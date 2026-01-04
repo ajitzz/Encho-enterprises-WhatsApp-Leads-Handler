@@ -8,7 +8,7 @@ export default defineConfig({
     'process.env': {}
   },
   build: {
-    // Output to 'build' folder to match what Vercel/CRA often expects
-    outDir: 'build' 
+    // Output to 'dist' folder (Vite default)
+    outDir: 'dist' 
   }
 });
