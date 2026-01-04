@@ -17,7 +17,6 @@ app.use(express.json());
 app.use(cors());
 
 // --- CONFIGURATION ---
-// CHANGED: Default to 3001 locally to avoid conflict with React (port 3000)
 const PORT = process.env.PORT || 3001;
 
 // CREDENTIALS
@@ -26,78 +25,94 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "982841698238647";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // NEON DATABASE CONNECTION
-// Provided by user. In production, keep this in .env
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 
 // Initialize AI
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-// --- POSTGRESQL CONNECTION (Optimized for Neon/Serverless) ---
-// Vercel Postgres/Neon requires SSL.
-// We add timeouts to ensure serverless functions don't hang on idle connections.
+// --- POSTGRESQL CONNECTION ---
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL,
   ssl: {
     rejectUnauthorized: false // Required for Vercel/Neon Postgres
   },
-  max: 10, // Maximum number of clients in the pool
-  idleTimeoutMillis: 30000, // Close clients after 30 seconds of inactivity
-  connectionTimeoutMillis: 5000, // Fail if connection takes longer than 5 seconds
+  max: 5, // Reduce max connections for serverless to avoid exhausting pool
+  connectionTimeoutMillis: 10000, // Increase timeout to 10s
+  idleTimeoutMillis: 0, // Disable idle timeout for serverless
 });
 
-// --- DATABASE INITIALIZATION (SCHEMA) ---
+// --- DATABASE INITIALIZATION (LAZY) ---
+let dbInitPromise = null;
+
 const initDB = async () => {
-  // If no DB URL is provided (e.g. during build), skip connection
-  // We check our hardcoded fallback as well
-  if (!process.env.POSTGRES_URL && !process.env.DATABASE_URL && !NEON_DB_URL) {
-    console.warn("⚠️ No POSTGRES_URL found. Database features will fail.");
-    return;
-  }
+  if (dbInitPromise) return dbInitPromise;
 
-  try {
-    const client = await pool.connect();
-    
-    // Create Drivers Table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS drivers (
-        id TEXT PRIMARY KEY,
-        phone_number TEXT UNIQUE NOT NULL,
-        name TEXT,
-        source TEXT DEFAULT 'Organic',
-        status TEXT DEFAULT 'New',
-        last_message TEXT,
-        last_message_time BIGINT,
-        documents TEXT[], 
-        notes TEXT,
-        onboarding_step INTEGER DEFAULT 0,
-        vehicle_registration TEXT,
-        availability TEXT,
-        qualification_checks JSONB DEFAULT '{"hasValidLicense": false, "hasVehicle": false, "isLocallyAvailable": true}'::jsonb
-      );
-    `);
+  dbInitPromise = (async () => {
+    // If no DB URL is provided, skip connection
+    if (!process.env.POSTGRES_URL && !process.env.DATABASE_URL && !NEON_DB_URL) {
+      console.warn("⚠️ No POSTGRES_URL found. Database features will fail.");
+      return;
+    }
 
-    // Create Messages Table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY,
-        driver_id TEXT REFERENCES drivers(id) ON DELETE CASCADE,
-        sender TEXT,
-        text TEXT,
-        image_url TEXT,
-        timestamp BIGINT,
-        type TEXT
-      );
-    `);
-    
-    console.log("✅ PostgreSQL Tables Initialized");
-    client.release();
-  } catch (err) {
-    console.error("❌ Error initializing database:", err);
-  }
+    let client;
+    try {
+      client = await pool.connect();
+      
+      // Create Drivers Table
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS drivers (
+          id TEXT PRIMARY KEY,
+          phone_number TEXT UNIQUE NOT NULL,
+          name TEXT,
+          source TEXT DEFAULT 'Organic',
+          status TEXT DEFAULT 'New',
+          last_message TEXT,
+          last_message_time BIGINT,
+          documents TEXT[], 
+          notes TEXT,
+          onboarding_step INTEGER DEFAULT 0,
+          vehicle_registration TEXT,
+          availability TEXT,
+          qualification_checks JSONB DEFAULT '{"hasValidLicense": false, "hasVehicle": false, "isLocallyAvailable": true}'::jsonb
+        );
+      `);
+
+      // Create Messages Table
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS messages (
+          id TEXT PRIMARY KEY,
+          driver_id TEXT REFERENCES drivers(id) ON DELETE CASCADE,
+          sender TEXT,
+          text TEXT,
+          image_url TEXT,
+          timestamp BIGINT,
+          type TEXT
+        );
+      `);
+      
+      console.log("✅ PostgreSQL Tables Initialized");
+    } catch (err) {
+      console.error("❌ Error initializing database:", err);
+      // Reset promise so next request can retry
+      dbInitPromise = null; 
+      throw err;
+    } finally {
+      if (client) client.release();
+    }
+  })();
+
+  return dbInitPromise;
 };
 
-// Initialize DB on startup
-initDB();
+// Middleware to ensure DB is ready before handling requests
+const ensureDB = async (req, res, next) => {
+  try {
+    await initDB();
+    next();
+  } catch (error) {
+    res.status(500).json({ error: 'Database Initialization Failed', details: error.message });
+  }
+};
 
 // --- HELPERS ---
 
@@ -159,6 +174,7 @@ const analyzeWithAI = async (text) => {
 // Health Check
 app.get('/api/health', async (req, res) => {
   try {
+    // We don't enforce DB init here to check purely connectivity, but we can try
     const client = await pool.connect();
     const result = await client.query('SELECT NOW()');
     client.release();
@@ -167,6 +183,11 @@ app.get('/api/health', async (req, res) => {
     console.error("Health Check Failed:", error);
     res.status(500).json({ status: 'error', message: error.message });
   }
+});
+
+// Manual Init Endpoint (for debugging)
+app.get('/api/init', ensureDB, (req, res) => {
+  res.json({ message: "Database initialized successfully" });
 });
 
 // Configure Webhook
@@ -217,8 +238,8 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// Incoming Webhook
-app.post('/webhook', async (req, res) => {
+// Incoming Webhook (Requires DB)
+app.post('/webhook', ensureDB, async (req, res) => {
   const body = req.body;
   
   if (body.object) {
@@ -299,8 +320,8 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// GET Drivers (Formatted for Frontend)
-app.get('/api/drivers', async (req, res) => {
+// GET Drivers (Requires DB)
+app.get('/api/drivers', ensureDB, async (req, res) => {
   try {
     const client = await pool.connect();
     
@@ -349,8 +370,8 @@ app.get('/api/drivers', async (req, res) => {
   }
 });
 
-// Simulate Lead (For Testing)
-app.post('/api/simulate-lead', async (req, res) => {
+// Simulate Lead (Requires DB)
+app.post('/api/simulate-lead', ensureDB, async (req, res) => {
    const { name, phone } = req.body;
    const timestamp = Date.now();
    
