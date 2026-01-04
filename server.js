@@ -19,10 +19,16 @@ app.use(cors());
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 3001;
 
-// CREDENTIALS
-const META_API_TOKEN = process.env.META_API_TOKEN || "EAAkr7Y9S2qYBQWp0jRODcIdgFeujZCIb6SGidEQibuusKFRZCiRe1gmIxbmSt1v71hKnj04REztwe2qKeL5XP62xPqKM8NXdAdiplTBocgjbKsA0qrsCiAWLKoyFd1o4xPIpiZCPQoio3KN7sCTP2POfAJ06DA1JHzepnLu8MdAqYMrRvaZB8EWBKqIcsK5KxBXU9LrphuGxPQGKm2n9Sz7XuPyYVPDEFCo6MYuCxPCCin6AXZASi3Le5DHXbzeDxZBZAsZACDSNwDZC03DWUrHbrXa48";
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "982841698238647";
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// CREDENTIALS - Mutable to allow runtime updates from UI
+let META_API_TOKEN = process.env.META_API_TOKEN || ""; 
+let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || ""; 
+// Default Test credentials (only if env vars missing) - REMOVE for production security if desired
+if (!META_API_TOKEN) console.warn("⚠️ No META_API_TOKEN found in env. Please configure via UI.");
+if (!PHONE_NUMBER_ID) console.warn("⚠️ No PHONE_NUMBER_ID found in env. Please configure via UI.");
+
+// Use provided key as fallback if env var is missing
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0";
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
 // NEON DATABASE CONNECTION
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
@@ -37,11 +43,11 @@ const pool = new Pool({
     rejectUnauthorized: false // Required for Vercel/Neon Postgres
   },
   max: 5, // Reduce max connections for serverless to avoid exhausting pool
-  connectionTimeoutMillis: 10000, // Increase timeout to 10s
-  idleTimeoutMillis: 0, // Disable idle timeout for serverless
+  connectionTimeoutMillis: 30000, // Increase timeout to 30s for cross-region
+  idleTimeoutMillis: 1000, // Keep alive briefly
 });
 
-// --- DATABASE INITIALIZATION (LAZY) ---
+// --- DATABASE INITIALIZATION (LAZY WITH RETRY) ---
 let dbInitPromise = null;
 
 const initDB = async () => {
@@ -54,50 +60,60 @@ const initDB = async () => {
       return;
     }
 
-    let client;
-    try {
-      client = await pool.connect();
-      
-      // Create Drivers Table
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS drivers (
-          id TEXT PRIMARY KEY,
-          phone_number TEXT UNIQUE NOT NULL,
-          name TEXT,
-          source TEXT DEFAULT 'Organic',
-          status TEXT DEFAULT 'New',
-          last_message TEXT,
-          last_message_time BIGINT,
-          documents TEXT[], 
-          notes TEXT,
-          onboarding_step INTEGER DEFAULT 0,
-          vehicle_registration TEXT,
-          availability TEXT,
-          qualification_checks JSONB DEFAULT '{"hasValidLicense": false, "hasVehicle": false, "isLocallyAvailable": true}'::jsonb
-        );
-      `);
+    let retries = 3;
+    while (retries > 0) {
+      let client;
+      try {
+        console.log(`Attempting DB connection (Retries left: ${retries})...`);
+        client = await pool.connect();
+        
+        // Create Drivers Table
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS drivers (
+            id TEXT PRIMARY KEY,
+            phone_number TEXT UNIQUE NOT NULL,
+            name TEXT,
+            source TEXT DEFAULT 'Organic',
+            status TEXT DEFAULT 'New',
+            last_message TEXT,
+            last_message_time BIGINT,
+            documents TEXT[], 
+            notes TEXT,
+            onboarding_step INTEGER DEFAULT 0,
+            vehicle_registration TEXT,
+            availability TEXT,
+            qualification_checks JSONB DEFAULT '{"hasValidLicense": false, "hasVehicle": false, "isLocallyAvailable": true}'::jsonb
+          );
+        `);
 
-      // Create Messages Table
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS messages (
-          id TEXT PRIMARY KEY,
-          driver_id TEXT REFERENCES drivers(id) ON DELETE CASCADE,
-          sender TEXT,
-          text TEXT,
-          image_url TEXT,
-          timestamp BIGINT,
-          type TEXT
-        );
-      `);
-      
-      console.log("✅ PostgreSQL Tables Initialized");
-    } catch (err) {
-      console.error("❌ Error initializing database:", err);
-      // Reset promise so next request can retry
-      dbInitPromise = null; 
-      throw err;
-    } finally {
-      if (client) client.release();
+        // Create Messages Table
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY,
+            driver_id TEXT REFERENCES drivers(id) ON DELETE CASCADE,
+            sender TEXT,
+            text TEXT,
+            image_url TEXT,
+            timestamp BIGINT,
+            type TEXT
+          );
+        `);
+        
+        console.log("✅ PostgreSQL Tables Initialized");
+        if (client) client.release();
+        return; // Success
+      } catch (err) {
+        console.error("❌ Error initializing database:", err.message);
+        if (client) client.release();
+        
+        retries--;
+        if (retries === 0) {
+          dbInitPromise = null; // Reset so we can try again on next request
+          throw err;
+        }
+        // Wait 2 seconds before retry
+        await new Promise(res => setTimeout(res, 2000));
+      }
     }
   })();
 
@@ -117,8 +133,12 @@ const ensureDB = async (req, res, next) => {
 // --- HELPERS ---
 
 const sendWhatsAppMessage = async (to, body) => {
+  if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
+    console.error("❌ Cannot send message: Missing META_API_TOKEN or PHONE_NUMBER_ID");
+    return;
+  }
   try {
-    console.log(`Sending message to ${to}: ${body}`);
+    console.log(`Sending message from ${PHONE_NUMBER_ID} to ${to}: ${body}`);
     await axios.post(
       `https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`,
       {
@@ -134,8 +154,12 @@ const sendWhatsAppMessage = async (to, body) => {
 };
 
 const sendWelcomeTemplate = async (to) => {
+  if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
+    console.error("❌ Cannot send template: Missing credentials");
+    return;
+  }
   try {
-    console.log(`Sending welcome template to ${to}`);
+    console.log(`Sending welcome template from ${PHONE_NUMBER_ID} to ${to}`);
     await axios.post(
       `https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`,
       {
@@ -174,20 +198,32 @@ const analyzeWithAI = async (text) => {
 // Health Check
 app.get('/api/health', async (req, res) => {
   try {
-    // We don't enforce DB init here to check purely connectivity, but we can try
     const client = await pool.connect();
     const result = await client.query('SELECT NOW()');
     client.release();
-    res.json({ status: 'ok', db_time: result.rows[0].now });
+    res.json({ 
+      status: 'ok', 
+      db_time: result.rows[0].now,
+      configured: !!(META_API_TOKEN && PHONE_NUMBER_ID),
+      mode: 'production_ready'
+    });
   } catch (error) {
     console.error("Health Check Failed:", error);
     res.status(500).json({ status: 'error', message: error.message });
   }
 });
 
-// Manual Init Endpoint (for debugging)
-app.get('/api/init', ensureDB, (req, res) => {
-  res.json({ message: "Database initialized successfully" });
+// Update Credentials (Runtime)
+app.post('/api/update-credentials', (req, res) => {
+  const { phoneNumberId, apiToken } = req.body;
+  if (phoneNumberId && apiToken) {
+    PHONE_NUMBER_ID = phoneNumberId;
+    META_API_TOKEN = apiToken;
+    console.log("✅ Credentials updated successfully at runtime.");
+    res.json({ success: true, message: "Credentials updated. You can now use the Real Number." });
+  } else {
+    res.status(400).json({ error: "Missing phoneNumberId or apiToken" });
+  }
 });
 
 // Configure Webhook
@@ -231,10 +267,16 @@ app.post('/api/configure-webhook', async (req, res) => {
 
 // Webhook Verification
 app.get('/webhook', (req, res) => {
-  if (req.query['hub.mode'] === 'subscribe') {
-    res.send(req.query['hub.challenge']);
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log("WEBHOOK_VERIFIED");
+    res.status(200).send(challenge);
   } else {
-    res.sendStatus(400);
+    console.error("Webhook Verification Failed. Token mismatch.");
+    res.sendStatus(403);
   }
 });
 
@@ -242,6 +284,7 @@ app.get('/webhook', (req, res) => {
 app.post('/webhook', ensureDB, async (req, res) => {
   const body = req.body;
   
+  // Basic validation for WhatsApp payload
   if (body.object) {
     if (
       body.entry &&
@@ -250,9 +293,9 @@ app.post('/webhook', ensureDB, async (req, res) => {
       body.entry[0].changes[0].value.messages[0]
     ) {
       const msg = body.entry[0].changes[0].value.messages[0];
-      const from = msg.from;
+      const from = msg.from; // This is the customer's number
       const msgBody = msg.text ? msg.text.body : '[Media Received]';
-      const name = body.entry[0].changes[0].value.contacts[0].profile.name;
+      const name = body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || "Unknown";
       const timestamp = Date.now();
       
       try {
@@ -273,7 +316,7 @@ app.post('/webhook', ensureDB, async (req, res) => {
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
                 [driverId, from, name, 'WhatsApp', 'New', msgBody, timestamp, []]
             );
-            await sendWelcomeTemplate(from);
+            await sendWelcomeTemplate(from); // Send welcome using configured credentials
             console.log(`New Driver Created: ${name}`);
             } else {
             // UPDATE EXISTING DRIVER
@@ -286,7 +329,7 @@ app.post('/webhook', ensureDB, async (req, res) => {
 
             // Send AI Reply
             const aiReply = await analyzeWithAI(msgBody);
-            await sendWhatsAppMessage(from, aiReply);
+            await sendWhatsAppMessage(from, aiReply); // Send reply using configured credentials
             
             // Log AI Reply
             await client.query(
@@ -325,8 +368,7 @@ app.get('/api/drivers', ensureDB, async (req, res) => {
   try {
     const client = await pool.connect();
     
-    // We use JSON_AGG to bundle messages into the driver object, 
-    // mimicking the structure the React frontend expects.
+    // We use JSON_AGG to bundle messages into the driver object
     const query = `
       SELECT 
         d.id,

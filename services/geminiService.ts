@@ -2,8 +2,8 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { LeadStatus } from "../types";
 
 // NOTE: In a real production app, this key should be in process.env and calls proxied through a backend.
-// We are initializing it here for the demo context.
-const apiKey = process.env.API_KEY || ''; 
+// We are initializing it here for the demo context using the key provided.
+const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0"; 
 
 const ai = new GoogleGenAI({ apiKey });
 

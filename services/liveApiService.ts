@@ -54,5 +54,23 @@ export const liveApiService = {
       throw new Error(data.error || 'Failed to configure webhook');
     }
     return data;
+  },
+
+  // NEW: Update dynamic credentials for testing production numbers
+  updateCredentials: async (credentials: { phoneNumberId: string, apiToken: string }) => {
+    const url = `${API_BASE_URL}/api/update-credentials`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(credentials)
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to update credentials');
+    }
+    return data;
   }
 };
