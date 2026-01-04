@@ -2,12 +2,11 @@ import { Driver } from '../types';
 
 // Determine if we are in local development or production
 // When deployed on Vercel, the backend and frontend share the same domain, so we use relative paths.
-// In local dev, if you run frontend on 5173/3000 and node on 3000, we might need localhost.
+// In local dev, if you run frontend on 3000 and node on 3001, we need localhost:3001.
 const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 
-// If local, assume Node is on 3000. If deployed, use relative path.
-// NOTE: If you run both on 3000 locally via a proxy, empty string works too.
-const API_BASE_URL = isLocal ? 'http://localhost:3000' : ''; 
+// CHANGED: Point to port 3001 for local development
+const API_BASE_URL = isLocal ? 'http://localhost:3001' : ''; 
 
 export const liveApiService = {
   // Fetch all drivers from the backend
@@ -17,11 +16,18 @@ export const liveApiService = {
       const url = `${API_BASE_URL}/api/drivers`;
       const response = await fetch(url);
       
-      if (!response.ok) throw new Error('Network response was not ok');
+      if (!response.ok) {
+        // CHANGED: Better error handling to display the actual server error
+        const errorText = await response.text();
+        throw new Error(`API Error: ${response.status} ${response.statusText} - ${errorText}`);
+      }
       return await response.json();
-    } catch (error) {
+    } catch (error: any) {
       console.error("Failed to fetch drivers:", error);
-      return [];
+      // We re-throw or handle the error in UI. 
+      // For now, returning empty to prevent crash, but logging heavily.
+      console.warn("Ensure Backend is running: 'node server.js' (Port 3001)");
+      throw error;
     }
   },
 

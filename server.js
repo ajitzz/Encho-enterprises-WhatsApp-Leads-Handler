@@ -17,7 +17,8 @@ app.use(express.json());
 app.use(cors());
 
 // --- CONFIGURATION ---
-const PORT = process.env.PORT || 3000;
+// CHANGED: Default to 3001 locally to avoid conflict with React (port 3000)
+const PORT = process.env.PORT || 3001;
 
 // CREDENTIALS
 const META_API_TOKEN = process.env.META_API_TOKEN || "EAAkr7Y9S2qYBQWp0jRODcIdgFeujZCIb6SGidEQibuusKFRZCiRe1gmIxbmSt1v71hKnj04REztwe2qKeL5XP62xPqKM8NXdAdiplTBocgjbKsA0qrsCiAWLKoyFd1o4xPIpiZCPQoio3KN7sCTP2POfAJ06DA1JHzepnLu8MdAqYMrRvaZB8EWBKqIcsK5KxBXU9LrphuGxPQGKm2n9Sz7XuPyYVPDEFCo6MYuCxPCCin6AXZASi3Le5DHXbzeDxZBZAsZACDSNwDZC03DWUrHbrXa48";
@@ -163,6 +164,7 @@ app.get('/api/health', async (req, res) => {
     client.release();
     res.json({ status: 'ok', db_time: result.rows[0].now });
   } catch (error) {
+    console.error("Health Check Failed:", error);
     res.status(500).json({ status: 'error', message: error.message });
   }
 });
@@ -342,8 +344,8 @@ app.get('/api/drivers', async (req, res) => {
     
     res.json(result.rows);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Database error fetching drivers' });
+    console.error("Database Error /api/drivers:", error);
+    res.status(500).json({ error: 'Database error fetching drivers', details: error.message });
   }
 });
 
