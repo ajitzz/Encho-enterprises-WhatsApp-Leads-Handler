@@ -1,0 +1,47 @@
+# WhatsApp API Integration Setup
+
+To make the automation work, you must connect your local computer to the Internet so Meta (Facebook) can send you messages.
+
+### 1. Meta Developer Account
+1. Go to [developers.facebook.com](https://developers.facebook.com).
+2. Create a new App > Select **Business** type.
+3. Scroll down to **WhatsApp** and click **Set up**.
+
+### 2. Credentials
+Your code is already pre-configured with the Token and Phone ID you provided in `server.js`.
+
+### 3. Exposing your Server (The "Tunnel")
+Since your server runs on your laptop (`localhost`), Facebook cannot see it. You need a "Tunnel" to give Facebook a public URL to talk to.
+
+**Option A: Using NPX (Easiest)**
+1. Open a new terminal (Keep your `node server.js` running in the first terminal).
+2. Run this command:
+   ```bash
+   npx ngrok http 3000
+   ```
+3. It will generate a link that looks like: `https://abcd-123-456.ngrok-free.app`.
+4. **Copy this HTTPS URL.**
+
+### 4. Configure Webhook in Meta
+1. Go to your App Dashboard on developers.facebook.com.
+2. In the left sidebar, click **WhatsApp** > **Configuration**.
+3. Find the **Webhook** section and click **Edit**.
+4. **Callback URL**: Paste the ngrok URL you copied and add `/webhook` at the end.
+   - Example: `https://abcd-123-456.ngrok-free.app/webhook`
+5. **Verify Token**: Enter `uber_fleet_verify_token`.
+6. Click **Verify and Save**.
+   - *If it fails, make sure your node server is running!*
+7. Click **Manage** (under Webhook Fields) and check the box for `messages`.
+
+### 5. Running the Project
+1. Start the Backend:
+   ```bash
+   node server.js
+   ```
+2. Start the Frontend:
+   ```bash
+   npm start
+   ```
+3. Switch the Frontend Toggle to **Live API**.
+
+Now send a WhatsApp message to the test number. It will appear on your dashboard!
