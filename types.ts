@@ -22,7 +22,8 @@ export interface Message {
   text?: string;
   imageUrl?: string;
   timestamp: number;
-  type: 'text' | 'image' | 'video_link' | 'template';
+  type: 'text' | 'image' | 'video_link' | 'template' | 'options';
+  options?: string[]; // For buttons
 }
 
 export interface Driver {
@@ -46,6 +47,10 @@ export interface Driver {
     hasVehicle: boolean;
     isLocallyAvailable: boolean;
   };
+  
+  // Bot State Tracking
+  currentBotStepId?: string; 
+  isBotActive: boolean;
 }
 
 export interface MetaTemplate {
@@ -59,4 +64,25 @@ export interface Notification {
   type: 'info' | 'warning' | 'success';
   title: string;
   message: string;
+}
+
+// --- BOT BUILDER TYPES ---
+
+export type InputType = 'text' | 'image' | 'option' | 'location';
+
+export interface BotStep {
+  id: string;
+  title: string;
+  message: string; // What the bot says
+  inputType: InputType; // What the user should reply with
+  options?: string[]; // If inputType is 'option'
+  saveToField?: 'name' | 'vehicleRegistration' | 'availability' | 'document'; // Where to save the data
+  nextStepId?: string | 'END' | 'AI_HANDOFF';
+}
+
+export interface BotSettings {
+  isEnabled: boolean;
+  routingStrategy: 'BOT_ONLY' | 'AI_ONLY' | 'HYBRID_BOT_FIRST';
+  systemInstruction: string; // The "Training" for Gemini
+  steps: BotStep[];
 }

@@ -5,6 +5,7 @@ import { ChatDrawer } from './components/ChatDrawer';
 import { Simulator } from './components/Simulator';
 import { WebhookConfigModal } from './components/WebhookConfigModal';
 import { NotificationToast } from './components/NotificationToast';
+import { BotBuilder } from './components/BotBuilder';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
 import { Driver, LeadStatus, Notification } from './types';
@@ -49,13 +50,12 @@ export default function App() {
 
     fetchData();
     return () => unsubscribe();
-  }, [dataSource]);
+  }, [dataSource, activeTab]); // Refresh when tab changes too
 
   // Notification Handler
   const addNotification = (notif: Omit<Notification, 'id'>) => {
     const newNotif = { ...notif, id: Date.now().toString() + Math.random() };
     setNotifications(prev => [newNotif, ...prev]);
-    // Auto dismiss after 5 seconds
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== newNotif.id));
     }, 5000);
@@ -73,7 +73,6 @@ export default function App() {
           setSelectedDriver(prev => prev ? ({ ...prev, status }) : null);
         }
     } else {
-        // In a real app, you would call liveApiService.updateStatus(id, status)
         alert("Status updates in Live Mode require the full backend implementation. Currently Read-Only.");
     }
   };
@@ -88,15 +87,6 @@ export default function App() {
           type: 'video_link' as const
         };
         mockBackend.addMessage(driver.id, msg);
-        setTimeout(() => {
-          mockBackend.addMessage(driver.id, {
-             id: Date.now().toString() + 'follow',
-             sender: 'system' as const,
-             text: 'Please reply with your Vehicle Registration Number to proceed.',
-             timestamp: Date.now(),
-             type: 'text' as const
-          });
-        }, 1500);
         
         addNotification({
           type: 'success',
@@ -104,7 +94,6 @@ export default function App() {
           message: `Onboarding initiated for ${driver.name}`
         });
     } else {
-        // Trigger backend welcome endpoint
         alert("Action Triggered on Live Server (Implementation Pending)");
     }
   };
@@ -117,7 +106,7 @@ export default function App() {
              sender: 'system',
              text: '[Bulk Template]: Hello! Are you ready to drive?',
              timestamp: Date.now(),
-             type: 'template'
+             type: 'template' as const
            });
         });
         setShowBulkModal(false);
@@ -143,9 +132,12 @@ export default function App() {
   return (
     <>
       <Layout activeTab={activeTab} onTabChange={setActiveTab}>
+        
+        {/* VIEW: DASHBOARD & LEADS */}
+        {(activeTab === 'dashboard' || activeTab === 'leads') && (
         <div className="p-8 max-w-7xl mx-auto space-y-8">
           
-          {/* Dashboard Header Stats */}
+          {/* Header & Stats (Dashboard Only) */}
           {activeTab === 'dashboard' && (
             <>
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -154,7 +146,6 @@ export default function App() {
                     <p className="text-gray-500">Welcome back. Here is your fleet recruitment overview.</p>
                  </div>
                  
-                 {/* Live Mode Toggle & Webhook Config */}
                  <div className="flex items-center gap-2">
                    {dataSource === 'live' && (
                      <button
@@ -227,25 +218,15 @@ export default function App() {
                   <div className="text-3xl font-bold text-gray-900">{stats.new}</div>
                 </div>
               </div>
-
-              <div className="bg-gradient-to-r from-gray-900 to-black rounded-2xl p-8 text-white flex justify-between items-center shadow-xl">
-                 <div>
-                   <h3 className="text-xl font-bold mb-2">Automate your hiring</h3>
-                   <p className="text-gray-400 max-w-lg">
-                     The AI bot (powered by Google Gemini) is active. It is currently monitoring incoming messages for driving licenses and questions about onboarding.
-                   </p>
-                 </div>
-                 <div className="bg-white/10 backdrop-blur-md px-6 py-3 rounded-lg border border-white/10">
-                   <span className="text-green-400 font-mono text-sm">● System Online</span>
-                 </div>
-              </div>
             </>
           )}
 
-          {/* Leads Table View */}
+          {/* Table Area */}
           <div className="h-[600px] flex flex-col">
             <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-bold text-gray-900">Recent Activity</h3>
+              <h3 className="text-lg font-bold text-gray-900">
+                {activeTab === 'dashboard' ? 'Recent Activity' : 'Lead Management'}
+              </h3>
               {selectedBulkIds.length > 0 && (
                 <button 
                   onClick={() => setShowBulkModal(true)}
@@ -272,8 +253,12 @@ export default function App() {
             />
           </div>
         </div>
+        )}
 
-        {/* Webhook Configuration Modal */}
+        {/* VIEW: BOT STUDIO */}
+        {activeTab === 'bot-studio' && <BotBuilder />}
+
+        {/* Modals & Drawers */}
         {showWebhookModal && (
           <WebhookConfigModal 
             onClose={() => setShowWebhookModal(false)}
@@ -287,39 +272,13 @@ export default function App() {
           />
         )}
 
-        {/* Bulk Message Modal */}
         {showBulkModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
              <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md m-4">
                <h3 className="text-lg font-bold mb-4">Send Bulk Message</h3>
-               <p className="text-sm text-gray-500 mb-4">
-                 Sending to <span className="font-bold text-black">{selectedBulkIds.length}</span> recipients.
-               </p>
-               
-               <div className="space-y-3 mb-6">
-                 <div className="border p-3 rounded-lg bg-gray-50 border-gray-200 cursor-pointer hover:border-blue-500 transition-colors">
-                   <p className="font-semibold text-sm">Template: Welcome_V1</p>
-                   <p className="text-xs text-gray-500 mt-1">"Hello! Are you ready to drive with Uber? Reply YES to start."</p>
-                 </div>
-                 <div className="border p-3 rounded-lg bg-white border-gray-200 cursor-pointer hover:border-blue-500 transition-colors opacity-50">
-                   <p className="font-semibold text-sm">Template: Follow_Up_Docs</p>
-                   <p className="text-xs text-gray-500 mt-1">"We are still waiting for your documents. Please upload them here."</p>
-                 </div>
-               </div>
-
                <div className="flex gap-3">
-                 <button 
-                   onClick={() => setShowBulkModal(false)}
-                   className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
-                 >
-                   Cancel
-                 </button>
-                 <button 
-                   onClick={handleBulkSend}
-                   className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-                 >
-                   Send Blast
-                 </button>
+                 <button onClick={() => setShowBulkModal(false)} className="flex-1 px-4 py-2 border rounded-lg">Cancel</button>
+                 <button onClick={handleBulkSend} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg">Send</button>
                </div>
              </div>
           </div>
@@ -334,7 +293,7 @@ export default function App() {
         <NotificationToast notifications={notifications} onDismiss={removeNotification} />
       </Layout>
       
-      {/* Simulator only visible in Mock mode to avoid confusion */}
+      {/* Simulator: Updated to use new Bot Logic */}
       {dataSource === 'mock' && <Simulator onNotify={addNotification} />}
     </>
   );

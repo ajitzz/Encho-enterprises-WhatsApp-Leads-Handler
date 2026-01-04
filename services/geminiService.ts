@@ -2,7 +2,6 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { LeadStatus } from "../types";
 
 // NOTE: In a real production app, this key should be in process.env and calls proxied through a backend.
-// We are initializing it here for the demo context using the key provided.
 const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0"; 
 
 const ai = new GoogleGenAI({ apiKey });
@@ -20,66 +19,44 @@ export interface AIAnalysisResult {
   };
 }
 
-export const analyzeMessage = async (text: string, imageUrl?: string): Promise<AIAnalysisResult> => {
+export const analyzeMessage = async (text: string, imageUrl?: string, systemInstruction?: string): Promise<AIAnalysisResult> => {
   if (!apiKey) {
     console.warn("No API Key provided for Gemini. Returning mock AI response.");
-    
-    // Improved mock logic for extraction simulation
-    const lowerText = text.toLowerCase();
-    let vehicleReg = undefined;
-    if (lowerText.match(/[a-z]{2}\s?\d{2}\s?[a-z]{1,2}\s?\d{4}/)) {
-        vehicleReg = text.toUpperCase(); // Simple mock extraction
-    }
-
-    let availability = undefined;
-    if (lowerText.includes('full time') || lowerText.includes('full-time')) availability = 'Full-time';
-    if (lowerText.includes('part time') || lowerText.includes('part-time')) availability = 'Part-time';
-
     return {
       intent: "Inquiry about joining",
       isInterested: true,
       containsDocument: !!imageUrl,
       suggestedReply: "Thanks! We've received your info.",
-      recommendedStatus: imageUrl ? LeadStatus.FLAGGED_FOR_REVIEW : LeadStatus.NEW,
-      extractedData: {
-        vehicleRegistration: vehicleReg,
-        availability: availability,
-        isLicenseValid: !!imageUrl // Mock assumption
-      }
+      recommendedStatus: LeadStatus.NEW,
+      extractedData: {}
     };
   }
 
   try {
     const model = "gemini-3-flash-preview";
     
-    let prompt = `You are an AI recruiter for Uber Fleet. Analyze the driver's message.
+    // Use the custom system instruction if provided, otherwise default
+    const persona = systemInstruction || `You are an AI recruiter for Uber Fleet. 
+    Your goal is to be helpful, professional, and encourage drivers to apply.`;
+
+    let prompt = `Analyze the driver's message.
     
     Message: "${text}"
     Has Image Attachment: ${imageUrl ? 'Yes' : 'No'}
 
     Tasks:
-    1. If an image is attached, determine if it looks like a valid Driving License (DL) or Aadhaar card.
-    2. Extract Vehicle Registration Number (e.g., MH 02 AB 1234) if present in text.
-    3. Extract Availability (Full-time, Part-time, Weekends) if mentioned.
-    4. Determine the best next status.
+    1. Reply to the user based on your persona.
+    2. Extract data if present.
+    3. Determine status.
 
-    Return JSON with:
-    - intent: summary
-    - isInterested: boolean
-    - containsDocument: boolean
-    - suggestedReply: short text
-    - recommendedStatus: "New", "Qualified", "Flagged", "Rejected"
-    - extractedData: {
-        vehicleRegistration: string (or null),
-        availability: string (or null),
-        isLicenseValid: boolean (true only if image is a valid license document)
-    }
+    Return JSON.
     `;
 
     const response = await ai.models.generateContent({
       model,
       contents: prompt,
       config: {
+        systemInstruction: persona,
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
