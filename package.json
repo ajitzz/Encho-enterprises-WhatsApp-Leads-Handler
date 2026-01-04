@@ -5,9 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "react-scripts start",
-    "build": "react-scripts build",
-    "client": "react-scripts start"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
   "dependencies": {
     "express": "^4.18.2",
@@ -17,9 +17,12 @@
     "@google/genai": "latest",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-scripts": "5.0.1",
     "lucide-react": "^0.294.0",
     "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "@vitejs/plugin-react": "^4.2.0"
   },
   "browserslist": {
     "production": [
