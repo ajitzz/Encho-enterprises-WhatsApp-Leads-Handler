@@ -1,22 +1,53 @@
 import React, { useState, useEffect } from 'react';
 import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
-import { Save, Plus, Trash2, Bot, BrainCircuit, MessageSquare, Image, List, ArrowRight, Settings2, Sparkles } from 'lucide-react';
+import { liveApiService } from '../services/liveApiService';
+import { Save, Plus, Trash2, BrainCircuit, MessageSquare, Settings2, Sparkles, AlertCircle } from 'lucide-react';
 
-export const BotBuilder: React.FC = () => {
+// Default prop in case parent doesn't provide it
+interface BotBuilderProps {
+    isLiveMode?: boolean; 
+}
+
+export const BotBuilder: React.FC<BotBuilderProps> = ({ isLiveMode = false }) => {
   const [settings, setSettings] = useState<BotSettings>(mockBackend.getBotSettings());
-  const [activeStepId, setActiveStepId] = useState<string>(settings.steps[0]?.id);
+  const [activeStepId, setActiveStepId] = useState<string>('');
   const [isSaving, setIsSaving] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
-    // Refresh settings when component mounts
-    setSettings(mockBackend.getBotSettings());
-  }, []);
+    const loadSettings = async () => {
+        if (isLiveMode) {
+            try {
+                const liveSettings = await liveApiService.getBotSettings();
+                setSettings(liveSettings);
+                if (liveSettings.steps.length > 0) setActiveStepId(liveSettings.steps[0].id);
+            } catch (e) {
+                setLoadError("Could not load live settings. Ensure server is running.");
+            }
+        } else {
+            setSettings(mockBackend.getBotSettings());
+            const mockSet = mockBackend.getBotSettings();
+            if (mockSet.steps.length > 0) setActiveStepId(mockSet.steps[0].id);
+        }
+    };
+    loadSettings();
+  }, [isLiveMode]);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     setIsSaving(true);
-    mockBackend.updateBotSettings(settings);
-    setTimeout(() => setIsSaving(false), 800);
+    try {
+        if (isLiveMode) {
+            await liveApiService.saveBotSettings(settings);
+        } else {
+            mockBackend.updateBotSettings(settings);
+        }
+        // Minimal delay for UX
+        setTimeout(() => setIsSaving(false), 800);
+    } catch (e) {
+        setIsSaving(false);
+        alert("Failed to save settings to server.");
+    }
   };
 
   const handleAddStep = () => {
@@ -29,7 +60,6 @@ export const BotBuilder: React.FC = () => {
       nextStepId: 'END'
     };
     
-    // Link previous last step to this new one if possible
     const newSteps = [...settings.steps, newStep];
     setSettings({ ...settings, steps: newSteps });
     setActiveStepId(newId);
@@ -56,10 +86,19 @@ export const BotBuilder: React.FC = () => {
       {/* LEFT: Sidebar / Flow List */}
       <div className="w-80 bg-white border-r border-gray-200 flex flex-col">
         <div className="p-4 border-b border-gray-100 bg-gray-50">
-           <h2 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-2">Flow Sequence</h2>
+           <div className="flex items-center justify-between mb-2">
+             <h2 className="text-sm font-bold text-gray-500 uppercase tracking-wider">Flow Sequence</h2>
+             {isLiveMode && <span className="text-[10px] bg-red-100 text-red-600 px-2 py-0.5 rounded-full font-bold animate-pulse">LIVE MODE</span>}
+           </div>
            <p className="text-xs text-gray-400">Define the path users will follow.</p>
         </div>
         
+        {loadError && (
+            <div className="p-4 bg-red-50 text-red-600 text-xs flex items-center gap-2">
+                <AlertCircle size={14} /> {loadError}
+            </div>
+        )}
+
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {settings.steps.map((step, idx) => (
             <div 
@@ -82,7 +121,6 @@ export const BotBuilder: React.FC = () => {
               <h4 className="font-semibold text-gray-900 text-sm mb-1">{step.title}</h4>
               <p className="text-xs text-gray-500 truncate">{step.message}</p>
               
-              {/* Connector Line Visual */}
               {idx < settings.steps.length - 1 && (
                 <div className="absolute left-1/2 -bottom-6 w-0.5 h-3 bg-gray-300 z-10" />
               )}
@@ -165,7 +203,6 @@ export const BotBuilder: React.FC = () => {
                      </div>
                    </div>
 
-                   {/* Options Editor */}
                    {activeStep.inputType === 'option' && (
                      <div className="bg-gray-50 p-4 rounded-lg border border-gray-200">
                         <label className="block text-xs font-bold text-gray-700 uppercase mb-2">Button Options (Comma Separated)</label>
@@ -179,7 +216,6 @@ export const BotBuilder: React.FC = () => {
                      </div>
                    )}
 
-                   {/* Logic Routing */}
                    <div className="pt-4 border-t border-gray-100">
                       <label className="block text-xs font-bold text-gray-700 uppercase mb-1">After Reply, Go To:</label>
                       <select 
@@ -221,7 +257,6 @@ export const BotBuilder: React.FC = () => {
          </div>
 
          <div className="p-6 space-y-8">
-            {/* Strategy Toggle */}
             <section>
                <h4 className="text-sm font-bold text-gray-900 mb-3">Routing Strategy</h4>
                <div className="space-y-3">
@@ -254,7 +289,6 @@ export const BotBuilder: React.FC = () => {
                </div>
             </section>
 
-            {/* AI Training */}
             <section>
                <h4 className="text-sm font-bold text-gray-900 mb-3 flex items-center gap-2">
                  <Sparkles size={14} className="text-purple-600" />
@@ -269,9 +303,6 @@ export const BotBuilder: React.FC = () => {
                  className="w-full h-64 border border-gray-300 rounded-lg p-3 text-xs leading-relaxed focus:ring-2 focus:ring-purple-500 outline-none resize-none"
                  placeholder="You are an expert recruiter..."
                />
-               <div className="mt-2 text-[10px] text-gray-400">
-                  Tip: Be specific about rejection criteria and salary benefits.
-               </div>
             </section>
          </div>
       </div>

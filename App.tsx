@@ -33,24 +33,37 @@ export default function App() {
          unsubscribe = mockBackend.subscribe(() => setDrivers(mockBackend.getDrivers()));
       } else {
          // Live Mode: Poll the real server
-         const data = await liveApiService.getDrivers();
-         setDrivers(data);
-         unsubscribe = liveApiService.subscribeToUpdates(async () => {
-             const updated = await liveApiService.getDrivers();
-             setDrivers(updated);
-         });
-         
-         addNotification({
-           type: 'info',
-           title: 'Connected to Live Server',
-           message: 'Polling http://localhost:3000/api/drivers'
-         });
+         try {
+           const data = await liveApiService.getDrivers();
+           setDrivers(data);
+           // Subscribe triggers polling internally (now every 2s)
+           unsubscribe = liveApiService.subscribeToUpdates(async () => {
+               try {
+                   const updated = await liveApiService.getDrivers();
+                   setDrivers(updated);
+               } catch (e) {
+                   // Silent fail on poll error to avoid spamming console
+               }
+           });
+           
+           addNotification({
+             type: 'info',
+             title: 'Connected to Live Server',
+             message: 'Polling active (2s interval)'
+           });
+         } catch (e) {
+             addNotification({
+                type: 'warning',
+                title: 'Connection Failed',
+                message: 'Ensure node server.js is running.'
+             });
+         }
       }
     };
 
     fetchData();
     return () => unsubscribe();
-  }, [dataSource, activeTab]); // Refresh when tab changes too
+  }, [dataSource, activeTab]); 
 
   // Notification Handler
   const addNotification = (notif: Omit<Notification, 'id'>) => {
@@ -256,7 +269,7 @@ export default function App() {
         )}
 
         {/* VIEW: BOT STUDIO */}
-        {activeTab === 'bot-studio' && <BotBuilder />}
+        {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
 
         {/* Modals & Drawers */}
         {showWebhookModal && (
