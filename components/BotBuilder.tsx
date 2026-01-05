@@ -1,612 +1,508 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { 
+  ReactFlow, 
+  MiniMap, 
+  Controls, 
+  Background, 
+  useNodesState, 
+  useEdgesState, 
+  addEdge,
+  Handle, 
+  Position,
+  Node,
+  Edge,
+  Connection,
+  Panel,
+  ReactFlowProvider,
+  useReactFlow
+} from '@xyflow/react';
 import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
-import { analyzeMessage } from '../services/geminiService';
 import { 
-  Save, Plus, Trash2, BrainCircuit, MessageSquare, Settings2, 
-  Sparkles, AlertCircle, Play, X, Send, Bot as BotIcon, 
-  List, Image as ImageIcon, Type, ArrowDown, GripVertical, FileCode
+  Save, MessageSquare, Image as ImageIcon, 
+  List, Type, Split, Zap, GripVertical, Trash2, 
+  Copy, Plus, Settings2, Play, AlertCircle 
 } from 'lucide-react';
 
-// Default prop in case parent doesn't provide it
+// --- CUSTOM NODE COMPONENT ---
+// This component renders the individual card in the canvas
+const BuilderNode = ({ data, id, selected }: any) => {
+  const [options, setOptions] = useState<string[]>(data.options || []);
+
+  const addOption = () => {
+    const newOpts = [...options, `Option ${options.length + 1}`];
+    setOptions(newOpts);
+    data.onChange?.(id, { ...data, options: newOpts });
+  };
+
+  const removeOption = (idx: number) => {
+    const newOpts = options.filter((_, i) => i !== idx);
+    setOptions(newOpts);
+    data.onChange?.(id, { ...data, options: newOpts });
+  };
+
+  const updateOption = (idx: number, val: string) => {
+    const newOpts = [...options];
+    newOpts[idx] = val;
+    setOptions(newOpts);
+    data.onChange?.(id, { ...data, options: newOpts });
+  };
+
+  const handleChange = (field: string, value: any) => {
+    data.onChange?.(id, { ...data, [field]: value });
+  };
+
+  return (
+    <div className={`w-80 bg-white rounded-xl shadow-lg border-2 transition-all duration-200 group ${selected ? 'border-blue-500 ring-4 ring-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
+      
+      {/* Target Handle (Input) */}
+      <Handle type="target" position={Position.Left} className="!w-3 !h-3 !-left-2 !bg-blue-500 border-2 border-white" />
+
+      {/* Header */}
+      <div className="bg-gray-50 px-4 py-3 border-b border-gray-100 rounded-t-lg flex items-center justify-between handle cursor-grab active:cursor-grabbing">
+        <div className="flex items-center gap-2">
+           <div className="p-1.5 bg-white rounded border border-gray-200 text-gray-500 shadow-sm">
+              {data.icon || <MessageSquare size={14} />}
+           </div>
+           <div>
+             <span className="text-xs font-bold text-gray-400 uppercase tracking-wider block leading-none mb-0.5">{data.label || 'Step'}</span>
+             <input 
+                className="bg-transparent border-none p-0 text-sm font-semibold text-gray-900 focus:ring-0 w-32 leading-none"
+                value={data.title}
+                onChange={(e) => handleChange('title', e.target.value)}
+                placeholder="Step Name"
+             />
+           </div>
+        </div>
+        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button onClick={() => data.onDelete?.(id)} className="p-1 hover:text-red-500 text-gray-400 transition-colors">
+                <Trash2 size={14} />
+            </button>
+        </div>
+      </div>
+
+      {/* Body */}
+      <div className="p-4 space-y-4">
+        
+        {/* Message Input */}
+        <div>
+           <label className="text-[10px] font-bold text-gray-400 uppercase mb-1.5 block">Bot Message</label>
+           <textarea 
+             className="w-full bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none resize-none transition-all"
+             rows={3}
+             placeholder="Type your question..."
+             value={data.message}
+             onChange={(e) => handleChange('message', e.target.value)}
+           />
+        </div>
+
+        {/* Media Placeholder */}
+        {data.hasMedia && (
+            <div className="border-2 border-dashed border-gray-200 rounded-lg p-4 flex flex-col items-center justify-center text-gray-400 hover:bg-gray-50 hover:border-blue-300 transition-colors cursor-pointer group/media">
+                <ImageIcon size={24} className="mb-2 group-hover/media:text-blue-500" />
+                <span className="text-xs font-medium">Upload Image/Video</span>
+            </div>
+        )}
+
+        {/* Dynamic Options / Buttons */}
+        {data.inputType === 'option' && (
+           <div className="space-y-2">
+             <div className="flex items-center justify-between">
+                <label className="text-[10px] font-bold text-gray-400 uppercase">Choices & Branching</label>
+                <button onClick={addOption} className="text-[10px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded font-bold hover:bg-blue-100">
+                    + Add
+                </button>
+             </div>
+             <div className="space-y-2">
+                {options.map((opt, idx) => (
+                    <div key={idx} className="relative flex items-center">
+                        <input 
+                          value={opt}
+                          onChange={(e) => updateOption(idx, e.target.value)}
+                          className="w-full bg-white border border-gray-200 rounded-md px-3 py-1.5 text-sm focus:border-blue-500 outline-none pr-8"
+                        />
+                        <button onClick={() => removeOption(idx)} className="absolute right-2 text-gray-300 hover:text-red-500">
+                            <Trash2 size={12} />
+                        </button>
+                        {/* Source Handle for this specific option */}
+                        <Handle 
+                            type="source" 
+                            position={Position.Right} 
+                            id={`opt_${idx}`}
+                            className="!w-3 !h-3 !-right-5 !bg-blue-500 border-2 border-white"
+                            style={{ top: '50%', transform: 'translateY(-50%)' }}
+                        />
+                    </div>
+                ))}
+             </div>
+           </div>
+        )}
+
+        {/* Default Source Handle (If not using options to branch) */}
+        {data.inputType !== 'option' && (
+             <div className="relative h-4 flex items-center justify-end">
+                 <span className="text-[10px] text-gray-400 mr-2">Next Step</span>
+                 <Handle type="source" position={Position.Right} className="!w-3 !h-3 !-right-5 !bg-gray-400 border-2 border-white" />
+             </div>
+        )}
+
+        {/* Variable Capture */}
+        <div className="pt-3 border-t border-gray-100">
+             <div className="flex items-center gap-2 mb-1">
+                 <Zap size={12} className="text-amber-500" />
+                 <label className="text-[10px] font-bold text-gray-600">Save Answer As</label>
+             </div>
+             <select 
+               value={data.saveToField || ''}
+               onChange={(e) => handleChange('saveToField', e.target.value)}
+               className="w-full bg-gray-50 border border-gray-200 rounded-md px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+             >
+                <option value="">Don't Save (Flow Logic Only)</option>
+                <option value="name">Driver Name</option>
+                <option value="vehicleRegistration">Vehicle Number</option>
+                <option value="availability">Availability</option>
+                <option value="document">Document List</option>
+             </select>
+        </div>
+
+      </div>
+    </div>
+  );
+};
+
+// --- MAIN BUILDER COMPONENT ---
+
+const nodeTypes = {
+  custom: BuilderNode,
+};
+
+const initialNodes: Node[] = [
+    { 
+        id: 'start', 
+        type: 'custom', 
+        position: { x: 100, y: 100 }, 
+        data: { title: 'Welcome', message: 'Hello! Welcome to Uber Fleet.', inputType: 'text' } 
+    }
+];
+
 interface BotBuilderProps {
     isLiveMode?: boolean; 
 }
 
 export const BotBuilder: React.FC<BotBuilderProps> = ({ isLiveMode = false }) => {
-  const [settings, setSettings] = useState<BotSettings>(mockBackend.getBotSettings());
-  const [activeStepId, setActiveStepId] = useState<string>('');
+  return (
+    <ReactFlowProvider>
+        <FlowEditor isLiveMode={isLiveMode} />
+    </ReactFlowProvider>
+  );
+};
+
+const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
+  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [isSaving, setIsSaving] = useState(false);
-  const [loadError, setLoadError] = useState('');
+  const reactFlowInstance = useReactFlow();
 
-  // Test Mode State
-  const [showTestModal, setShowTestModal] = useState(false);
-  const [testMessages, setTestMessages] = useState<{id: number, sender: 'user' | 'system', text: string, options?: string[]}[]>([]);
-  const [testInput, setTestInput] = useState('');
-  const [testCurrentStepId, setTestCurrentStepId] = useState<string | null>(null);
-  const [testIsAiActive, setTestIsAiActive] = useState(false); // Track if AI has taken over in test
-  const [isTestTyping, setIsTestTyping] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-
+  // Load Initial Data
   useEffect(() => {
-    const loadSettings = async () => {
+    const load = async () => {
+        let settings: BotSettings;
         if (isLiveMode) {
-            try {
-                const liveSettings = await liveApiService.getBotSettings();
-                setSettings(liveSettings);
-                if (liveSettings.steps.length > 0) setActiveStepId(liveSettings.steps[0].id);
-            } catch (e) {
-                setLoadError("Could not load live settings. Ensure server is running.");
-            }
+             try {
+                settings = await liveApiService.getBotSettings();
+             } catch(e) { return; }
         } else {
-            setSettings(mockBackend.getBotSettings());
-            const mockSet = mockBackend.getBotSettings();
-            if (mockSet.steps.length > 0) setActiveStepId(mockSet.steps[0].id);
+             settings = mockBackend.getBotSettings();
+        }
+
+        if (settings.flowData) {
+            // Restore visual state if exists
+            // We need to re-attach the handlers functions to nodes
+            const restoredNodes = settings.flowData.nodes.map((n: any) => ({
+                ...n,
+                data: {
+                    ...n.data,
+                    onChange: updateNodeData,
+                    onDelete: deleteNode
+                }
+            }));
+            setNodes(restoredNodes);
+            setEdges(settings.flowData.edges);
+        } else if (settings.steps.length > 0) {
+            // Fallback: Convert linear steps to nodes (Basic conversion)
+            // This is a rough conversion for backward compatibility
+            const newNodes: Node[] = settings.steps.map((step, idx) => ({
+                id: step.id,
+                type: 'custom',
+                position: { x: 100 + (idx * 350), y: 100 },
+                data: {
+                    title: step.title,
+                    message: step.message,
+                    inputType: step.inputType,
+                    options: step.options,
+                    saveToField: step.saveToField,
+                    onChange: updateNodeData,
+                    onDelete: deleteNode
+                }
+            }));
+            
+            // Generate linear edges
+            const newEdges: Edge[] = [];
+            settings.steps.forEach((step, idx) => {
+                if (step.nextStepId && step.nextStepId !== 'END' && step.nextStepId !== 'AI_HANDOFF') {
+                    newEdges.push({
+                        id: `e-${step.id}-${step.nextStepId}`,
+                        source: step.id,
+                        target: step.nextStepId
+                    });
+                }
+            });
+            
+            setNodes(newNodes);
+            setEdges(newEdges);
         }
     };
-    loadSettings();
+    load();
   }, [isLiveMode]);
 
-  // Scroll to bottom of test chat
-  useEffect(() => {
-    if (showTestModal) {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [testMessages, showTestModal, isTestTyping]);
+  const onConnect = useCallback(
+    (params: Connection) => setEdges((eds) => addEdge({ ...params, animated: true, style: { stroke: '#3b82f6', strokeWidth: 2 } }, eds)),
+    [setEdges],
+  );
 
+  const updateNodeData = (id: string, newData: any) => {
+    setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: newData } : n)));
+  };
+
+  const deleteNode = (id: string) => {
+    setNodes((nds) => nds.filter((n) => n.id !== id));
+    setEdges((eds) => eds.filter((e) => e.source !== id && e.target !== id));
+  };
+
+  const onDragOver = useCallback((event: React.DragEvent) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  }, []);
+
+  const onDrop = useCallback(
+    (event: React.DragEvent) => {
+      event.preventDefault();
+
+      const type = event.dataTransfer.getData('application/reactflow');
+      const inputType = event.dataTransfer.getData('application/inputType');
+      const label = event.dataTransfer.getData('application/label');
+
+      if (typeof type === 'undefined' || !type) return;
+
+      const position = reactFlowInstance.screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      });
+
+      const newNode: Node = {
+        id: `node_${Date.now()}`,
+        type: 'custom',
+        position,
+        data: { 
+            title: label, 
+            message: '', 
+            inputType: inputType, 
+            label: label,
+            onChange: updateNodeData, 
+            onDelete: deleteNode,
+            options: inputType === 'option' ? ['Yes', 'No'] : undefined
+        },
+      };
+
+      setNodes((nds) => nds.concat(newNode));
+    },
+    [reactFlowInstance],
+  );
+
+  // --- SAVE LOGIC ---
   const handleSave = async () => {
-    setIsSaving(true);
-    try {
-        if (isLiveMode) {
-            await liveApiService.saveBotSettings(settings);
-        } else {
-            mockBackend.updateBotSettings(settings);
-        }
-        // Minimal delay for UX
-        setTimeout(() => setIsSaving(false), 800);
-    } catch (e) {
-        setIsSaving(false);
-        alert("Failed to save settings to server.");
-    }
-  };
-
-  const handleAddStep = () => {
-    const newId = `step_${Date.now()}`;
-    const newStep: BotStep = {
-      id: newId,
-      title: 'New Question',
-      message: '',
-      inputType: 'text',
-      nextStepId: 'END'
-    };
-    
-    const newSteps = [...settings.steps, newStep];
-    setSettings({ ...settings, steps: newSteps });
-    setActiveStepId(newId);
-  };
-
-  const handleDeleteStep = (id: string) => {
-    const newSteps = settings.steps.filter(s => s.id !== id);
-    setSettings({ ...settings, steps: newSteps });
-    if (activeStepId === id && newSteps.length > 0) {
-      setActiveStepId(newSteps[0].id);
-    }
-  };
-
-  const updateActiveStep = (updates: Partial<BotStep>) => {
-    const newSteps = settings.steps.map(s => s.id === activeStepId ? { ...s, ...updates } : s);
-    setSettings({ ...settings, steps: newSteps });
-  };
-
-  // --- Test Logic ---
-  const startTest = () => {
-    setTestMessages([]);
-    setTestInput('');
-    setTestIsAiActive(false);
-    
-    if (settings.routingStrategy === 'AI_ONLY') {
-        setTestIsAiActive(true);
-        addTestMessage('system', '👋 [AI Connected]: I am ready to handle the conversation based on your training.');
-    } else {
-        const firstStep = settings.steps[0];
-        if (firstStep) {
-          setTestCurrentStepId(firstStep.id);
-          addTestMessage('system', firstStep.message, firstStep.inputType === 'option' ? firstStep.options : undefined);
-        } else {
-          setTestCurrentStepId(null);
-          addTestMessage('system', 'No steps configured. Add a step to start.');
-        }
-    }
-    setShowTestModal(true);
-  };
-
-  const addTestMessage = (sender: 'user' | 'system', text: string, options?: string[]) => {
-    setTestMessages(prev => [...prev, { id: Date.now(), sender, text, options }]);
-  };
-
-  const handleTestReply = async (text: string) => {
-    if (!text.trim()) return;
-    addTestMessage('user', text);
-    setTestInput('');
-    setIsTestTyping(true);
-
-    // 1. AI MODE ACTIVE
-    if (testIsAiActive) {
-        try {
-            // Call the REAL Gemini service with the CURRENT system instruction (from state, not saved DB)
-            const result = await analyzeMessage(text, undefined, settings.systemInstruction);
-            setIsTestTyping(false);
-            addTestMessage('system', result.suggestedReply);
-        } catch (e) {
-            setIsTestTyping(false);
-            addTestMessage('system', "⚠️ AI Error: Check API Key");
-        }
-        return;
-    }
-
-    // 2. BOT FLOW MODE
-    setTimeout(async () => {
-        if (!testCurrentStepId) {
-            setIsTestTyping(false);
-            return;
-        }
+      setIsSaving(true);
+      
+      // 1. Compile Graph to Linear/Branching Steps for the Backend
+      const compiledSteps: BotStep[] = nodes.map(node => {
+        // Find default next step
+        const defaultEdge = edges.find(e => e.source === node.id && !e.sourceHandle);
         
-        const currentStep = settings.steps.find(s => s.id === testCurrentStepId);
-        if (currentStep) {
-            // Move Logic
-            const nextId = currentStep.nextStepId;
-            
-            if (nextId === 'AI_HANDOFF') {
-                 setIsTestTyping(false);
-                 setTestCurrentStepId(null);
-                 setTestIsAiActive(true);
-                 
-                 // Immediately trigger AI welcome/continuation
-                 setIsTestTyping(true);
-                 try {
-                     const prompt = `User just finished the bot flow. Last input: "${text}". Introduce yourself and ask if they have questions.`;
-                     const result = await analyzeMessage(prompt, undefined, settings.systemInstruction);
-                     setIsTestTyping(false);
-                     addTestMessage('system', result.suggestedReply);
-                 } catch (e) {
-                     setIsTestTyping(false);
-                     addTestMessage('system', "🤖 [System]: Handed off to AI. (AI Reply Failed in Test)");
-                 }
+        // If it's an option type, we might not have a simple nextStepId if it branches. 
+        // For the simplified backend model in this demo, we'll try to follow the "first" connection or basic next.
+        // A real production backend would need a graph executor. 
+        // We will adapt the linear 'BotStep' to store 'nextStepId' as the default fall through.
+        
+        let nextId = defaultEdge ? defaultEdge.target : 'END';
+        
+        // Simple heuristic: If it's options, and we have multiple edges, the backend currently
+        // supports linear steps mostly. We will assume the next step is the one connected to the first option 
+        // OR simply set it to AI_HANDOFF if no connection.
+        
+        // In this demo revision, we will persist the visual flow to `flowData` and also update `steps` 
+        // for backward compatibility with the mock engine.
+        
+        return {
+            id: node.id,
+            title: node.data.title,
+            message: node.data.message,
+            inputType: node.data.inputType,
+            options: node.data.options,
+            saveToField: node.data.saveToField,
+            nextStepId: nextId
+        };
+      });
 
-            } else if (nextId === 'END') {
-                 setIsTestTyping(false);
-                 addTestMessage('system', '🏁 [System]: Conversation Flow Ended.');
-                 setTestCurrentStepId(null);
-            } else {
-                 setTestCurrentStepId(nextId || null);
-                 const nextStep = settings.steps.find(s => s.id === nextId);
-                 if (nextStep) {
-                     setIsTestTyping(false);
-                     // Simulate template message if present
-                     const msg = nextStep.templateName ? `[Template: ${nextStep.templateName}] ${nextStep.message}` : nextStep.message;
-                     addTestMessage('system', msg, nextStep.inputType === 'option' ? nextStep.options : undefined);
-                 } else {
-                     setIsTestTyping(false);
-                     addTestMessage('system', '⚠️ [Error]: Next step configuration missing.');
-                 }
-            }
-        }
-    }, 600);
-  };
+      // Sort steps to ensure start is first (if possible) or just trust the ID links
+      // The current backend engine just looks up by ID, so order matters less, 
+      // EXCEPT for the entry point which defaults to steps[0].
+      // We should find the node with no incoming edges or the one named 'start' to be first.
+      
+      const newSettings: BotSettings = {
+          ...mockBackend.getBotSettings(),
+          steps: compiledSteps,
+          flowData: { nodes, edges } // Save visual state
+      };
 
-  const activeStep = settings.steps.find(s => s.id === activeStepId);
-
-  // Helper for icons
-  const getInputIcon = (type: string) => {
-      switch(type) {
-          case 'option': return <List size={14} />;
-          case 'image': return <ImageIcon size={14} />;
-          default: return <Type size={14} />;
+      if (isLiveMode) {
+          try {
+             await liveApiService.saveBotSettings(newSettings);
+          } catch(e) { console.error(e); }
+      } else {
+          mockBackend.updateBotSettings(newSettings);
       }
+      
+      setTimeout(() => setIsSaving(false), 800);
   };
 
   return (
-    <div className="flex flex-col h-full bg-gray-50 overflow-hidden font-sans">
-      
-      {/* Top Navigation Bar */}
-      <div className="bg-white border-b border-gray-200 px-6 h-16 flex items-center justify-between shrink-0 shadow-sm z-10">
-         <div className="flex items-center gap-3">
-            <div className="bg-blue-600 text-white p-2 rounded-lg shadow-sm">
-                <BrainCircuit size={20} />
+    <div className="flex flex-col h-full bg-gray-100">
+        
+        {/* Top Bar */}
+        <div className="bg-white border-b border-gray-200 px-6 h-16 flex items-center justify-between shrink-0 shadow-sm z-20">
+            <div className="flex items-center gap-3">
+                <div className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white p-2 rounded-lg shadow-md">
+                    <Split size={20} />
+                </div>
+                <div>
+                    <h1 className="text-lg font-bold text-gray-900 leading-tight">Flow Builder</h1>
+                    <p className="text-xs text-gray-400">Drag nodes to design conversation</p>
+                </div>
             </div>
-            <div>
-                <h1 className="text-lg font-bold text-gray-900 leading-tight">Bot Studio</h1>
-                <p className="text-xs text-gray-400">Design your conversational flow</p>
+            <div className="flex items-center gap-3">
+                 <button className="text-gray-500 hover:text-gray-900 px-3 py-2 text-sm font-medium transition-colors">
+                    Variables
+                 </button>
+                 <div className="h-6 w-px bg-gray-200"></div>
+                 <button 
+                    onClick={handleSave}
+                    disabled={isSaving}
+                    className="bg-gray-900 text-white px-5 py-2.5 rounded-lg text-sm font-bold shadow-lg hover:shadow-xl hover:-translate-y-0.5 transition-all flex items-center gap-2"
+                 >
+                    {isSaving ? 'Saving...' : <><Save size={16} /> Save Flow</>}
+                 </button>
             </div>
-         </div>
-         <div className="flex items-center gap-3">
-             {isLiveMode && (
-                 <div className="flex items-center gap-2 px-3 py-1 bg-red-50 text-red-600 rounded-full border border-red-100 text-xs font-bold animate-pulse">
-                     <span className="w-2 h-2 bg-red-500 rounded-full"></span>
-                     LIVE MODE
-                 </div>
-             )}
-             <button 
-                onClick={handleSave}
-                disabled={isSaving}
-                className="bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
-                >
-                {isSaving ? 'Saving...' : <><Save size={16} /> Save Changes</>}
-             </button>
-             <button 
-               onClick={startTest}
-               className="bg-gray-900 hover:bg-gray-800 text-white px-5 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 shadow-md hover:shadow-lg transform hover:-translate-y-0.5"
-             >
-                <Play size={16} fill="currentColor" />
-                Test Bot
-             </button>
-         </div>
-      </div>
+        </div>
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* LEFT: Modern Flow Sequence */}
-        <div className="w-80 bg-white border-r border-gray-200 flex flex-col z-0">
-            <div className="p-5 border-b border-gray-100 bg-gray-50/30">
-                <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider flex items-center gap-2">
-                    <List size={14} />
-                    Sequence Order
-                </h2>
-            </div>
+        {/* Main Workspace */}
+        <div className="flex-1 flex overflow-hidden relative">
             
-            {loadError && (
-                <div className="p-4 bg-red-50 text-red-600 text-xs flex items-center gap-2">
-                    <AlertCircle size={14} /> {loadError}
-                </div>
-            )}
-
-            <div className="flex-1 overflow-y-auto p-4 relative">
-                {/* Timeline Line */}
-                <div className="absolute left-8 top-6 bottom-0 w-0.5 bg-gray-200" />
-
-                <div className="space-y-6 relative">
-                    {settings.steps.map((step, idx) => (
-                        <div key={step.id} className="relative pl-10 group">
-                            {/* Connector Dot */}
-                            <div 
-                                className={`absolute left-2.5 top-4 w-3 h-3 rounded-full border-2 z-10 transition-colors ${
-                                    activeStepId === step.id ? 'bg-blue-600 border-blue-600' : 'bg-white border-gray-300 group-hover:border-blue-400'
-                                }`}
-                            />
-                            
-                            {/* Card */}
-                            <div 
-                                onClick={() => setActiveStepId(step.id)}
-                                className={`
-                                    cursor-pointer rounded-xl border p-4 transition-all duration-200
-                                    ${activeStepId === step.id 
-                                        ? 'bg-white border-blue-500 ring-4 ring-blue-50 shadow-md transform scale-[1.02]' 
-                                        : 'bg-white border-gray-200 hover:border-blue-300 hover:shadow-sm'
-                                    }
-                                `}
-                            >
-                                <div className="flex items-center justify-between mb-2">
-                                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Step {idx + 1}</span>
-                                    <button 
-                                        onClick={(e) => { e.stopPropagation(); handleDeleteStep(step.id); }} 
-                                        className="text-gray-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
-                                    >
-                                        <Trash2 size={14} />
-                                    </button>
-                                </div>
-                                <h4 className={`font-semibold text-sm mb-1 ${activeStepId === step.id ? 'text-blue-700' : 'text-gray-900'}`}>
-                                    {step.title}
-                                </h4>
-                                <p className="text-xs text-gray-500 line-clamp-1 mb-3">
-                                    {step.templateName ? `[Template] ${step.templateName}` : step.message}
-                                </p>
-                                
-                                <div className="flex items-center gap-2">
-                                    <span className={`text-[10px] px-2 py-1 rounded-md flex items-center gap-1 font-medium ${
-                                        activeStepId === step.id ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600'
-                                    }`}>
-                                        {getInputIcon(step.inputType)}
-                                        {step.inputType.toUpperCase()}
-                                    </span>
-                                    {step.nextStepId === 'AI_HANDOFF' && (
-                                        <span className="text-[10px] px-2 py-1 rounded-md bg-purple-100 text-purple-700 font-bold flex items-center gap-1">
-                                            <Sparkles size={10} /> AI HANDOFF
-                                        </span>
-                                    )}
-                                    {step.templateName && (
-                                        <span className="text-[10px] px-2 py-1 rounded-md bg-green-100 text-green-700 font-bold flex items-center gap-1">
-                                            <FileCode size={10} /> TMPL
-                                        </span>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-                    ))}
-
-                    <div className="relative pl-10 pt-2">
-                        <div className="absolute left-3.5 top-5 w-1 h-1 bg-gray-300 rounded-full" />
-                        <button 
-                            onClick={handleAddStep}
-                            className="w-full py-3 border-2 border-dashed border-gray-300 rounded-xl text-gray-400 text-xs font-bold uppercase tracking-wider hover:border-blue-500 hover:text-blue-600 hover:bg-blue-50 transition-all flex items-center justify-center gap-2"
-                        >
-                            <Plus size={16} />
-                            Add Step
-                        </button>
-                    </div>
-                </div>
+            {/* CANVAS */}
+            <div className="flex-1 h-full bg-gray-50 relative" onDragOver={onDragOver} onDrop={onDrop}>
+                 <ReactFlow
+                    nodes={nodes}
+                    edges={edges}
+                    onNodesChange={onNodesChange}
+                    onEdgesChange={onEdgesChange}
+                    onConnect={onConnect}
+                    nodeTypes={nodeTypes}
+                    defaultViewport={{ x: 0, y: 0, zoom: 1 }}
+                    minZoom={0.2}
+                    maxZoom={2}
+                 >
+                    <Background color="#e5e7eb" gap={20} size={1} />
+                    <Controls className="bg-white border border-gray-200 shadow-sm rounded-lg p-1" />
+                    <MiniMap className="border border-gray-200 rounded-lg shadow-sm" zoomable pannable />
+                    <Panel position="top-left" className="bg-white/80 backdrop-blur p-2 rounded-lg border border-gray-200 text-xs text-gray-500 shadow-sm">
+                        Total Steps: {nodes.length}
+                    </Panel>
+                 </ReactFlow>
             </div>
-        </div>
 
-        {/* CENTER: Step Editor */}
-        <div className="flex-1 overflow-y-auto bg-gray-50/50 p-8">
-            {activeStep ? (
-            <div className="max-w-3xl mx-auto space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                {/* Configuration Card */}
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
-                    <div className="flex items-center gap-4 mb-8 pb-6 border-b border-gray-100">
-                        <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 text-white rounded-xl flex items-center justify-center shadow-lg shadow-blue-200">
-                            <Settings2 size={24} />
-                        </div>
-                        <div>
-                            <h3 className="font-bold text-xl text-gray-900">Step Configuration</h3>
-                            <p className="text-sm text-gray-500">Define the bot's behavior for this interaction point.</p>
-                        </div>
-                    </div>
-
-                    <div className="space-y-6">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            <div>
-                                <label className="block text-xs font-bold text-gray-700 uppercase mb-2">Internal Title</label>
-                                <input 
-                                type="text" 
-                                value={activeStep.title}
-                                onChange={(e) => updateActiveStep({ title: e.target.value })}
-                                className="w-full bg-gray-50 border border-gray-200 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-sm transition-all"
-                                placeholder="e.g. Ask Name"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-xs font-bold text-gray-700 uppercase mb-2">Expected Input</label>
-                                <select 
-                                value={activeStep.inputType}
-                                onChange={(e) => updateActiveStep({ inputType: e.target.value as any })}
-                                className="w-full bg-gray-50 border border-gray-200 rounded-lg px-4 py-2.5 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-sm cursor-pointer"
-                                >
-                                <option value="text">Text Message</option>
-                                <option value="image">Image Attachment</option>
-                                <option value="option">Select Options (Buttons)</option>
-                                </select>
-                            </div>
-                        </div>
-
-                        {/* WhatsApp Template Toggle */}
-                        <div className="bg-gray-50 border border-gray-200 rounded-xl p-5">
-                            <div className="flex items-center justify-between mb-4">
-                                <label className="flex items-center gap-2 text-sm font-bold text-gray-800">
-                                    <FileCode size={16} className="text-green-600" />
-                                    Use Pre-approved Template
-                                </label>
-                                <div className="relative inline-block w-10 h-6 align-middle select-none transition duration-200 ease-in">
-                                    <input 
-                                        type="checkbox" 
-                                        name="toggle" 
-                                        id="toggle-template" 
-                                        className="toggle-checkbox absolute block w-5 h-5 rounded-full bg-white border-4 appearance-none cursor-pointer border-gray-300 checked:right-0 checked:border-green-500 right-4"
-                                        checked={!!activeStep.templateName}
-                                        onChange={(e) => updateActiveStep({ templateName: e.target.checked ? 'hello_world' : undefined })}
-                                    />
-                                    <label htmlFor="toggle-template" className={`toggle-label block overflow-hidden h-6 rounded-full cursor-pointer ${activeStep.templateName ? 'bg-green-500' : 'bg-gray-300'}`}></label>
-                                </div>
-                            </div>
-
-                            {activeStep.templateName !== undefined && (
-                                <div className="animate-in fade-in slide-in-from-top-2">
-                                    <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Template Name (from Meta)</label>
-                                    <input 
-                                        type="text" 
-                                        value={activeStep.templateName}
-                                        onChange={(e) => updateActiveStep({ templateName: e.target.value })}
-                                        className="w-full bg-white border border-gray-300 rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none"
-                                        placeholder="e.g. encho_enterprises"
-                                    />
-                                    <p className="text-[10px] text-gray-400 mt-2">
-                                        Must match exactly with a template created in WhatsApp Manager.
-                                    </p>
-                                </div>
-                            )}
-                        </div>
-
-                        <div>
-                            <label className="block text-xs font-bold text-gray-700 uppercase mb-2 flex justify-between">
-                                <span>Bot Message</span>
-                                <span className="text-gray-400 font-normal normal-case">
-                                    {activeStep.templateName ? 'Description / Fallback Text' : 'What the user sees'}
-                                </span>
-                            </label>
-                            <textarea 
-                            value={activeStep.message}
-                            onChange={(e) => updateActiveStep({ message: e.target.value })}
-                            className="w-full bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-sm h-32 resize-none leading-relaxed"
-                            placeholder="Type the message here..."
-                            />
-                        </div>
-
-                        {/* Conditional Options Input (Only if NOT using Template) */}
-                        {activeStep.inputType === 'option' && !activeStep.templateName && (
-                            <div className="bg-blue-50 p-5 rounded-xl border border-blue-100 animate-in fade-in zoom-in-95">
-                                <label className="block text-xs font-bold text-blue-800 uppercase mb-2">Button Options</label>
-                                <input 
-                                type="text"
-                                value={activeStep.options?.join(', ') || ''}
-                                onChange={(e) => updateActiveStep({ options: e.target.value.split(',').map(s => s.trim()) })}
-                                placeholder="e.g. Yes, No, Maybe (Comma separated)"
-                                className="w-full bg-white border border-blue-200 rounded-lg px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
-                                />
-                                <p className="text-[10px] text-blue-600 mt-2">WhatsApp allows up to 3 buttons per message.</p>
-                            </div>
-                        )}
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t border-gray-100">
-                             <div>
-                                <label className="block text-xs font-bold text-gray-700 uppercase mb-2">Save Response To</label>
-                                <select 
-                                value={activeStep.saveToField || ''}
-                                onChange={(e) => updateActiveStep({ saveToField: e.target.value as any })}
-                                className="w-full bg-white border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-                                >
-                                <option value="">Don't Save (Just Logic)</option>
-                                <option value="name">Driver Name</option>
-                                <option value="vehicleRegistration">Vehicle Number</option>
-                                <option value="availability">Availability</option>
-                                <option value="document">Document List</option>
-                                </select>
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-bold text-gray-700 uppercase mb-2">Next Step</label>
-                                <div className="relative">
-                                    <select 
-                                        value={activeStep.nextStepId || 'END'}
-                                        onChange={(e) => updateActiveStep({ nextStepId: e.target.value })}
-                                        className={`w-full border rounded-lg px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500 outline-none appearance-none font-medium ${
-                                            activeStep.nextStepId === 'AI_HANDOFF' ? 'bg-purple-50 border-purple-200 text-purple-700' : 'bg-white border-gray-300'
-                                        }`}
-                                    >
-                                        {settings.steps.map(s => (
-                                        <option key={s.id} value={s.id}>Step: {s.title}</option>
-                                        ))}
-                                        <option value="AI_HANDOFF">🤖 Handover to Gemini AI</option>
-                                        <option value="END">🏁 End Conversation</option>
-                                    </select>
-                                    <ArrowDown size={14} className="absolute right-4 top-3 text-gray-400 pointer-events-none" />
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            ) : (
-            <div className="flex flex-col items-center justify-center h-full text-gray-400">
-                <div className="w-24 h-24 bg-gray-100 rounded-full flex items-center justify-center mb-6">
-                    <GripVertical size={32} className="opacity-20" />
-                </div>
-                <h3 className="text-lg font-medium text-gray-900">No Step Selected</h3>
-                <p className="max-w-xs text-center mt-2">Select a step from the Flow Sequence on the left or create a new one to get started.</p>
-                <button 
-                    onClick={handleAddStep}
-                    className="mt-6 px-6 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
-                >
-                    Create First Step
-                </button>
-            </div>
-            )}
-        </div>
-      </div>
-
-      {/* Test Bot Modal */}
-      {showTestModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md h-[700px] flex flex-col overflow-hidden relative">
-                {/* Modal Header */}
-                <div className="bg-gray-900 text-white p-5 flex items-center justify-between shrink-0 shadow-md">
-                    <div className="flex items-center gap-3">
-                        <div className={`p-2 rounded-full ${testIsAiActive ? 'bg-purple-600' : 'bg-blue-600'}`}>
-                            {testIsAiActive ? <Sparkles size={18} /> : <BotIcon size={18} />}
-                        </div>
-                        <div>
-                            <h3 className="font-bold text-sm">{testIsAiActive ? 'Gemini AI Agent' : 'Rule-Based Bot'}</h3>
-                            <p className="text-[10px] text-gray-400 flex items-center gap-1">
-                                <span className={`w-1.5 h-1.5 rounded-full ${testIsAiActive ? 'bg-purple-400' : 'bg-green-400'} animate-pulse`}></span>
-                                Online & Testing
-                            </p>
-                        </div>
-                    </div>
-                    <button onClick={() => setShowTestModal(false)} className="hover:bg-white/20 p-2 rounded-full transition-colors">
-                        <X size={20} />
-                    </button>
+            {/* SIDEBAR TOOLBOX */}
+            <div className="w-72 bg-white border-l border-gray-200 flex flex-col shadow-xl z-10">
+                <div className="p-4 border-b border-gray-100">
+                    <h3 className="text-xs font-bold text-gray-900 uppercase tracking-wider flex items-center gap-2">
+                        <GripVertical size={14} /> Toolbox
+                    </h3>
                 </div>
                 
-                {/* Chat Area */}
-                <div className="flex-1 overflow-y-auto p-5 space-y-6 bg-gray-100">
-                    {testMessages.map((msg) => (
-                        <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
-                            {msg.sender === 'system' && (
-                                <div className={`w-8 h-8 rounded-full flex items-center justify-center mr-3 mt-1 shrink-0 shadow-sm ${
-                                    testIsAiActive ? 'bg-purple-600 text-white' : 'bg-blue-600 text-white'
-                                }`}>
-                                    {testIsAiActive ? <Sparkles size={14} /> : <BotIcon size={14} />}
-                                </div>
-                            )}
-                            <div className="flex flex-col gap-2 max-w-[80%]">
-                                <div className={`px-4 py-3 rounded-2xl shadow-sm text-sm leading-relaxed ${
-                                    msg.sender === 'user' 
-                                    ? 'bg-gray-900 text-white rounded-tr-none' 
-                                    : 'bg-white text-gray-800 rounded-tl-none border border-gray-200'
-                                }`}>
-                                    {msg.text}
-                                </div>
-                                {/* Option Buttons */}
-                                {msg.options && msg.options.length > 0 && (
-                                    <div className="flex flex-wrap gap-2 animate-in slide-in-from-left-2 fade-in duration-300">
-                                        {msg.options.map((opt) => (
-                                            <button 
-                                                key={opt}
-                                                onClick={() => handleTestReply(opt)}
-                                                className="bg-white border border-blue-200 text-blue-700 text-xs font-bold px-4 py-2 rounded-full hover:bg-blue-50 hover:border-blue-400 transition-all shadow-sm"
-                                            >
-                                                {opt}
-                                            </button>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
+                <div className="flex-1 overflow-y-auto p-4 space-y-6">
+                    
+                    {/* Section: Messages */}
+                    <div>
+                        <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-3 px-1">Send Message</h4>
+                        <div className="grid grid-cols-2 gap-2">
+                             <DraggableItem type="custom" inputType="text" label="Text Msg" icon={<MessageSquare size={16} />} />
+                             <DraggableItem type="custom" inputType="text" label="Image" icon={<ImageIcon size={16} />} />
+                             <DraggableItem type="custom" inputType="text" label="Template" icon={<Settings2 size={16} />} />
                         </div>
-                    ))}
-                    {isTestTyping && (
-                        <div className="flex justify-start animate-in fade-in">
-                             <div className={`w-8 h-8 rounded-full flex items-center justify-center mr-3 mt-1 shrink-0 ${
-                                testIsAiActive ? 'bg-purple-600 text-white' : 'bg-blue-600 text-white'
-                             }`}>
-                                {testIsAiActive ? <Sparkles size={14} /> : <BotIcon size={14} />}
-                            </div>
-                            <div className="bg-white border border-gray-200 px-4 py-3 rounded-2xl rounded-tl-none shadow-sm flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"></span>
-                                <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce delay-100"></span>
-                                <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce delay-200"></span>
-                            </div>
-                        </div>
-                    )}
-                    <div ref={messagesEndRef} />
-                </div>
+                    </div>
 
-                {/* Input Area */}
-                <div className="p-4 bg-white border-t border-gray-200 shrink-0">
-                    <div className="flex items-center gap-2 bg-gray-100 border border-gray-200 rounded-full px-5 py-3 focus-within:ring-2 focus-within:ring-blue-500 focus-within:bg-white transition-all shadow-inner">
-                        <input 
-                            type="text"
-                            value={testInput}
-                            onChange={(e) => setTestInput(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && handleTestReply(testInput)}
-                            placeholder={testIsAiActive ? "Ask the AI anything..." : "Type your reply..."}
-                            className="flex-1 bg-transparent border-none outline-none text-sm text-gray-800 placeholder:text-gray-400"
-                        />
-                        <button 
-                            onClick={() => handleTestReply(testInput)}
-                            disabled={!testInput.trim()}
-                            className="text-blue-600 hover:text-blue-700 disabled:opacity-30 transition-colors transform active:scale-95"
-                        >
-                            <Send size={20} fill="currentColor" />
-                        </button>
+                    {/* Section: Interaction */}
+                    <div>
+                        <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-3 px-1">Ask User</h4>
+                        <div className="space-y-2">
+                             <DraggableItem type="custom" inputType="text" label="Collect Input" icon={<Type size={16} />} />
+                             <DraggableItem type="custom" inputType="option" label="Buttons / Options" icon={<List size={16} />} />
+                        </div>
                     </div>
-                    <div className="text-center mt-3">
-                         <button onClick={startTest} className="text-[10px] text-gray-400 hover:text-gray-600 font-medium flex items-center justify-center gap-1 mx-auto hover:underline decoration-gray-300 underline-offset-2">
-                            <Play size={10} /> Restart Simulation
-                         </button>
+
+                    {/* Section: Logic */}
+                    <div>
+                        <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-3 px-1">Logic</h4>
+                        <div className="space-y-2">
+                             <div className="opacity-50 cursor-not-allowed border border-dashed border-gray-300 rounded-lg p-3 text-xs text-gray-400 flex items-center gap-2">
+                                <Split size={16} /> Conditions (Pro)
+                             </div>
+                             <div className="opacity-50 cursor-not-allowed border border-dashed border-gray-300 rounded-lg p-3 text-xs text-gray-400 flex items-center gap-2">
+                                <Zap size={16} /> Webhook (Pro)
+                             </div>
+                        </div>
                     </div>
+
+                </div>
+                
+                <div className="p-4 bg-gray-50 border-t border-gray-100 text-[10px] text-gray-400 text-center">
+                    Drag items onto the canvas to add steps.
                 </div>
             </div>
+
         </div>
-      )}
     </div>
   );
+};
+
+// Helper for Sidebar Items
+const DraggableItem = ({ type, inputType, label, icon }: any) => {
+    const onDragStart = (event: React.DragEvent, nodeType: string) => {
+      event.dataTransfer.setData('application/reactflow', nodeType);
+      event.dataTransfer.setData('application/inputType', inputType);
+      event.dataTransfer.setData('application/label', label);
+      event.dataTransfer.effectAllowed = 'move';
+    };
+  
+    return (
+      <div 
+        className="bg-white border border-gray-200 rounded-lg p-3 cursor-grab hover:border-blue-500 hover:shadow-md transition-all flex items-center gap-3 group"
+        onDragStart={(event) => onDragStart(event, type)} 
+        draggable
+      >
+        <div className="text-gray-500 group-hover:text-blue-600 transition-colors">
+            {icon}
+        </div>
+        <span className="text-sm font-medium text-gray-700">{label}</span>
+      </div>
+    );
 };

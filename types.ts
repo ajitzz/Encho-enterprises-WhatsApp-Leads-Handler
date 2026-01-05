@@ -89,4 +89,9 @@ export interface BotSettings {
   routingStrategy: 'BOT_ONLY' | 'AI_ONLY' | 'HYBRID_BOT_FIRST';
   systemInstruction: string; // The "Training" for Gemini
   steps: BotStep[];
+  // New Visual Flow Data
+  flowData?: {
+    nodes: any[];
+    edges: any[];
+  };
 }
