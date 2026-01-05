@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, LeadStatus, OnboardingStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
-import { X, Send, Image as ImageIcon, Video, CheckCircle, AlertTriangle, UserX, Car, Clock, ShieldCheck, ChevronRight, Facebook, Globe } from 'lucide-react';
+import { X, Send, Image as ImageIcon, Video, CheckCircle, AlertTriangle, UserX, Car, Clock, ShieldCheck, ChevronRight, Facebook, Globe, RefreshCcw } from 'lucide-react';
 
 interface ChatDrawerProps {
   driver: Driver | null;
@@ -53,6 +53,11 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
     onUpdateDriver(driver.id, updates);
   };
 
+  const handleResetFlow = () => {
+      onUpdateDriver(driver.id, { flowCompleted: false });
+      alert("Bot status reset! The driver can now restart the bot flow.");
+  };
+
   const steps = [
     { label: 'Welcome', done: true },
     { label: 'Documents', done: driver.documents && driver.documents.length > 0 },
@@ -92,6 +97,13 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
                </div>
             </div>
             <div className="flex items-center gap-3">
+               <button 
+                 onClick={handleResetFlow}
+                 className="bg-gray-800 text-gray-300 hover:text-white px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors border border-gray-700"
+                 title="Force Reset Bot Status"
+               >
+                 <RefreshCcw size={14} /> Reset Bot
+               </button>
                <select 
                   className="bg-gray-800 text-white text-sm border-none rounded-md px-3 py-1.5 cursor-pointer outline-none focus:ring-2 focus:ring-blue-500"
                   value={driver.status}

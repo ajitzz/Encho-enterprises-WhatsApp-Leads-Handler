@@ -188,6 +188,12 @@ const sendWhatsApp = async (to, type, content) => {
       return;
   }
   
+  // Guard against empty content
+  if (type === 'text' && (!content.text || content.text.trim() === '')) {
+      console.warn("⚠️ Attempted to send empty text to WhatsApp. Skipping.");
+      return;
+  }
+
   const payload = { messaging_product: 'whatsapp', to };
   if (type === 'text') {
     payload.type = 'text';
@@ -232,11 +238,11 @@ const generateAIResponse = async (input, systemInstruction) => {
         const model = ai.models; 
         const response = await model.generateContent({
             model: 'gemini-1.5-flash',
-            // FIX: Correct structure for @google/genai SDK
             contents: [{ role: 'user', parts: [{ text: input }] }],
             config: { systemInstruction: systemInstruction || "You are a helpful assistant." }
         });
-        return response.text;
+        const text = response.text || "I didn't catch that. Could you say it again?";
+        return text;
     } catch (error) {
         console.error("AI Error:", error.message || error);
         return "I'm currently updating my system. Please try again in a few moments.";
@@ -260,7 +266,14 @@ class BotEngine {
 
   async getFlow() {
     const res = await this.client.query('SELECT nodes, edges FROM flows ORDER BY updated_at DESC LIMIT 1');
-    return res.rows[0] || { nodes: [], edges: [] };
+    const flow = res.rows[0] || { nodes: [], edges: [] };
+    
+    // SAFETY: If fetched flow contains the placeholder, treat it as invalid so we fallback to AI
+    if (JSON.stringify(flow.nodes).toLowerCase().includes("replace this sample message")) {
+        console.warn("🚫 Detected placeholder flow in DB. Ignoring it.");
+        return { nodes: [], edges: [] };
+    }
+    return flow;
   }
 
   async processUser(phone, input, driverId) {
@@ -337,14 +350,22 @@ class BotEngine {
             return true; 
         }
     } else {
-        // New Session
-        const startNode = nodes.find(n => n.data.type === 'start');
+        // New Session: Find Start Node
+        // Fallback: Look for node with type 'start' OR id 'start'
+        const startNode = nodes.find(n => n.data.type === 'start') || nodes.find(n => n.id === 'start');
+        
         if (startNode) {
             const startEdge = edges.find(e => e.source === startNode.id);
             if (startEdge) {
                 currentNodeId = startEdge.target;
                 currentNode = nodes.find(n => n.id === currentNodeId);
+            } else {
+                console.log("⚠️ Start node found but no outgoing edges. Delegating to AI.");
+                return false; 
             }
+        } else {
+            console.log("⚠️ No Start node found in flow. Delegating to AI.");
+            return false;
         }
     }
 
@@ -467,9 +488,10 @@ app.post('/webhook', async (req, res) => {
         if (settings.is_enabled && settings.routing_strategy !== 'AI_ONLY') {
             const engine = new BotEngine(client);
             // Engine returns FALSE if:
-            // 1. Flow is empty
+            // 1. Flow is empty or invalid
             // 2. Flow has the "bad placeholder"
             // 3. User has already completed the flow (flow_completed = true)
+            // 4. Start node is missing
             botHandled = await engine.processUser(from, input, driverId);
         }
 
@@ -480,11 +502,13 @@ app.post('/webhook', async (req, res) => {
              console.log(`🤖 Bot skipped/passed. AI replying to: ${input}`);
              const aiReply = await generateAIResponse(input, settings.system_instruction || "You are a helpful recruitment assistant.");
              
-             await sendWhatsApp(from, 'text', { text: aiReply });
-             await client.query(
-                `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'system', $3, $4, 'text')`,
-                [Date.now().toString() + '_ai', driverId, aiReply, Date.now()]
-             );
+             if (aiReply) {
+                await sendWhatsApp(from, 'text', { text: aiReply });
+                await client.query(
+                   `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'system', $3, $4, 'text')`,
+                   [Date.now().toString() + '_ai', driverId, aiReply, Date.now()]
+                );
+             }
         }
 
       } catch (e) {
@@ -605,6 +629,12 @@ app.patch('/api/drivers/:id', async (req, res) => {
         if (updates.status !== undefined) {
              fields.push(`status = $${idx++}`);
              values.push(updates.status);
+        }
+        
+        // NEW: Allow resetting flow status manually
+        if (updates.flowCompleted !== undefined) {
+             fields.push(`flow_completed = $${idx++}`);
+             values.push(updates.flowCompleted);
         }
 
         if (fields.length > 0) {
