@@ -1,6 +1,8 @@
 /**
  * UBER FLEET RECRUITER - BACKEND SERVER
  * Optimized for Vercel Serverless + Neon Postgres
+ * 
+ * Dependencies: express, axios, cors, pg, dotenv, @google/genai
  */
 
 const express = require('express');
@@ -13,10 +15,11 @@ require('dotenv').config();
 const app = express();
 
 // --- MIDDLEWARE ---
+// Increased limit for potential image handling
 app.use(express.json({ limit: '10mb' }));
 app.use(cors()); 
 
-// Disable Caching for API responses
+// Disable Caching for API responses to prevent stale data
 app.set('etag', false);
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -25,32 +28,32 @@ app.use((req, res, next) => {
 
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 3001;
-let META_API_TOKEN = process.env.META_API_TOKEN; 
-let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID; 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+// CREDENTIALS
+let META_API_TOKEN = process.env.META_API_TOKEN || ""; 
+let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || ""; 
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0";
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
-// --- DATABASE CONNECTION (NEON OPTIMIZED) ---
-// Use the POOLED connection string (port 5432 or 6543) for best Vercel performance
-const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL;
+// DATABASE CONNECTION STRINGS
+// Use the POOLED connection string for Vercel/Serverless performance
+const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 
-if (!CONNECTION_STRING) {
-  console.error("❌ CRITICAL: No POSTGRES_URL or DATABASE_URL found in environment variables.");
-}
-
+// --- DATABASE CONNECTION POOL ---
 const pool = new Pool({
-  connectionString: CONNECTION_STRING,
-  ssl: { rejectUnauthorized: false }, 
+  connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL,
+  ssl: { rejectUnauthorized: false }, // Essential for Neon
   
-  // VERCEL SERVERLESS OPTIMIZATION:
-  max: 1, // Keep 1 connection per lambda. Vercel scales horizontal instances.
-  idleTimeoutMillis: 0, // Disable auto-disconnection. Keep the connection warm as long as possible.
-  connectionTimeoutMillis: 15000, // Allow 15s for Neon cold starts.
+  // VERCEL SERVERLESS OPTIMIZATIONS:
+  max: 1, // Limit to 1 connection per Lambda instance to prevent exhaustion
+  idleTimeoutMillis: 0, // Disable auto-close. Keep connection warm for polling.
+  connectionTimeoutMillis: 15000, // 15s timeout to handle cold starts gracefully
 });
 
-// Robust Error Handling for the Pool to prevent crashes
+// Global error listener to prevent crash on idle client errors
 pool.on('error', (err, client) => {
   console.error('Unexpected error on idle database client', err);
+  // Don't exit; Vercel will recycle the container eventually
 });
 
 // --- SCHEMA DEFINITION (Used for Auto-Recovery) ---
@@ -100,6 +103,7 @@ const DEFAULT_BOT_SETTINGS = {
 };
 
 // --- HELPER: Auto-Init DB (Self-Healing) ---
+// This runs ONLY if a query fails due to missing tables.
 const ensureDatabaseInitialized = async (client) => {
     try {
         console.log("🛠 Performing Database Auto-Recovery/Initialization...");
@@ -125,7 +129,7 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // --- ROUTES ---
 
-// Init Route (Manual Trigger)
+// Manual Init Route (Optional)
 app.get('/api/init', async (req, res) => {
     const client = await pool.connect();
     try {
@@ -138,6 +142,7 @@ app.get('/api/init', async (req, res) => {
     }
 });
 
+// Health Check
 app.get('/api/health', async (req, res) => {
     try {
         await pool.query('SELECT 1');
@@ -148,6 +153,7 @@ app.get('/api/health', async (req, res) => {
 });
 
 // Drivers List (With Auto-Recovery Logic)
+// This is the heavy lifter called by dashboard polling
 app.get('/api/drivers', async (req, res) => {
     let client;
     try {
@@ -169,7 +175,7 @@ app.get('/api/drivers', async (req, res) => {
             const driversRes = await fetchDrivers();
             res.json(driversRes.rows);
         } catch (queryError) {
-            // Error 42P01 means "undefined table". This happens on new deployments.
+            // Error 42P01 means "undefined table". This happens on new deployments/resets.
             if (queryError.code === '42P01') {
                 console.warn("⚠️ Tables missing. Triggering Self-Healing...");
                 await ensureDatabaseInitialized(client);
@@ -196,7 +202,6 @@ app.get('/api/bot-settings', async (req, res) => {
         const result = await client.query('SELECT * FROM bot_settings WHERE id = 1');
         res.json(result.rows[0]?.settings || DEFAULT_BOT_SETTINGS);
     } catch (e) {
-        // Auto-recover for settings too
         if (e.code === '42P01' && client) {
             try {
                 await ensureDatabaseInitialized(client);
@@ -389,8 +394,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         if (e.code === '42P01') {
             console.warn("⚠️ Tables missing in webhook. Auto-initializing for next request...");
             await ensureDatabaseInitialized(client);
-            // We cannot easily retry the whole webhook logic safely without reprocessing events, 
-            // but the DB is now fixed for the NEXT message.
         } else {
             console.error("Logic Error:", e);
         }
@@ -468,8 +471,10 @@ app.post('/api/configure-webhook', (req, res) => {
     res.json({ success: true });
 });
 
+// Export app for Vercel
 module.exports = app;
 
+// Local Start
 if (require.main === module) {
     app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 }
