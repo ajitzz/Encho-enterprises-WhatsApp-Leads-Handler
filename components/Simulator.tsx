@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { mockBackend } from '../services/mockBackend';
 import { analyzeMessage } from '../services/geminiService';
 import { MessageSquare, Upload, Smartphone, Facebook } from 'lucide-react';
-import { Notification } from '../types';
+import { Notification, LeadStatus } from '../types';
 
 interface SimulatorProps {
   onNotify: (n: Omit<Notification, 'id'>) => void;
@@ -33,6 +33,7 @@ export const Simulator: React.FC<SimulatorProps> = ({ onNotify }) => {
       const text = message || (hasImage ? "Here is the photo" : "");
 
       // 1. Send Message to Backend (Bot Engine)
+      // @ts-ignore - mockBackend types updated but Simulator not strictly typed in this context yet
       const result = mockBackend.processIncomingMessage(phone, text, imageUrl);
       const { driver, actionNeeded } = result;
       
@@ -47,40 +48,58 @@ export const Simulator: React.FC<SimulatorProps> = ({ onNotify }) => {
           // Get current system instruction from settings
           const settings = mockBackend.getBotSettings();
           
+          // In Simulator, we always try AI unless key is missing, then fallback
+          // Simulate missing key scenario for demonstration if needed, but here we assume key exists
+          // For strict parity with server.js fallback:
           const aiResult = await analyzeMessage(text, imageUrl, settings.systemInstruction);
           
-          if (aiResult.extractedData) {
-             mockBackend.updateDriverDetails(driver.id, {
-                vehicleRegistration: aiResult.extractedData.vehicleRegistration || driver.vehicleRegistration,
-                availability: (aiResult.extractedData.availability as any) || driver.availability,
-                qualificationChecks: {
-                  ...driver.qualificationChecks,
-                  hasValidLicense: aiResult.extractedData.isLicenseValid || driver.qualificationChecks.hasValidLicense
-                }
-             });
-          }
-
-          if (aiResult.recommendedStatus && aiResult.recommendedStatus !== driver.status) {
-             mockBackend.updateDriverStatus(driver.id, aiResult.recommendedStatus);
-             if (aiResult.recommendedStatus === 'Flagged') {
-                onNotify({
-                  type: 'warning',
-                  title: 'AI Alert: Review Needed',
-                  message: `AI flagged ${driver.name} for manual review.`
+          if (aiResult.intent === "Analysis Failed" || !aiResult.suggestedReply) {
+               // AI FAILED -> HUMAN AGENT
+               mockBackend.updateDriverStatus(driver.id, LeadStatus.FLAGGED_FOR_REVIEW);
+               setTimeout(() => {
+                mockBackend.addMessage(driver.id, {
+                  id: Date.now().toString(),
+                  sender: 'system',
+                  text: `[Fallback]: Thanks! A human agent will contact you shortly.`,
+                  timestamp: Date.now(),
+                  type: 'text'
+                });
+               }, 1000);
+          } else {
+             // AI SUCCEEDED
+             if (aiResult.extractedData) {
+                mockBackend.updateDriverDetails(driver.id, {
+                    vehicleRegistration: aiResult.extractedData.vehicleRegistration || driver.vehicleRegistration,
+                    availability: (aiResult.extractedData.availability as any) || driver.availability,
+                    qualificationChecks: {
+                    ...driver.qualificationChecks,
+                    hasValidLicense: aiResult.extractedData.isLicenseValid || driver.qualificationChecks.hasValidLicense
+                    }
                 });
              }
+
+             if (aiResult.recommendedStatus && aiResult.recommendedStatus !== driver.status) {
+                mockBackend.updateDriverStatus(driver.id, aiResult.recommendedStatus);
+                if (aiResult.recommendedStatus === 'Flagged') {
+                    onNotify({
+                    type: 'warning',
+                    title: 'AI Alert: Review Needed',
+                    message: `AI flagged ${driver.name} for manual review.`
+                    });
+                }
+             }
+             
+             // Send AI Reply
+             setTimeout(() => {
+                mockBackend.addMessage(driver.id, {
+                id: Date.now().toString(),
+                sender: 'system',
+                text: `[AI]: ${aiResult.suggestedReply}`,
+                timestamp: Date.now(),
+                type: 'text'
+                });
+             }, 1000);
           }
-          
-          // Send AI Reply
-          setTimeout(() => {
-            mockBackend.addMessage(driver.id, {
-              id: Date.now().toString(),
-              sender: 'system',
-              text: `[AI]: ${aiResult.suggestedReply}`,
-              timestamp: Date.now(),
-              type: 'text'
-            });
-          }, 1000);
       }
 
       setMessage('');

@@ -261,6 +261,12 @@ const sendWhatsApp = async (to, type, content) => {
 
 // --- AI ENGINE ---
 const generateAIResponse = async (input, systemInstruction) => {
+    // If API Key is the default placeholder, don't even try, just fail gracefully so we handoff to human.
+    if (!GEMINI_API_KEY || GEMINI_API_KEY === "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0") {
+        console.warn("⚠️ No valid Gemini API Key found. Skipping AI generation.");
+        return null;
+    }
+
     try {
         const model = ai.models;
         const response = await model.generateContent({
@@ -268,11 +274,12 @@ const generateAIResponse = async (input, systemInstruction) => {
             contents: [{ role: 'user', parts: [{ text: input }] }],
             config: { systemInstruction: systemInstruction || "You are a helpful assistant." }
         });
-        const text = response.text || "I didn't catch that. Could you say it again?";
-        return text;
+        const text = response.text;
+        return text || null;
     } catch (error) {
         console.error("AI Error:", error.message || error);
-        return null;
+        // RETURN NULL so the webhook knows AI failed and can trigger Human Agent fallback
+        return null; 
     }
 };
 
@@ -295,7 +302,7 @@ class BotEngine {
     const res = await this.client.query('SELECT nodes, edges FROM flows ORDER BY updated_at DESC LIMIT 1');
     const flow = res.rows[0] || { nodes: [], edges: [] };
     
-    // SAFETY: If fetched flow contains the placeholder, treat it as invalid so we fallback to AI
+    // SAFETY: If fetched flow contains the placeholder, treat it as invalid so we fallback
     if (JSON.stringify(flow.nodes).toLowerCase().includes("replace this sample message")) {
         console.warn("🚫 Detected placeholder flow in DB. Ignoring it.");
         return { nodes: [], edges: [] };
@@ -326,7 +333,7 @@ class BotEngine {
 
     // --- LOGIC: SKIP BOT IF FLOW COMPLETED ---
     // If no active session exists AND user has already finished the flow, 
-    // we return FALSE so the Webhook handler triggers the AI.
+    // we return FALSE so the Webhook handler triggers the AI/Human.
     if (!currentNode && driver.flow_completed) {
         console.log(`ℹ️ Driver ${driver.name} completed flow. Delegating to AI.`);
         return false; 
@@ -353,8 +360,10 @@ class BotEngine {
         }
 
         let nextEdge;
+        // Button/Option Logic: Exact or Partial Match
         if (currentNode.data.inputType === 'option' || (currentNode.data.options && currentNode.data.options.length > 0)) {
             const opts = currentNode.data.options || [];
+            // Match input against options (case insensitive)
             const selectedIdx = opts.findIndex(o => o.toLowerCase().includes(input.toLowerCase()) || input.toLowerCase().includes(o.toLowerCase()));
             if (selectedIdx !== -1) {
                 nextEdge = edges.find(e => e.source === currentNodeId && e.sourceHandle === `opt_${selectedIdx}`);
@@ -362,6 +371,7 @@ class BotEngine {
         } 
         
         if (!nextEdge) {
+            // Default edge
             nextEdge = edges.find(e => e.source === currentNodeId && (e.sourceHandle === 'main' || !e.sourceHandle));
         }
 
@@ -372,23 +382,27 @@ class BotEngine {
             // End of Flow
             await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
             await this.client.query('UPDATE drivers SET flow_completed = TRUE WHERE id = $1', [driverId]);
-            console.log("✅ Flow Completed for user. Next message will go to AI.");
-            // Returning true means "Bot handled this turn (by finishing)". The *next* user msg will hit the AI fallback above.
+            console.log("✅ Flow Completed for user. Next message will go to AI/Human.");
+            // Returning true means "Bot handled this turn (by finishing)".
             return true; 
         }
     } else {
         // New Session: Find Start Node
-        // Fallback: Look for node with type 'start' OR id 'start'
-        const startNode = nodes.find(n => n.data.type === 'start') || nodes.find(n => n.id === 'start');
+        // Fallback: Look for node with type 'start', OR id 'start', OR label 'Start'
+        const startNode = nodes.find(n => n.data.type === 'start') || 
+                          nodes.find(n => n.id === 'start') ||
+                          nodes.find(n => n.data.label === 'Start');
         
         if (startNode) {
+            // Check if start node has an edge, otherwise just start AT the start node if it has content
             const startEdge = edges.find(e => e.source === startNode.id);
             if (startEdge) {
                 currentNodeId = startEdge.target;
                 currentNode = nodes.find(n => n.id === currentNodeId);
             } else {
-                console.log("⚠️ Start node found but no outgoing edges. Delegating to AI.");
-                return false; 
+                 // Maybe the start node IS the first message (uncommon but possible in custom flows)
+                 currentNode = startNode;
+                 currentNodeId = startNode.id;
             }
         } else {
             console.log("⚠️ No Start node found in flow. Delegating to AI.");
@@ -409,7 +423,6 @@ class BotEngine {
         if (messageText && messageText.toLowerCase().includes("replace this sample message")) {
             console.warn("🚫 Placeholder detected. Aborting Bot Flow to AI.");
             await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
-            // Return FALSE so it falls through to AI immediately
             return false; 
         }
 
@@ -633,9 +646,37 @@ app.post('/webhook', async (req, res) => {
 
         const flowResult = await handleFlowConversation(client, from, input, msg.type === 'interactive');
 
-        if (!flowResult.handled) {
-            console.log(`Routing to human agent because: ${flowResult.reason}`);
-            await routeToHumanAgent(client, from);
+        // --- LOGIC: FALLBACK (AI OR HUMAN) ---
+        // 1. If strategy is 'AI_ONLY', botHandled is false -> Try AI.
+        // 2. If strategy is 'HYBRID' but flow completed -> botHandled returned false -> Try AI.
+        if (!botHandled) {
+             console.log(`🤖 Bot skipped/passed. Attempting AI reply for: ${input}`);
+             
+             // Try to get AI response
+             const aiReply = await generateAIResponse(input, settings.system_instruction || "You are a helpful recruitment assistant.");
+             
+             if (aiReply) {
+                // AI Succeeded
+                await sendWhatsApp(from, 'text', { text: aiReply });
+                await client.query(
+                   `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'system', $3, $4, 'text')`,
+                   [Date.now().toString() + '_ai', driverId, aiReply, Date.now()]
+                );
+             } else {
+                // AI Failed (or API Key missing) -> HUMAN AGENT HANDOFF
+                console.log("⚠️ AI failed/disabled. Handing off to Human Agent.");
+                
+                // 1. Update status to Flagged (Human Review)
+                await client.query("UPDATE drivers SET status = 'Flagged' WHERE id = $1", [driverId]);
+                
+                // 2. Send Fallback Message
+                const fallbackMsg = "Thanks for your message. I've passed your details to a human recruiter who will contact you shortly.";
+                await sendWhatsApp(from, 'text', { text: fallbackMsg });
+                await client.query(
+                   `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'system', $3, $4, 'text')`,
+                   [Date.now().toString() + '_fallback', driverId, fallbackMsg, Date.now()]
+                );
+             }
         }
 
       } catch (e) {
