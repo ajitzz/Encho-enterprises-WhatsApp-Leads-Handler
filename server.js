@@ -233,10 +233,11 @@ class BotEngine {
     const driverRes = await this.client.query('SELECT * FROM drivers WHERE id = $1', [driverId]);
     const driver = driverRes.rows[0];
 
-    // --- STEP 1: HANDLE INPUT ---
+    // --- STEP 1: HANDLE INPUT (If in session) ---
     if (currentNode) {
-        console.log(`📍 User at node: ${currentNode.data.label}`);
+        console.log(`📍 Processing Input at node: ${currentNode.data.label} (ID: ${currentNodeId})`);
         
+        // Save variable if configured
         if (currentNode.data.saveToField) {
             const field = currentNode.data.saveToField;
             if (['name', 'availability'].includes(field)) {
@@ -248,6 +249,7 @@ class BotEngine {
             driver.variables = { ...driver.variables, [field]: input }; 
         }
 
+        // Find Next Edge
         let nextEdge;
         
         if (currentNode.data.inputType === 'option' || currentNode.data.options?.length > 0) {
@@ -257,12 +259,15 @@ class BotEngine {
             if (selectedIdx !== -1) {
                 nextEdge = edges.find(e => e.source === currentNodeId && e.sourceHandle === `opt_${selectedIdx}`);
             } else {
-                console.log("   Input did not match options. Falling back to AI.");
+                console.log("   Input did not match options. Falling back to AI/Default.");
+                // If no match and it's strictly an option node, we might want to return false to let AI handle it?
+                // Or loop back. For now, let's assume if it's not a match, we fail the bot flow so AI picks it up.
                 return false; 
             }
         } 
         
         if (!nextEdge) {
+            // Try default edge
             nextEdge = edges.find(e => e.source === currentNodeId && (e.sourceHandle === 'main' || !e.sourceHandle));
         }
 
@@ -270,11 +275,13 @@ class BotEngine {
             currentNodeId = nextEdge.target;
             currentNode = nodes.find(n => n.id === currentNodeId);
         } else {
+            console.log("   End of Flow reached (No outgoing edge). Deleting session.");
             await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
             return true;
         }
 
     } else {
+        // New Session: Find Start Node
         const startNode = nodes.find(n => n.data.type === 'start');
         if (startNode) {
             const startEdge = edges.find(e => e.source === startNode.id);
@@ -285,29 +292,33 @@ class BotEngine {
         }
     }
 
-    // --- STEP 2: SEND MESSAGES ---
+    // --- STEP 2: SEND MESSAGES CHAIN ---
     if (!currentNode) return false;
 
     let stepsExecuted = 0;
     while (currentNode && stepsExecuted < 5) {
         stepsExecuted++;
         
+        console.log(`   Sending Node: ${currentNode.data.label}`);
         const messageText = this.replaceVariables(currentNode.data.message || '', driver);
-        const { mediaUrl, label, options } = currentNode.data;
+        const { mediaUrl, label, options, inputType } = currentNode.data;
 
+        // Send logic
         if (label === 'Image' && mediaUrl) {
             await sendWhatsApp(phone, 'image', { url: mediaUrl, caption: messageText });
-        } else if ((label === 'Quick Reply' || label === 'List' || currentNode.data.inputType === 'option') && options?.length > 0) {
+        } else if ((label === 'Quick Reply' || label === 'List' || inputType === 'option') && options?.length > 0) {
             await sendWhatsApp(phone, 'interactive', { text: messageText, options });
         } else {
             if (messageText) await sendWhatsApp(phone, 'text', { text: messageText });
         }
 
+        // Log message
         await this.client.query(
             `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'system', $3, $4, 'text')`,
             [Date.now().toString() + stepsExecuted, driverId, messageText, Date.now()]
         );
 
+        // Update Session to Current Node
         await this.client.query(
             `INSERT INTO sessions (phone_number, current_node_id, last_active) 
              VALUES ($1, $2, NOW()) 
@@ -315,10 +326,19 @@ class BotEngine {
             [phone, currentNode.id]
         );
         
-        const isInputNode = ['Text', 'Number', 'Email', 'Quick Reply', 'List'].includes(currentNode.data.inputType) || currentNode.data.options?.length > 0;
+        // --- CHECK IF WE STOP HERE ---
+        // A node is an "Input Node" (pauses flow) if it expects user data.
+        // 'statement' type means just display and move on.
+        // 'option', 'text', 'email', etc. mean wait for input.
+        const type = inputType || 'text'; // Default fallback
+        const isInputNode = ['text', 'number', 'email', 'website', 'date', 'time', 'option'].includes(type) || (options?.length > 0);
         
-        if (isInputNode) return true;
+        if (isInputNode) {
+            console.log("   Waiting for user input...");
+            return true;
+        }
 
+        // If NOT input node, find next edge immediately
         const outgoingEdges = edges.filter(e => e.source === currentNode.id);
         if (outgoingEdges.length > 0) {
             const nextEdge = outgoingEdges.find(e => e.sourceHandle === 'main' || !e.sourceHandle);
@@ -326,10 +346,13 @@ class BotEngine {
                 currentNodeId = nextEdge.target;
                 currentNode = nodes.find(n => n.id === currentNodeId);
             } else {
-                break;
+                break; // No main edge found
             }
         } else {
-            break; 
+             // End of flow
+             console.log("   Flow complete. Clearing session.");
+             await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
+             break; 
         }
     }
 
