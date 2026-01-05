@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { X, CheckCircle, AlertCircle, Loader2, Globe, Shield, Key, Smartphone, Lock } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, CheckCircle, AlertCircle, Loader2, Globe, Shield, Key, Smartphone, Lock, Terminal, Play, RefreshCw, Bug } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface WebhookConfigModalProps {
@@ -8,7 +8,7 @@ interface WebhookConfigModalProps {
 }
 
 export const WebhookConfigModal: React.FC<WebhookConfigModalProps> = ({ onClose, onSuccess }) => {
-  const [activeTab, setActiveTab] = useState<'creds' | 'webhook'>('creds');
+  const [activeTab, setActiveTab] = useState<'creds' | 'webhook' | 'debug'>('debug');
   
   // Credentials Form
   const [credsData, setCredsData] = useState({
@@ -24,8 +24,27 @@ export const WebhookConfigModal: React.FC<WebhookConfigModalProps> = ({ onClose,
     verifyToken: 'uber_fleet_verify_token'
   });
 
+  // Debug Data
+  const [logs, setLogs] = useState<string[]>([]);
+  const [simPhone, setSimPhone] = useState('919876543210');
+  const [simMsg, setSimMsg] = useState('Hello');
+
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState('');
+
+  // Log Polling
+  useEffect(() => {
+    let interval: any;
+    if (activeTab === 'debug') {
+        const fetchLogs = async () => {
+            const data = await liveApiService.getLogs();
+            setLogs(data);
+        };
+        fetchLogs();
+        interval = setInterval(fetchLogs, 2000);
+    }
+    return () => clearInterval(interval);
+  }, [activeTab]);
 
   const handleUpdateCreds = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -74,12 +93,21 @@ export const WebhookConfigModal: React.FC<WebhookConfigModalProps> = ({ onClose,
     }
   };
 
+  const handleSimulate = async () => {
+      try {
+          await liveApiService.simulateWebhook({ phone: simPhone, text: simMsg, name: 'Test User' });
+          alert("Simulation Sent! Check the logs below or the dashboard.");
+      } catch (e: any) {
+          alert("Failed to simulate: " + e.message);
+      }
+  };
+
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
         
         {/* Header */}
-        <div className="bg-gray-900 text-white p-4 flex justify-between items-center">
+        <div className="bg-gray-900 text-white p-4 flex justify-between items-center shrink-0">
           <h3 className="font-bold flex items-center gap-2">
             <Globe size={18} />
             Configure Live API
@@ -90,7 +118,7 @@ export const WebhookConfigModal: React.FC<WebhookConfigModalProps> = ({ onClose,
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-gray-200">
+        <div className="flex border-b border-gray-200 shrink-0">
              <button 
                 onClick={() => { setActiveTab('creds'); setStatus('idle'); setErrorMessage(''); }}
                 className={`flex-1 py-3 text-xs font-medium ${activeTab === 'creds' ? 'bg-white text-blue-600 border-b-2 border-blue-600' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
@@ -103,10 +131,17 @@ export const WebhookConfigModal: React.FC<WebhookConfigModalProps> = ({ onClose,
              >
                 2. Webhook Setup
              </button>
+             <button 
+                onClick={() => { setActiveTab('debug'); }}
+                className={`flex-1 py-3 text-xs font-bold flex items-center justify-center gap-1 ${activeTab === 'debug' ? 'bg-white text-amber-600 border-b-2 border-amber-600' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
+             >
+                <Bug size={14} /> Test & Debug
+             </button>
         </div>
 
-        {activeTab === 'creds' ? (
-             <form onSubmit={handleUpdateCreds} className="p-6 space-y-4">
+        <div className="overflow-y-auto flex-1 p-6">
+        {activeTab === 'creds' && (
+             <form onSubmit={handleUpdateCreds} className="space-y-4 max-w-md mx-auto">
                 <div className="bg-blue-50 text-blue-800 text-xs p-3 rounded-lg border border-blue-100 mb-2">
                     Enter your <strong>Original Number ID</strong> and <strong>Permanent Token</strong> here. The server will use these to send messages.
                 </div>
@@ -160,8 +195,10 @@ export const WebhookConfigModal: React.FC<WebhookConfigModalProps> = ({ onClose,
                 {status === 'loading' ? 'Updating...' : 'Set Production Credentials'}
                 </button>
              </form>
-        ) : (
-             <form onSubmit={handleConfigureWebhook} className="p-6 space-y-4">
+        )} 
+
+        {activeTab === 'webhook' && (
+             <form onSubmit={handleConfigureWebhook} className="space-y-4 max-w-md mx-auto">
                 <div className="bg-gray-50 text-gray-600 text-xs p-3 rounded-lg border border-gray-200 mb-4">
                     Only required if you haven't configured the Webhook in Meta Dashboard yet.
                 </div>
@@ -243,6 +280,64 @@ export const WebhookConfigModal: React.FC<WebhookConfigModalProps> = ({ onClose,
                 </div>
             </form>
         )}
+
+        {activeTab === 'debug' && (
+            <div className="space-y-4">
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                     {/* Simulator */}
+                     <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+                         <h4 className="text-sm font-bold text-gray-800 mb-3 flex items-center gap-2">
+                             <Play size={16} className="text-blue-600" /> Simulate Message
+                         </h4>
+                         <div className="space-y-3">
+                             <input 
+                               type="text" 
+                               value={simPhone} 
+                               onChange={e => setSimPhone(e.target.value)} 
+                               placeholder="Phone Number" 
+                               className="w-full border rounded p-2 text-xs"
+                             />
+                             <input 
+                               type="text" 
+                               value={simMsg} 
+                               onChange={e => setSimMsg(e.target.value)} 
+                               placeholder="Message" 
+                               className="w-full border rounded p-2 text-xs"
+                             />
+                             <button onClick={handleSimulate} className="w-full bg-blue-600 text-white py-2 rounded text-xs font-bold hover:bg-blue-700">
+                                 Send Simulation
+                             </button>
+                         </div>
+                     </div>
+                     {/* Info */}
+                     <div className="bg-amber-50 p-4 rounded-xl border border-amber-200 text-xs text-amber-900 space-y-2">
+                         <p className="font-bold flex items-center gap-2"><AlertCircle size={14} /> Why aren't messages showing?</p>
+                         <p>1. Ensure your Vercel URL is set in Meta Webhook settings.</p>
+                         <p>2. Verify the <strong>Verify Token</strong> matches: <code>uber_fleet_verify_token</code></p>
+                         <p>3. If using local tunnel (ngrok), ensure it's running.</p>
+                     </div>
+                 </div>
+
+                 {/* Logs */}
+                 <div className="flex flex-col h-64 bg-gray-900 rounded-xl overflow-hidden border border-gray-700">
+                     <div className="bg-gray-800 px-4 py-2 flex justify-between items-center border-b border-gray-700">
+                         <span className="text-xs font-mono text-gray-400 flex items-center gap-2">
+                             <Terminal size={12} /> Server Logs (Live)
+                         </span>
+                         <button onClick={() => setLogs([])} className="text-[10px] text-gray-500 hover:text-white">Clear</button>
+                     </div>
+                     <div className="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-1">
+                         {logs.length === 0 && <span className="text-gray-600 italic">Waiting for logs...</span>}
+                         {logs.map((log, i) => (
+                             <div key={i} className={`${log.includes('ERROR') ? 'text-red-400' : 'text-green-400'}`}>
+                                 {log}
+                             </div>
+                         ))}
+                     </div>
+                 </div>
+            </div>
+        )}
+        </div>
       </div>
     </div>
   );
