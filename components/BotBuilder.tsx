@@ -20,6 +20,7 @@ import {
 import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
+import { TestBotChat } from './TestBotChat';
 import { 
   Save, MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
   List, Type, Hash, Mail, Globe, Calendar, Clock, Phone, 
@@ -435,6 +436,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [isSaving, setIsSaving] = useState(false);
+  const [isTestChatOpen, setIsTestChatOpen] = useState(false); // NEW STATE
   const reactFlowInstance = useReactFlow();
 
   // Load Data
@@ -608,7 +610,10 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             </div>
 
             <div className="flex items-center gap-4">
-                 <button className="flex items-center gap-2 px-4 py-1.5 border border-green-500 text-green-600 rounded-full text-sm font-medium hover:bg-green-50 transition-colors">
+                 <button 
+                    onClick={() => setIsTestChatOpen(!isTestChatOpen)}
+                    className={`flex items-center gap-2 px-4 py-1.5 border rounded-full text-sm font-medium transition-colors ${isTestChatOpen ? 'bg-green-50 border-green-500 text-green-700' : 'border-green-500 text-green-600 hover:bg-green-50'}`}
+                 >
                     <Play size={14} fill="currentColor" /> Test Bot
                  </button>
                  <div className="h-6 w-px bg-gray-200"></div>
@@ -644,6 +649,15 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     <MiniMap className="border border-gray-200 rounded-lg shadow-sm m-4" zoomable pannable />
                  </ReactFlow>
             </div>
+
+            {/* TEST CHAT OVERLAY */}
+            {isTestChatOpen && (
+                <TestBotChat 
+                    nodes={nodes} 
+                    edges={edges} 
+                    onClose={() => setIsTestChatOpen(false)} 
+                />
+            )}
 
             {/* RIGHT SIDEBAR */}
             <div className="w-[280px] bg-white border-l border-gray-200 flex flex-col shadow-xl z-10 overflow-hidden">
