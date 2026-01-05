@@ -35,27 +35,35 @@ let pool = null;
 const getPool = () => {
     if (pool) return pool;
 
-    const connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
-    
+    // Support all Vercel Postgres variants to avoid missing env issues
+    const connectionString =
+        process.env.POSTGRES_URL ||
+        process.env.POSTGRES_PRISMA_URL ||
+        process.env.POSTGRES_URL_NON_POOLING ||
+        process.env.DATABASE_URL;
+
     if (!connectionString) {
-        console.error("❌ CRITICAL: Database URL is missing from environment variables.");
+        console.error("❌ CRITICAL: Database URL is missing from environment variables (checked POSTGRES_URL, POSTGRES_PRISMA_URL, POSTGRES_URL_NON_POOLING, DATABASE_URL).");
         return null;
     }
+
+    const shouldUseSSL = !connectionString.includes('localhost');
 
     try {
         pool = new Pool({
             connectionString,
-            ssl: { rejectUnauthorized: false }, // Required for Neon/AWS RDS
+            ssl: shouldUseSSL ? { rejectUnauthorized: false } : false, // Required for Neon/AWS RDS, disabled locally
             max: 3, // Keep max connections low for serverless
             connectionTimeoutMillis: 5000,
             idleTimeoutMillis: 1000,
         });
-        
+
         pool.on('error', (err) => {
             console.error('Unexpected error on idle client', err);
             // Don't exit, just log
         });
 
+        console.log('📡 Database pool created using', shouldUseSSL ? 'secure' : 'local', 'connection');
         return pool;
     } catch (e) {
         console.error("❌ Failed to create connection pool:", e);
@@ -622,6 +630,25 @@ app.get('/api/drivers', async (req, res) => {
     } catch (e) {
         console.error("API Drivers Error:", e);
         res.status(500).json({ error: e.message }); 
+    }
+});
+
+// Lightweight health endpoint for debugging connection issues
+app.get('/api/health', async (req, res) => {
+    try {
+        const p = getPool();
+        if (!p) return res.status(500).json({ status: 'error', message: 'Database URL missing' });
+
+        const client = await p.connect();
+        try {
+            const now = await client.query('SELECT NOW()');
+            res.json({ status: 'ok', timestamp: now.rows[0].now });
+        } finally {
+            client.release();
+        }
+    } catch (err) {
+        console.error('Health check failed:', err.message);
+        res.status(500).json({ status: 'error', message: err.message });
     }
 });
 
