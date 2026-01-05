@@ -237,8 +237,6 @@ class MockBackendService {
           });
 
           // Check if auto-advance needed (statements)
-          // "Text" (Message) node uses inputType: 'statement' in BotBuilder constants
-          // "Text" (Input) node uses inputType: 'text'
           const isInput = ['text', 'number', 'email', 'option'].includes(currentNode.data.inputType) || (currentNode.data.options && currentNode.data.options.length > 0);
           
           if (!isInput) {

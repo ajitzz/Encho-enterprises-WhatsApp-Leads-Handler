@@ -79,19 +79,16 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
             addBotMessage(message, mediaUrl, options);
         }
 
-        // AUTO-ADVANCE LOGIC
-        // If it's purely a display node (statement) AND NOT an input or option node, move to next automatically
+        // If it's purely a display node (not expecting input), move to next automatically
+        // Unless it's an option node or explicit input node
         const isInput = ['text', 'number', 'email', 'date', 'time'].includes(inputType) || inputType === 'option' || (options && options.length > 0);
         
         if (!isInput) {
             // Auto-advance after delay
             setTimeout(() => {
-                // Determine next edge. For statements, we just look for any outgoing edge.
                 const outgoingEdge = edges.find(e => e.source === nodeId);
                 if (outgoingEdge) {
                     processNode(outgoingEdge.target);
-                } else {
-                    addBotMessage("🏁 [End of Flow]");
                 }
             }, 1000);
             return; // Don't wait for user
@@ -130,7 +127,7 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
         }
     }
 
-    // 2. Fallback to default handle (Main) if no option matched
+    // 2. Fallback to default handle (Main)
     if (!nextEdge) {
         nextEdge = edges.find(e => e.source === currentNodeId && (e.sourceHandle === 'main' || !e.sourceHandle));
     }
@@ -218,7 +215,6 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 placeholder="Type a reply..."
-                autoFocus
                 className="flex-1 bg-gray-100 border-none rounded-xl px-4 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
             />
             <button type="submit" className="bg-blue-600 hover:bg-blue-700 text-white p-2 rounded-xl transition-colors">
