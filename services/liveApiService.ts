@@ -5,10 +5,16 @@ import { Driver, BotSettings } from '../types';
 const API_BASE_URL = ''; 
 const FALLBACK_URL = 'http://localhost:3001';
 
+// Helper to force no-cache fetches (avoid Vercel/browser caching)
+const withNoStore = (options: RequestInit = {}): RequestInit => ({
+    cache: 'no-store',
+    ...options,
+});
+
 // Helper: Retry fetch with exponential backoff
 const fetchWithRetry = async (url: string, options: RequestInit = {}, retries = 5, delay = 1000): Promise<Response> => {
     try {
-        const response = await fetch(url, options);
+        const response = await fetch(url, withNoStore(options));
         
         // Retry on Proxy Errors (502, 503, 504) or HTML 404s (meaning backend not reachable via proxy yet)
         if ((response.status === 502 || response.status === 503 || response.status === 504 || response.status === 404) && retries > 0) {
@@ -40,7 +46,7 @@ export const liveApiService = {
       for (let i = 0; i < 20; i++) {
           try {
               // Simple fetch to health check, no retries logic here, just pass/fail
-              const res = await fetch(`${API_BASE_URL}/api/health`);
+              const res = await fetch(`${API_BASE_URL}/api/health`, withNoStore());
               if (res.ok) return;
           } catch (e) {
               // ignore connection errors
@@ -48,7 +54,7 @@ export const liveApiService = {
           // If fallback needed check localhost (dev only)
           if (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
                try {
-                   const res = await fetch(`${FALLBACK_URL}/api/health`);
+                   const res = await fetch(`${FALLBACK_URL}/api/health`, withNoStore());
                    if (res.ok) return;
                } catch (e) {}
           }
@@ -75,7 +81,7 @@ export const liveApiService = {
          url = `${FALLBACK_URL}/api/drivers`;
          try {
              // Don't retry heavily on fallback, just one attempt
-             const fallbackResponse = await fetch(url);
+             const fallbackResponse = await fetch(url, withNoStore());
              if (fallbackResponse.ok) {
                  response = fallbackResponse;
              }
@@ -109,20 +115,20 @@ export const liveApiService = {
   updateDriver: async (id: string, updates: Partial<Driver>) => {
       // Try relative first
       try {
-          const res = await fetch(`${API_BASE_URL}/api/drivers/${id}`, {
+          const res = await fetch(`${API_BASE_URL}/api/drivers/${id}`, withNoStore({
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(updates)
-          });
+          }));
           if (!res.ok) throw new Error('Proxy failed');
       } catch (e) {
           // Fallback only if local
            if (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
-                await fetch(`${FALLBACK_URL}/api/drivers/${id}`, {
+                await fetch(`${FALLBACK_URL}/api/drivers/${id}`, withNoStore({
                     method: 'PATCH',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(updates)
-                });
+                }));
            }
       }
   },
@@ -143,7 +149,7 @@ export const liveApiService = {
           const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
           if (isLocalhost) {
             try {
-                const fallbackRes = await fetch(`${FALLBACK_URL}/api/health`);
+                const fallbackRes = await fetch(`${FALLBACK_URL}/api/health`, withNoStore());
                 if (fallbackRes.ok) return await fallbackRes.json();
             } catch (err) {
                 return { database: 'disconnected', whatsapp: 'unknown', ai: 'unknown' };
@@ -161,7 +167,7 @@ export const liveApiService = {
       
       const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
       if (!response.ok && isLocalhost) {
-          response = await fetch(`${FALLBACK_URL}/api/bot-settings`);
+          response = await fetch(`${FALLBACK_URL}/api/bot-settings`, withNoStore());
       }
       if (!response.ok) throw new Error('Failed to fetch bot settings');
       return await response.json();
@@ -178,21 +184,21 @@ export const liveApiService = {
 
   saveBotSettings: async (settings: BotSettings) => {
     try {
-        const response = await fetch(`${API_BASE_URL}/api/bot-settings`, {
+        const response = await fetch(`${API_BASE_URL}/api/bot-settings`, withNoStore({
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(settings)
-        });
+        }));
         if (!response.ok) throw new Error('Failed to save settings');
         return await response.json();
     } catch (e) {
         const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
         if (isLocalhost) {
-            const response = await fetch(`${FALLBACK_URL}/api/bot-settings`, {
+            const response = await fetch(`${FALLBACK_URL}/api/bot-settings`, withNoStore({
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(settings)
-            });
+            }));
             if (!response.ok) throw new Error('Failed to save settings');
             return await response.json();
         }
@@ -204,20 +210,20 @@ export const liveApiService = {
 
   configureWebhook: async (config: any) => {
     try {
-        const response = await fetch(`${API_BASE_URL}/api/configure-webhook`, {
+        const response = await fetch(`${API_BASE_URL}/api/configure-webhook`, withNoStore({
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(config)
-        });
+        }));
         return await response.json();
     } catch (e) {
         const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
         if (isLocalhost) {
-            const response = await fetch(`${FALLBACK_URL}/api/configure-webhook`, {
+            const response = await fetch(`${FALLBACK_URL}/api/configure-webhook`, withNoStore({
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(config)
-            });
+            }));
             return await response.json();
         }
         throw e;
@@ -226,20 +232,20 @@ export const liveApiService = {
 
   updateCredentials: async (credentials: any) => {
     try {
-        const response = await fetch(`${API_BASE_URL}/api/update-credentials`, {
+        const response = await fetch(`${API_BASE_URL}/api/update-credentials`, withNoStore({
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(credentials)
-        });
+        }));
         return await response.json();
     } catch (e) {
         const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
         if (isLocalhost) {
-            const response = await fetch(`${FALLBACK_URL}/api/update-credentials`, {
+            const response = await fetch(`${FALLBACK_URL}/api/update-credentials`, withNoStore({
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(credentials)
-            });
+            }));
             return await response.json();
         }
         throw e;
@@ -249,12 +255,12 @@ export const liveApiService = {
   // --- DEBUG TOOLS ---
   getLogs: async () => {
       try {
-          const res = await fetch(`${API_BASE_URL}/api/logs`);
+          const res = await fetch(`${API_BASE_URL}/api/logs`, withNoStore());
           if (res.ok) return await res.json();
           // fallback
           const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
           if (isLocalhost) {
-              const fb = await fetch(`${FALLBACK_URL}/api/logs`);
+              const fb = await fetch(`${FALLBACK_URL}/api/logs`, withNoStore());
               if (fb.ok) return await fb.json();
           }
           return [];
@@ -265,22 +271,22 @@ export const liveApiService = {
 
   simulateWebhook: async (data: any) => {
        try {
-          const res = await fetch(`${API_BASE_URL}/api/simulate-webhook`, {
+          const res = await fetch(`${API_BASE_URL}/api/simulate-webhook`, withNoStore({
              method: 'POST',
              headers: { 'Content-Type': 'application/json' },
              body: JSON.stringify(data)
-          });
+         }));
           if(res.ok) return true;
           throw new Error('Simulation failed');
        } catch (e) {
            // fallback
           const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
           if (isLocalhost) {
-             const fb = await fetch(`${FALLBACK_URL}/api/simulate-webhook`, {
+             const fb = await fetch(`${FALLBACK_URL}/api/simulate-webhook`, withNoStore({
                  method: 'POST',
                  headers: { 'Content-Type': 'application/json' },
                  body: JSON.stringify(data)
-             });
+             }));
              if(fb.ok) return true;
           }
           throw e;
