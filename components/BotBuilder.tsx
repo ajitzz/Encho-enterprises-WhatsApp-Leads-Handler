@@ -74,6 +74,30 @@ const CustomNode = ({ data, id, selected }: any) => {
     handleChange('options', newOpts);
   };
 
+  // Helper to determine icon based on data.label / data.inputType
+  const getNodeIcon = () => {
+    const size = 14;
+    const { label, inputType } = data;
+    
+    switch (label) {
+      case 'Image': return <ImageIcon size={size} />;
+      case 'Video': return <Video size={size} />;
+      case 'File': return <FileText size={size} />;
+      case 'Location': return <MapPin size={size} />;
+      case 'Link': return <Link size={size} />;
+      case 'Quick Reply': return <LayoutGrid size={size} />;
+      case 'List': return <List size={size} />;
+      case 'Number': return <Hash size={size} />;
+      case 'Email': return <Mail size={size} />;
+      case 'Website': return <Globe size={size} />;
+      case 'Date': return <Calendar size={size} />;
+      case 'Time': return <Clock size={size} />;
+      case 'Text': 
+         return inputType === 'text' ? <Type size={size} /> : <MessageSquare size={size} />;
+      default: return <MessageSquare size={size} />;
+    }
+  };
+
   // --- 1. START NODE (Special Case) ---
   if (data.type === 'start') {
     return (
@@ -267,7 +291,7 @@ const CustomNode = ({ data, id, selected }: any) => {
         <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
             <div className="flex items-center gap-2">
                 <span className="text-gray-500">
-                    {data.icon || (data.label === 'Video' ? <Video size={14} /> : <MessageSquare size={14} />)}
+                    {getNodeIcon()}
                 </span>
                 <span className="text-xs font-bold text-gray-900">Group #{id.split('_')[1] || id.slice(-4)}</span>
             </div>
@@ -456,7 +480,9 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             const restoredNodes = settings.flowData.nodes.map((n: any) => ({
                 ...n,
                 data: {
+                    // Important: Clean data.icon if present from old saves to prevent Error #31
                     ...n.data,
+                    icon: undefined, 
                     onChange: updateNodeData,
                     onDelete: deleteNode
                 }
@@ -508,20 +534,14 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         y: event.clientY,
       });
 
-      // Icon Reconstruction
-      let icon = <MessageSquare size={16} className="text-gray-600" />;
-      if(label === 'Image') icon = <ImageIcon size={16} className="text-gray-600" />;
-      if(inputType === 'option') icon = <List size={16} className="text-gray-600" />;
-      if(label === 'Video') icon = <Video size={16} className="text-gray-600" />;
-      if(label === 'File') icon = <FileText size={16} className="text-gray-600" />;
-
+      // No longer storing React Element in data
       const newNode: Node = {
         id: `node_${Date.now()}`,
         type: 'custom',
         position,
         data: { 
             label: label,
-            icon: icon,
+            // icon: Removed
             message: '', 
             inputType: inputType || 'text', 
             hasMedia: type === 'image' || type === 'video' || type === 'file',
@@ -568,10 +588,21 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
           });
       });
 
+      // Ensure we don't save React elements in nodes data
+      const cleanNodes = nodes.map(n => ({
+          ...n,
+          data: {
+              ...n.data,
+              icon: undefined, // ensure cleaned before save
+              onChange: undefined, // functions don't serialize anyway, but good to be explicit mentally
+              onDelete: undefined
+          }
+      }));
+
       const newSettings: BotSettings = {
           ...mockBackend.getBotSettings(),
           steps: compiledSteps,
-          flowData: { nodes, edges } 
+          flowData: { nodes: cleanNodes, edges } 
       };
 
       if (isLiveMode) {
