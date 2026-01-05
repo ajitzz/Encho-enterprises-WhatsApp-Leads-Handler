@@ -8,7 +8,7 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const { Pool } = require('pg'); 
+const { Pool } = require('pg');
 const { GoogleGenAI } = require('@google/genai');
 require('dotenv').config();
 
@@ -36,25 +36,114 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
 // DATABASE CONNECTION STRINGS
-// Use the POOLED connection string for Vercel/Serverless performance
+// Prefer pooled connections for Vercel/Neon, with optional unpooled fallback
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
+const NEON_DB_URL_UNPOOLED = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 
-// --- DATABASE CONNECTION POOL ---
-const pool = new Pool({
-  connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL,
-  ssl: { rejectUnauthorized: false }, // Essential for Neon
-  
-  // VERCEL SERVERLESS OPTIMIZATIONS:
-  max: 1, // Limit to 1 connection per Lambda instance to prevent exhaustion
-  idleTimeoutMillis: 0, // Disable auto-close. Keep connection warm for polling.
-  connectionTimeoutMillis: 15000, // 15s timeout to handle cold starts gracefully
-});
+const resolveDbUrl = () => {
+  const useUnpooled = process.env.USE_UNPOOLED === 'true' || process.env.POSTGRES_USE_UNPOOLED === 'true';
+  if (useUnpooled) {
+    return (
+      process.env.DATABASE_URL_UNPOOLED ||
+      process.env.POSTGRES_URL_NON_POOLING ||
+      process.env.POSTGRES_URL_NO_SSL ||
+      NEON_DB_URL_UNPOOLED
+    );
+  }
 
-// Global error listener to prevent crash on idle client errors
-pool.on('error', (err, client) => {
-  console.error('Unexpected error on idle database client', err);
-  // Don't exit; Vercel will recycle the container eventually
-});
+  return (
+    process.env.POSTGRES_URL ||
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_PRISMA_URL ||
+    process.env.POSTGRES_URL_NO_SSL ||
+    NEON_DB_URL
+  );
+};
+
+const createPool = () => {
+  const connectionString = resolveDbUrl();
+  const newPool = new Pool({
+    connectionString,
+    ssl: { rejectUnauthorized: false }, // Essential for Neon
+    keepAlive: true,
+    max: parseInt(process.env.PG_POOL_MAX || '3', 10),
+    idleTimeoutMillis: parseInt(process.env.PG_IDLE_TIMEOUT_MS || '30000', 10),
+    connectionTimeoutMillis: parseInt(process.env.PG_CONNECTION_TIMEOUT_MS || '15000', 10),
+  });
+
+  // Global error listener to prevent crash on idle client errors
+  newPool.on('error', (err) => {
+    console.error('Unexpected error on idle database client', err);
+  });
+
+  return newPool;
+};
+
+let pool = createPool();
+
+const getDbClient = async () => {
+  try {
+    return await pool.connect();
+  } catch (err) {
+    console.warn('Database pool connection failed, recreating pool...', err.message);
+    try {
+      await pool.end();
+    } catch (closeErr) {
+      console.warn('Error while closing stale pool', closeErr.message);
+    }
+    pool = createPool();
+    return await pool.connect();
+  }
+};
+
+const CONNECTION_ERROR_CODES = new Set([
+  '57P01', // admin shutdown
+  '57P02', // crash
+  '57P03', // cannot connect now
+  '08006', // connection failure
+  '08003', // connection does not exist
+  '08P01', // protocol violation
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ETIMEDOUT'
+]);
+
+const refreshPool = async () => {
+  try { await pool.end(); } catch (e) { console.warn('Error closing pool during refresh', e.message); }
+  pool = createPool();
+};
+
+const isConnectionError = (err) => CONNECTION_ERROR_CODES.has(err?.code) || /terminating connection/i.test(err?.message || '');
+
+const withDbClient = async (operation, { retries = 1 } = {}) => {
+  let attempt = 0;
+  while (attempt <= retries) {
+    let client;
+    try {
+      client = await getDbClient();
+      const result = await operation(client);
+      return result;
+    } catch (err) {
+      if (client) {
+        try { client.release(true); } catch (_) {}
+        client = null;
+      }
+
+      if (isConnectionError(err) && attempt < retries) {
+        console.warn('DB connection dropped mid-operation. Refreshing pool and retrying...', err.code || err.message);
+        await refreshPool();
+        attempt++;
+        continue;
+      }
+
+      throw err;
+    } finally {
+      if (client) {
+        try { client.release(); } catch (_) {}
+      }
+    }
+  }
+};
 
 // --- SCHEMA DEFINITION (Used for Auto-Recovery) ---
 const SCHEMA_SQL = `
@@ -131,21 +220,18 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // Manual Init Route (Optional)
 app.get('/api/init', async (req, res) => {
-    const client = await pool.connect();
     try {
-        await ensureDatabaseInitialized(client);
+        await withDbClient((client) => ensureDatabaseInitialized(client));
         res.status(200).json({ status: 'Database Initialized Successfully' });
     } catch (err) {
         res.status(500).json({ error: err.message });
-    } finally {
-        client.release();
     }
 });
 
 // Health Check
 app.get('/api/health', async (req, res) => {
     try {
-        await pool.query('SELECT 1');
+        await withDbClient((client) => client.query('SELECT 1'));
         res.json({ database: 'connected', status: 'healthy' });
     } catch (e) {
         res.status(500).json({ database: 'disconnected', error: e.message });
@@ -155,71 +241,73 @@ app.get('/api/health', async (req, res) => {
 // Drivers List (With Auto-Recovery Logic)
 // This is the heavy lifter called by dashboard polling
 app.get('/api/drivers', async (req, res) => {
-    let client;
     try {
-        client = await pool.connect();
-        
-        const fetchDrivers = async () => {
-             return await client.query(`
-                SELECT d.id, d.phone_number as "phoneNumber", d.name, d.source, d.status, d.last_message as "lastMessage", 
-                d.last_message_time as "lastMessageTime", COALESCE(d.documents, ARRAY[]::text[]) as documents, 
-                d.onboarding_step as "onboardingStep", d.vehicle_registration as "vehicleRegistration", d.availability, 
-                d.qualification_checks as "qualificationChecks", d.is_bot_active as "isBotActive", d.current_bot_step_id as "currentBotStepId",
-                COALESCE(json_agg(json_build_object('id', m.id, 'sender', m.sender, 'text', m.text, 'imageUrl', m.image_url, 'timestamp', m.timestamp, 'type', m.type, 'options', m.options) ORDER BY m.timestamp ASC) FILTER (WHERE m.id IS NOT NULL), '[]') as messages
-                FROM drivers d LEFT JOIN messages m ON d.id = m.driver_id
-                GROUP BY d.id ORDER BY d.last_message_time DESC
-            `);
-        };
+        const rows = await withDbClient(async (client) => {
+            const fetchDrivers = async () => {
+                 return await client.query(`
+                    SELECT d.id, d.phone_number as "phoneNumber", d.name, d.source, d.status, d.last_message as "lastMessage",
+                    d.last_message_time as "lastMessageTime", COALESCE(d.documents, ARRAY[]::text[]) as documents,
+                    d.onboarding_step as "onboardingStep", d.vehicle_registration as "vehicleRegistration", d.availability,
+                    d.qualification_checks as "qualificationChecks", d.is_bot_active as "isBotActive", d.current_bot_step_id as "currentBotStepId",
+                    COALESCE(json_agg(json_build_object('id', m.id, 'sender', m.sender, 'text', m.text, 'imageUrl', m.image_url, 'timestamp', m.timestamp, 'type', m.type, 'options', m.options) ORDER BY m.timestamp ASC) FILTER (WHERE m.id IS NOT NULL), '[]') as messages
+                    FROM drivers d LEFT JOIN messages m ON d.id = m.driver_id
+                    GROUP BY d.id ORDER BY d.last_message_time DESC
+                `);
+            };
 
-        try {
-            const driversRes = await fetchDrivers();
-            res.json(driversRes.rows);
-        } catch (queryError) {
-            // Error 42P01 means "undefined table". This happens on new deployments/resets.
-            if (queryError.code === '42P01') {
-                console.warn("⚠️ Tables missing. Triggering Self-Healing...");
-                await ensureDatabaseInitialized(client);
-                // Retry the query once after healing
-                const retryRes = await fetchDrivers();
-                res.json(retryRes.rows);
-            } else {
-                throw queryError;
+            try {
+                const driversRes = await fetchDrivers();
+                return driversRes.rows;
+            } catch (queryError) {
+                // Error 42P01 means "undefined table". This happens on new deployments/resets.
+                if (queryError.code === '42P01') {
+                    console.warn("⚠️ Tables missing. Triggering Self-Healing...");
+                    await ensureDatabaseInitialized(client);
+                    // Retry the query once after healing
+                    const retryRes = await fetchDrivers();
+                    return retryRes.rows;
+                } else {
+                    throw queryError;
+                }
             }
-        }
+        }, { retries: 1 });
+
+        res.json(rows);
     } catch (e) {
         console.error("GET /api/drivers Error:", e);
         res.status(500).json({ error: e.message });
-    } finally {
-        if (client) client.release();
     }
 });
 
 // Bot Settings
 app.get('/api/bot-settings', async (req, res) => {
-    let client;
     try {
-        client = await pool.connect();
-        const result = await client.query('SELECT * FROM bot_settings WHERE id = 1');
-        res.json(result.rows[0]?.settings || DEFAULT_BOT_SETTINGS);
+        const settings = await withDbClient(async (client) => {
+            const result = await client.query('SELECT * FROM bot_settings WHERE id = 1');
+            return result.rows[0]?.settings || DEFAULT_BOT_SETTINGS;
+        }, { retries: 1 });
+
+        res.json(settings);
     } catch (e) {
-        if (e.code === '42P01' && client) {
+        if (e.code === '42P01') {
             try {
-                await ensureDatabaseInitialized(client);
-                const result = await client.query('SELECT * FROM bot_settings WHERE id = 1');
-                return res.json(result.rows[0]?.settings || DEFAULT_BOT_SETTINGS);
+                const settings = await withDbClient(async (client) => {
+                    await ensureDatabaseInitialized(client);
+                    const result = await client.query('SELECT * FROM bot_settings WHERE id = 1');
+                    return result.rows[0]?.settings || DEFAULT_BOT_SETTINGS;
+                });
+                return res.json(settings);
             } catch (retryErr) {
                 return res.status(500).json({ error: retryErr.message });
             }
         }
         res.status(500).json({ error: e.message });
-    } finally {
-        if(client) client.release();
     }
 });
 
 app.post('/api/bot-settings', async (req, res) => {
     try {
-        await pool.query(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(req.body)]);
+        await withDbClient((client) => client.query(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(req.body)]));
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -376,30 +464,29 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         return { replyText, replyOptions, replyTemplate, shouldCallAI, driver, botSettings };
     };
 
-    const client = await pool.connect();
-    try {
-        const result = await runLogic(client);
-        
-        // External calls (API) outside the DB transaction/lock
-        if (result.replyTemplate) {
-            await sendWhatsAppMessage(from, null, null, result.replyTemplate);
-        } else if (result.replyText) {
-            await sendWhatsAppMessage(from, result.replyText, result.replyOptions);
-        } else if (result.shouldCallAI) {
-            const aiReply = await analyzeWithAI(msgBody, result.botSettings.systemInstruction);
-            await sendWhatsAppMessage(from, aiReply);
+    await withDbClient(async (client) => {
+        try {
+            const result = await runLogic(client);
+
+            // External calls (API) outside the DB transaction/lock
+            if (result.replyTemplate) {
+                await sendWhatsAppMessage(from, null, null, result.replyTemplate);
+            } else if (result.replyText) {
+                await sendWhatsAppMessage(from, result.replyText, result.replyOptions);
+            } else if (result.shouldCallAI) {
+                const aiReply = await analyzeWithAI(msgBody, result.botSettings.systemInstruction);
+                await sendWhatsAppMessage(from, aiReply);
+            }
+        } catch (e) {
+            await client.query('ROLLBACK');
+            if (e.code === '42P01') {
+                console.warn("⚠️ Tables missing in webhook. Auto-initializing for next request...");
+                await ensureDatabaseInitialized(client);
+            } else {
+                console.error("Logic Error:", e);
+            }
         }
-    } catch (e) {
-        await client.query('ROLLBACK');
-        if (e.code === '42P01') {
-            console.warn("⚠️ Tables missing in webhook. Auto-initializing for next request...");
-            await ensureDatabaseInitialized(client);
-        } else {
-            console.error("Logic Error:", e);
-        }
-    } finally {
-        client.release();
-    }
+    }, { retries: 1 });
 };
 
 // Webhook
@@ -447,12 +534,12 @@ app.patch('/api/drivers/:id', async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
     try {
-        const client = await pool.connect();
-        if (updates.status) await client.query('UPDATE drivers SET status = $1 WHERE id = $2', [updates.status, id]);
-        if (updates.qualificationChecks) await client.query('UPDATE drivers SET qualification_checks = $1 WHERE id = $2', [JSON.stringify(updates.qualificationChecks), id]);
-        if (updates.vehicleRegistration) await client.query('UPDATE drivers SET vehicle_registration = $1 WHERE id = $2', [updates.vehicleRegistration, id]);
-        if (updates.availability) await client.query('UPDATE drivers SET availability = $1 WHERE id = $2', [updates.availability, id]);
-        client.release();
+        await withDbClient(async (client) => {
+            if (updates.status) await client.query('UPDATE drivers SET status = $1 WHERE id = $2', [updates.status, id]);
+            if (updates.qualificationChecks) await client.query('UPDATE drivers SET qualification_checks = $1 WHERE id = $2', [JSON.stringify(updates.qualificationChecks), id]);
+            if (updates.vehicleRegistration) await client.query('UPDATE drivers SET vehicle_registration = $1 WHERE id = $2', [updates.vehicleRegistration, id]);
+            if (updates.availability) await client.query('UPDATE drivers SET availability = $1 WHERE id = $2', [updates.availability, id]);
+        });
         res.json({ success: true });
     } catch(e) {
         res.status(500).json({ error: e.message });
