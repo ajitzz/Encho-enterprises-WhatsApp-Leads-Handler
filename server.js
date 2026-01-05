@@ -8,7 +8,7 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const { Pool } = require('pg'); 
+const { Pool } = require('pg');
 const { GoogleGenAI } = require('@google/genai');
 require('dotenv').config();
 
@@ -36,25 +36,65 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
 // DATABASE CONNECTION STRINGS
-// Use the POOLED connection string for Vercel/Serverless performance
+// Prefer pooled connections for Vercel/Neon, with optional unpooled fallback
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
+const NEON_DB_URL_UNPOOLED = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 
-// --- DATABASE CONNECTION POOL ---
-const pool = new Pool({
-  connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL,
-  ssl: { rejectUnauthorized: false }, // Essential for Neon
-  
-  // VERCEL SERVERLESS OPTIMIZATIONS:
-  max: 1, // Limit to 1 connection per Lambda instance to prevent exhaustion
-  idleTimeoutMillis: 0, // Disable auto-close. Keep connection warm for polling.
-  connectionTimeoutMillis: 15000, // 15s timeout to handle cold starts gracefully
-});
+const resolveDbUrl = () => {
+  const useUnpooled = process.env.USE_UNPOOLED === 'true' || process.env.POSTGRES_USE_UNPOOLED === 'true';
+  if (useUnpooled) {
+    return (
+      process.env.DATABASE_URL_UNPOOLED ||
+      process.env.POSTGRES_URL_NON_POOLING ||
+      process.env.POSTGRES_URL_NO_SSL ||
+      NEON_DB_URL_UNPOOLED
+    );
+  }
 
-// Global error listener to prevent crash on idle client errors
-pool.on('error', (err, client) => {
-  console.error('Unexpected error on idle database client', err);
-  // Don't exit; Vercel will recycle the container eventually
-});
+  return (
+    process.env.POSTGRES_URL ||
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_PRISMA_URL ||
+    process.env.POSTGRES_URL_NO_SSL ||
+    NEON_DB_URL
+  );
+};
+
+const createPool = () => {
+  const connectionString = resolveDbUrl();
+  const newPool = new Pool({
+    connectionString,
+    ssl: { rejectUnauthorized: false }, // Essential for Neon
+    keepAlive: true,
+    max: parseInt(process.env.PG_POOL_MAX || '3', 10),
+    idleTimeoutMillis: parseInt(process.env.PG_IDLE_TIMEOUT_MS || '30000', 10),
+    connectionTimeoutMillis: parseInt(process.env.PG_CONNECTION_TIMEOUT_MS || '15000', 10),
+  });
+
+  // Global error listener to prevent crash on idle client errors
+  newPool.on('error', (err) => {
+    console.error('Unexpected error on idle database client', err);
+  });
+
+  return newPool;
+};
+
+let pool = createPool();
+
+const getDbClient = async () => {
+  try {
+    return await pool.connect();
+  } catch (err) {
+    console.warn('Database pool connection failed, recreating pool...', err.message);
+    try {
+      await pool.end();
+    } catch (closeErr) {
+      console.warn('Error while closing stale pool', closeErr.message);
+    }
+    pool = createPool();
+    return await pool.connect();
+  }
+};
 
 // --- SCHEMA DEFINITION (Used for Auto-Recovery) ---
 const SCHEMA_SQL = `
@@ -131,7 +171,7 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // Manual Init Route (Optional)
 app.get('/api/init', async (req, res) => {
-    const client = await pool.connect();
+    const client = await getDbClient();
     try {
         await ensureDatabaseInitialized(client);
         res.status(200).json({ status: 'Database Initialized Successfully' });
@@ -144,11 +184,15 @@ app.get('/api/init', async (req, res) => {
 
 // Health Check
 app.get('/api/health', async (req, res) => {
+    let client;
     try {
-        await pool.query('SELECT 1');
+        client = await getDbClient();
+        await client.query('SELECT 1');
         res.json({ database: 'connected', status: 'healthy' });
     } catch (e) {
         res.status(500).json({ database: 'disconnected', error: e.message });
+    } finally {
+        if (client) client.release();
     }
 });
 
@@ -157,7 +201,7 @@ app.get('/api/health', async (req, res) => {
 app.get('/api/drivers', async (req, res) => {
     let client;
     try {
-        client = await pool.connect();
+        client = await getDbClient();
         
         const fetchDrivers = async () => {
              return await client.query(`
@@ -198,7 +242,7 @@ app.get('/api/drivers', async (req, res) => {
 app.get('/api/bot-settings', async (req, res) => {
     let client;
     try {
-        client = await pool.connect();
+        client = await getDbClient();
         const result = await client.query('SELECT * FROM bot_settings WHERE id = 1');
         res.json(result.rows[0]?.settings || DEFAULT_BOT_SETTINGS);
     } catch (e) {
@@ -218,11 +262,15 @@ app.get('/api/bot-settings', async (req, res) => {
 });
 
 app.post('/api/bot-settings', async (req, res) => {
+    let client;
     try {
-        await pool.query(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(req.body)]);
+        client = await getDbClient();
+        await client.query(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(req.body)]);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
+    } finally {
+        if (client) client.release();
     }
 });
 
@@ -376,7 +424,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         return { replyText, replyOptions, replyTemplate, shouldCallAI, driver, botSettings };
     };
 
-    const client = await pool.connect();
+    const client = await getDbClient();
     try {
         const result = await runLogic(client);
         
@@ -446,16 +494,18 @@ app.post('/webhook', async (req, res) => {
 app.patch('/api/drivers/:id', async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
+    let client;
     try {
-        const client = await pool.connect();
+        client = await getDbClient();
         if (updates.status) await client.query('UPDATE drivers SET status = $1 WHERE id = $2', [updates.status, id]);
         if (updates.qualificationChecks) await client.query('UPDATE drivers SET qualification_checks = $1 WHERE id = $2', [JSON.stringify(updates.qualificationChecks), id]);
         if (updates.vehicleRegistration) await client.query('UPDATE drivers SET vehicle_registration = $1 WHERE id = $2', [updates.vehicleRegistration, id]);
         if (updates.availability) await client.query('UPDATE drivers SET availability = $1 WHERE id = $2', [updates.availability, id]);
-        client.release();
         res.json({ success: true });
     } catch(e) {
         res.status(500).json({ error: e.message });
+    } finally {
+        if (client) client.release();
     }
 });
 
