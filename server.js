@@ -25,39 +25,60 @@ let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0";
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
-// DB URL: Prefer Vercel's POSTGRES_URL, fallback to DATABASE_URL, then hardcoded (fallback is risky)
-const NEON_DB_URL = process.env.POSTGRES_URL || process.env.DATABASE_URL;
-
 // Initialize AI
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-// --- POSTGRESQL CONNECTION ---
-let pool;
-if (NEON_DB_URL) {
-    pool = new Pool({
-        connectionString: NEON_DB_URL,
-        ssl: { rejectUnauthorized: false }, // Required for Neon/AWS RDS
-        max: 3, // Low max connections for serverless
-        connectionTimeoutMillis: 5000,
-        idleTimeoutMillis: 1000,
-    });
-} else {
-    console.warn("⚠️ No POSTGRES_URL or DATABASE_URL found. Database features will fail.");
-}
+// --- POSTGRESQL CONNECTION MANAGER ---
+let pool = null;
+
+// Helper to get or create pool safely
+const getPool = () => {
+    if (pool) return pool;
+
+    const connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
+    
+    if (!connectionString) {
+        console.error("❌ CRITICAL: Database URL is missing from environment variables.");
+        return null;
+    }
+
+    try {
+        pool = new Pool({
+            connectionString,
+            ssl: { rejectUnauthorized: false }, // Required for Neon/AWS RDS
+            max: 3, // Keep max connections low for serverless
+            connectionTimeoutMillis: 5000,
+            idleTimeoutMillis: 1000,
+        });
+        
+        pool.on('error', (err) => {
+            console.error('Unexpected error on idle client', err);
+            // Don't exit, just log
+        });
+
+        return pool;
+    } catch (e) {
+        console.error("❌ Failed to create connection pool:", e);
+        return null;
+    }
+};
 
 // --- DB INIT LOGIC ---
-// Cache the init promise so we don't spam queries on every request in serverless
 let dbInitPromise = null;
 
 const initDB = async () => {
-  if (!pool) return;
+  const p = getPool();
+  if (!p) {
+      console.warn("⚠️ Skipping DB Init: No Pool available.");
+      return;
+  }
   
   if (dbInitPromise) return dbInitPromise;
 
   dbInitPromise = (async () => {
       let client;
       try {
-        client = await pool.connect();
+        client = await p.connect();
         console.log("🔌 Connected to Database");
 
         // 1. Flows Table
@@ -144,7 +165,7 @@ const initDB = async () => {
         console.log("✅ Database Schema Synced");
       } catch (err) {
         console.error("❌ DB Init Error:", err);
-        dbInitPromise = null; // Reset promise so we try again next time
+        dbInitPromise = null;
         throw err;
       } finally {
         if (client) client.release();
@@ -266,7 +287,7 @@ class BotEngine {
     
     // SAFETY CHECK: Stale Node ID
     if (currentNodeId && !currentNode) {
-        console.log("⚠️ Stale session detected (Node ID not found in current flow). Resetting.");
+        console.log("⚠️ Stale session detected. Resetting.");
         await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
         currentNodeId = null; 
     }
@@ -288,7 +309,6 @@ class BotEngine {
             driver.variables = { ...driver.variables, [field]: input }; 
         }
 
-        // Find Next Edge
         let nextEdge;
         
         // Option Logic
@@ -300,7 +320,6 @@ class BotEngine {
             }
         } 
         
-        // Fallback Edge
         if (!nextEdge) {
             nextEdge = edges.find(e => e.source === currentNodeId && (e.sourceHandle === 'main' || !e.sourceHandle));
         }
@@ -339,29 +358,29 @@ class BotEngine {
         console.log(`   Sending Node: ${currentNode.data.label}`);
         const messageText = this.replaceVariables(currentNode.data.message || '', driver);
         
-        // --- CRITICAL FIX FOR LOOP ---
-        // If the message is the placeholder, SKIP IT. This fixes the corrupted DB state loop.
+        // --- CRITICAL FIX: DETECT BROKEN LOOP ---
         if (messageText.includes("Replace this sample message")) {
-            console.warn("🚫 Blocking placeholder message to prevent loop.");
-        } else {
-            const { mediaUrl, label, options, inputType } = currentNode.data;
-
-            if (label === 'Image' && mediaUrl) {
-                await sendWhatsApp(phone, 'image', { url: mediaUrl, caption: messageText });
-            } else if ((label === 'Quick Reply' || label === 'List' || inputType === 'option') && options?.length > 0) {
-                await sendWhatsApp(phone, 'interactive', { text: messageText, options });
-            } else {
-                if (messageText) await sendWhatsApp(phone, 'text', { text: messageText });
-            }
-            
-            // Log outgoing
-            await this.client.query(
-                `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'system', $3, $4, 'text')`,
-                [Date.now().toString() + stepsExecuted, driverId, messageText, Date.now()]
-            );
+            console.warn("🚫 Placeholder text detected. Aborting broken flow and resetting session.");
+            await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
+            // Return FALSE to trigger AI handoff
+            return false;
         }
 
-        // Update Session
+        const { mediaUrl, label, options, inputType } = currentNode.data;
+
+        if (label === 'Image' && mediaUrl) {
+            await sendWhatsApp(phone, 'image', { url: mediaUrl, caption: messageText });
+        } else if ((label === 'Quick Reply' || label === 'List' || inputType === 'option') && options?.length > 0) {
+            await sendWhatsApp(phone, 'interactive', { text: messageText, options });
+        } else {
+            if (messageText) await sendWhatsApp(phone, 'text', { text: messageText });
+        }
+        
+        await this.client.query(
+            `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'system', $3, $4, 'text')`,
+            [Date.now().toString() + stepsExecuted, driverId, messageText, Date.now()]
+        );
+
         await this.client.query(
             `INSERT INTO sessions (phone_number, current_node_id, last_active) 
              VALUES ($1, $2, NOW()) 
@@ -369,11 +388,7 @@ class BotEngine {
             [phone, currentNode.id]
         );
         
-        // Determine input type
         let type = currentNode.data.inputType;
-        const options = currentNode.data.options;
-        const label = currentNode.data.label;
-
         if (!type) {
              if (options && options.length > 0) type = 'option';
              else if (['Text', 'Image', 'Video', 'File'].includes(label)) type = 'statement'; 
@@ -386,7 +401,6 @@ class BotEngine {
             return true; 
         }
 
-        // Move to next node automatically (Statement)
         const outgoingEdges = edges.filter(e => e.source === currentNode.id);
         if (outgoingEdges.length > 0) {
             const nextEdge = outgoingEdges.find(e => e.sourceHandle === 'main' || !e.sourceHandle);
@@ -409,12 +423,15 @@ class BotEngine {
 // --- API ENDPOINTS ---
 
 app.post('/api/update-credentials', async (req, res) => {
+    const p = getPool();
+    if (!p) return res.status(500).json({ error: "Database not configured (URL missing)" });
+
     try {
         const { phoneNumberId, apiToken } = req.body;
         if(phoneNumberId) PHONE_NUMBER_ID = phoneNumberId;
         if(apiToken) META_API_TOKEN = apiToken;
         
-        const client = await pool.connect();
+        const client = await p.connect();
         try {
             await client.query(`INSERT INTO app_config (key, value) VALUES ('PHONE_NUMBER_ID', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [phoneNumberId]);
             await client.query(`INSERT INTO app_config (key, value) VALUES ('META_API_TOKEN', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [apiToken]);
@@ -429,10 +446,13 @@ app.post('/api/update-credentials', async (req, res) => {
 });
 
 app.post('/api/configure-webhook', async (req, res) => {
+    const p = getPool();
+    if (!p) return res.status(500).json({ error: "Database not configured" });
+
     try {
         const { verifyToken } = req.body;
         if(verifyToken) VERIFY_TOKEN = verifyToken;
-        const client = await pool.connect();
+        const client = await p.connect();
         try {
             await client.query(`INSERT INTO app_config (key, value) VALUES ('VERIFY_TOKEN', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [verifyToken]);
             res.json({ success: true });
@@ -446,9 +466,12 @@ app.post('/api/configure-webhook', async (req, res) => {
 });
 
 app.post('/api/bot-settings', async (req, res) => {
+  const p = getPool();
+  if (!p) return res.status(500).json({ error: "Database not configured" });
+
   try {
     const { flowData, isEnabled, routingStrategy, systemInstruction } = req.body; 
-    const client = await pool.connect();
+    const client = await p.connect();
     try {
         if (flowData) {
             await client.query(`INSERT INTO flows (nodes, edges) VALUES ($1, $2)`, [JSON.stringify(flowData.nodes), JSON.stringify(flowData.edges)]);
@@ -471,8 +494,11 @@ app.post('/api/bot-settings', async (req, res) => {
 });
 
 app.get('/api/bot-settings', async (req, res) => {
+  const p = getPool();
+  if (!p) return res.status(500).json({ error: "Database not configured" });
+
   try {
-    const client = await pool.connect();
+    const client = await p.connect();
     try {
         const flowRes = await client.query('SELECT nodes, edges FROM flows ORDER BY updated_at DESC LIMIT 1');
         const setRes = await client.query('SELECT * FROM bot_settings WHERE id = 1');
@@ -511,8 +537,14 @@ app.post('/webhook', async (req, res) => {
       if (msg.type === 'interactive') input = msg.interactive.button_reply.title;
       if (msg.type === 'image') input = '[Image]'; 
 
+      const p = getPool();
+      if (!p) {
+          console.error("❌ Webhook failed: No DB Pool");
+          return res.sendStatus(500);
+      }
+
       try {
-        const client = await pool.connect();
+        const client = await p.connect();
         try {
             // Driver Check
             let driverRes = await client.query('SELECT id, name FROM drivers WHERE phone_number = $1', [from]);
@@ -571,8 +603,11 @@ app.get('/webhook', (req, res) => {
 });
 
 app.get('/api/drivers', async (req, res) => {
+    const p = getPool();
+    if (!p) return res.status(500).json({ error: "Database not configured (URL missing)" });
+
     try {
-        const client = await pool.connect();
+        const client = await p.connect();
         try {
             const result = await client.query(`
             SELECT d.*, 
@@ -593,7 +628,6 @@ app.get('/api/drivers', async (req, res) => {
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
-    // For local dev, we run initDB. For Vercel, it runs via middleware.
     initDB();
   });
 }
