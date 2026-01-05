@@ -39,6 +39,24 @@ const getYoutubeId = (url: string) => {
   return (match && match[2].length === 11) ? match[2] : null;
 };
 
+// --- HELPER: Get Icon dynamically ---
+const getNodeIcon = (label: string, inputType?: string) => {
+    if (label === 'Image') return <ImageIcon size={14} />;
+    if (label === 'Video') return <Video size={14} />;
+    if (label === 'File') return <FileText size={14} />;
+    if (label === 'Location') return <MapPin size={14} />;
+    if (inputType === 'option' || label === 'List' || label === 'Quick Reply') return <List size={14} />;
+    if (label === 'Link') return <Link size={14} />;
+    // Input types
+    if (label === 'Email') return <Mail size={14} />;
+    if (label === 'Number') return <Hash size={14} />;
+    if (label === 'Website') return <Globe size={14} />;
+    if (label === 'Date') return <Calendar size={14} />;
+    if (label === 'Time') return <Clock size={14} />;
+    
+    return <MessageSquare size={14} />;
+};
+
 // --- CUSTOM NODE COMPONENT ---
 const CustomNode = ({ data, id, selected }: any) => {
   const [options, setOptions] = useState<string[]>(data.options || []);
@@ -266,7 +284,8 @@ const CustomNode = ({ data, id, selected }: any) => {
         <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
             <div className="flex items-center gap-2">
                 <span className="text-gray-500">
-                    {data.icon || (data.label === 'Video' ? <Video size={14} /> : <MessageSquare size={14} />)}
+                    {/* DYNAMICALLY RENDER ICON TO FIX SERIALIZATION ERROR */}
+                    {getNodeIcon(data.label, data.inputType)}
                 </span>
                 <span className="text-xs font-bold text-gray-900">Group #{id.split('_')[1] || id.slice(-4)}</span>
             </div>
@@ -455,6 +474,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 ...n,
                 data: {
                     ...n.data,
+                    // Remove existing icon property if it exists to prevent Error #31
+                    icon: undefined, 
                     onChange: updateNodeData,
                     onDelete: deleteNode
                 }
@@ -506,20 +527,13 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         y: event.clientY,
       });
 
-      // Icon Reconstruction
-      let icon = <MessageSquare size={16} className="text-gray-600" />;
-      if(label === 'Image') icon = <ImageIcon size={16} className="text-gray-600" />;
-      if(inputType === 'option') icon = <List size={16} className="text-gray-600" />;
-      if(label === 'Video') icon = <Video size={16} className="text-gray-600" />;
-      if(label === 'File') icon = <FileText size={16} className="text-gray-600" />;
-
       const newNode: Node = {
         id: `node_${Date.now()}`,
         type: 'custom',
         position,
         data: { 
             label: label,
-            icon: icon,
+            // Removed icon property to ensure serializability
             message: '', 
             inputType: inputType || 'text', 
             hasMedia: type === 'image' || type === 'video' || type === 'file',
@@ -569,6 +583,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       const newSettings: BotSettings = {
           ...mockBackend.getBotSettings(),
           steps: compiledSteps,
+          // Save nodes without icon property (handled by updateNodeData logic anyway, but good to be safe)
           flowData: { nodes, edges } 
       };
 
