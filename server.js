@@ -39,12 +39,16 @@ const pool = new Pool({
   idleTimeoutMillis: 1000,
 });
 
-// --- DATABASE INITIALIZATION ---
+// --- DB INIT LOGIC ---
+let isDbInitialized = false;
+
 const initDB = async () => {
+  if (isDbInitialized) return;
+  
   try {
     const client = await pool.connect();
     
-    // 1. Flows Table (Stores nodes/edges)
+    // 1. Flows Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS flows (
         id SERIAL PRIMARY KEY,
@@ -54,7 +58,7 @@ const initDB = async () => {
       );
     `);
 
-    // 2. Bot Settings Table (Stores Strategy & System Prompt)
+    // 2. Bot Settings Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS bot_settings (
         id INT PRIMARY KEY DEFAULT 1,
@@ -64,7 +68,6 @@ const initDB = async () => {
         updated_at TIMESTAMP DEFAULT NOW()
       );
     `);
-    // Ensure default row exists
     await client.query(`INSERT INTO bot_settings (id, is_enabled) VALUES (1, true) ON CONFLICT (id) DO NOTHING`);
 
     // 3. Drivers Table
@@ -83,7 +86,7 @@ const initDB = async () => {
       );
     `);
 
-    // 4. Sessions Table (Active Bot State)
+    // 4. Sessions Table
     await client.query(`
       CREATE TABLE IF NOT EXISTS sessions (
         phone_number TEXT PRIMARY KEY,
@@ -105,7 +108,7 @@ const initDB = async () => {
       );
     `);
     
-    // 6. App Config (Credentials)
+    // 6. App Config
     await client.query(`
       CREATE TABLE IF NOT EXISTS app_config (
         key TEXT PRIMARY KEY,
@@ -122,11 +125,20 @@ const initDB = async () => {
     });
 
     console.log("✅ Database Schema Synced & Config Loaded");
+    isDbInitialized = true;
     client.release();
   } catch (err) {
     console.error("❌ DB Init Error:", err.message);
   }
 };
+
+// Middleware to ensure DB init runs
+const ensureDb = async (req, res, next) => {
+    await initDB();
+    next();
+};
+
+app.use(ensureDb);
 
 // --- WHATSAPP API HELPER ---
 const sendWhatsApp = async (to, type, content) => {
@@ -175,7 +187,6 @@ const sendWhatsApp = async (to, type, content) => {
 const generateAIResponse = async (input, systemInstruction) => {
     try {
         const model = ai.models; 
-        // Using generateContent with the model name as per coding guidelines
         const response = await model.generateContent({
             model: 'gemini-1.5-flash',
             contents: input,
@@ -211,25 +222,21 @@ class BotEngine {
     return res.rows[0] || { nodes: [], edges: [] };
   }
 
-  // Returns TRUE if bot handled the message, FALSE if it should fall back to AI
   async processUser(phone, input, driverId) {
     const { nodes, edges } = await this.getFlow();
-    if (!nodes.length) return false; // No bot flow defined
+    if (!nodes || nodes.length === 0) return false;
 
-    // Fetch Session
     let sessionRes = await this.client.query('SELECT * FROM sessions WHERE phone_number = $1', [phone]);
     let currentNodeId = sessionRes.rows[0]?.current_node_id;
     let currentNode = nodes.find(n => n.id === currentNodeId);
     
-    // Fetch Driver for variables
     const driverRes = await this.client.query('SELECT * FROM drivers WHERE id = $1', [driverId]);
     const driver = driverRes.rows[0];
 
-    // --- STEP 1: HANDLE INPUT FOR CURRENT NODE ---
+    // --- STEP 1: HANDLE INPUT ---
     if (currentNode) {
         console.log(`📍 User at node: ${currentNode.data.label}`);
         
-        // Save Variable logic
         if (currentNode.data.saveToField) {
             const field = currentNode.data.saveToField;
             if (['name', 'availability'].includes(field)) {
@@ -238,30 +245,23 @@ class BotEngine {
                 const newVars = { ...driver.variables, [field]: input };
                 await this.client.query(`UPDATE drivers SET variables = $1 WHERE id = $2`, [newVars, driverId]);
             }
-            driver.variables = { ...driver.variables, [field]: input }; // Update local for immediate use
+            driver.variables = { ...driver.variables, [field]: input }; 
         }
 
-        // Determine Next Node
         let nextEdge;
         
-        // A. Option Matching
         if (currentNode.data.inputType === 'option' || currentNode.data.options?.length > 0) {
-            // Fuzzy match or exact match
             const opts = currentNode.data.options || [];
             const selectedIdx = opts.findIndex(o => o.toLowerCase().includes(input.toLowerCase()) || input.toLowerCase().includes(o.toLowerCase()));
             
             if (selectedIdx !== -1) {
                 nextEdge = edges.find(e => e.source === currentNodeId && e.sourceHandle === `opt_${selectedIdx}`);
             } else {
-                // Invalid Option Selection!
-                // Decision: Should we fallback to AI? Or repeat?
-                // For Hybrid bots, usually implies user is asking a question instead of answering.
                 console.log("   Input did not match options. Falling back to AI.");
                 return false; 
             }
         } 
         
-        // B. Default/Main Edge (Text input or fallthrough)
         if (!nextEdge) {
             nextEdge = edges.find(e => e.source === currentNodeId && (e.sourceHandle === 'main' || !e.sourceHandle));
         }
@@ -270,28 +270,23 @@ class BotEngine {
             currentNodeId = nextEdge.target;
             currentNode = nodes.find(n => n.id === currentNodeId);
         } else {
-            // End of Flow
             await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
-            console.log("   Flow completed.");
-            return true; // We handled the "end" by doing nothing (or could send goodbye)
+            return true;
         }
 
     } else {
-        // --- STEP 2: START NEW FLOW ---
         const startNode = nodes.find(n => n.data.type === 'start');
         if (startNode) {
-            // Check if there's a connection from Start
             const startEdge = edges.find(e => e.source === startNode.id);
             if (startEdge) {
                 currentNodeId = startEdge.target;
                 currentNode = nodes.find(n => n.id === currentNodeId);
-                console.log("🚀 Starting new flow");
             }
         }
     }
 
-    // --- STEP 3: SEND RESPONSE(S) ---
-    if (!currentNode) return false; // No next node found, maybe fallback to AI
+    // --- STEP 2: SEND MESSAGES ---
+    if (!currentNode) return false;
 
     let stepsExecuted = 0;
     while (currentNode && stepsExecuted < 5) {
@@ -300,7 +295,6 @@ class BotEngine {
         const messageText = this.replaceVariables(currentNode.data.message || '', driver);
         const { mediaUrl, label, options } = currentNode.data;
 
-        // Send Message
         if (label === 'Image' && mediaUrl) {
             await sendWhatsApp(phone, 'image', { url: mediaUrl, caption: messageText });
         } else if ((label === 'Quick Reply' || label === 'List' || currentNode.data.inputType === 'option') && options?.length > 0) {
@@ -309,49 +303,33 @@ class BotEngine {
             if (messageText) await sendWhatsApp(phone, 'text', { text: messageText });
         }
 
-        // Log Message
         await this.client.query(
             `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'system', $3, $4, 'text')`,
             [Date.now().toString() + stepsExecuted, driverId, messageText, Date.now()]
         );
 
-        // Update Session
         await this.client.query(
             `INSERT INTO sessions (phone_number, current_node_id, last_active) 
              VALUES ($1, $2, NOW()) 
              ON CONFLICT (phone_number) DO UPDATE SET current_node_id = $2, last_active = NOW()`,
             [phone, currentNode.id]
         );
-
-        // Check if we should stop for input
-        // Rules: 
-        // 1. If it's an Option or Input node, STOP.
-        // 2. If it's just an Image/Text/Video node (Display Only), does it have a 'main' outgoing edge?
-        //    If yes, and that edge leads to another node, we *could* auto-advance.
-        //    But React Flow UI doesn't explicitly mark "wait for input". 
-        //    Assumption: "Text" input type means wait for text. "Option" means wait for option.
-        //    "Image" label usually means display image.
         
         const isInputNode = ['Text', 'Number', 'Email', 'Quick Reply', 'List'].includes(currentNode.data.inputType) || currentNode.data.options?.length > 0;
         
-        if (isInputNode) {
-            return true; // We sent a message and are waiting.
-        }
+        if (isInputNode) return true;
 
-        // If it's a display-only node, check if we can auto-advance
         const outgoingEdges = edges.filter(e => e.source === currentNode.id);
         if (outgoingEdges.length > 0) {
-            // Auto-advance to next
             const nextEdge = outgoingEdges.find(e => e.sourceHandle === 'main' || !e.sourceHandle);
             if (nextEdge) {
                 currentNodeId = nextEdge.target;
                 currentNode = nodes.find(n => n.id === currentNodeId);
-                // Loop continues...
             } else {
                 break;
             }
         } else {
-            break; // End of branch
+            break; 
         }
     }
 
@@ -386,18 +364,15 @@ app.post('/api/configure-webhook', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Save Bot Settings (Flow + Strategy)
 app.post('/api/bot-settings', async (req, res) => {
   try {
     const { flowData, isEnabled, routingStrategy, systemInstruction } = req.body; 
     const client = await pool.connect();
     
-    // Save Flow
     if (flowData) {
         await client.query(`INSERT INTO flows (nodes, edges) VALUES ($1, $2)`, [JSON.stringify(flowData.nodes), JSON.stringify(flowData.edges)]);
     }
     
-    // Save Strategy
     await client.query(`
         INSERT INTO bot_settings (id, is_enabled, routing_strategy, system_instruction)
         VALUES (1, $1, $2, $3)
@@ -431,11 +406,14 @@ app.get('/api/bot-settings', async (req, res) => {
 // --- WEBHOOK ---
 app.post('/webhook', async (req, res) => {
   const body = req.body;
+  
   if (body.object) {
     if (body.entry && body.entry[0].changes && body.entry[0].changes[0].value.messages) {
       const msg = body.entry[0].changes[0].value.messages[0];
       const from = msg.from;
       
+      console.log("📩 Webhook received message from:", from);
+
       let input = '';
       if (msg.type === 'text') input = msg.text.body;
       if (msg.type === 'interactive') input = msg.interactive.button_reply.title;
@@ -444,7 +422,6 @@ app.post('/webhook', async (req, res) => {
       try {
         const client = await pool.connect();
         
-        // 1. Get/Create Driver
         let driverRes = await client.query('SELECT id, name FROM drivers WHERE phone_number = $1', [from]);
         let driverId = driverRes.rows[0]?.id;
         if (!driverId) {
@@ -452,13 +429,11 @@ app.post('/webhook', async (req, res) => {
              await client.query(`INSERT INTO drivers (id, phone_number, name) VALUES ($1, $2, 'Guest')`, [driverId, from]);
         }
         
-        // 2. Log Message
         await client.query(
              `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'driver', $3, $4, 'text')`,
              [Date.now().toString(), driverId, input, Date.now()]
         );
 
-        // 3. Routing Logic
         const settingsRes = await client.query('SELECT * FROM bot_settings WHERE id = 1');
         const settings = settingsRes.rows[0] || { is_enabled: true, routing_strategy: 'HYBRID_BOT_FIRST', system_instruction: '' };
 
@@ -469,7 +444,6 @@ app.post('/webhook', async (req, res) => {
             botHandled = await engine.processUser(from, input, driverId);
         }
 
-        // 4. Fallback to AI
         if (!botHandled && (settings.routing_strategy === 'HYBRID_BOT_FIRST' || settings.routing_strategy === 'AI_ONLY')) {
              console.log("🤖 Handing off to AI...");
              const aiReply = await generateAIResponse(input, settings.system_instruction || "You are a helpful recruitment assistant for Uber Fleet.");
@@ -500,7 +474,6 @@ app.get('/webhook', (req, res) => {
   else res.sendStatus(403);
 });
 
-// Existing Drivers API
 app.get('/api/drivers', async (req, res) => {
     try {
         const client = await pool.connect();
@@ -515,8 +488,12 @@ app.get('/api/drivers', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.listen(PORT, async () => {
-  console.log(`Server running on port ${PORT}`);
-  await initDB();
-});
+// For local testing:
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    initDB();
+  });
+}
+
 module.exports = app;

@@ -20,7 +20,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden">
       {/* Sidebar */}
-      <aside className="w-64 bg-black text-white flex flex-col shadow-xl z-20">
+      <aside className="w-64 bg-black text-white flex flex-col shadow-xl z-20 flex-shrink-0">
         <div className="p-6 border-b border-gray-800 flex items-center gap-3">
           <div className="bg-white text-black p-2 rounded-lg">
             <Car size={24} />
@@ -31,7 +31,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
           </div>
         </div>
 
-        <nav className="flex-1 p-4 space-y-2">
+        <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
           <button
             onClick={() => onTabChange('dashboard')}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
@@ -98,8 +98,12 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-auto relative">
-        {children}
+      <main className="flex-1 flex flex-col relative overflow-hidden bg-gray-50">
+        {/* We remove overflow-auto here and let children handle it if they need to scroll. 
+            This allows BotBuilder (ReactFlow) to take 100% height. */}
+        <div className="flex-1 relative w-full h-full overflow-auto">
+           {children}
+        </div>
       </main>
     </div>
   );

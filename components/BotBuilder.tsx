@@ -446,12 +446,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         if (isLiveMode) {
              try {
                 settings = await liveApiService.getBotSettings();
-             } catch(e) { return; }
+             } catch(e) { console.error("Could not fetch settings:", e); return; }
         } else {
              settings = mockBackend.getBotSettings();
         }
 
-        if (settings.flowData && settings.flowData.nodes.length > 0) {
+        if (settings && settings.flowData && settings.flowData.nodes.length > 0) {
             // Restore visual state
             const restoredNodes = settings.flowData.nodes.map((n: any) => ({
                 ...n,
