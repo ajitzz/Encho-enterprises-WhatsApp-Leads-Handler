@@ -4,7 +4,28 @@ import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, B
 const DEFAULT_BOT_SETTINGS: BotSettings = {
   isEnabled: true,
   routingStrategy: 'HYBRID_BOT_FIRST',
-  systemInstruction: `You are a friendly and persuasive recruiter for Uber Fleet in Kerala.`,
+  systemInstruction: `You are a friendly and persuasive recruiter for Uber Fleet in Kerala.
+
+**Language & Tone:**
+- Communicate in casual, conversational Malayalam using **Malayalam Script** (Malayalam letters).
+- Freely mix **English words** for common terms (like 'Driver', 'License', 'Payment', 'Trip', 'Bonus', 'Account', 'Join').
+- Do NOT use Manglish (Malayalam written in English text). Use real Malayalam characters.
+- Do NOT use overly formal/bookish Malayalam. Talk like a helpful friend.
+
+**Example Style:**
+- "Uber Fleet-ൽ join ചെയ്യാൻ താല്പര്യമുണ്ടോ? നല്ല income earn ചെയ്യാം."
+- "നിങ്ങളുടെ ലൈസൻസ് (License) ഡീറ്റെയിൽസ് അയച്ചുതരൂ."
+- "ആഴ്ച തോറും പേയ്മെന്റ് ലഭിക്കും."
+
+**Your Goal:** 
+- Help the user understand the benefits of joining Uber Fleet.
+- Answer their doubts clearly regarding salary and work nature.
+- Encourage them to complete the application process.
+
+**Key Selling Points:**
+- Potential to earn up to ₹50,000/month based on performance.
+- Weekly payments (ആഴ്ച തോറും പേയ്മെന്റ്).
+- Flexible timings (നമ്മുടെ സമയം പോലെ വർക്ക് ചെയ്യാം).`,
   steps: [
     {
       id: 'step_1',
@@ -166,8 +187,6 @@ class MockBackendService {
   processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Driver, reply?: Message, actionNeeded: 'NONE' | 'AI_REPLY' } {
     let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
     let isNew = false;
-    const settings = this.botSettings;
-    const strategy = settings.routingStrategy || 'HYBRID_BOT_FIRST';
 
     // 1. Create or Get Driver
     if (!driver) {
@@ -184,8 +203,7 @@ class MockBackendService {
         documents: [],
         onboardingStep: OnboardingStep.WELCOME_SENT,
         qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
-        // Initially active unless AI Only
-        isBotActive: settings.isEnabled && strategy !== 'AI_ONLY',
+        isBotActive: this.botSettings.isEnabled && this.botSettings.routingStrategy !== 'AI_ONLY',
         currentBotStepId: this.botSettings.steps[0]?.id
       };
       this.drivers.push(driver);
@@ -203,59 +221,38 @@ class MockBackendService {
     this.addMessage(driver.id, userMsg);
 
     // 3. Logic Engine
-
+    const settings = this.botSettings;
+    
     // STRATEGY: AI ONLY
-    if (settings.isEnabled && strategy === 'AI_ONLY') {
+    if (settings.isEnabled && settings.routingStrategy === 'AI_ONLY') {
       return { driver, actionNeeded: 'AI_REPLY' };
     }
 
-    // STRATEGY: BOT ONLY (Restart Logic)
-    if (settings.isEnabled && strategy === 'BOT_ONLY' && !driver.isBotActive && !isNew) {
-        // Restart Bot
-        const firstStep = settings.steps[0];
-        if (firstStep) {
-            driver.isBotActive = true;
-            driver.currentBotStepId = firstStep.id;
-            isNew = true; // Trigger restart immediate reply
-        }
-    }
-
-    // STRATEGY: BOT FLOW ACTIVE
+    // STRATEGY: BOT FLOW
     if (settings.isEnabled && driver.isBotActive && driver.currentBotStepId) {
       
       const currentStep = settings.steps.find(s => s.id === driver.currentBotStepId);
       
       if (currentStep) {
         // A. PROCESS DATA CAPTURE from previous input
-        if (!isNew) { 
+        if (!isNew) { // Don't process input on the very first "Hello" triggering the bot
              if (currentStep.saveToField === 'name') driver.name = text;
              if (currentStep.saveToField === 'availability') driver.availability = text as any;
              if (currentStep.saveToField === 'document' && imageUrl) driver.documents.push(imageUrl);
              
              // Move to next Step
-             let nextId = currentStep.nextStepId;
-
-             if (nextId === 'END' || nextId === 'AI_HANDOFF') {
+             if (currentStep.nextStepId === 'END') {
                  driver.isBotActive = false;
                  driver.currentBotStepId = undefined;
                  this.persist();
-
-                 if (nextId === 'AI_HANDOFF' && strategy === 'HYBRID_BOT_FIRST') {
-                     return { driver, actionNeeded: 'AI_REPLY' };
-                 } else {
-                     // Bot Only End or Hybrid End without Handoff
-                     const endMsg: Message = {
-                         id: Date.now().toString() + '_end',
-                         sender: 'system',
-                         text: 'Thank you for your response.',
-                         timestamp: Date.now() + 500,
-                         type: 'text'
-                     };
-                     this.addMessage(driver.id, endMsg);
-                     return { driver, reply: endMsg, actionNeeded: 'NONE' };
-                 }
+                 return { driver, actionNeeded: 'NONE' };
+             } else if (currentStep.nextStepId === 'AI_HANDOFF') {
+                 driver.isBotActive = false;
+                 driver.currentBotStepId = undefined;
+                 this.persist();
+                 return { driver, actionNeeded: 'AI_REPLY' };
              } else {
-                 driver.currentBotStepId = nextId;
+                 driver.currentBotStepId = currentStep.nextStepId;
              }
         }
 
@@ -277,12 +274,11 @@ class MockBackendService {
       }
     }
 
-    // Fallback to AI if bot is inactive and strategy is HYBRID
-    if (settings.isEnabled && strategy === 'HYBRID_BOT_FIRST' && !driver.isBotActive) {
+    // Fallback to AI if bot is finished or disabled (and strategy allows)
+    if (settings.routingStrategy === 'HYBRID_BOT_FIRST' || settings.routingStrategy === 'AI_ONLY') {
         return { driver, actionNeeded: 'AI_REPLY' };
     }
 
-    // Default for Bot Only if inactive (and didn't restart for some reason)
     return { driver, actionNeeded: 'NONE' };
   }
 
