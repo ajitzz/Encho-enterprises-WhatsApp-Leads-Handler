@@ -17,9 +17,7 @@ export const liveApiService = {
     }
   },
 
-  // Optimized Polling (2 Seconds)
   subscribeToUpdates: (callback: () => void) => {
-    // Poll every 2 seconds for snappier updates without full websockets
     const interval = setInterval(callback, 2000); 
     return () => clearInterval(interval);
   },
@@ -33,7 +31,6 @@ export const liveApiService = {
       return await response.json();
     } catch (error) {
       console.warn("Could not fetch live bot settings, using default");
-      // Fallback object to prevent UI crash
       return { 
           isEnabled: true, 
           routingStrategy: 'HYBRID_BOT_FIRST', 
@@ -44,10 +41,19 @@ export const liveApiService = {
   },
 
   saveBotSettings: async (settings: BotSettings) => {
+    // We strictly need to send flowData for the new engine
+    const payload = {
+        flowData: settings.flowData,
+        // Legacy fields if needed
+        isEnabled: settings.isEnabled,
+        routingStrategy: settings.routingStrategy,
+        systemInstruction: settings.systemInstruction
+    };
+
     const response = await fetch(`${API_BASE_URL}/api/bot-settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings)
+      body: JSON.stringify(payload)
     });
     if (!response.ok) throw new Error('Failed to save settings');
     return await response.json();
