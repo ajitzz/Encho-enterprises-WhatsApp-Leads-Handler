@@ -1,7 +1,7 @@
 import { Driver, BotSettings } from '../types';
 
-const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-const API_BASE_URL = isLocal ? 'http://localhost:3001' : ''; 
+// Use relative path to leverage Vite's proxy in development and relative routing in production
+const API_BASE_URL = ''; 
 
 export const liveApiService = {
   // Fetch drivers
@@ -9,7 +9,7 @@ export const liveApiService = {
     try {
       const url = `${API_BASE_URL}/api/drivers`;
       const response = await fetch(url);
-      if (!response.ok) throw new Error('API Error');
+      if (!response.ok) throw new Error('API Error: ' + response.statusText);
       return await response.json();
     } catch (error: any) {
       console.error("Fetch Error:", error);

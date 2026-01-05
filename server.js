@@ -142,7 +142,6 @@ const initDB = async () => {
     isDbInitialized = true;
   } catch (err) {
     console.error("❌ DB Init Error:", err.message);
-    // Retry logic could go here, but for now we log
   } finally {
     if (client) client.release();
   }
@@ -161,7 +160,7 @@ app.use(ensureDb);
 // --- WHATSAPP API HELPER ---
 const sendWhatsApp = async (to, type, content) => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
-      console.warn("⚠️ Missing Meta Credentials - Cannot send WhatsApp message");
+      console.warn(`⚠️ Missing Meta Credentials - Cannot send ${type} message to ${to}`);
       return;
   }
   
