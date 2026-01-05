@@ -4,15 +4,33 @@ import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, B
 const DEFAULT_BOT_SETTINGS: BotSettings = {
   isEnabled: true,
   routingStrategy: 'HYBRID_BOT_FIRST',
-  systemInstruction: `You are a professional and persuasive recruiter for Uber Fleet. 
-Your goal is to convince drivers to join by highlighting benefits like flexible hours and weekly payments.
-If a user asks about salary, mention they can earn up to ₹50,000/month based on performance.
-Always be polite, concise, and encourage them to complete the application.`,
+  systemInstruction: `You are a friendly and persuasive recruiter for Uber Fleet in Kerala.
+
+**Language & Tone:**
+- Communicate in casual, conversational Malayalam using **Malayalam Script** (Malayalam letters).
+- Freely mix **English words** for common terms (like 'Driver', 'License', 'Payment', 'Trip', 'Bonus', 'Account', 'Join').
+- Do NOT use Manglish (Malayalam written in English text). Use real Malayalam characters.
+- Do NOT use overly formal/bookish Malayalam. Talk like a helpful friend.
+
+**Example Style:**
+- "Uber Fleet-ൽ join ചെയ്യാൻ താല്പര്യമുണ്ടോ? നല്ല income earn ചെയ്യാം."
+- "നിങ്ങളുടെ ലൈസൻസ് (License) ഡീറ്റെയിൽസ് അയച്ചുതരൂ."
+- "ആഴ്ച തോറും പേയ്മെന്റ് ലഭിക്കും."
+
+**Your Goal:** 
+- Help the user understand the benefits of joining Uber Fleet.
+- Answer their doubts clearly regarding salary and work nature.
+- Encourage them to complete the application process.
+
+**Key Selling Points:**
+- Potential to earn up to ₹50,000/month based on performance.
+- Weekly payments (ആഴ്ച തോറും പേയ്മെന്റ്).
+- Flexible timings (നമ്മുടെ സമയം പോലെ വർക്ക് ചെയ്യാം).`,
   steps: [
     {
       id: 'step_1',
       title: 'Welcome & Name',
-      message: 'Hello! Welcome to Uber Fleet recruitment. What is your full name?',
+      message: 'നമസ്കാരം! Uber Fleet-ലേക്ക് സ്വാഗതം. നിങ്ങളുടെ പേര് പറയാമോ?',
       inputType: 'text',
       saveToField: 'name',
       nextStepId: 'step_2'
@@ -20,15 +38,15 @@ Always be polite, concise, and encourage them to complete the application.`,
     {
       id: 'step_2',
       title: 'License Check',
-      message: 'Great! Do you have a valid Commercial Driving License?',
+      message: 'നന്ദി! നിങ്ങളുടെ കൈയ്യിൽ valid ആയ Commercial Driving License ഉണ്ടോ?',
       inputType: 'option',
-      options: ['Yes', 'No'],
+      options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'],
       nextStepId: 'step_3'
     },
     {
       id: 'step_3',
       title: 'Upload License',
-      message: 'Please upload a photo of your Driving License for verification.',
+      message: 'Verification-ന് വേണ്ടി License-ന്റെ ഒരു ഫോട്ടോ അയച്ചുതരൂ.',
       inputType: 'image',
       saveToField: 'document',
       nextStepId: 'step_4'
@@ -36,7 +54,7 @@ Always be polite, concise, and encourage them to complete the application.`,
     {
       id: 'step_4',
       title: 'Availability',
-      message: 'When are you available to drive?',
+      message: 'എപ്പോഴാണ് ഡ്രൈവ് ചെയ്യാൻ താല്പര്യം? (Full-time / Part-time)',
       inputType: 'option',
       options: ['Full-time', 'Part-time', 'Weekends'],
       saveToField: 'availability',
