@@ -1,7 +1,7 @@
 import { Driver, BotSettings } from '../types';
 
-const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-const API_BASE_URL = isLocal ? 'http://localhost:3001' : ''; 
+// In Vercel (and with Vite Proxy locally), we can use relative paths.
+const API_BASE_URL = ''; 
 
 export const liveApiService = {
   // Fetch drivers
@@ -17,10 +17,31 @@ export const liveApiService = {
     }
   },
 
-  // Optimized Polling (2 Seconds)
+  // Check System Health
+  checkHealth: async (): Promise<{ database: string, whatsapp: string, ai: string }> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/health`);
+      if (!response.ok) return { database: 'disconnected', whatsapp: 'unknown', ai: 'unknown' };
+      return await response.json();
+    } catch (error) {
+      return { database: 'disconnected', whatsapp: 'unknown', ai: 'unknown' };
+    }
+  },
+
+  // Update Driver Details
+  updateDriver: async (id: string, updates: Partial<Driver>) => {
+    const response = await fetch(`${API_BASE_URL}/api/drivers/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates)
+    });
+    if (!response.ok) throw new Error('Failed to update driver');
+    return await response.json();
+  },
+
+  // Optimized Polling (15 Seconds)
   subscribeToUpdates: (callback: () => void) => {
-    // Poll every 2 seconds for snappier updates without full websockets
-    const interval = setInterval(callback, 2000); 
+    const interval = setInterval(callback, 15000); 
     return () => clearInterval(interval);
   },
 
@@ -33,7 +54,6 @@ export const liveApiService = {
       return await response.json();
     } catch (error) {
       console.warn("Could not fetch live bot settings, using default");
-      // Fallback object to prevent UI crash
       return { 
           isEnabled: true, 
           routingStrategy: 'HYBRID_BOT_FIRST', 

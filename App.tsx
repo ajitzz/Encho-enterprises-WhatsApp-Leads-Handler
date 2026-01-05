@@ -10,7 +10,7 @@ import { AITraining } from './components/AITraining';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
 import { Driver, LeadStatus, Notification, BotSettings } from './types';
-import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split } from 'lucide-react';
+import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split, Server, ShieldCheck, AlertTriangle, Loader2, RefreshCw, WifiOff } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -20,9 +20,13 @@ export default function App() {
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [showWebhookModal, setShowWebhookModal] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [retryTrigger, setRetryTrigger] = useState(0);
   
-  // Data Source Toggle: 'mock' or 'live'
-  const [dataSource, setDataSource] = useState<'mock' | 'live'>('mock');
+  // Data Source Toggle: Default to 'live' so user sees DB connection immediately
+  const [dataSource, setDataSource] = useState<'mock' | 'live'>('live');
+  const [systemHealth, setSystemHealth] = useState({ database: 'unknown', whatsapp: 'unknown', ai: 'unknown' });
 
   // Bot Strategy for Dashboard
   const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
@@ -30,15 +34,24 @@ export default function App() {
   // Sync with backend (Mock or Live)
   useEffect(() => {
     let unsubscribe: () => void = () => {};
+    setConnectionError(null);
 
     const fetchData = async () => {
+      setIsLoading(true);
       if (dataSource === 'mock') {
          setDrivers(mockBackend.getDrivers());
          setBotSettings(mockBackend.getBotSettings());
          unsubscribe = mockBackend.subscribe(() => {
              setDrivers(mockBackend.getDrivers());
              setBotSettings(mockBackend.getBotSettings());
+             // Sync selected driver for mock
+             setSelectedDriver(prev => {
+                if(!prev) return null;
+                const fresh = mockBackend.getDriver(prev.id);
+                return fresh || prev;
+             });
          });
+         setIsLoading(false);
       } else {
          // Live Mode: Poll the real server
          try {
@@ -47,36 +60,49 @@ export default function App() {
            const settings = await liveApiService.getBotSettings();
            setBotSettings(settings);
 
-           // Subscribe triggers polling internally (now every 2s)
+           // Initial Health Check
+           const health = await liveApiService.checkHealth();
+           setSystemHealth(health);
+
+           // Subscribe triggers polling internally (every 15s)
            unsubscribe = liveApiService.subscribeToUpdates(async () => {
                try {
                    const updated = await liveApiService.getDrivers();
                    setDrivers(updated);
-                   // Optionally re-fetch settings occasionally if multiple users? 
-                   // For now, assume settings don't change frequently from other users.
+                   
+                   // --- CRITICAL UPDATE: SYNC OPEN CHAT WINDOW ---
+                   setSelectedDriver((prev) => {
+                      if (!prev) return null;
+                      const freshData = updated.find(d => d.id === prev.id);
+                      // Only return fresh object if exists, otherwise keep old (to prevent crash, though unlikely)
+                      // This ensures that when a new message comes in, the ChatDrawer re-renders
+                      return freshData || prev;
+                   });
+
+                   const h = await liveApiService.checkHealth();
+                   setSystemHealth(h);
                } catch (e) {
-                   // Silent fail on poll error to avoid spamming console
+                   // Silent fail on poll error
                }
            });
            
            addNotification({
              type: 'info',
              title: 'Connected to Live Server',
-             message: 'Polling active (2s interval)'
+             message: 'System is online.'
            });
-         } catch (e) {
-             addNotification({
-                type: 'warning',
-                title: 'Connection Failed',
-                message: 'Ensure node server.js is running.'
-             });
+         } catch (e: any) {
+             console.error("Connection Error:", e);
+             setConnectionError(e.message || "Failed to connect to backend server.");
+         } finally {
+             setIsLoading(false);
          }
       }
     };
 
     fetchData();
     return () => unsubscribe();
-  }, [dataSource, activeTab]); 
+  }, [dataSource, activeTab, retryTrigger]); 
 
   // Notification Handler
   const addNotification = (notif: Omit<Notification, 'id'>) => {
@@ -91,16 +117,27 @@ export default function App() {
     setNotifications(prev => prev.filter(n => n.id !== id));
   };
 
-  // Handlers
+  // UNIFIED UPDATE HANDLER
+  const handleUpdateDriver = async (id: string, updates: Partial<Driver>) => {
+      if (dataSource === 'mock') {
+          mockBackend.updateDriverDetails(id, updates);
+          // Manually update selectedDriver state to reflect changes instantly in the drawer
+          setSelectedDriver(prev => prev && prev.id === id ? { ...prev, ...updates } : prev);
+      } else {
+          try {
+             await liveApiService.updateDriver(id, updates);
+             // Optimistic update for UI responsiveness
+             setDrivers(prev => prev.map(d => d.id === id ? { ...d, ...updates } : d));
+             setSelectedDriver(prev => prev && prev.id === id ? { ...prev, ...updates } : prev);
+          } catch (e) {
+             console.error("Update failed", e);
+             addNotification({ type: 'warning', title: 'Update Failed', message: 'Could not save changes to server.' });
+          }
+      }
+  };
+
   const handleStatusUpdate = (id: string, status: LeadStatus) => {
-    if (dataSource === 'mock') {
-        mockBackend.updateDriverStatus(id, status);
-        if (selectedDriver && selectedDriver.id === id) {
-          setSelectedDriver(prev => prev ? ({ ...prev, status }) : null);
-        }
-    } else {
-        alert("Status updates in Live Mode require the full backend implementation. Currently Read-Only.");
-    }
+      handleUpdateDriver(id, { status });
   };
 
   const handleSendWelcome = (driver: Driver) => {
@@ -173,6 +210,47 @@ export default function App() {
     new: drivers.filter(d => d.status === LeadStatus.NEW).length
   };
 
+  if (connectionError) {
+      return (
+          <div className="flex flex-col items-center justify-center h-screen bg-gray-50 text-center p-6">
+              <div className="bg-red-50 p-6 rounded-full mb-6 animate-in zoom-in duration-300">
+                  <WifiOff size={48} className="text-red-500" />
+              </div>
+              <h2 className="text-2xl font-bold text-gray-900 mb-2">Backend Connection Failed</h2>
+              <p className="text-gray-600 max-w-md mb-8 leading-relaxed">
+                  {connectionError}
+              </p>
+              <div className="flex flex-col sm:flex-row gap-4 w-full max-w-sm">
+                  <button 
+                    onClick={() => setRetryTrigger(prev => prev + 1)} 
+                    className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 rounded-xl transition-colors flex items-center justify-center gap-2"
+                  >
+                      <RefreshCw size={18} /> Retry Connection
+                  </button>
+                  <button 
+                    onClick={() => setDataSource('mock')} 
+                    className="flex-1 bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 font-medium py-3 rounded-xl transition-colors flex items-center justify-center gap-2"
+                  >
+                      <Database size={18} /> Use Simulator
+                  </button>
+              </div>
+              <p className="mt-8 text-xs text-gray-400">
+                  Ensure the backend server is running on port 3001.
+              </p>
+          </div>
+      );
+  }
+
+  if (isLoading) {
+      return (
+          <div className="flex flex-col items-center justify-center h-screen bg-gray-50">
+              <Loader2 className="animate-spin text-blue-600 mb-4" size={48} />
+              <h2 className="text-xl font-bold text-gray-900">Connecting to Backend & Database...</h2>
+              <p className="text-gray-500 mt-2">Please wait while the server starts up.</p>
+          </div>
+      );
+  }
+
   return (
     <>
       <Layout activeTab={activeTab} onTabChange={setActiveTab}>
@@ -219,6 +297,16 @@ export default function App() {
                      </button>
                    )}
                    
+                   {dataSource === 'live' && (
+                       <button 
+                           onClick={() => setRetryTrigger(prev => prev + 1)}
+                           className="bg-white border border-gray-200 text-gray-500 hover:text-blue-600 p-2 rounded-lg hover:bg-blue-50 transition-colors shadow-sm mr-1"
+                           title="Force Refresh Data"
+                       >
+                           <RefreshCw size={20} />
+                       </button>
+                   )}
+
                    <div className="flex items-center bg-white border border-gray-200 rounded-lg p-1 shadow-sm">
                       <button
                         onClick={() => setDataSource('mock')}
@@ -237,6 +325,42 @@ export default function App() {
                    </div>
                  </div>
               </div>
+
+              {/* LIVE MODE: SYSTEM STATUS WIDGET */}
+              {dataSource === 'live' && (
+                 <div className="bg-gray-900 rounded-xl p-4 text-white flex items-center justify-between shadow-lg">
+                    <div className="flex items-center gap-4">
+                        <div className="flex items-center gap-2">
+                             <div className={`w-3 h-3 rounded-full ${systemHealth.database === 'connected' ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]' : 'bg-red-500'}`}></div>
+                             <span className="text-sm font-medium flex items-center gap-2">
+                                <Server size={14} className="text-gray-400" /> Database
+                             </span>
+                        </div>
+                        <div className="h-6 w-px bg-gray-700"></div>
+                        <div className="flex items-center gap-2">
+                             <div className={`w-3 h-3 rounded-full ${systemHealth.whatsapp === 'configured' ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]' : 'bg-amber-500'}`}></div>
+                             <span className="text-sm font-medium flex items-center gap-2">
+                                <MessageSquare size={14} className="text-gray-400" /> WhatsApp API
+                             </span>
+                        </div>
+                        <div className="h-6 w-px bg-gray-700"></div>
+                         <div className="flex items-center gap-2">
+                             <div className={`w-3 h-3 rounded-full ${systemHealth.ai === 'configured' ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]' : 'bg-amber-500'}`}></div>
+                             <span className="text-sm font-medium flex items-center gap-2">
+                                <ShieldCheck size={14} className="text-gray-400" /> AI Engine
+                             </span>
+                        </div>
+                    </div>
+                    {systemHealth.whatsapp !== 'configured' && (
+                        <button 
+                          onClick={() => setShowWebhookModal(true)}
+                          className="text-xs bg-amber-500/20 text-amber-300 px-3 py-1 rounded-full border border-amber-500/50 flex items-center gap-1 hover:bg-amber-500/30 transition-colors"
+                        >
+                           <AlertTriangle size={12} /> Configure Credentials
+                        </button>
+                    )}
+                 </div>
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
@@ -302,7 +426,7 @@ export default function App() {
             
             {dataSource === 'live' && drivers.length === 0 && (
                 <div className="bg-amber-50 text-amber-800 p-4 rounded-lg mb-4 border border-amber-200 text-sm">
-                    <strong>Note:</strong> Ensure <code>node server.js</code> is running on port 3000 to see live data.
+                    <strong>Note:</strong> Attempting to fetch live data. If empty, ensure database has records or create one via Webhook.
                 </div>
             )}
 
@@ -353,6 +477,7 @@ export default function App() {
           driver={selectedDriver} 
           onClose={() => setSelectedDriver(null)}
           onStatusUpdate={handleStatusUpdate}
+          onUpdateDriver={handleUpdateDriver}
         />
         
         <NotificationToast notifications={notifications} onDismiss={removeNotification} />
