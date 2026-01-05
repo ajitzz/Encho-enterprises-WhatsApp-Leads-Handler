@@ -158,6 +158,33 @@ const initDB = async () => {
       );
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS chatbot_flows (
+        id SERIAL PRIMARY KEY,
+        flow JSONB NOT NULL,
+        is_active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_sessions (
+        phone_number TEXT PRIMARY KEY,
+        current_node_id TEXT,
+        captured_data JSONB DEFAULT '{}'::jsonb,
+        last_active TIMESTAMP DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS leads (
+        id SERIAL PRIMARY KEY,
+        phone_number TEXT UNIQUE NOT NULL,
+        status TEXT DEFAULT 'Open',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+
     // Load credentials
     const configRes = await client.query('SELECT * FROM app_config');
     configRes.rows.forEach(row => {
@@ -241,7 +268,7 @@ const generateAIResponse = async (input, systemInstruction) => {
     }
 
     try {
-        const model = ai.models; 
+        const model = ai.models;
         const response = await model.generateContent({
             model: 'gemini-1.5-flash',
             contents: [{ role: 'user', parts: [{ text: input }] }],
@@ -462,6 +489,123 @@ class BotEngine {
   }
 }
 
+// --- NEW BOT STUDIO FLOW ENGINE ---
+const getActiveFlowFromDb = async (client) => {
+    const res = await client.query(
+        'SELECT flow FROM chatbot_flows WHERE is_active = TRUE ORDER BY created_at DESC LIMIT 1'
+    );
+    if (!res.rowCount) return null;
+
+    const rawFlow = res.rows[0].flow;
+    if (!rawFlow) return null;
+    try {
+        return typeof rawFlow === 'string' ? JSON.parse(rawFlow) : rawFlow;
+    } catch (e) {
+        console.error('Failed to parse chatbot flow JSON:', e.message);
+        return null;
+    }
+};
+
+const findStartNode = (nodes) => {
+    if (!Array.isArray(nodes)) return null;
+    return (
+        nodes.find((n) => (n.data?.type || '').toLowerCase() === 'start') ||
+        nodes.find((n) => (n.data?.label || '').toLowerCase() === 'start') ||
+        nodes.find((n) => n.id === 'start') ||
+        null
+    );
+};
+
+const routeToHumanAgent = async (client, phone) => {
+    await client.query(
+        `INSERT INTO leads (phone_number, status) VALUES ($1, 'Human Agent')
+         ON CONFLICT (phone_number) DO UPDATE SET status = 'Human Agent'`,
+        [phone]
+    );
+    await sendWhatsApp(phone, 'text', { text: "I'm connecting you with a human agent for further help." });
+};
+
+const sendNodeMessage = async (node, phone) => {
+    if (!node || !node.data) return false;
+    const text = node.data.message || node.data.text || node.data.label || '';
+    const options = node.data.options || node.data.buttons || [];
+
+    if (!text || text.toLowerCase().includes('replace this sample message')) {
+        return false;
+    }
+
+    if (Array.isArray(options) && options.length > 0) {
+        await sendWhatsApp(phone, 'interactive', { text, options });
+    } else {
+        await sendWhatsApp(phone, 'text', { text });
+    }
+
+    return true;
+};
+
+const handleFlowConversation = async (client, phone, input, isButtonInput) => {
+    const flow = await getActiveFlowFromDb(client);
+    if (!flow || !Array.isArray(flow.nodes) || flow.nodes.length === 0) {
+        return { handled: false, reason: 'missing_flow' };
+    }
+
+    const nodes = flow.nodes;
+    const edges = flow.edges || [];
+
+    const sessionRes = await client.query('SELECT * FROM user_sessions WHERE phone_number = $1', [phone]);
+    const session = sessionRes.rows[0];
+
+    let currentNode = session ? nodes.find((n) => n.id === session.current_node_id) : null;
+    let capturedData = session?.captured_data || {};
+
+    if (!currentNode) {
+        currentNode = findStartNode(nodes);
+        if (!currentNode) return { handled: false, reason: 'missing_start' };
+    } else {
+        // Persist collected input when the node is a collect/input step
+        const nodeType = (currentNode.data?.type || currentNode.data?.nodeType || '').toLowerCase();
+        if (input && nodeType.includes('collect')) {
+            capturedData = { ...capturedData, [currentNode.id]: input };
+        }
+    }
+
+    const normalizedInput = (input || '').trim().toLowerCase();
+    let nextEdge;
+
+    if (isButtonInput && normalizedInput) {
+        nextEdge = edges.find(
+            (e) =>
+                e.source === currentNode.id &&
+                ((e.label || '').toLowerCase() === normalizedInput || (e.data?.label || '').toLowerCase() === normalizedInput)
+        );
+    }
+
+    if (!nextEdge) {
+        nextEdge = edges.find((e) => e.source === currentNode.id && (!e.label || e.label.trim() === ''));
+    }
+
+    if (!nextEdge) {
+        nextEdge = edges.find((e) => e.source === currentNode.id);
+    }
+
+    if (!nextEdge) return { handled: false, reason: 'no_edge' };
+
+    const targetNode = nodes.find((n) => n.id === nextEdge.target);
+    if (!targetNode) return { handled: false, reason: 'missing_target' };
+
+    const sent = await sendNodeMessage(targetNode, phone);
+    if (!sent) return { handled: false, reason: 'empty_message' };
+
+    await client.query(
+        `INSERT INTO user_sessions (phone_number, current_node_id, captured_data, last_active)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (phone_number) DO UPDATE SET current_node_id = $2, captured_data = $3, last_active = NOW()`,
+        [phone, targetNode.id, capturedData]
+    );
+
+    return { handled: true };
+};
+
 // --- WEBHOOK HANDLER ---
 app.post('/webhook', async (req, res) => {
   const body = req.body;
@@ -484,7 +628,13 @@ app.post('/webhook', async (req, res) => {
              driverId = Date.now().toString();
              await client.query(`INSERT INTO drivers (id, phone_number, name) VALUES ($1, $2, 'Guest')`, [driverId, from]);
         }
-        
+
+        await client.query(
+            `INSERT INTO leads (phone_number, status) VALUES ($1, 'Open')
+             ON CONFLICT (phone_number) DO NOTHING`,
+            [from]
+        );
+
         // Log Incoming
         await client.query(
              `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'driver', $3, $4, 'text')`,
@@ -494,19 +644,7 @@ app.post('/webhook', async (req, res) => {
         const settingsRes = await client.query('SELECT * FROM bot_settings WHERE id = 1');
         const settings = settingsRes.rows[0] || { is_enabled: true, routing_strategy: 'HYBRID_BOT_FIRST' };
 
-        let botHandled = false;
-        
-        // --- LOGIC: HYBRID STRATEGY ---
-        // If strategy is NOT 'AI_ONLY', try the bot first.
-        if (settings.is_enabled && settings.routing_strategy !== 'AI_ONLY') {
-            const engine = new BotEngine(client);
-            // Engine returns FALSE if:
-            // 1. Flow is empty or invalid
-            // 2. Flow has the "bad placeholder"
-            // 3. User has already completed the flow (flow_completed = true)
-            // 4. Start node is missing
-            botHandled = await engine.processUser(from, input, driverId);
-        }
+        const flowResult = await handleFlowConversation(client, from, input, msg.type === 'interactive');
 
         // --- LOGIC: FALLBACK (AI OR HUMAN) ---
         // 1. If strategy is 'AI_ONLY', botHandled is false -> Try AI.
