@@ -364,29 +364,18 @@ const SIDEBAR_CATEGORIES = [
     }
 ];
 
-const initialNodes: Node[] = [
-    {
-        id: 'start',
-        type: 'custom',
-        position: { x: 50, y: 300 },
-        data: { type: 'start' }
-    }
-];
-
 interface BotBuilderProps {
-    isLiveMode?: boolean;
+    isLiveMode?: boolean; 
 }
 
-const FALLBACK_SETTINGS: BotSettings = {
-    isEnabled: true,
-    routingStrategy: 'HYBRID_BOT_FIRST',
-    systemInstruction: 'You are a friendly recruiter.',
-    steps: [],
-    flowData: {
-        nodes: initialNodes,
-        edges: []
+const initialNodes: Node[] = [
+    { 
+        id: 'start', 
+        type: 'custom', 
+        position: { x: 50, y: 300 }, 
+        data: { type: 'start' } 
     }
-};
+];
 
 export const BotBuilder: React.FC<BotBuilderProps> = ({ isLiveMode = false }) => {
   return (
@@ -401,24 +390,20 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [isSaving, setIsSaving] = useState(false);
   const [isTestChatOpen, setIsTestChatOpen] = useState(false);
-  const [sourceSettings, setSourceSettings] = useState<BotSettings | null>(null);
   const reactFlowInstance = useReactFlow();
 
   useEffect(() => {
     const load = async () => {
-        let settings: BotSettings | null = null;
+        let settings: BotSettings;
         if (isLiveMode) {
-             try { settings = await liveApiService.getBotSettings(); }
-             catch(e) { settings = null; }
+             try { settings = await liveApiService.getBotSettings(); } 
+             catch(e) { return; }
         } else {
              settings = mockBackend.getBotSettings();
         }
 
-        const effectiveSettings = settings || FALLBACK_SETTINGS;
-        setSourceSettings(effectiveSettings);
-
-        if (effectiveSettings.flowData && effectiveSettings.flowData.nodes.length > 0) {
-            const restoredNodes = effectiveSettings.flowData.nodes.map((n: any) => ({
+        if (settings && settings.flowData && settings.flowData.nodes.length > 0) {
+            const restoredNodes = settings.flowData.nodes.map((n: any) => ({
                 ...n,
                 data: {
                     ...n.data,
@@ -428,10 +413,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 }
             }));
             setNodes(restoredNodes);
-            setEdges(effectiveSettings.flowData.edges);
-        } else {
-            setNodes(initialNodes);
-            setEdges([]);
+            setEdges(settings.flowData.edges);
         }
     };
     load();
@@ -500,13 +482,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
           data: { ...n.data, icon: undefined, onChange: undefined, onDelete: undefined }
       }));
 
-      // We still update the legacy 'steps' for compatibility if needed,
+      // We still update the legacy 'steps' for compatibility if needed, 
       // but the real source of truth is now flowData
-      const baseSettings = sourceSettings || FALLBACK_SETTINGS;
       const newSettings: BotSettings = {
-          ...baseSettings,
+          ...mockBackend.getBotSettings(),
           steps: [], // Deprecated: Linear steps cleared in favor of flowData
-          flowData: { nodes: cleanNodes, edges }
+          flowData: { nodes: cleanNodes, edges } 
       };
 
       if (isLiveMode) {
@@ -514,7 +495,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       } else {
           mockBackend.updateBotSettings(newSettings);
       }
-      setSourceSettings(newSettings);
       setTimeout(() => setIsSaving(false), 800);
   };
 

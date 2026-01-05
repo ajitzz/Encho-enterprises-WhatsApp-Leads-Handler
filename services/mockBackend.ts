@@ -34,7 +34,8 @@ const MOCK_DRIVERS: Driver[] = [
       hasVehicle: false,
       isLocallyAvailable: true
     },
-    isBotActive: false
+    isBotActive: false,
+    flowCompleted: false
   }
 ];
 
@@ -125,7 +126,8 @@ class MockBackendService {
         onboardingStep: OnboardingStep.WELCOME_SENT,
         qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
         isBotActive: true,
-        currentBotStepId: undefined
+        currentBotStepId: undefined,
+        flowCompleted: false
     };
 
     // Auto-start bot for ad leads
@@ -160,6 +162,7 @@ class MockBackendService {
     if (text.toLowerCase() === 'reset') {
         driver.isBotActive = true;
         driver.currentBotStepId = undefined;
+        driver.flowCompleted = false;
         this.addMessage(driver.id, { id: 'sys', sender: 'system', text: 'Bot Reset.', timestamp: Date.now(), type: 'text' });
         this.persist();
         return { driver, actionNeeded: 'NONE' };
@@ -171,6 +174,12 @@ class MockBackendService {
     }
 
     if (settings.isEnabled && settings.routingStrategy === 'HYBRID_BOT_FIRST') {
+        // --- LOGIC CHANGE ---
+        // If flow is completed and no active step, skip Bot, go to AI
+        if (!driver.currentBotStepId && driver.flowCompleted) {
+            return { driver, actionNeeded: 'AI_REPLY' };
+        }
+
         const handled = this.processBotStep(driver, text);
         if (handled) return { driver, actionNeeded: 'NONE' };
         
@@ -207,6 +216,7 @@ class MockBackendService {
                currentNode = nodes.find(n => n.id === currentNodeId);
            } else {
                driver.isBotActive = false; // End of flow
+               driver.flowCompleted = true; // Mark as done
                this.persist();
                return false; 
            }
@@ -242,6 +252,8 @@ class MockBackendService {
           if (!isInput) {
               // Recursive step for statements
               setTimeout(() => this.processBotStep(driver, 'continue'), 1000);
+          } else {
+              // Waiting for input, NOT complete yet
           }
           
           this.persist();

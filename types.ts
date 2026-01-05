@@ -51,6 +51,7 @@ export interface Driver {
   // Bot State Tracking
   currentBotStepId?: string; 
   isBotActive: boolean;
+  flowCompleted?: boolean; // NEW: Tracks if the initial flow is done
 }
 
 export interface MetaTemplate {
