@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Node, Edge } from '@xyflow/react';
-import { Send, Bot, User, RefreshCw, X } from 'lucide-react';
+import { Send, Bot, RefreshCw, X, Video as VideoIcon } from 'lucide-react';
 
 interface TestBotChatProps {
   nodes: Node[];
@@ -13,6 +13,7 @@ interface ChatMessage {
   sender: 'bot' | 'user';
   text?: string;
   image?: string;
+  video?: string;
   options?: string[];
 }
 
@@ -43,16 +44,26 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
     }
   };
 
-  const addBotMessage = (text?: string, image?: string, options?: string[]) => {
+  const addBotMessage = (text?: string, mediaUrl?: string, options?: string[], label?: string) => {
     setIsTyping(true);
     setTimeout(() => {
-      setMessages(prev => [...prev, {
+      const msg: ChatMessage = {
         id: Date.now().toString(),
         sender: 'bot',
         text,
-        image,
         options
-      }]);
+      };
+
+      if (label === 'Video' || (mediaUrl && mediaUrl.includes('.mp4'))) {
+          msg.video = mediaUrl;
+      } else if (label === 'Image' || (mediaUrl && (mediaUrl.includes('.jpg') || mediaUrl.includes('.png')))) {
+          msg.image = mediaUrl;
+      } else if (mediaUrl) {
+          // Fallback for other media types (like docs) treated as text link for test bot
+          msg.text = `${text || ''} \n[📎 Attachment: ${mediaUrl}]`;
+      }
+
+      setMessages(prev => [...prev, msg]);
       setIsTyping(false);
     }, 600);
   };
@@ -72,21 +83,25 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
 
     // If it's a content node, show it
     if (node.data.type !== 'start') {
-        const { message, mediaUrl, options, inputType } = node.data;
+        const { message, mediaUrl, options, inputType, label } = node.data;
         
         // Show content
         if (message || mediaUrl || (options && options.length > 0)) {
-            addBotMessage(message, mediaUrl, options);
+            addBotMessage(message, mediaUrl, options, label);
         }
 
-        // If it's purely a display node (not expecting input), move to next automatically
-        // Unless it's an option node or explicit input node
+        // Determine if we should wait for input
         const isInput = ['text', 'number', 'email', 'date', 'time'].includes(inputType) || inputType === 'option' || (options && options.length > 0);
         
         if (!isInput) {
-            // Auto-advance after delay
+            // Auto-advance after delay (for Statements)
             setTimeout(() => {
-                const outgoingEdge = edges.find(e => e.source === nodeId);
+                // Find edge connected to 'main' handle (or implicit if only one)
+                const outgoingEdge = edges.find(e => 
+                    e.source === nodeId && 
+                    (e.sourceHandle === 'main' || e.sourceHandle === null || e.sourceHandle === undefined)
+                );
+                
                 if (outgoingEdge) {
                     processNode(outgoingEdge.target);
                 }
@@ -147,9 +162,9 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
   };
 
   return (
-    <div className="absolute right-6 bottom-6 w-96 h-[600px] bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col z-50 animate-in slide-in-from-bottom-10">
+    <div className="fixed right-6 bottom-6 w-96 h-[600px] bg-white rounded-2xl shadow-2xl border border-gray-200 flex flex-col z-[100] animate-in slide-in-from-bottom-10">
       {/* Header */}
-      <div className="bg-gray-900 text-white p-4 rounded-t-2xl flex justify-between items-center">
+      <div className="bg-gray-900 text-white p-4 rounded-t-2xl flex justify-between items-center shadow-md">
         <div className="flex items-center gap-2">
             <Bot size={18} />
             <span className="font-bold">Test Bot</span>
@@ -169,10 +184,18 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
         {messages.map((msg) => (
             <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${msg.sender === 'user' ? 'bg-blue-600 text-white rounded-br-none' : 'bg-white border border-gray-200 text-gray-800 rounded-bl-none shadow-sm'}`}>
+                    
+                    {msg.video && (
+                         <div className="mb-2 rounded-lg overflow-hidden bg-black flex items-center justify-center relative">
+                            <video src={msg.video} controls className="w-full max-h-48" />
+                         </div>
+                    )}
+
                     {msg.image && (
                         <img src={msg.image} alt="Bot Media" className="w-full h-32 object-cover rounded-lg mb-2" />
                     )}
-                    {msg.text && <p>{msg.text}</p>}
+
+                    {msg.text && <p className="whitespace-pre-wrap">{msg.text}</p>}
                     
                     {/* Interactive Buttons */}
                     {msg.options && (
