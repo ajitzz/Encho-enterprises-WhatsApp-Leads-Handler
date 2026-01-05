@@ -491,19 +491,35 @@ class BotEngine {
 
 // --- NEW BOT STUDIO FLOW ENGINE ---
 const getActiveFlowFromDb = async (client) => {
-    const res = await client.query(
+    // Prefer the new chatbot_flows table if present, otherwise fall back to legacy flows
+    const chatbotFlowRes = await client.query(
         'SELECT flow FROM chatbot_flows WHERE is_active = TRUE ORDER BY created_at DESC LIMIT 1'
     );
-    if (!res.rowCount) return null;
 
-    const rawFlow = res.rows[0].flow;
-    if (!rawFlow) return null;
-    try {
-        return typeof rawFlow === 'string' ? JSON.parse(rawFlow) : rawFlow;
-    } catch (e) {
-        console.error('Failed to parse chatbot flow JSON:', e.message);
+    if (chatbotFlowRes.rowCount) {
+        const rawFlow = chatbotFlowRes.rows[0].flow;
+        if (rawFlow) {
+            try {
+                return typeof rawFlow === 'string' ? JSON.parse(rawFlow) : rawFlow;
+            } catch (e) {
+                console.error('Failed to parse chatbot flow JSON:', e.message);
+            }
+        }
+    }
+
+    const legacyFlowRes = await client.query('SELECT nodes, edges FROM flows ORDER BY updated_at DESC LIMIT 1');
+    if (!legacyFlowRes.rowCount) return null;
+
+    const nodes = legacyFlowRes.rows[0].nodes || [];
+    const edges = legacyFlowRes.rows[0].edges || [];
+
+    // Treat placeholder flows as invalid so they don't get served to WhatsApp users
+    if (JSON.stringify(nodes).toLowerCase().includes('replace this sample message')) {
+        console.warn('🚫 Detected placeholder content in legacy flow. Ignoring it.');
         return null;
     }
+
+    return { nodes, edges };
 };
 
 const findStartNode = (nodes) => {
@@ -645,6 +661,7 @@ app.post('/webhook', async (req, res) => {
         const settings = settingsRes.rows[0] || { is_enabled: true, routing_strategy: 'HYBRID_BOT_FIRST' };
 
         const flowResult = await handleFlowConversation(client, from, input, msg.type === 'interactive');
+        const botHandled = flowResult?.handled;
 
         // --- LOGIC: FALLBACK (AI OR HUMAN) ---
         // 1. If strategy is 'AI_ONLY', botHandled is false -> Try AI.
