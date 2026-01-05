@@ -223,6 +223,14 @@ class BotEngine {
   }
 
   async processUser(phone, input, driverId) {
+    // 0. RESET COMMAND
+    if (input.toLowerCase().trim() === 'reset' || input.toLowerCase().trim() === 'restart') {
+        console.log(`🔄 Resetting session for ${phone}`);
+        await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
+        await sendWhatsApp(phone, 'text', { text: "Session reset. Say 'Hi' to start again." });
+        return true;
+    }
+
     const { nodes, edges } = await this.getFlow();
     if (!nodes || nodes.length === 0) return false;
 
@@ -230,10 +238,17 @@ class BotEngine {
     let currentNodeId = sessionRes.rows[0]?.current_node_id;
     let currentNode = nodes.find(n => n.id === currentNodeId);
     
+    // SAFETY CHECK: If session points to a non-existent node (stale flow), reset.
+    if (currentNodeId && !currentNode) {
+        console.log("⚠️ Stale session detected. Resetting to start.");
+        await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
+        currentNodeId = null; 
+    }
+
     const driverRes = await this.client.query('SELECT * FROM drivers WHERE id = $1', [driverId]);
     const driver = driverRes.rows[0];
 
-    // --- STEP 1: HANDLE INPUT (If in session) ---
+    // --- STEP 1: HANDLE INPUT (If in session and we have a valid current node) ---
     if (currentNode) {
         console.log(`📍 Processing Input at node: ${currentNode.data.label} (ID: ${currentNodeId})`);
         
@@ -252,22 +267,23 @@ class BotEngine {
         // Find Next Edge
         let nextEdge;
         
-        if (currentNode.data.inputType === 'option' || currentNode.data.options?.length > 0) {
+        // Option Matching Logic
+        if (currentNode.data.inputType === 'option' || (currentNode.data.options && currentNode.data.options.length > 0)) {
             const opts = currentNode.data.options || [];
             const selectedIdx = opts.findIndex(o => o.toLowerCase().includes(input.toLowerCase()) || input.toLowerCase().includes(o.toLowerCase()));
             
             if (selectedIdx !== -1) {
                 nextEdge = edges.find(e => e.source === currentNodeId && e.sourceHandle === `opt_${selectedIdx}`);
             } else {
-                console.log("   Input did not match options. Falling back to AI/Default.");
-                // If no match and it's strictly an option node, we might want to return false to let AI handle it?
-                // Or loop back. For now, let's assume if it's not a match, we fail the bot flow so AI picks it up.
-                return false; 
+                // If it was a Strict Option node, we might want to loop or handoff. 
+                // For this simple bot, we'll try to follow the 'main' edge if option match fails, 
+                // effectively treating it as a fallback.
+                console.log("   Input did not match options. Checking for fallback edge...");
             }
         } 
         
         if (!nextEdge) {
-            // Try default edge
+            // Try default edge (sourceHandle null or 'main')
             nextEdge = edges.find(e => e.source === currentNodeId && (e.sourceHandle === 'main' || !e.sourceHandle));
         }
 
@@ -277,6 +293,8 @@ class BotEngine {
         } else {
             console.log("   End of Flow reached (No outgoing edge). Deleting session.");
             await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
+            // If the flow ended, we might want to return true (handled) or false (let AI reply?).
+            // Let's return true to stop AI from replying to the last input which ended the flow.
             return true;
         }
 
@@ -284,6 +302,7 @@ class BotEngine {
         // New Session: Find Start Node
         const startNode = nodes.find(n => n.data.type === 'start');
         if (startNode) {
+            // Find edge connected to start
             const startEdge = edges.find(e => e.source === startNode.id);
             if (startEdge) {
                 currentNodeId = startEdge.target;
@@ -292,11 +311,12 @@ class BotEngine {
         }
     }
 
-    // --- STEP 2: SEND MESSAGES CHAIN ---
-    if (!currentNode) return false;
+    // --- STEP 2: SEND MESSAGES CHAIN (Auto-advance statements) ---
+    if (!currentNode) return false; // No flow to start
 
     let stepsExecuted = 0;
-    while (currentNode && stepsExecuted < 5) {
+    // Limit chain to avoid infinite loops
+    while (currentNode && stepsExecuted < 10) {
         stepsExecuted++;
         
         console.log(`   Sending Node: ${currentNode.data.label}`);
@@ -327,18 +347,23 @@ class BotEngine {
         );
         
         // --- CHECK IF WE STOP HERE ---
-        // A node is an "Input Node" (pauses flow) if it expects user data.
-        // 'statement' type means just display and move on.
-        // 'option', 'text', 'email', etc. mean wait for input.
-        const type = inputType || 'text'; // Default fallback
-        const isInputNode = ['text', 'number', 'email', 'website', 'date', 'time', 'option'].includes(type) || (options?.length > 0);
+        // CRITICAL FIX: If inputType is undefined/missing (legacy data), 
+        // default to 'statement' (don't wait) UNLESS it has options.
+        let type = inputType;
+        if (!type) {
+             if (options && options.length > 0) type = 'option';
+             else if (['Text', 'Image', 'Video', 'File'].includes(label)) type = 'statement'; 
+             else type = 'text';
+        }
+
+        const isInputNode = ['text', 'number', 'email', 'website', 'date', 'time', 'option'].includes(type);
         
         if (isInputNode) {
             console.log("   Waiting for user input...");
-            return true;
+            return true; // STOP here and wait for next webhook event
         }
 
-        // If NOT input node, find next edge immediately
+        // If NOT input node (i.e. 'statement'), immediately find next edge and loop again
         const outgoingEdges = edges.filter(e => e.source === currentNode.id);
         if (outgoingEdges.length > 0) {
             const nextEdge = outgoingEdges.find(e => e.sourceHandle === 'main' || !e.sourceHandle);
@@ -346,7 +371,7 @@ class BotEngine {
                 currentNodeId = nextEdge.target;
                 currentNode = nodes.find(n => n.id === currentNodeId);
             } else {
-                break; // No main edge found
+                break; // No main edge found, stop
             }
         } else {
              // End of flow
