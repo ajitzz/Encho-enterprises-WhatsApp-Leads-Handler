@@ -81,16 +81,22 @@ const initDB = async () => {
 
     await client.query(`INSERT INTO bot_settings (id, is_enabled) VALUES (1, true) ON CONFLICT (id) DO NOTHING`);
 
-    // Cleanup broken flows
+    // --- FIX: CLEANUP BROKEN FLOWS AND INJECT VALID DEFAULT ---
     const flowCheck = await client.query('SELECT * FROM flows');
-    const hasBrokenFlow = flowCheck.rows.some(row => JSON.stringify(row.nodes).includes("Replace this sample message"));
+    // Check if empty OR if it contains the broken placeholder text ("Replace this sample message")
+    const hasBrokenFlow = flowCheck.rows.some(row => 
+        JSON.stringify(row.nodes).toLowerCase().includes("replace this sample message")
+    );
     
     if (parseInt(flowCheck.rowCount) === 0 || hasBrokenFlow) {
         console.log("🧹 Cleaning up broken/empty flows & injecting defaults...");
+        
+        // Remove existing to ensure clean state
         await client.query('TRUNCATE flows');
+        
         const defaultNodes = [
             { id: 'start', type: 'custom', position: { x: 50, y: 300 }, data: { type: 'start', label: 'Start' } },
-            { id: 'welcome', type: 'custom', position: { x: 300, y: 300 }, data: { label: 'Text', inputType: 'text', message: 'Welcome to Uber Fleet! How can I help you today?', saveToField: 'last_inquiry' } }
+            { id: 'welcome', type: 'custom', position: { x: 300, y: 300 }, data: { label: 'Text', inputType: 'text', message: 'Welcome to Uber Fleet! How can I help you start driving today?', saveToField: 'last_inquiry' } }
         ];
         const defaultEdges = [
             { id: 'e1', source: 'start', target: 'welcome', sourceHandle: 'main' }
@@ -226,7 +232,8 @@ const generateAIResponse = async (input, systemInstruction) => {
         const model = ai.models; 
         const response = await model.generateContent({
             model: 'gemini-1.5-flash',
-            contents: input,
+            // FIX: Ensure contents is formatted correctly for the new SDK
+            contents: [{ role: 'user', parts: [{ text: input }] }],
             config: { systemInstruction: systemInstruction || "You are a helpful assistant." }
         });
         return response.text;
@@ -281,7 +288,7 @@ class BotEngine {
     // If no active session exists AND user has already finished the flow, 
     // we return FALSE so the Webhook handler triggers the AI.
     if (!currentNode && driver.flow_completed) {
-        console.log("ℹ️ User completed flow. Delegating to AI.");
+        console.log(`ℹ️ Driver ${driver.name} completed flow. Delegating to AI.`);
         return false; 
     }
 
@@ -350,11 +357,11 @@ class BotEngine {
         
         const messageText = this.replaceVariables(currentNode.data.message || '', driver);
         
-        // Block placeholder (Case insensitive check)
+        // FIX: Block "Replace this sample message" placeholder
         if (messageText && messageText.toLowerCase().includes("replace this sample message")) {
             console.warn("🚫 Placeholder detected. Aborting Bot Flow to AI.");
             await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
-            return false;
+            return false; // Return false so AI picks up the welcome
         }
 
         const { mediaUrl, label, options, inputType } = currentNode.data;
@@ -458,6 +465,10 @@ app.post('/webhook', async (req, res) => {
         // If strategy is NOT 'AI_ONLY', try the bot first.
         if (settings.is_enabled && settings.routing_strategy !== 'AI_ONLY') {
             const engine = new BotEngine(client);
+            // Engine returns FALSE if:
+            // 1. Flow is empty
+            // 2. Flow has the "bad placeholder"
+            // 3. User has already completed the flow (flow_completed = true)
             botHandled = await engine.processUser(from, input, driverId);
         }
 
