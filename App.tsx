@@ -10,7 +10,7 @@ import { AITraining } from './components/AITraining';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
 import { Driver, LeadStatus, Notification, BotSettings } from './types';
-import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split } from 'lucide-react';
+import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split, Bot } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -147,7 +147,7 @@ export default function App() {
     }
   };
 
-  const handleStrategyChange = async (strategy: 'HYBRID_BOT_FIRST' | 'AI_ONLY') => {
+  const handleStrategyChange = async (strategy: 'BOT_ONLY' | 'HYBRID_BOT_FIRST' | 'AI_ONLY') => {
       if (!botSettings) return;
       const newSettings = { ...botSettings, routingStrategy: strategy };
       
@@ -195,14 +195,23 @@ export default function App() {
                    {botSettings && (
                      <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg p-1 shadow-sm mr-2">
                          <button 
+                            onClick={() => handleStrategyChange('BOT_ONLY')}
+                            className={`px-3 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 transition-colors ${botSettings.routingStrategy === 'BOT_ONLY' ? 'bg-black text-white' : 'text-gray-400 hover:text-gray-600'}`}
+                            title="Strict Bot Flow. Restarts if finished."
+                         >
+                            <Bot size={14} /> Bot Only
+                         </button>
+                         <button 
                             onClick={() => handleStrategyChange('HYBRID_BOT_FIRST')}
                             className={`px-3 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 transition-colors ${botSettings.routingStrategy === 'HYBRID_BOT_FIRST' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-600'}`}
+                            title="Bot first, then AI handles complex queries."
                          >
-                            <Split size={14} /> Bot Flow
+                            <Split size={14} /> Hybrid
                          </button>
                          <button 
                             onClick={() => handleStrategyChange('AI_ONLY')}
                             className={`px-3 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 transition-colors ${botSettings.routingStrategy === 'AI_ONLY' ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-gray-600'}`}
+                            title="AI handles everything immediately."
                          >
                             <SettingsIcon size={14} /> AI Only
                          </button>
