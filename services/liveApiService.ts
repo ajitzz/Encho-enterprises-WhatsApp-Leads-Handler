@@ -1,36 +1,27 @@
 import { Driver, BotSettings } from '../types';
 
-// Default to relative path (Vite proxy)
-// If running locally and proxy fails, we try direct port 3001
+// Default to relative path (Vite proxy), fallback to direct backend for debugging
 const API_BASE_URL = ''; 
 const FALLBACK_URL = 'http://localhost:3001';
 
 export const liveApiService = {
   // Fetch drivers
   getDrivers: async (): Promise<Driver[]> => {
+    // Try relative path first (Vite Proxy)
     let url = `${API_BASE_URL}/api/drivers`;
-    
     try {
       let response = await fetch(url);
       
-      // If 404/500 and we are local, try direct port fallback
+      // If proxy returns 404 or fails, try direct backend (if running locally)
       if (!response.ok && window.location.hostname === 'localhost') {
-         console.warn(`Proxy failed at ${url} (${response.status}), trying direct backend...`);
-         // Try /api/drivers at port 3001
+         console.warn("Proxy failed, trying direct backend port 3001...");
          url = `${FALLBACK_URL}/api/drivers`;
          response = await fetch(url);
       }
 
       if (!response.ok) {
-          // Clone to read text safely
-          const errText = await response.clone().text();
-          try {
-             const errJson = await response.json();
-             throw new Error(`API Error: ${errJson.error || response.statusText}`);
-          } catch (e) {
-             // If not JSON, it's likely a static 404 page or "File not found" text
-             throw new Error(`API Error ${response.status}: ${errText.substring(0, 50)}...`);
-          }
+          const text = await response.text();
+          throw new Error(`API Error ${response.status}: ${response.statusText}. Response: ${text.substring(0, 100)}`);
       }
       return await response.json();
     } catch (error: any) {
@@ -56,11 +47,12 @@ export const liveApiService = {
   // --- SYSTEM STATUS ---
   checkHealth: async () => {
       try {
+          // Try Ping First (No DB dependency)
+          const pingRes = await fetch(`${API_BASE_URL}/api/ping`);
+          if (!pingRes.ok) return { database: 'disconnected', whatsapp: 'unknown', ai: 'unknown' };
+
           const res = await fetch(`${API_BASE_URL}/api/health`);
           if (res.ok) return await res.json();
-          // Fallback check
-          const fallbackRes = await fetch(`${FALLBACK_URL}/api/health`);
-          if (fallbackRes.ok) return await fallbackRes.json();
           return { database: 'disconnected', whatsapp: 'unknown', ai: 'unknown' };
       } catch (e) {
           return { database: 'disconnected', whatsapp: 'unknown', ai: 'unknown' };
