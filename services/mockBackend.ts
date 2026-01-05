@@ -41,7 +41,9 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
       message: 'നന്ദി! നിങ്ങളുടെ കൈയ്യിൽ valid ആയ Commercial Driving License ഉണ്ടോ?',
       inputType: 'option',
       options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'],
-      nextStepId: 'step_3'
+      nextStepId: 'step_3',
+      templateName: 'encho_enterprises', // USING TEMPLATE HERE
+      templateLanguage: 'en_US'
     },
     {
       id: 'step_3',
@@ -260,9 +262,9 @@ class MockBackendService {
             const botMsg: Message = {
                 id: Date.now().toString() + '_bot',
                 sender: 'system',
-                text: nextStep.message,
+                text: nextStep.templateName ? `[Template: ${nextStep.templateName}] ${nextStep.message}` : nextStep.message,
                 timestamp: Date.now() + 500, // Slight delay
-                type: nextStep.inputType === 'option' ? 'options' : 'text',
+                type: nextStep.templateName ? 'template' : (nextStep.inputType === 'option' ? 'options' : 'text'),
                 options: nextStep.options
             };
             this.addMessage(driver.id, botMsg);
@@ -309,11 +311,12 @@ class MockBackendService {
     const firstStep = this.botSettings.steps[0];
     if (firstStep) {
         setTimeout(() => {
+            const isTemplate = !!firstStep.templateName;
             this.addMessage(driver!.id, {
                 id: Date.now().toString() + '_auto',
                 sender: 'system',
-                text: `Hi ${name}! ${firstStep.message}`,
-                type: firstStep.inputType === 'option' ? 'options' : 'text',
+                text: isTemplate ? `[Template: ${firstStep.templateName}] Hi ${name}!` : `Hi ${name}! ${firstStep.message}`,
+                type: isTemplate ? 'template' : (firstStep.inputType === 'option' ? 'options' : 'text'),
                 options: firstStep.options,
                 timestamp: Date.now()
             });

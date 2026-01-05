@@ -73,11 +73,15 @@ export type InputType = 'text' | 'image' | 'option' | 'location';
 export interface BotStep {
   id: string;
   title: string;
-  message: string; // What the bot says
+  message: string; // What the bot says (Fallback text if template used)
   inputType: InputType; // What the user should reply with
   options?: string[]; // If inputType is 'option'
   saveToField?: 'name' | 'vehicleRegistration' | 'availability' | 'document'; // Where to save the data
   nextStepId?: string | 'END' | 'AI_HANDOFF';
+  
+  // Template Integration
+  templateName?: string; // The ID/Name of the template in Meta
+  templateLanguage?: string; // e.g. en_US, ml_IN
 }
 
 export interface BotSettings {

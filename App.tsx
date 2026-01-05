@@ -6,10 +6,11 @@ import { Simulator } from './components/Simulator';
 import { WebhookConfigModal } from './components/WebhookConfigModal';
 import { NotificationToast } from './components/NotificationToast';
 import { BotBuilder } from './components/BotBuilder';
+import { AITraining } from './components/AITraining';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
-import { Driver, LeadStatus, Notification } from './types';
-import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon } from 'lucide-react';
+import { Driver, LeadStatus, Notification, BotSettings } from './types';
+import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -23,6 +24,9 @@ export default function App() {
   // Data Source Toggle: 'mock' or 'live'
   const [dataSource, setDataSource] = useState<'mock' | 'live'>('mock');
 
+  // Bot Strategy for Dashboard
+  const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
+
   // Sync with backend (Mock or Live)
   useEffect(() => {
     let unsubscribe: () => void = () => {};
@@ -30,17 +34,26 @@ export default function App() {
     const fetchData = async () => {
       if (dataSource === 'mock') {
          setDrivers(mockBackend.getDrivers());
-         unsubscribe = mockBackend.subscribe(() => setDrivers(mockBackend.getDrivers()));
+         setBotSettings(mockBackend.getBotSettings());
+         unsubscribe = mockBackend.subscribe(() => {
+             setDrivers(mockBackend.getDrivers());
+             setBotSettings(mockBackend.getBotSettings());
+         });
       } else {
          // Live Mode: Poll the real server
          try {
            const data = await liveApiService.getDrivers();
            setDrivers(data);
+           const settings = await liveApiService.getBotSettings();
+           setBotSettings(settings);
+
            // Subscribe triggers polling internally (now every 2s)
            unsubscribe = liveApiService.subscribeToUpdates(async () => {
                try {
                    const updated = await liveApiService.getDrivers();
                    setDrivers(updated);
+                   // Optionally re-fetch settings occasionally if multiple users? 
+                   // For now, assume settings don't change frequently from other users.
                } catch (e) {
                    // Silent fail on poll error to avoid spamming console
                }
@@ -134,6 +147,24 @@ export default function App() {
     }
   };
 
+  const handleStrategyChange = async (strategy: 'HYBRID_BOT_FIRST' | 'AI_ONLY') => {
+      if (!botSettings) return;
+      const newSettings = { ...botSettings, routingStrategy: strategy };
+      
+      // Optimistic Update
+      setBotSettings(newSettings);
+
+      if (dataSource === 'mock') {
+          mockBackend.updateBotSettings(newSettings);
+      } else {
+          try {
+              await liveApiService.saveBotSettings(newSettings);
+          } catch(e) {
+              alert("Failed to update strategy");
+          }
+      }
+  };
+
   // Derived Stats
   const stats = {
     total: drivers.length,
@@ -160,6 +191,24 @@ export default function App() {
                  </div>
                  
                  <div className="flex items-center gap-2">
+                   {/* Routing Strategy Widget */}
+                   {botSettings && (
+                     <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg p-1 shadow-sm mr-2">
+                         <button 
+                            onClick={() => handleStrategyChange('HYBRID_BOT_FIRST')}
+                            className={`px-3 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 transition-colors ${botSettings.routingStrategy === 'HYBRID_BOT_FIRST' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-600'}`}
+                         >
+                            <Split size={14} /> Bot Flow
+                         </button>
+                         <button 
+                            onClick={() => handleStrategyChange('AI_ONLY')}
+                            className={`px-3 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 transition-colors ${botSettings.routingStrategy === 'AI_ONLY' ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-gray-600'}`}
+                         >
+                            <SettingsIcon size={14} /> AI Only
+                         </button>
+                     </div>
+                   )}
+
                    {dataSource === 'live' && (
                      <button
                         onClick={() => setShowWebhookModal(true)}
@@ -270,6 +319,9 @@ export default function App() {
 
         {/* VIEW: BOT STUDIO */}
         {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
+
+        {/* VIEW: AI TRAINING */}
+        {activeTab === 'ai-training' && <AITraining isLiveMode={dataSource === 'live'} />}
 
         {/* Modals & Drawers */}
         {showWebhookModal && (

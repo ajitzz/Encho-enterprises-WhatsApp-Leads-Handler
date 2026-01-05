@@ -87,7 +87,9 @@ const DEFAULT_BOT_SETTINGS = {
       message: 'നന്ദി! നിങ്ങളുടെ കൈയ്യിൽ valid ആയ Commercial Driving License ഉണ്ടോ?',
       inputType: 'option',
       options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'],
-      nextStepId: 'step_3'
+      nextStepId: 'step_3',
+      templateName: 'encho_enterprises', // Added template
+      templateLanguage: 'en_US'
     },
     {
       id: 'step_3',
@@ -207,7 +209,8 @@ const ensureDB = async (req, res, next) => {
 
 // --- HELPERS ---
 
-const sendWhatsAppMessage = async (to, body, options = null) => {
+// Updated to handle Templates
+const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
     console.error("❌ Cannot send message: Missing META_API_TOKEN or PHONE_NUMBER_ID");
     return;
@@ -219,8 +222,15 @@ const sendWhatsAppMessage = async (to, body, options = null) => {
     to: to,
   };
 
-  if (options && options.length > 0) {
-    // Interactive Button Message
+  if (templateName) {
+    // TEMPLATE MESSAGE
+    payload.type = 'template';
+    payload.template = {
+        name: templateName,
+        language: { code: language }
+    };
+  } else if (options && options.length > 0) {
+    // INTERACTIVE BUTTONS
     payload.type = 'interactive';
     payload.interactive = {
       type: 'button',
@@ -233,13 +243,13 @@ const sendWhatsAppMessage = async (to, body, options = null) => {
       }
     };
   } else {
-    // Standard Text
+    // STANDARD TEXT
     payload.type = 'text';
     payload.text = { body: body };
   }
 
   try {
-    console.log(`Sending message to ${to}: ${body}`);
+    console.log(`Sending message to ${to} [Type: ${payload.type}]`);
     await axios.post(
       `https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`,
       payload,
@@ -413,6 +423,7 @@ app.post('/webhook', ensureDB, async (req, res) => {
             // --- BOT LOGIC ENGINE ---
             let replyText = null;
             let replyOptions = null;
+            let replyTemplate = null; // New Template Variable
             let shouldCallAI = false;
 
             // STRATEGY: AI ONLY
@@ -452,7 +463,10 @@ app.post('/webhook', ensureDB, async (req, res) => {
                              const nextStep = botSettings.steps.find(s => s.id === nextId);
                              if (nextStep) {
                                  replyText = nextStep.message;
-                                 if (nextStep.inputType === 'option') {
+                                 if (nextStep.templateName) {
+                                     replyTemplate = nextStep.templateName;
+                                 }
+                                 else if (nextStep.inputType === 'option') {
                                      replyOptions = nextStep.options;
                                  }
                              } else {
@@ -463,7 +477,9 @@ app.post('/webhook', ensureDB, async (req, res) => {
                     } else {
                         // It is a new driver, send the FIRST step message immediately
                          replyText = currentStep.message;
-                         if (currentStep.inputType === 'option') {
+                         if (currentStep.templateName) {
+                             replyTemplate = currentStep.templateName;
+                         } else if (currentStep.inputType === 'option') {
                              replyOptions = currentStep.options;
                          }
                     }
@@ -478,8 +494,16 @@ app.post('/webhook', ensureDB, async (req, res) => {
 
             // --- EXECUTE REPLY ---
             
-            if (replyText) {
-                // Send Bot Message
+            if (replyTemplate) {
+                 // Send Template Message
+                 await sendWhatsAppMessage(from, null, null, replyTemplate);
+                 await client.query(
+                    `INSERT INTO messages (id, driver_id, sender, text, timestamp, type)
+                    VALUES ($1, $2, 'system', $3, $4, 'template')`,
+                    [(timestamp + 1).toString(), driver.id, `Template: ${replyTemplate}`, timestamp + 1]
+                );
+            } else if (replyText) {
+                // Send Text/Option Message
                 await sendWhatsAppMessage(from, replyText, replyOptions);
                 await client.query(
                     `INSERT INTO messages (id, driver_id, sender, text, timestamp, type)
