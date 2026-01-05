@@ -52,10 +52,8 @@ export default function App() {
                try {
                    const updated = await liveApiService.getDrivers();
                    setDrivers(updated);
-                   // Optionally re-fetch settings occasionally if multiple users? 
-                   // For now, assume settings don't change frequently from other users.
                } catch (e) {
-                   // Silent fail on poll error to avoid spamming console
+                   // Silent fail on poll error
                }
            });
            
@@ -91,16 +89,27 @@ export default function App() {
     setNotifications(prev => prev.filter(n => n.id !== id));
   };
 
-  // Handlers
+  // UNIFIED UPDATE HANDLER
+  const handleUpdateDriver = async (id: string, updates: Partial<Driver>) => {
+      if (dataSource === 'mock') {
+          mockBackend.updateDriverDetails(id, updates);
+          // Manually update selectedDriver state to reflect changes instantly in the drawer
+          setSelectedDriver(prev => prev && prev.id === id ? { ...prev, ...updates } : prev);
+      } else {
+          try {
+             await liveApiService.updateDriver(id, updates);
+             // Optimistic update for UI responsiveness
+             setDrivers(prev => prev.map(d => d.id === id ? { ...d, ...updates } : d));
+             setSelectedDriver(prev => prev && prev.id === id ? { ...prev, ...updates } : prev);
+          } catch (e) {
+             console.error("Update failed", e);
+             addNotification({ type: 'warning', title: 'Update Failed', message: 'Could not save changes to server.' });
+          }
+      }
+  };
+
   const handleStatusUpdate = (id: string, status: LeadStatus) => {
-    if (dataSource === 'mock') {
-        mockBackend.updateDriverStatus(id, status);
-        if (selectedDriver && selectedDriver.id === id) {
-          setSelectedDriver(prev => prev ? ({ ...prev, status }) : null);
-        }
-    } else {
-        alert("Status updates in Live Mode require the full backend implementation. Currently Read-Only.");
-    }
+      handleUpdateDriver(id, { status });
   };
 
   const handleSendWelcome = (driver: Driver) => {
@@ -353,6 +362,7 @@ export default function App() {
           driver={selectedDriver} 
           onClose={() => setSelectedDriver(null)}
           onStatusUpdate={handleStatusUpdate}
+          onUpdateDriver={handleUpdateDriver}
         />
         
         <NotificationToast notifications={notifications} onDismiss={removeNotification} />

@@ -65,7 +65,7 @@ const initDB = async () => {
       );
     `);
 
-    // 2. Bot Settings - Create basic table first
+    // 2. Bot Settings
     await client.query(`
       CREATE TABLE IF NOT EXISTS bot_settings (
         id INT PRIMARY KEY DEFAULT 1,
@@ -73,29 +73,21 @@ const initDB = async () => {
       );
     `);
 
-    // 2b. Schema Migration: Fix Legacy Columns
-    // Drop 'settings' column if it exists (Fixes the Not-Null constraint error)
+    // 2b. Schema Migration: Bot Settings
     await client.query(`ALTER TABLE bot_settings DROP COLUMN IF EXISTS settings`);
-
-    // Ensure new columns exist
     await client.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN DEFAULT TRUE`);
     await client.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS routing_strategy TEXT DEFAULT 'HYBRID_BOT_FIRST'`);
     await client.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS system_instruction TEXT`);
 
-    // Insert default row if not exists
     await client.query(`INSERT INTO bot_settings (id, is_enabled) VALUES (1, true) ON CONFLICT (id) DO NOTHING`);
 
-    // --- FIX: CLEANUP BROKEN FLOWS AND INJECT VALID DEFAULT ---
+    // Cleanup broken flows
     const flowCheck = await client.query('SELECT * FROM flows');
-    // Check if empty OR if it contains the broken placeholder text
     const hasBrokenFlow = flowCheck.rows.some(row => JSON.stringify(row.nodes).includes("Replace this sample message"));
     
     if (parseInt(flowCheck.rowCount) === 0 || hasBrokenFlow) {
         console.log("🧹 Cleaning up broken/empty flows & injecting defaults...");
-        
-        // Remove existing to ensure clean state
         await client.query('TRUNCATE flows');
-        
         const defaultNodes = [
             { id: 'start', type: 'custom', position: { x: 50, y: 300 }, data: { type: 'start', label: 'Start' } },
             { id: 'welcome', type: 'custom', position: { x: 300, y: 300 }, data: { label: 'Text', inputType: 'text', message: 'Welcome to Uber Fleet! How can I help you today?', saveToField: 'last_inquiry' } }
@@ -124,8 +116,11 @@ const initDB = async () => {
       );
     `);
     
-    // Ensure column exists for existing tables
+    // 3b. Schema Migration: Drivers
     await client.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS flow_completed BOOLEAN DEFAULT FALSE`);
+    await client.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS vehicle_registration TEXT`);
+    await client.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS availability TEXT`);
+    await client.query(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS onboarding_step INT DEFAULT 0`);
 
     // 4. Sessions Table
     await client.query(`
@@ -501,7 +496,6 @@ app.get('/webhook', (req, res) => {
   else res.sendStatus(403);
 });
 
-// FIX: Ensure /api prefix routes are handled explicitly to avoid 404
 app.post('/api/bot-settings', async (req, res) => {
   let client;
   try {
@@ -512,7 +506,6 @@ app.post('/api/bot-settings', async (req, res) => {
         await client.query(`INSERT INTO flows (nodes, edges) VALUES ($1, $2)`, [JSON.stringify(flowData.nodes), JSON.stringify(flowData.edges)]);
     }
     
-    // Default values to prevent SQL errors if frontend sends partial data
     const safeEnabled = isEnabled !== undefined ? isEnabled : true;
     const safeStrategy = routingStrategy || 'HYBRID_BOT_FIRST';
     const safeInstruction = systemInstruction || '';
@@ -553,8 +546,63 @@ app.get('/api/drivers', async (req, res) => {
           FROM drivers d LEFT JOIN messages m ON d.id = m.driver_id
           GROUP BY d.id ORDER BY d.last_message_time DESC
         `);
-        res.json(result.rows.map(r => ({ ...r, phoneNumber: r.phone_number, lastMessage: r.last_message, lastMessageTime: parseInt(r.last_message_time || '0') })));
+        // FIX: MAP DB COLUMNS TO FRONTEND TYPES TO PREVENTS CRASH
+        res.json(result.rows.map(r => ({
+            ...r,
+            phoneNumber: r.phone_number,
+            lastMessage: r.last_message,
+            lastMessageTime: parseInt(r.last_message_time || '0'),
+            qualificationChecks: r.qualification_checks || { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
+            vehicleRegistration: r.vehicle_registration,
+            availability: r.availability,
+            onboardingStep: r.onboarding_step || 0,
+            documents: r.documents || []
+        })));
     } catch (e) { res.status(500).json({ error: e.message }); } finally { if(client) client.release(); }
+});
+
+// NEW ENDPOINT: PATCH DRIVER DETAILS
+app.patch('/api/drivers/:id', async (req, res) => {
+    let client;
+    try {
+        const { id } = req.params;
+        const updates = req.body;
+        client = await pool.connect();
+        
+        // Construct dynamic query
+        const fields = [];
+        const values = [];
+        let idx = 1;
+
+        if (updates.vehicleRegistration !== undefined) {
+            fields.push(`vehicle_registration = $${idx++}`);
+            values.push(updates.vehicleRegistration);
+        }
+        if (updates.availability !== undefined) {
+            fields.push(`availability = $${idx++}`);
+            values.push(updates.availability);
+        }
+        if (updates.qualificationChecks !== undefined) {
+             fields.push(`qualification_checks = $${idx++}`);
+             values.push(updates.qualificationChecks);
+        }
+        if (updates.onboardingStep !== undefined) {
+             fields.push(`onboarding_step = $${idx++}`);
+             values.push(updates.onboardingStep);
+        }
+        if (updates.status !== undefined) {
+             fields.push(`status = $${idx++}`);
+             values.push(updates.status);
+        }
+
+        if (fields.length > 0) {
+            values.push(id);
+            await client.query(`UPDATE drivers SET ${fields.join(', ')} WHERE id = $${idx}`, values);
+        }
+        
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({error: e.message}); } 
+    finally { if(client) client.release(); }
 });
 
 app.post('/api/update-credentials', async (req, res) => {

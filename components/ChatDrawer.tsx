@@ -7,9 +7,10 @@ interface ChatDrawerProps {
   driver: Driver | null;
   onClose: () => void;
   onStatusUpdate: (id: string, status: LeadStatus) => void;
+  onUpdateDriver: (id: string, updates: Partial<Driver>) => void;
 }
 
-export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatusUpdate }) => {
+export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatusUpdate, onUpdateDriver }) => {
   const [replyText, setReplyText] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -24,15 +25,19 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
   const handleSend = () => {
     if (!replyText.trim()) return;
     
-    const newMsg: Message = {
-      id: Date.now().toString(),
-      sender: 'agent',
-      text: replyText,
-      timestamp: Date.now(),
-      type: 'text'
-    };
+    // Note: Messaging in live mode still needs backend endpoint if we want "Agent" replies to go out
+    // For now we assume mockBackend logic or pending implementation for agent replies
+    if (mockBackend) {
+        const newMsg: Message = {
+        id: Date.now().toString(),
+        sender: 'agent',
+        text: replyText,
+        timestamp: Date.now(),
+        type: 'text'
+        };
+        mockBackend.addMessage(driver.id, newMsg);
+    }
     
-    mockBackend.addMessage(driver.id, newMsg);
     setReplyText('');
   };
 
@@ -45,12 +50,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
 
   // Helper to update specific driver fields locally (and backend)
   const handleUpdateDetails = (updates: Partial<Driver>) => {
-    mockBackend.updateDriverDetails(driver.id, updates);
+    onUpdateDriver(driver.id, updates);
   };
 
   const steps = [
     { label: 'Welcome', done: true },
-    { label: 'Documents', done: driver.documents.length > 0 },
+    { label: 'Documents', done: driver.documents && driver.documents.length > 0 },
     { label: 'Vehicle', done: !!driver.vehicleRegistration },
     { label: 'Availability', done: !!driver.availability },
     { label: 'Qualified', done: driver.status === LeadStatus.QUALIFIED }
@@ -108,7 +113,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
             {/* Left: Chat History */}
             <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px]">
               <div className="flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4">
-                {driver.messages.map((msg) => (
+                {driver.messages && driver.messages.map((msg) => (
                   <div 
                     key={msg.id} 
                     className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}
@@ -228,13 +233,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
                          />
                          <button 
                            onClick={() => {
-                             mockBackend.addMessage(driver.id, {
-                               id: Date.now().toString(),
-                               sender: 'system',
-                               text: 'Please provide your vehicle registration number.',
-                               type: 'text',
-                               timestamp: Date.now()
-                             });
+                             // Mock action for now
                            }}
                            className="text-blue-600 hover:bg-blue-50 p-2 rounded-lg text-xs font-medium"
                            title="Request Info"
@@ -266,13 +265,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
                      </div>
                      <button 
                        onClick={() => {
-                         mockBackend.addMessage(driver.id, {
-                           id: Date.now().toString(),
-                           sender: 'system',
-                           text: 'What is your driving availability? (Full-time / Part-time / Weekends)',
-                           type: 'text',
-                           timestamp: Date.now()
-                         });
+                         // Mock action
                        }}
                        className="w-full text-center text-blue-600 hover:bg-blue-50 py-2 rounded-lg text-xs font-medium border border-transparent hover:border-blue-100 transition-colors"
                      >
@@ -284,7 +277,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
                 {/* Documents */}
                 <section>
                    <h3 className="font-semibold text-gray-900 mb-4 text-sm">Documents</h3>
-                   {driver.documents.length > 0 ? (
+                   {driver.documents && driver.documents.length > 0 ? (
                      <div className="grid grid-cols-2 gap-3">
                        {driver.documents.map((doc, idx) => (
                          <a key={idx} href={doc} target="_blank" rel="noreferrer" className="block relative aspect-video rounded-lg overflow-hidden border border-gray-200 group hover:shadow-md transition-shadow">

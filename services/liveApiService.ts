@@ -17,6 +17,14 @@ export const liveApiService = {
     }
   },
 
+  updateDriver: async (id: string, updates: Partial<Driver>) => {
+      await fetch(`${API_BASE_URL}/api/drivers/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updates)
+      });
+  },
+
   // Optimized Polling (2 Seconds)
   subscribeToUpdates: (callback: () => void) => {
     // Poll every 2 seconds for snappier updates without full websockets
