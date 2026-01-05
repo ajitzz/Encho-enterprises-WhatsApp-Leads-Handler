@@ -1,8 +1,8 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { 
-  ReactFlow, 
-  MiniMap, 
-  Controls, 
+import {
+  ReactFlow,
+  MiniMap,
+  Controls,
   Background, 
   useNodesState, 
   useEdgesState, 
@@ -17,6 +17,7 @@ import {
   useReactFlow,
   MarkerType
 } from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
 import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
