@@ -9,7 +9,7 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
   flowData: {
       nodes: [
           { id: 'start', type: 'custom', data: { type: 'start' }, position: { x: 50, y: 100 } },
-          { id: 'node_1', type: 'custom', data: { label: 'Text', message: 'Hello! Replace this sample message!', inputType: 'text' }, position: { x: 250, y: 100 } }
+          { id: 'node_1', type: 'custom', data: { label: 'Text', message: 'Hello! Welcome to Uber Fleet.', inputType: 'text' }, position: { x: 250, y: 100 } }
       ],
       edges: [
           { id: 'e1', source: 'start', target: 'node_1' }
@@ -130,7 +130,7 @@ class MockBackendService {
         flowCompleted: false
     };
 
-    // Auto-start bot for ad leads
+    // Auto-start bot for ad leads if strategy permits
     if(this.botSettings.isEnabled && this.botSettings.routingStrategy !== 'AI_ONLY') {
          this.processBotStep(driver, 'trigger_start');
     }
@@ -169,12 +169,15 @@ class MockBackendService {
     }
 
     const settings = this.botSettings;
+    
+    // --- LOGIC: AI ONLY ---
     if (settings.isEnabled && settings.routingStrategy === 'AI_ONLY') {
+        // Skip bot entirely
         return { driver, actionNeeded: 'AI_REPLY' };
     }
 
+    // --- LOGIC: HYBRID (Bot First) ---
     if (settings.isEnabled && settings.routingStrategy === 'HYBRID_BOT_FIRST') {
-        // --- LOGIC CHANGE ---
         // If flow is completed and no active step, skip Bot, go to AI
         if (!driver.currentBotStepId && driver.flowCompleted) {
             return { driver, actionNeeded: 'AI_REPLY' };
@@ -183,7 +186,7 @@ class MockBackendService {
         const handled = this.processBotStep(driver, text);
         if (handled) return { driver, actionNeeded: 'NONE' };
         
-        // If bot didn't handle (end of flow), return AI
+        // If bot didn't handle (end of flow or error), return AI
         return { driver, actionNeeded: 'AI_REPLY' };
     }
 
@@ -218,7 +221,7 @@ class MockBackendService {
                driver.isBotActive = false; // End of flow
                driver.flowCompleted = true; // Mark as done
                this.persist();
-               return false; 
+               return false; // Return false so AI picks up if user continues
            }
       } else {
            // Start Flow

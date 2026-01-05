@@ -13,7 +13,8 @@ const { GoogleGenAI } = require('@google/genai');
 require('dotenv').config();
 
 const app = express();
-app.use(express.json());
+// INCREASE PAYLOAD LIMIT TO 50MB TO SUPPORT LARGE FLOW DATA
+app.use(express.json({ limit: '50mb' }));
 app.use(cors());
 
 // --- CONFIGURATION ---
@@ -64,22 +65,33 @@ const initDB = async () => {
       );
     `);
 
-    // 2. Bot Settings
+    // 2. Bot Settings - Create basic table first
     await client.query(`
       CREATE TABLE IF NOT EXISTS bot_settings (
         id INT PRIMARY KEY DEFAULT 1,
-        is_enabled BOOLEAN DEFAULT TRUE,
-        routing_strategy TEXT DEFAULT 'HYBRID_BOT_FIRST',
-        system_instruction TEXT,
         updated_at TIMESTAMP DEFAULT NOW()
       );
     `);
+
+    // 2b. Schema Migration: Ensure columns exist (Fix for "column does not exist" error)
+    await client.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN DEFAULT TRUE`);
+    await client.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS routing_strategy TEXT DEFAULT 'HYBRID_BOT_FIRST'`);
+    await client.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS system_instruction TEXT`);
+
+    // Insert default row if not exists
     await client.query(`INSERT INTO bot_settings (id, is_enabled) VALUES (1, true) ON CONFLICT (id) DO NOTHING`);
 
-    // INJECT DEFAULT FLOW IF EMPTY
-    const flowCheck = await client.query('SELECT COUNT(*) FROM flows');
-    if (parseInt(flowCheck.rows[0].count) === 0) {
-        console.log("⚠️ No flows found. Injecting default working flow.");
+    // --- FIX: CLEANUP BROKEN FLOWS AND INJECT VALID DEFAULT ---
+    const flowCheck = await client.query('SELECT * FROM flows');
+    // Check if empty OR if it contains the broken placeholder text
+    const hasBrokenFlow = flowCheck.rows.some(row => JSON.stringify(row.nodes).includes("Replace this sample message"));
+    
+    if (parseInt(flowCheck.rowCount) === 0 || hasBrokenFlow) {
+        console.log("🧹 Cleaning up broken/empty flows & injecting defaults...");
+        
+        // Remove existing to ensure clean state
+        await client.query('TRUNCATE flows');
+        
         const defaultNodes = [
             { id: 'start', type: 'custom', position: { x: 50, y: 300 }, data: { type: 'start', label: 'Start' } },
             { id: 'welcome', type: 'custom', position: { x: 300, y: 300 }, data: { label: 'Text', inputType: 'text', message: 'Welcome to Uber Fleet! How can I help you today?', saveToField: 'last_inquiry' } }
@@ -221,7 +233,7 @@ const generateAIResponse = async (input, systemInstruction) => {
         return response.text;
     } catch (error) {
         console.error("AI Error:", error);
-        return "I'm having trouble connecting to my brain right now. Please try again later.";
+        return "I'm currently updating my system. Please try again in a few moments.";
     }
 };
 
@@ -255,6 +267,7 @@ class BotEngine {
     }
 
     const { nodes, edges } = await this.getFlow();
+    // FALLBACK TO AI IF NO FLOW DEFINED
     if (!nodes || nodes.length === 0) return false;
 
     let sessionRes = await this.client.query('SELECT * FROM sessions WHERE phone_number = $1', [phone]);
@@ -269,6 +282,7 @@ class BotEngine {
     // If no active session exists AND user has already finished the flow, 
     // we return FALSE so the Webhook handler triggers the AI.
     if (!currentNode && driver.flow_completed) {
+        console.log("ℹ️ User completed flow. Delegating to AI.");
         return false; 
     }
 
@@ -313,7 +327,8 @@ class BotEngine {
             await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
             await this.client.query('UPDATE drivers SET flow_completed = TRUE WHERE id = $1', [driverId]);
             console.log("✅ Flow Completed for user. Next message will go to AI.");
-            return true; // Flow finished, user treated as 'handled' for this turn
+            // Returning true means "Bot handled this turn (by finishing)". The *next* user msg will hit the AI fallback above.
+            return true; 
         }
     } else {
         // New Session
@@ -336,8 +351,8 @@ class BotEngine {
         
         const messageText = this.replaceVariables(currentNode.data.message || '', driver);
         
-        // Block placeholder
-        if (messageText.includes("Replace this sample message")) {
+        // Block placeholder (Case insensitive check)
+        if (messageText && messageText.toLowerCase().includes("replace this sample message")) {
             console.warn("🚫 Placeholder detected. Aborting Bot Flow to AI.");
             await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
             return false;
@@ -395,6 +410,7 @@ class BotEngine {
                 break;
             }
         } else {
+             // End of flow sequence
              await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
              await this.client.query('UPDATE drivers SET flow_completed = TRUE WHERE id = $1', [driverId]);
              break; 
@@ -439,15 +455,18 @@ app.post('/webhook', async (req, res) => {
 
         let botHandled = false;
         
-        // Hybrid Strategy: Try Bot first (unless AI Only mode)
+        // --- LOGIC: HYBRID STRATEGY ---
+        // If strategy is NOT 'AI_ONLY', try the bot first.
         if (settings.is_enabled && settings.routing_strategy !== 'AI_ONLY') {
             const engine = new BotEngine(client);
             botHandled = await engine.processUser(from, input, driverId);
         }
 
-        // Fallback to AI if Bot didn't handle (End of flow OR Flow already completed)
+        // --- LOGIC: AI FALLBACK ---
+        // 1. If strategy is 'AI_ONLY', botHandled is false -> AI replies.
+        // 2. If strategy is 'HYBRID' but flow completed -> botHandled returned false -> AI replies.
         if (!botHandled) {
-             console.log(`🤖 Bot passed. AI replying to: ${input}`);
+             console.log(`🤖 Bot skipped/passed. AI replying to: ${input}`);
              const aiReply = await generateAIResponse(input, settings.system_instruction || "You are a helpful recruitment assistant.");
              
              await sendWhatsApp(from, 'text', { text: aiReply });
@@ -478,6 +497,7 @@ app.get('/webhook', (req, res) => {
   else res.sendStatus(403);
 });
 
+// FIX: Ensure /api prefix routes are handled explicitly to avoid 404
 app.post('/api/bot-settings', async (req, res) => {
   let client;
   try {
@@ -487,11 +507,17 @@ app.post('/api/bot-settings', async (req, res) => {
     if (flowData) {
         await client.query(`INSERT INTO flows (nodes, edges) VALUES ($1, $2)`, [JSON.stringify(flowData.nodes), JSON.stringify(flowData.edges)]);
     }
+    
+    // Default values to prevent SQL errors if frontend sends partial data
+    const safeEnabled = isEnabled !== undefined ? isEnabled : true;
+    const safeStrategy = routingStrategy || 'HYBRID_BOT_FIRST';
+    const safeInstruction = systemInstruction || '';
+
     await client.query(`
         INSERT INTO bot_settings (id, is_enabled, routing_strategy, system_instruction)
         VALUES (1, $1, $2, $3)
         ON CONFLICT (id) DO UPDATE SET is_enabled = $1, routing_strategy = $2, system_instruction = $3
-    `, [isEnabled, routingStrategy, systemInstruction]);
+    `, [safeEnabled, safeStrategy, safeInstruction]);
 
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); } finally { if(client) client.release(); }
