@@ -1,76 +1,75 @@
-import { Driver } from '../types';
+import { Driver, BotSettings } from '../types';
 
-// Determine if we are in local development or production
-// When deployed on Vercel, the backend and frontend share the same domain, so we use relative paths.
-// In local dev, if you run frontend on 3000 and node on 3001, we need localhost:3001.
 const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-
-// CHANGED: Point to port 3001 for local development
 const API_BASE_URL = isLocal ? 'http://localhost:3001' : ''; 
 
 export const liveApiService = {
-  // Fetch all drivers from the backend
+  // Fetch drivers
   getDrivers: async (): Promise<Driver[]> => {
     try {
-      // Clean path construction
       const url = `${API_BASE_URL}/api/drivers`;
       const response = await fetch(url);
-      
-      if (!response.ok) {
-        // CHANGED: Better error handling to display the actual server error
-        const errorText = await response.text();
-        throw new Error(`API Error: ${response.status} ${response.statusText} - ${errorText}`);
-      }
+      if (!response.ok) throw new Error('API Error');
       return await response.json();
     } catch (error: any) {
-      console.error("Failed to fetch drivers:", error);
-      // We re-throw or handle the error in UI. 
-      // For now, returning empty to prevent crash, but logging heavily.
-      console.warn("Ensure Backend is running: 'node server.js' (Port 3001)");
+      console.error("Fetch Error:", error);
       throw error;
     }
   },
 
-  // In a real app, you would use WebSockets (Socket.io) to listen for updates
-  // instead of polling.
+  // Optimized Polling (2 Seconds)
   subscribeToUpdates: (callback: () => void) => {
-    const interval = setInterval(callback, 5000); // Poll every 5 seconds
+    // Poll every 2 seconds for snappier updates without full websockets
+    const interval = setInterval(callback, 2000); 
     return () => clearInterval(interval);
   },
 
-  // Calls the backend to update Meta Webhook configuration
-  configureWebhook: async (config: { appId: string, appSecret: string, webhookUrl: string, verifyToken: string }) => {
-    const url = `${API_BASE_URL}/api/configure-webhook`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(config)
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error || 'Failed to configure webhook');
+  // --- BOT SETTINGS API ---
+  
+  getBotSettings: async (): Promise<BotSettings> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/bot-settings`);
+      if (!response.ok) throw new Error('Failed to fetch bot settings');
+      return await response.json();
+    } catch (error) {
+      console.warn("Could not fetch live bot settings, using default");
+      // Fallback object to prevent UI crash
+      return { 
+          isEnabled: true, 
+          routingStrategy: 'HYBRID_BOT_FIRST', 
+          systemInstruction: '', 
+          steps: [] 
+      };
     }
-    return data;
   },
 
-  // NEW: Update dynamic credentials for testing production numbers
-  updateCredentials: async (credentials: { phoneNumberId: string, apiToken: string }) => {
-    const url = `${API_BASE_URL}/api/update-credentials`;
-    const response = await fetch(url, {
+  saveBotSettings: async (settings: BotSettings) => {
+    const response = await fetch(`${API_BASE_URL}/api/bot-settings`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings)
+    });
+    if (!response.ok) throw new Error('Failed to save settings');
+    return await response.json();
+  },
+
+  // --- CONFIG ---
+
+  configureWebhook: async (config: any) => {
+    const response = await fetch(`${API_BASE_URL}/api/configure-webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config)
+    });
+    return await response.json();
+  },
+
+  updateCredentials: async (credentials: any) => {
+    const response = await fetch(`${API_BASE_URL}/api/update-credentials`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(credentials)
     });
-
-    const data = await response.json();
-    if (!response.ok) {
-      throw new Error(data.error || 'Failed to update credentials');
-    }
-    return data;
+    return await response.json();
   }
 };

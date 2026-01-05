@@ -1,4 +1,69 @@
-import { Driver, LeadStatus, Message, OnboardingStep, LeadSource } from '../types';
+import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, BotStep } from '../types';
+
+// Initial Bot Config
+const DEFAULT_BOT_SETTINGS: BotSettings = {
+  isEnabled: true,
+  routingStrategy: 'HYBRID_BOT_FIRST',
+  systemInstruction: `You are a friendly and persuasive recruiter for Uber Fleet in Kerala.
+
+**Language & Tone:**
+- Communicate in casual, conversational Malayalam using **Malayalam Script** (Malayalam letters).
+- Freely mix **English words** for common terms (like 'Driver', 'License', 'Payment', 'Trip', 'Bonus', 'Account', 'Join').
+- Do NOT use Manglish (Malayalam written in English text). Use real Malayalam characters.
+- Do NOT use overly formal/bookish Malayalam. Talk like a helpful friend.
+
+**Example Style:**
+- "Uber Fleet-ൽ join ചെയ്യാൻ താല്പര്യമുണ്ടോ? നല്ല income earn ചെയ്യാം."
+- "നിങ്ങളുടെ ലൈസൻസ് (License) ഡീറ്റെയിൽസ് അയച്ചുതരൂ."
+- "ആഴ്ച തോറും പേയ്മെന്റ് ലഭിക്കും."
+
+**Your Goal:** 
+- Help the user understand the benefits of joining Uber Fleet.
+- Answer their doubts clearly regarding salary and work nature.
+- Encourage them to complete the application process.
+
+**Key Selling Points:**
+- Potential to earn up to ₹50,000/month based on performance.
+- Weekly payments (ആഴ്ച തോറും പേയ്മെന്റ്).
+- Flexible timings (നമ്മുടെ സമയം പോലെ വർക്ക് ചെയ്യാം).`,
+  steps: [
+    {
+      id: 'step_1',
+      title: 'Welcome & Name',
+      message: 'നമസ്കാരം! Uber Fleet-ലേക്ക് സ്വാഗതം. നിങ്ങളുടെ പേര് പറയാമോ?',
+      inputType: 'text',
+      saveToField: 'name',
+      nextStepId: 'step_2'
+    },
+    {
+      id: 'step_2',
+      title: 'License Check',
+      message: 'നന്ദി! നിങ്ങളുടെ കൈയ്യിൽ valid ആയ Commercial Driving License ഉണ്ടോ?',
+      inputType: 'option',
+      options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'],
+      nextStepId: 'step_3',
+      templateName: 'encho_enterprises', // USING TEMPLATE HERE
+      templateLanguage: 'en_US'
+    },
+    {
+      id: 'step_3',
+      title: 'Upload License',
+      message: 'Verification-ന് വേണ്ടി License-ന്റെ ഒരു ഫോട്ടോ അയച്ചുതരൂ.',
+      inputType: 'image',
+      saveToField: 'document',
+      nextStepId: 'step_4'
+    },
+    {
+      id: 'step_4',
+      title: 'Availability',
+      message: 'എപ്പോഴാണ് ഡ്രൈവ് ചെയ്യാൻ താല്പര്യം? (Full-time / Part-time)',
+      inputType: 'option',
+      options: ['Full-time', 'Part-time', 'Weekends'],
+      saveToField: 'availability',
+      nextStepId: 'AI_HANDOFF' // Hand over to AI for Q&A after basic details
+    }
+  ]
+};
 
 // Initial Mock Data
 const MOCK_DRIVERS: Driver[] = [
@@ -25,67 +90,32 @@ const MOCK_DRIVERS: Driver[] = [
       hasValidLicense: false,
       hasVehicle: false,
       isLocallyAvailable: true
-    }
-  },
-  {
-    id: '2',
-    phoneNumber: '+91 99887 76655',
-    name: 'Amit Singh',
-    source: 'Meta Ad',
-    status: LeadStatus.FLAGGED_FOR_REVIEW,
-    lastMessage: '[Image Sent]',
-    lastMessageTime: Date.now() - 1000 * 60 * 30,
-    messages: [
-      {
-        id: 'msg_sys_1',
-        sender: 'system',
-        text: 'Hi Amit, thanks for applying via Facebook! To start, please upload your Driving License.',
-        timestamp: Date.now() - 1000 * 60 * 40,
-        type: 'template',
-      },
-      {
-        id: 'msg_2',
-        sender: 'driver',
-        text: 'Is this the correct license?',
-        timestamp: Date.now() - 1000 * 60 * 35,
-        type: 'text',
-      },
-      {
-        id: 'msg_3',
-        sender: 'driver',
-        imageUrl: 'https://picsum.photos/400/300', // Placeholder for DL
-        timestamp: Date.now() - 1000 * 60 * 30,
-        type: 'image',
-      },
-    ],
-    documents: ['https://picsum.photos/400/300'],
-    onboardingStep: OnboardingStep.DOCUMENTS_RECEIVED,
-    qualificationChecks: {
-      hasValidLicense: true, // Mocked as true for this demo user
-      hasVehicle: false,
-      isLocallyAvailable: true
-    }
-  },
+    },
+    isBotActive: false
+  }
 ];
 
 class MockBackendService {
   private drivers: Driver[] = [...MOCK_DRIVERS];
+  private botSettings: BotSettings = { ...DEFAULT_BOT_SETTINGS };
   private listeners: (() => void)[] = [];
 
   constructor() {
-    // Load from local storage if available to persist across reloads
-    const saved = localStorage.getItem('uber_fleet_drivers');
-    if (saved) {
-      try {
-        this.drivers = JSON.parse(saved);
-      } catch (e) {
-        console.error('Failed to parse saved drivers', e);
-      }
+    // Load from local storage
+    const savedDrivers = localStorage.getItem('uber_fleet_drivers');
+    const savedBot = localStorage.getItem('uber_fleet_bot_settings');
+    
+    if (savedDrivers) {
+      try { this.drivers = JSON.parse(savedDrivers); } catch (e) {}
+    }
+    if (savedBot) {
+      try { this.botSettings = JSON.parse(savedBot); } catch (e) {}
     }
   }
 
   private persist() {
     localStorage.setItem('uber_fleet_drivers', JSON.stringify(this.drivers));
+    localStorage.setItem('uber_fleet_bot_settings', JSON.stringify(this.botSettings));
     this.notify();
   }
 
@@ -102,6 +132,15 @@ class MockBackendService {
 
   getDrivers(): Driver[] {
     return this.drivers.sort((a, b) => b.lastMessageTime - a.lastMessageTime);
+  }
+
+  getBotSettings(): BotSettings {
+    return this.botSettings;
+  }
+
+  updateBotSettings(settings: BotSettings) {
+    this.botSettings = settings;
+    this.persist();
   }
 
   getDriver(id: string): Driver | undefined {
@@ -126,30 +165,32 @@ class MockBackendService {
     }
   }
 
-  // Update specific driver details (Mocking DB Update)
   updateDriverDetails(driverId: string, updates: Partial<Driver>) {
     const driverIndex = this.drivers.findIndex((d) => d.id === driverId);
     if (driverIndex > -1) {
       this.drivers[driverIndex] = { ...this.drivers[driverIndex], ...updates };
-      
-      // Auto-update onboarding step based on data presence
-      const d = this.drivers[driverIndex];
-      if (d.vehicleRegistration && d.onboardingStep < OnboardingStep.VEHICLE_DETAILS) {
-        d.onboardingStep = OnboardingStep.VEHICLE_DETAILS;
-      }
-      if (d.availability && d.onboardingStep < OnboardingStep.AVAILABILITY_SET) {
-        d.onboardingStep = OnboardingStep.AVAILABILITY_SET;
-      }
-      
       this.persist();
     }
   }
 
-  // Simulates a new driver or existing driver sending a message via Webhook
-  receiveWebhookMessage(phoneNumber: string, text: string, imageUrl?: string): Driver {
+  updateDriverStatus(driverId: string, status: LeadStatus) {
+    const driver = this.drivers.find((d) => d.id === driverId);
+    if (driver) {
+      driver.status = status;
+      this.persist();
+    }
+  }
+
+  // --- BOT ENGINE ---
+
+  // Called when a user sends a message. Determines if Bot or AI should reply.
+  processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Driver, reply?: Message, actionNeeded: 'NONE' | 'AI_REPLY' } {
     let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
-    
+    let isNew = false;
+
+    // 1. Create or Get Driver
     if (!driver) {
+      isNew = true;
       driver = {
         id: Date.now().toString(),
         phoneNumber,
@@ -161,40 +202,91 @@ class MockBackendService {
         messages: [],
         documents: [],
         onboardingStep: OnboardingStep.WELCOME_SENT,
-        qualificationChecks: {
-          hasValidLicense: false,
-          hasVehicle: false,
-          isLocallyAvailable: true
-        }
+        qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
+        isBotActive: this.botSettings.isEnabled && this.botSettings.routingStrategy !== 'AI_ONLY',
+        currentBotStepId: this.botSettings.steps[0]?.id
       };
       this.drivers.push(driver);
     }
 
-    const newMessage: Message = {
-      id: Date.now().toString() + Math.random().toString(),
+    // 2. Add User Message
+    const userMsg: Message = {
+      id: Date.now().toString(),
       sender: 'driver',
       text: text,
       imageUrl: imageUrl,
       timestamp: Date.now(),
       type: imageUrl ? 'image' : 'text',
     };
+    this.addMessage(driver.id, userMsg);
 
-    this.addMessage(driver.id, newMessage);
-    return driver;
+    // 3. Logic Engine
+    const settings = this.botSettings;
+    
+    // STRATEGY: AI ONLY
+    if (settings.isEnabled && settings.routingStrategy === 'AI_ONLY') {
+      return { driver, actionNeeded: 'AI_REPLY' };
+    }
+
+    // STRATEGY: BOT FLOW
+    if (settings.isEnabled && driver.isBotActive && driver.currentBotStepId) {
+      
+      const currentStep = settings.steps.find(s => s.id === driver.currentBotStepId);
+      
+      if (currentStep) {
+        // A. PROCESS DATA CAPTURE from previous input
+        if (!isNew) { // Don't process input on the very first "Hello" triggering the bot
+             if (currentStep.saveToField === 'name') driver.name = text;
+             if (currentStep.saveToField === 'availability') driver.availability = text as any;
+             if (currentStep.saveToField === 'document' && imageUrl) driver.documents.push(imageUrl);
+             
+             // Move to next Step
+             if (currentStep.nextStepId === 'END') {
+                 driver.isBotActive = false;
+                 driver.currentBotStepId = undefined;
+                 this.persist();
+                 return { driver, actionNeeded: 'NONE' };
+             } else if (currentStep.nextStepId === 'AI_HANDOFF') {
+                 driver.isBotActive = false;
+                 driver.currentBotStepId = undefined;
+                 this.persist();
+                 return { driver, actionNeeded: 'AI_REPLY' };
+             } else {
+                 driver.currentBotStepId = currentStep.nextStepId;
+             }
+        }
+
+        // B. SEND NEXT MESSAGE
+        const nextStep = settings.steps.find(s => s.id === driver.currentBotStepId);
+        if (nextStep) {
+            const botMsg: Message = {
+                id: Date.now().toString() + '_bot',
+                sender: 'system',
+                text: nextStep.templateName ? `[Template: ${nextStep.templateName}] ${nextStep.message}` : nextStep.message,
+                timestamp: Date.now() + 500, // Slight delay
+                type: nextStep.templateName ? 'template' : (nextStep.inputType === 'option' ? 'options' : 'text'),
+                options: nextStep.options
+            };
+            this.addMessage(driver.id, botMsg);
+            this.persist();
+            return { driver, reply: botMsg, actionNeeded: 'NONE' };
+        }
+      }
+    }
+
+    // Fallback to AI if bot is finished or disabled (and strategy allows)
+    if (settings.routingStrategy === 'HYBRID_BOT_FIRST' || settings.routingStrategy === 'AI_ONLY') {
+        return { driver, actionNeeded: 'AI_REPLY' };
+    }
+
+    return { driver, actionNeeded: 'NONE' };
   }
 
-  // Simulates receiving a Lead from Meta Ads (Facebook/Instagram)
-  // This happens when a user fills a form. We get the data, but no message from them yet.
-  // The SYSTEM initiates the chat.
+  // --- AD LEAD ---
   createAdLead(name: string, phoneNumber: string): Driver {
+    // ... existing implementation but init bot state ...
     let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
-    
-    if (driver) {
-      // Driver exists, just update source to latest
-      driver.source = 'Meta Ad';
-      this.persist();
-      return driver;
-    }
+    if (driver) return driver;
 
     driver = {
       id: Date.now().toString(),
@@ -207,43 +299,31 @@ class MockBackendService {
       messages: [],
       documents: [],
       onboardingStep: OnboardingStep.WELCOME_SENT,
-      qualificationChecks: {
-        hasValidLicense: false,
-        hasVehicle: false,
-        isLocallyAvailable: true
-      }
+      qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
+      isBotActive: true,
+      currentBotStepId: this.botSettings.steps[0]?.id
     };
     
     this.drivers.push(driver);
     this.persist();
-
-    // AUTOMATION: Immediate Outreach
-    // We simulate the WhatsApp Business API sending a template immediately
-    setTimeout(() => {
-        this.addMessage(driver!.id, {
-            id: Date.now().toString() + '_auto',
-            sender: 'system',
-            text: `Hi ${name}! Thanks for applying to drive with Uber via Facebook. 🚗\n\nTo get started, do you have a valid Commercial Driving License? (Reply YES/NO)`,
-            type: 'template',
-            timestamp: Date.now()
-        });
-    }, 500);
+    
+    // Trigger first bot message immediately
+    const firstStep = this.botSettings.steps[0];
+    if (firstStep) {
+        setTimeout(() => {
+            const isTemplate = !!firstStep.templateName;
+            this.addMessage(driver!.id, {
+                id: Date.now().toString() + '_auto',
+                sender: 'system',
+                text: isTemplate ? `[Template: ${firstStep.templateName}] Hi ${name}!` : `Hi ${name}! ${firstStep.message}`,
+                type: isTemplate ? 'template' : (firstStep.inputType === 'option' ? 'options' : 'text'),
+                options: firstStep.options,
+                timestamp: Date.now()
+            });
+        }, 500);
+    }
 
     return driver;
-  }
-
-  updateDriverStatus(driverId: string, status: LeadStatus) {
-    const driver = this.drivers.find((d) => d.id === driverId);
-    if (driver) {
-      driver.status = status;
-      this.persist();
-    }
-  }
-  
-  // Simulated Email Notification
-  async sendAdminEmail(subject: string, body: string) {
-    console.log(`[MOCK EMAIL SERVER] Sending to admin@uberfleet.com\nSubject: ${subject}\nBody: ${body}`);
-    return true;
   }
 }
 
