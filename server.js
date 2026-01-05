@@ -25,18 +25,29 @@ let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0";
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
+// --- DATABASE CONNECTION ---
+// Robust fallback using the provided Neon/Vercel URL
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
+const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL;
 
 // Initialize AI
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-// --- POSTGRESQL CONNECTION ---
+// Create Connection Pool
 const pool = new Pool({
-  connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL,
-  ssl: { rejectUnauthorized: false },
-  max: 5,
-  connectionTimeoutMillis: 30000,
-  idleTimeoutMillis: 1000,
+  connectionString: CONNECTION_STRING,
+  ssl: { 
+    rejectUnauthorized: false // Required for Neon/Vercel to accept the connection
+  },
+  max: 10, // Max clients in the pool
+  connectionTimeoutMillis: 10000, // Return an error after 10 seconds if connection could not be established
+  idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
+});
+
+// CRITICAL: Handle idle client errors to prevent server crash
+pool.on('error', (err, client) => {
+  console.error('❌ Unexpected error on idle database client', err);
+  // Do not exit process, just log the error
 });
 
 // --- DB INIT LOGIC ---
@@ -45,8 +56,10 @@ let isDbInitialized = false;
 const initDB = async () => {
   if (isDbInitialized) return;
   
+  let client;
   try {
-    const client = await pool.connect();
+    client = await pool.connect();
+    console.log("🔌 Database Connected Successfully");
     
     // 1. Flows Table (Stores the visual graph)
     await client.query(`
@@ -82,6 +95,7 @@ const initDB = async () => {
         last_message TEXT,
         last_message_time BIGINT,
         documents TEXT[], 
+        qualification_checks JSONB DEFAULT '{"hasValidLicense": false, "hasVehicle": false, "isLocallyAvailable": true}'::jsonb,
         created_at TIMESTAMP DEFAULT NOW()
       );
     `);
@@ -119,22 +133,26 @@ const initDB = async () => {
     // Load credentials
     const configRes = await client.query('SELECT * FROM app_config');
     configRes.rows.forEach(row => {
-        if(row.key === 'META_API_TOKEN') META_API_TOKEN = row.value;
-        if(row.key === 'PHONE_NUMBER_ID') PHONE_NUMBER_ID = row.value;
-        if(row.key === 'VERIFY_TOKEN') VERIFY_TOKEN = row.value;
+        if(row.key === 'META_API_TOKEN' && row.value) META_API_TOKEN = row.value;
+        if(row.key === 'PHONE_NUMBER_ID' && row.value) PHONE_NUMBER_ID = row.value;
+        if(row.key === 'VERIFY_TOKEN' && row.value) VERIFY_TOKEN = row.value;
     });
 
     console.log("✅ Database Schema Synced & Config Loaded");
     isDbInitialized = true;
-    client.release();
   } catch (err) {
     console.error("❌ DB Init Error:", err.message);
+    // Retry logic could go here, but for now we log
+  } finally {
+    if (client) client.release();
   }
 };
 
 // Middleware to ensure DB init runs
 const ensureDb = async (req, res, next) => {
-    await initDB();
+    if (!isDbInitialized) {
+        await initDB();
+    }
     next();
 };
 
@@ -143,7 +161,7 @@ app.use(ensureDb);
 // --- WHATSAPP API HELPER ---
 const sendWhatsApp = async (to, type, content) => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
-      console.warn("⚠️ Missing Meta Credentials");
+      console.warn("⚠️ Missing Meta Credentials - Cannot send WhatsApp message");
       return;
   }
   
@@ -156,6 +174,14 @@ const sendWhatsApp = async (to, type, content) => {
   else if (type === 'image') {
     payload.type = 'image';
     payload.image = { link: content.url, caption: content.caption || '' };
+  }
+  else if (type === 'video') {
+    payload.type = 'video';
+    payload.video = { link: content.url, caption: content.caption || '' };
+  }
+  else if (type === 'document') {
+    payload.type = 'document';
+    payload.document = { link: content.url, caption: content.caption || 'Document', filename: 'file.pdf' };
   }
   else if (type === 'interactive') {
     payload.type = 'interactive';
@@ -314,6 +340,10 @@ class BotEngine {
         // Send Content
         if (label === 'Image' && mediaUrl) {
             await sendWhatsApp(phone, 'image', { url: mediaUrl, caption: messageText });
+        } else if (label === 'Video' && mediaUrl) {
+            await sendWhatsApp(phone, 'video', { url: mediaUrl, caption: messageText });
+        } else if (label === 'File' && mediaUrl) {
+            await sendWhatsApp(phone, 'document', { url: mediaUrl, caption: messageText });
         } else if ((label === 'Quick Reply' || label === 'List' || inputType === 'option') && options?.length > 0) {
             await sendWhatsApp(phone, 'interactive', { text: messageText, options });
         } else {
@@ -373,34 +403,43 @@ class BotEngine {
 // --- API ENDPOINTS ---
 
 app.post('/api/update-credentials', async (req, res) => {
+    let client;
     try {
         const { phoneNumberId, apiToken } = req.body;
         if(phoneNumberId) PHONE_NUMBER_ID = phoneNumberId;
         if(apiToken) META_API_TOKEN = apiToken;
         
-        const client = await pool.connect();
+        client = await pool.connect();
         await client.query(`INSERT INTO app_config (key, value) VALUES ('PHONE_NUMBER_ID', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [phoneNumberId]);
         await client.query(`INSERT INTO app_config (key, value) VALUES ('META_API_TOKEN', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [apiToken]);
-        client.release();
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { 
+        res.status(500).json({ error: e.message }); 
+    } finally {
+        if(client) client.release();
+    }
 });
 
 app.post('/api/configure-webhook', async (req, res) => {
+    let client;
     try {
         const { verifyToken } = req.body;
         if(verifyToken) VERIFY_TOKEN = verifyToken;
-        const client = await pool.connect();
+        client = await pool.connect();
         await client.query(`INSERT INTO app_config (key, value) VALUES ('VERIFY_TOKEN', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [verifyToken]);
-        client.release();
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { 
+        res.status(500).json({ error: e.message }); 
+    } finally {
+        if(client) client.release();
+    }
 });
 
 app.post('/api/bot-settings', async (req, res) => {
+  let client;
   try {
     const { flowData, isEnabled, routingStrategy, systemInstruction } = req.body; 
-    const client = await pool.connect();
+    client = await pool.connect();
     
     if (flowData) {
         // Save the visual graph
@@ -414,17 +453,20 @@ app.post('/api/bot-settings', async (req, res) => {
         ON CONFLICT (id) DO UPDATE SET is_enabled = $1, routing_strategy = $2, system_instruction = $3
     `, [isEnabled, routingStrategy, systemInstruction]);
 
-    client.release();
     res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { 
+      res.status(500).json({ error: e.message }); 
+  } finally {
+      if(client) client.release();
+  }
 });
 
 app.get('/api/bot-settings', async (req, res) => {
+  let client;
   try {
-    const client = await pool.connect();
+    client = await pool.connect();
     const flowRes = await client.query('SELECT nodes, edges FROM flows ORDER BY updated_at DESC LIMIT 1');
     const setRes = await client.query('SELECT * FROM bot_settings WHERE id = 1');
-    client.release();
     
     const settings = setRes.rows[0] || { is_enabled: true, routing_strategy: 'HYBRID_BOT_FIRST', system_instruction: '' };
     
@@ -435,7 +477,11 @@ app.get('/api/bot-settings', async (req, res) => {
         steps: [], // Legacy steps empty
         flowData: flowRes.rows[0] || { nodes: [], edges: [] }
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { 
+      res.status(500).json({ error: e.message }); 
+  } finally {
+      if(client) client.release();
+  }
 });
 
 // --- WEBHOOK ---
@@ -454,8 +500,9 @@ app.post('/webhook', async (req, res) => {
       if (msg.type === 'interactive') input = msg.interactive.button_reply.title;
       if (msg.type === 'image') input = '[Image]'; 
 
+      let client;
       try {
-        const client = await pool.connect();
+        client = await pool.connect();
         
         // Driver Check
         let driverRes = await client.query('SELECT id, name FROM drivers WHERE phone_number = $1', [from]);
@@ -494,9 +541,10 @@ app.post('/webhook', async (req, res) => {
              );
         }
 
-        client.release();
       } catch (e) {
         console.error("Webhook Error:", e);
+      } finally {
+        if(client) client.release();
       }
     }
     res.sendStatus(200);
@@ -514,17 +562,21 @@ app.get('/webhook', (req, res) => {
 });
 
 app.get('/api/drivers', async (req, res) => {
+    let client;
     try {
-        const client = await pool.connect();
+        client = await pool.connect();
         const result = await client.query(`
           SELECT d.*, 
           COALESCE(json_agg(json_build_object('id', m.id, 'sender', m.sender, 'text', m.text, 'timestamp', m.timestamp) ORDER BY m.timestamp ASC) FILTER (WHERE m.id IS NOT NULL), '[]') as messages
           FROM drivers d LEFT JOIN messages m ON d.id = m.driver_id
           GROUP BY d.id ORDER BY d.last_message_time DESC
         `);
-        client.release();
         res.json(result.rows.map(r => ({ ...r, phoneNumber: r.phone_number, lastMessage: r.last_message, lastMessageTime: parseInt(r.last_message_time || '0'), qualificationChecks: r.qualification_checks || {} })));
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { 
+        res.status(500).json({ error: e.message }); 
+    } finally {
+        if(client) client.release();
+    }
 });
 
 if (require.main === module) {
