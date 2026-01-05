@@ -19,11 +19,12 @@ app.use(cors());
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 3001;
 
-// CREDENTIALS
+// CREDENTIALS (Mutable to allow UI updates without restart)
 let META_API_TOKEN = process.env.META_API_TOKEN || ""; 
 let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || ""; 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0";
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
+let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
+
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 
 // Initialize AI
@@ -91,8 +92,24 @@ const initDB = async () => {
         type TEXT
       );
     `);
+    
+    // 5. App Config Table (To persist credentials)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS app_config (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      );
+    `);
 
-    console.log("✅ Database Schema Synced");
+    // Load credentials from DB if available
+    const configRes = await client.query('SELECT * FROM app_config');
+    configRes.rows.forEach(row => {
+        if(row.key === 'META_API_TOKEN') META_API_TOKEN = row.value;
+        if(row.key === 'PHONE_NUMBER_ID') PHONE_NUMBER_ID = row.value;
+        if(row.key === 'VERIFY_TOKEN') VERIFY_TOKEN = row.value;
+    });
+
+    console.log("✅ Database Schema Synced & Config Loaded");
     client.release();
   } catch (err) {
     console.error("❌ DB Init Error:", err.message);
@@ -101,7 +118,10 @@ const initDB = async () => {
 
 // --- WHATSAPP API HELPER ---
 const sendWhatsApp = async (to, type, content) => {
-  if (!META_API_TOKEN || !PHONE_NUMBER_ID) return console.warn("⚠️ Missing Meta Credentials");
+  if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
+      console.warn("⚠️ Missing Meta Credentials - Cannot send WhatsApp message");
+      return;
+  }
   
   const payload = { messaging_product: 'whatsapp', to };
 
@@ -141,6 +161,7 @@ const sendWhatsApp = async (to, type, content) => {
       payload,
       { headers: { Authorization: `Bearer ${META_API_TOKEN}` } }
     );
+    console.log(`✅ Message sent to ${to}`);
   } catch (e) {
     console.error("Meta API Error:", e.response?.data || e.message);
   }
@@ -170,67 +191,63 @@ class BotEngine {
   }
 
   // Core: Execute Flow
-  async processUser(phone, input, type = 'text') {
-    // 1. Fetch Context
+  async processUser(phone, input) {
+    console.log(`🤖 Bot processing for ${phone}: "${input}"`);
+
+    // 1. Fetch Driver Context
     let driverRes = await this.client.query('SELECT * FROM drivers WHERE phone_number = $1', [phone]);
     if (driverRes.rows.length === 0) {
-      // Create new driver if not exists
       const id = Date.now().toString();
       await this.client.query(
-        `INSERT INTO drivers (id, phone_number, name) VALUES ($1, $2, 'Unknown')`, 
+        `INSERT INTO drivers (id, phone_number, name) VALUES ($1, $2, 'Guest')`, 
         [id, phone]
       );
       driverRes = await this.client.query('SELECT * FROM drivers WHERE phone_number = $1', [phone]);
     }
     const driver = driverRes.rows[0];
 
-    // 2. Fetch Session
+    // 2. Fetch Session & Flow
     let sessionRes = await this.client.query('SELECT * FROM sessions WHERE phone_number = $1', [phone]);
     const { nodes, edges } = await this.getFlow();
+
+    if (!nodes || nodes.length === 0) {
+        console.warn("⚠️ No flow defined in database.");
+        return;
+    }
 
     let currentNodeId = sessionRes.rows[0]?.current_node_id;
     let currentNode = nodes.find(n => n.id === currentNodeId);
 
     // --- STATE 1: PROCESS INPUT (If we are at a node waiting for input) ---
     if (currentNode) {
+      console.log(`   Current Node: ${currentNode.data?.label} (${currentNodeId})`);
+      
       // A. Capture Variable
       if (currentNode.data.saveToField) {
         const field = currentNode.data.saveToField;
         const val = input; 
         
-        // Update either a specific column or the variables JSONB
         if (['name', 'availability'].includes(field)) {
              await this.client.query(`UPDATE drivers SET ${field} = $1 WHERE id = $2`, [val, driver.id]);
         } else {
-             // For generic variables, update the JSONB column
              const newVars = { ...driver.variables, [field]: val };
              await this.client.query(`UPDATE drivers SET variables = $1 WHERE id = $2`, [newVars, driver.id]);
         }
-        // Refresh driver object for variable substitution later
-        driver.variables[field] = val;
+        driver.variables[field] = val; // Update local obj for templating
       }
 
       // B. Determine Next Node via Edges
       let nextEdge;
       
-      // If previous node was buttons, look for handle match (input = button label)
+      // Option Matching
       if (currentNode.data.inputType === 'option') {
-          // Find edge where sourceHandle corresponds to the option selected
-          // Note: In React Flow, we might rely on the option text matching the edge handle or logic
-          // Simplified: We look for an edge connected to this source. 
-          // If we had handles named after options, we'd match input === handleId.
-          // Fallback: If generic 'main' handle, just go next.
-          
-          // Logic: Check if input matches any option
           const selectedOptionIndex = currentNode.data.options?.indexOf(input);
-          
           if (selectedOptionIndex !== -1) {
-             // Look for specific handle `opt_${index}`
              nextEdge = edges.find(e => e.source === currentNodeId && e.sourceHandle === `opt_${selectedOptionIndex}`);
           }
       } 
       
-      // Fallback: Find default edge (main)
+      // Fallback Main Edge
       if (!nextEdge) {
          nextEdge = edges.find(e => e.source === currentNodeId && (e.sourceHandle === 'main' || !e.sourceHandle));
       }
@@ -239,15 +256,14 @@ class BotEngine {
         currentNodeId = nextEdge.target;
         currentNode = nodes.find(n => n.id === currentNodeId);
       } else {
-        // End of flow or dead end
         currentNode = null;
-        currentNodeId = null;
+        currentNodeId = null; // End of flow
       }
     } else {
       // New Session: Find Start Node
-      const startNode = nodes.find(n => n.type === 'custom' && n.data.type === 'start');
+      console.log("   New Session: Looking for Start Node");
+      const startNode = nodes.find(n => n.data.type === 'start');
       if (startNode) {
-         // Move to the node connected to Start
          const startEdge = edges.find(e => e.source === startNode.id);
          if (startEdge) {
             currentNodeId = startEdge.target;
@@ -256,18 +272,16 @@ class BotEngine {
       }
     }
 
-    // --- STATE 2: EXECUTION LOOP (Chain messages until input needed) ---
-    // We loop because some nodes are just statements (Images, Text) that don't wait for user input.
-    // We stop when we hit a node that requires `inputType` != null/informational OR end of flow.
-    
+    // --- STATE 2: EXECUTION LOOP ---
     let executionCount = 0;
-    while (currentNode && executionCount < 5) { // Safety break
+    while (currentNode && executionCount < 5) {
       executionCount++;
+      console.log(`   Executing Node: ${currentNode.id} (${currentNode.data?.label})`);
 
       // 1. Prepare Content
       const messageText = this.replaceVariables(currentNode.data.message || '', driver);
       const mediaUrl = currentNode.data.mediaUrl;
-      const label = currentNode.data.label; // Text, Image, Video, Option
+      const label = currentNode.data.label; 
       const options = currentNode.data.options;
 
       // 2. Send Message
@@ -277,21 +291,13 @@ class BotEngine {
           await sendWhatsApp(phone, 'video', { url: mediaUrl, caption: messageText });
       } else if (label === 'File' && mediaUrl) {
           await sendWhatsApp(phone, 'file', { url: mediaUrl, caption: messageText });
-      } else if ((label === 'Quick Reply' || currentNode.data.inputType === 'option') && options?.length > 0) {
+      } else if ((label === 'Quick Reply' || label === 'List' || currentNode.data.inputType === 'option') && options?.length > 0) {
           await sendWhatsApp(phone, 'interactive', { text: messageText, options });
       } else if (messageText) {
           await sendWhatsApp(phone, 'text', { text: messageText });
       }
 
-      // 3. Update Session
-      // If this node requires user input (Text, Options, etc that aren't just display), we STOP here.
-      // Logic: If it has options or inputType is text/email/etc, we wait.
-      // If it is just an Image node with NO caption (or purely display), we might want to auto-skip?
-      // For this simplified engine, we assume EVERY node except Start waits for input/ack, 
-      // UNLESS we implement a specific "Statement Node" type.
-      // To keep it simple for the User: We will save state here and wait for user reply.
-      
-      // Update Session DB
+      // 3. Update Session State
       await this.client.query(
         `INSERT INTO sessions (phone_number, current_node_id, last_active) 
          VALUES ($1, $2, NOW()) 
@@ -299,33 +305,74 @@ class BotEngine {
         [phone, currentNode.id]
       );
       
-      // Save outgoing message to history
       await this.client.query(
         `INSERT INTO messages (id, driver_id, sender, text, timestamp, type)
          VALUES ($1, $2, 'system', $3, $4, 'text')`,
         [Date.now().toString() + executionCount, driver.id, messageText || '[Media]', Date.now(), 'system']
       );
 
-      return; // Stop and wait for user input
+      // Stop here to wait for user input.
+      // In a more advanced engine, we would check if the node *requires* input.
+      // If it's just a display node (Image without caption question?), we might auto-proceed.
+      // But for this project, we assume one-step-at-a-time for stability.
+      return; 
     }
 
     if (!currentNode) {
-      // Flow ended
+      console.log("   Flow ended.");
       await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
+      
+      // Optional: Send "Flow complete" message?
     }
   }
 }
 
 // --- API ENDPOINTS ---
 
-// 1. Save Flow (From React Flow Frontend)
+// 1. Update Credentials (Missing in previous version)
+app.post('/api/update-credentials', async (req, res) => {
+    try {
+        const { phoneNumberId, apiToken } = req.body;
+        if(phoneNumberId) PHONE_NUMBER_ID = phoneNumberId;
+        if(apiToken) META_API_TOKEN = apiToken;
+
+        // Persist to DB
+        const client = await pool.connect();
+        await client.query(`INSERT INTO app_config (key, value) VALUES ('PHONE_NUMBER_ID', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [phoneNumberId]);
+        await client.query(`INSERT INTO app_config (key, value) VALUES ('META_API_TOKEN', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [apiToken]);
+        client.release();
+
+        console.log("✅ Credentials updated via API");
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 2. Configure Webhook (Missing in previous version)
+app.post('/api/configure-webhook', async (req, res) => {
+    try {
+        const { verifyToken } = req.body;
+        if(verifyToken) VERIFY_TOKEN = verifyToken;
+        
+        const client = await pool.connect();
+        await client.query(`INSERT INTO app_config (key, value) VALUES ('VERIFY_TOKEN', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [verifyToken]);
+        client.release();
+
+        console.log("✅ Webhook config updated via API");
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 3. Save Flow
 app.post('/api/bot-settings', async (req, res) => {
   try {
-    const { flowData } = req.body; // Expecting { nodes: [], edges: [] }
+    const { flowData } = req.body; 
     if (!flowData) return res.status(400).json({ error: "Missing flowData" });
 
     const client = await pool.connect();
-    // Archive old flow (optional) or just Insert new version
     await client.query(
       `INSERT INTO flows (nodes, edges) VALUES ($1, $2)`,
       [JSON.stringify(flowData.nodes), JSON.stringify(flowData.edges)]
@@ -338,7 +385,7 @@ app.post('/api/bot-settings', async (req, res) => {
   }
 });
 
-// 2. Get Flow
+// 4. Get Flow
 app.get('/api/bot-settings', async (req, res) => {
   try {
     const client = await pool.connect();
@@ -346,12 +393,11 @@ app.get('/api/bot-settings', async (req, res) => {
     client.release();
     
     if (result.rows.length > 0) {
-        // Return in the format the frontend expects for `settings`
         res.json({
             isEnabled: true,
             routingStrategy: 'HYBRID_BOT_FIRST',
-            systemInstruction: '', // Could store in DB too
-            steps: [], // Legacy support
+            systemInstruction: '', 
+            steps: [], 
             flowData: result.rows[0]
         });
     } else {
@@ -362,7 +408,7 @@ app.get('/api/bot-settings', async (req, res) => {
   }
 });
 
-// 3. Webhook (The Trigger)
+// 5. Webhook (The Trigger)
 app.post('/webhook', async (req, res) => {
   const body = req.body;
   if (body.object) {
@@ -374,20 +420,19 @@ app.post('/webhook', async (req, res) => {
       let input = '';
       if (msg.type === 'text') input = msg.text.body;
       if (msg.type === 'interactive') input = msg.interactive.button_reply.title;
-      if (msg.type === 'image') input = '[Image]'; // Placeholder for now
+      if (msg.type === 'image') input = '[Image]'; 
 
       try {
         const client = await pool.connect();
         
         // Save Incoming Message
-        // 1. Find Driver ID
         let driverRes = await client.query('SELECT id FROM drivers WHERE phone_number = $1', [from]);
         let driverId = driverRes.rows[0]?.id;
         if (!driverId) {
              driverId = Date.now().toString();
              await client.query(`INSERT INTO drivers (id, phone_number, name) VALUES ($1, $2, 'Guest')`, [driverId, from]);
         }
-        // 2. Insert Message
+        
         await client.query(
              `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'driver', $3, $4, 'text')`,
              [Date.now().toString(), driverId, input, Date.now()]
@@ -426,7 +471,7 @@ app.listen(PORT, async () => {
   await initDB();
 });
 
-// Existing Drivers API (Keep for dashboard compatibility)
+// Existing Drivers API
 app.get('/api/drivers', async (req, res) => {
     try {
         const client = await pool.connect();
@@ -442,7 +487,7 @@ app.get('/api/drivers', async (req, res) => {
             phoneNumber: r.phone_number,
             lastMessage: r.last_message,
             lastMessageTime: parseInt(r.last_message_time),
-            qualificationChecks: r.qualification_checks || {} // Ensure frontend safe
+            qualificationChecks: r.qualification_checks || {} 
         })));
     } catch (e) {
         res.status(500).json({ error: e.message });
