@@ -10,7 +10,7 @@ import { AITraining } from './components/AITraining';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
 import { Driver, LeadStatus, Notification, BotSettings } from './types';
-import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split } from 'lucide-react';
+import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split, Server, ShieldCheck, AlertTriangle } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -23,6 +23,7 @@ export default function App() {
   
   // Data Source Toggle: 'mock' or 'live'
   const [dataSource, setDataSource] = useState<'mock' | 'live'>('mock');
+  const [systemHealth, setSystemHealth] = useState({ database: 'unknown', whatsapp: 'unknown', ai: 'unknown' });
 
   // Bot Strategy for Dashboard
   const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
@@ -47,11 +48,17 @@ export default function App() {
            const settings = await liveApiService.getBotSettings();
            setBotSettings(settings);
 
+           // Initial Health Check
+           const health = await liveApiService.checkHealth();
+           setSystemHealth(health);
+
            // Subscribe triggers polling internally (now every 2s)
            unsubscribe = liveApiService.subscribeToUpdates(async () => {
                try {
                    const updated = await liveApiService.getDrivers();
                    setDrivers(updated);
+                   const h = await liveApiService.checkHealth();
+                   setSystemHealth(h);
                } catch (e) {
                    // Silent fail on poll error
                }
@@ -246,6 +253,42 @@ export default function App() {
                    </div>
                  </div>
               </div>
+
+              {/* LIVE MODE: SYSTEM STATUS WIDGET */}
+              {dataSource === 'live' && (
+                 <div className="bg-gray-900 rounded-xl p-4 text-white flex items-center justify-between shadow-lg">
+                    <div className="flex items-center gap-4">
+                        <div className="flex items-center gap-2">
+                             <div className={`w-3 h-3 rounded-full ${systemHealth.database === 'connected' ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]' : 'bg-red-500'}`}></div>
+                             <span className="text-sm font-medium flex items-center gap-2">
+                                <Server size={14} className="text-gray-400" /> Database
+                             </span>
+                        </div>
+                        <div className="h-6 w-px bg-gray-700"></div>
+                        <div className="flex items-center gap-2">
+                             <div className={`w-3 h-3 rounded-full ${systemHealth.whatsapp === 'configured' ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]' : 'bg-amber-500'}`}></div>
+                             <span className="text-sm font-medium flex items-center gap-2">
+                                <MessageSquare size={14} className="text-gray-400" /> WhatsApp API
+                             </span>
+                        </div>
+                        <div className="h-6 w-px bg-gray-700"></div>
+                         <div className="flex items-center gap-2">
+                             <div className={`w-3 h-3 rounded-full ${systemHealth.ai === 'configured' ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]' : 'bg-amber-500'}`}></div>
+                             <span className="text-sm font-medium flex items-center gap-2">
+                                <ShieldCheck size={14} className="text-gray-400" /> AI Engine
+                             </span>
+                        </div>
+                    </div>
+                    {systemHealth.whatsapp !== 'configured' && (
+                        <button 
+                          onClick={() => setShowWebhookModal(true)}
+                          className="text-xs bg-amber-500/20 text-amber-300 px-3 py-1 rounded-full border border-amber-500/50 flex items-center gap-1 hover:bg-amber-500/30 transition-colors"
+                        >
+                           <AlertTriangle size={12} /> Configure Credentials
+                        </button>
+                    )}
+                 </div>
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">

@@ -1,18 +1,40 @@
 import { Driver, BotSettings } from '../types';
 
-// Use relative path to leverage Vite's proxy in development and relative routing in production
+// Default to relative path (Vite proxy)
+// If running locally and proxy fails, we try direct port 3001
 const API_BASE_URL = ''; 
+const FALLBACK_URL = 'http://localhost:3001';
 
 export const liveApiService = {
   // Fetch drivers
   getDrivers: async (): Promise<Driver[]> => {
+    let url = `${API_BASE_URL}/api/drivers`;
+    
     try {
-      const url = `${API_BASE_URL}/api/drivers`;
-      const response = await fetch(url);
-      if (!response.ok) throw new Error('API Error: ' + response.statusText);
+      let response = await fetch(url);
+      
+      // If 404/500 and we are local, try direct port fallback
+      if (!response.ok && window.location.hostname === 'localhost') {
+         console.warn(`Proxy failed at ${url} (${response.status}), trying direct backend...`);
+         // Try /api/drivers at port 3001
+         url = `${FALLBACK_URL}/api/drivers`;
+         response = await fetch(url);
+      }
+
+      if (!response.ok) {
+          // Clone to read text safely
+          const errText = await response.clone().text();
+          try {
+             const errJson = await response.json();
+             throw new Error(`API Error: ${errJson.error || response.statusText}`);
+          } catch (e) {
+             // If not JSON, it's likely a static 404 page or "File not found" text
+             throw new Error(`API Error ${response.status}: ${errText.substring(0, 50)}...`);
+          }
+      }
       return await response.json();
     } catch (error: any) {
-      console.error("Fetch Error:", error);
+      console.error(`Fetch failed at ${url}`, error);
       throw error;
     }
   },
@@ -27,9 +49,22 @@ export const liveApiService = {
 
   // Optimized Polling (2 Seconds)
   subscribeToUpdates: (callback: () => void) => {
-    // Poll every 2 seconds for snappier updates without full websockets
     const interval = setInterval(callback, 2000); 
     return () => clearInterval(interval);
+  },
+
+  // --- SYSTEM STATUS ---
+  checkHealth: async () => {
+      try {
+          const res = await fetch(`${API_BASE_URL}/api/health`);
+          if (res.ok) return await res.json();
+          // Fallback check
+          const fallbackRes = await fetch(`${FALLBACK_URL}/api/health`);
+          if (fallbackRes.ok) return await fallbackRes.json();
+          return { database: 'disconnected', whatsapp: 'unknown', ai: 'unknown' };
+      } catch (e) {
+          return { database: 'disconnected', whatsapp: 'unknown', ai: 'unknown' };
+      }
   },
 
   // --- BOT SETTINGS API ---

@@ -23,7 +23,7 @@ import { TestBotChat } from './TestBotChat';
 import { 
   MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
   List, Type, Hash, Mail, Globe, Calendar, Clock, 
-  LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Pencil, Bold, Italic, Link, Play
+  LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Pencil, Bold, Italic, Link, Play, RefreshCw
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
@@ -498,6 +498,21 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       setTimeout(() => setIsSaving(false), 800);
   };
 
+  const handleReset = async () => {
+    if (!window.confirm("Are you sure? This will delete the current flow and restore the default Welcome message.")) return;
+    
+    if (isLiveMode) {
+        try {
+            await fetch('/api/reset-flow', { method: 'POST' });
+            window.location.reload(); // Quick refresh to fetch defaults
+        } catch (e) {
+            alert("Failed to reset flow.");
+        }
+    } else {
+        alert("This feature is only available in Live Mode.");
+    }
+  };
+
   return (
     <div className="flex flex-col h-full bg-gray-50 font-sans">
         <div className="bg-white border-b border-gray-200 px-6 h-16 flex items-center justify-between shrink-0 z-20">
@@ -510,10 +525,15 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 </div>
             </div>
             <div className="flex items-center gap-4">
+                 {isLiveMode && (
+                     <button onClick={handleReset} className="text-gray-400 hover:text-red-500 text-xs font-medium flex items-center gap-1 transition-colors">
+                        <RefreshCw size={12} /> Reset Flow
+                     </button>
+                 )}
+                 <div className="h-6 w-px bg-gray-200"></div>
                  <button onClick={() => setIsTestChatOpen(!isTestChatOpen)} className="flex items-center gap-2 px-4 py-1.5 border border-green-500 rounded-full text-sm font-medium text-green-600 hover:bg-green-50 transition-colors">
                     <Play size={14} fill="currentColor" /> Test Bot
                  </button>
-                 <div className="h-6 w-px bg-gray-200"></div>
                  <button onClick={handleSave} disabled={isSaving} className="bg-green-500 hover:bg-green-600 text-white px-6 py-2 rounded-full text-sm font-bold shadow-md hover:shadow-lg transition-all flex items-center gap-2">
                     {isSaving ? <span className="animate-pulse">Saving...</span> : <><CheckCircle size={16} /> Save</>}
                  </button>
