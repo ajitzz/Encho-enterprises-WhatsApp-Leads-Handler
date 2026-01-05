@@ -5,7 +5,7 @@ import {
   Settings, 
   LogOut, 
   Car,
-  Users, 
+  Users,
   Bot,
   Sparkles
 } from 'lucide-react';
@@ -17,14 +17,10 @@ interface LayoutProps {
 }
 
 export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange }) => {
-  // Bot Studio needs overflow-hidden to allow React Flow canvas to handle scrolling/panning.
-  // Other pages (Dashboard) need overflow-auto to scroll vertical content.
-  const isCanvasPage = activeTab === 'bot-studio';
-
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden">
       {/* Sidebar */}
-      <aside className="w-64 bg-black text-white flex flex-col shadow-xl z-20 flex-shrink-0">
+      <aside className="w-64 bg-black text-white flex flex-col shadow-xl z-20">
         <div className="p-6 border-b border-gray-800 flex items-center gap-3">
           <div className="bg-white text-black p-2 rounded-lg">
             <Car size={24} />
@@ -35,7 +31,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
           </div>
         </div>
 
-        <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
+        <nav className="flex-1 p-4 space-y-2">
           <button
             onClick={() => onTabChange('dashboard')}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
@@ -102,10 +98,8 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 flex flex-col relative overflow-hidden bg-gray-50">
-        <div className={`flex-1 relative w-full h-full ${isCanvasPage ? 'overflow-hidden' : 'overflow-auto'}`}>
-           {children}
-        </div>
+      <main className="flex-1 overflow-auto relative">
+        {children}
       </main>
     </div>
   );

@@ -52,9 +52,8 @@ export default function App() {
                try {
                    const updated = await liveApiService.getDrivers();
                    setDrivers(updated);
-                   // Refresh settings to keep strategy synced
-                   const updatedSettings = await liveApiService.getBotSettings();
-                   setBotSettings(updatedSettings);
+                   // Optionally re-fetch settings occasionally if multiple users? 
+                   // For now, assume settings don't change frequently from other users.
                } catch (e) {
                    // Silent fail on poll error to avoid spamming console
                }
@@ -166,6 +165,7 @@ export default function App() {
       }
   };
 
+  // Derived Stats
   const stats = {
     total: drivers.length,
     flagged: drivers.filter(d => d.status === LeadStatus.FLAGGED_FOR_REVIEW).length,
@@ -248,7 +248,28 @@ export default function App() {
                   </div>
                   <div className="text-3xl font-bold text-gray-900">{stats.total}</div>
                 </div>
-                {/* Other stat cards omitted for brevity but logic remains same */}
+
+                <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-gray-500 text-sm font-medium">Flagged Docs</span>
+                    <div className="p-2 bg-amber-50 text-amber-600 rounded-lg">
+                      <FileText size={20} />
+                    </div>
+                  </div>
+                  <div className="text-3xl font-bold text-gray-900">{stats.flagged}</div>
+                  <div className="text-xs text-amber-600 mt-2 font-medium">Needs Review</div>
+                </div>
+
+                <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-gray-500 text-sm font-medium">Qualified</span>
+                    <div className="p-2 bg-green-50 text-green-600 rounded-lg">
+                      <CheckCircle size={20} />
+                    </div>
+                  </div>
+                  <div className="text-3xl font-bold text-gray-900">{stats.qualified}</div>
+                </div>
+                
                  <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
                   <div className="flex items-center justify-between mb-4">
                     <span className="text-gray-500 text-sm font-medium">New Leads</span>
@@ -297,12 +318,7 @@ export default function App() {
         )}
 
         {/* VIEW: BOT STUDIO */}
-        {activeTab === 'bot-studio' && (
-             <BotBuilder 
-                isLiveMode={dataSource === 'live'} 
-                currentSettings={botSettings} 
-             />
-        )}
+        {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
 
         {/* VIEW: AI TRAINING */}
         {activeTab === 'ai-training' && <AITraining isLiveMode={dataSource === 'live'} />}
