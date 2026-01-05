@@ -1,8 +1,8 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import {
-  ReactFlow,
-  MiniMap,
-  Controls,
+import { 
+  ReactFlow, 
+  MiniMap, 
+  Controls, 
   Background, 
   useNodesState, 
   useEdgesState, 
@@ -17,7 +17,6 @@ import {
   useReactFlow,
   MarkerType
 } from '@xyflow/react';
-import '@xyflow/react/dist/style.css';
 import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
@@ -631,8 +630,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         {/* WORKSPACE */}
         <div className="flex-1 flex overflow-hidden relative">
             
-            {/* CANVAS */}
-            <div className="flex-1 h-full bg-[#f8f9fa] relative" onDragOver={onDragOver} onDrop={onDrop}>
+            {/* CANVAS - Force 100% Height */}
+            <div className="flex-1 h-full bg-[#f8f9fa] relative" style={{ height: '100%' }} onDragOver={onDragOver} onDrop={onDrop}>
                  <ReactFlow
                     nodes={nodes}
                     edges={edges}

@@ -5,7 +5,7 @@ import {
   Settings, 
   LogOut, 
   Car,
-  Users,
+  Users, 
   Bot,
   Sparkles
 } from 'lucide-react';
@@ -17,6 +17,10 @@ interface LayoutProps {
 }
 
 export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange }) => {
+  // Bot Studio needs overflow-hidden to allow React Flow canvas to handle scrolling/panning.
+  // Other pages (Dashboard) need overflow-auto to scroll vertical content.
+  const isCanvasPage = activeTab === 'bot-studio';
+
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden">
       {/* Sidebar */}
@@ -99,9 +103,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col relative overflow-hidden bg-gray-50">
-        {/* We remove overflow-auto here and let children handle it if they need to scroll. 
-            This allows BotBuilder (ReactFlow) to take 100% height. */}
-        <div className="flex-1 relative w-full h-full overflow-auto">
+        <div className={`flex-1 relative w-full h-full ${isCanvasPage ? 'overflow-hidden' : 'overflow-auto'}`}>
            {children}
         </div>
       </main>
