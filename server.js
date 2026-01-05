@@ -44,13 +44,10 @@ console.error = (...args) => {
 app.use(express.json({ limit: '50mb' }));
 app.use(cors()); 
 
-// Disable Caching for API responses (avoid stale data on Vercel/edge)
+// Disable Caching for API responses
 app.set('etag', false);
 app.use((req, res, next) => {
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-    res.set('Surrogate-Control', 'no-store');
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     next();
 });
 
@@ -131,10 +128,57 @@ const initDB = async () => {
         `);
 
         console.log("✅ Database Tables Initialized");
+
+        // --- SEED DATA (If Empty) ---
+        try {
+            const countRes = await pool.query('SELECT COUNT(*) FROM drivers');
+            if (parseInt(countRes.rows[0].count) === 0) {
+                console.log("🌱 Database is empty. Seeding with demo data...");
+                await seedDatabase();
+            }
+        } catch (e) {
+            console.error("Seed Check Failed:", e);
+        }
+
     } catch (err) {
         console.error("❌ DB Init Error:", err);
     }
 };
+
+const seedDatabase = async () => {
+    const now = Date.now();
+    
+    // Demo 1: Rajesh (New Lead)
+    await pool.query(`
+        INSERT INTO drivers (id, phone_number, name, source, status, last_message, last_message_time, created_at)
+        VALUES ('demo_1', '+91 98765 43210', 'Rajesh Kumar', 'Meta Ad', 'New', 'I saw your ad on Facebook', $1, $1)
+    `, [now]);
+
+    await pool.query(`
+        INSERT INTO messages (id, driver_id, sender, text, timestamp, type)
+        VALUES 
+        ('msg_1_1', 'demo_1', 'driver', 'Hi', $1, 'text'),
+        ('msg_1_2', 'demo_1', 'driver', 'I saw your ad on Facebook', $2, 'text')
+    `, [now - 10000, now]);
+
+    // Demo 2: Amit (Qualified)
+    await pool.query(`
+        INSERT INTO drivers (id, phone_number, name, source, status, last_message, last_message_time, created_at, vehicle_details)
+        VALUES ('demo_2', '+91 91234 56789', 'Amit Singh', 'Referral', 'Qualified', 'Here is my license photo', $1, $2, $3)
+    `, [now - 50000, now - 100000, JSON.stringify({ registration: 'MH 02 AB 9999', availability: 'Full-time' })]);
+
+    await pool.query(`
+        INSERT INTO messages (id, driver_id, sender, text, timestamp, type)
+        VALUES 
+        ('msg_2_1', 'demo_2', 'driver', 'Hello, my friend told me about this.', $1, 'text'),
+        ('msg_2_2', 'demo_2', 'system', 'Great! Do you have a valid license?', $2, 'text'),
+        ('msg_2_3', 'demo_2', 'driver', 'Yes, sending it now.', $3, 'text'),
+        ('msg_2_4', 'demo_2', 'driver', 'Here is my license photo', $4, 'text')
+    `, [now - 80000, now - 70000, now - 60000, now - 50000]);
+
+    console.log("✅ Demo Data Inserted Successfully");
+};
+
 initDB();
 
 // --- AI ENGINE ---

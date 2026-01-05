@@ -5,12 +5,10 @@ import { ChatDrawer } from './components/ChatDrawer';
 import { Simulator } from './components/Simulator';
 import { WebhookConfigModal } from './components/WebhookConfigModal';
 import { NotificationToast } from './components/NotificationToast';
-import { BotBuilder } from './components/BotBuilder';
-import { AITraining } from './components/AITraining';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
-import { Driver, LeadStatus, Notification, BotSettings } from './types';
-import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split, Server, ShieldCheck, AlertTriangle } from 'lucide-react';
+import { Driver, LeadStatus, Notification } from './types';
+import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -23,10 +21,6 @@ export default function App() {
   
   // Data Source Toggle: 'mock' or 'live'
   const [dataSource, setDataSource] = useState<'mock' | 'live'>('mock');
-  const [systemHealth, setSystemHealth] = useState({ database: 'unknown', whatsapp: 'unknown', ai: 'unknown' });
-
-  // Bot Strategy for Dashboard
-  const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
 
   // Sync with backend (Mock or Live)
   useEffect(() => {
@@ -35,58 +29,33 @@ export default function App() {
     const fetchData = async () => {
       if (dataSource === 'mock') {
          setDrivers(mockBackend.getDrivers());
-         setBotSettings(mockBackend.getBotSettings());
-         unsubscribe = mockBackend.subscribe(() => {
-             setDrivers(mockBackend.getDrivers());
-             setBotSettings(mockBackend.getBotSettings());
-         });
+         unsubscribe = mockBackend.subscribe(() => setDrivers(mockBackend.getDrivers()));
       } else {
          // Live Mode: Poll the real server
-         try {
-           const data = await liveApiService.getDrivers();
-           setDrivers(data);
-           const settings = await liveApiService.getBotSettings();
-           setBotSettings(settings);
-
-           // Initial Health Check
-           const health = await liveApiService.checkHealth();
-           setSystemHealth(health);
-
-           // Subscribe triggers polling internally (now every 2s)
-           unsubscribe = liveApiService.subscribeToUpdates(async () => {
-               try {
-                   const updated = await liveApiService.getDrivers();
-                   setDrivers(updated);
-                   const h = await liveApiService.checkHealth();
-                   setSystemHealth(h);
-               } catch (e) {
-                   // Silent fail on poll error
-               }
-           });
-           
-           addNotification({
-             type: 'info',
-             title: 'Connected to Live Server',
-             message: 'Polling active (2s interval)'
-           });
-         } catch (e) {
-             addNotification({
-                type: 'warning',
-                title: 'Connection Failed',
-                message: 'Ensure node server.js is running.'
-             });
-         }
+         const data = await liveApiService.getDrivers();
+         setDrivers(data);
+         unsubscribe = liveApiService.subscribeToUpdates(async () => {
+             const updated = await liveApiService.getDrivers();
+             setDrivers(updated);
+         });
+         
+         addNotification({
+           type: 'info',
+           title: 'Connected to Live Server',
+           message: 'Polling http://localhost:3000/api/drivers'
+         });
       }
     };
 
     fetchData();
     return () => unsubscribe();
-  }, [dataSource, activeTab]); 
+  }, [dataSource]);
 
   // Notification Handler
   const addNotification = (notif: Omit<Notification, 'id'>) => {
     const newNotif = { ...notif, id: Date.now().toString() + Math.random() };
     setNotifications(prev => [newNotif, ...prev]);
+    // Auto dismiss after 5 seconds
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== newNotif.id));
     }, 5000);
@@ -96,27 +65,17 @@ export default function App() {
     setNotifications(prev => prev.filter(n => n.id !== id));
   };
 
-  // UNIFIED UPDATE HANDLER
-  const handleUpdateDriver = async (id: string, updates: Partial<Driver>) => {
-      if (dataSource === 'mock') {
-          mockBackend.updateDriverDetails(id, updates);
-          // Manually update selectedDriver state to reflect changes instantly in the drawer
-          setSelectedDriver(prev => prev && prev.id === id ? { ...prev, ...updates } : prev);
-      } else {
-          try {
-             await liveApiService.updateDriver(id, updates);
-             // Optimistic update for UI responsiveness
-             setDrivers(prev => prev.map(d => d.id === id ? { ...d, ...updates } : d));
-             setSelectedDriver(prev => prev && prev.id === id ? { ...prev, ...updates } : prev);
-          } catch (e) {
-             console.error("Update failed", e);
-             addNotification({ type: 'warning', title: 'Update Failed', message: 'Could not save changes to server.' });
-          }
-      }
-  };
-
+  // Handlers
   const handleStatusUpdate = (id: string, status: LeadStatus) => {
-      handleUpdateDriver(id, { status });
+    if (dataSource === 'mock') {
+        mockBackend.updateDriverStatus(id, status);
+        if (selectedDriver && selectedDriver.id === id) {
+          setSelectedDriver(prev => prev ? ({ ...prev, status }) : null);
+        }
+    } else {
+        // In a real app, you would call liveApiService.updateStatus(id, status)
+        alert("Status updates in Live Mode require the full backend implementation. Currently Read-Only.");
+    }
   };
 
   const handleSendWelcome = (driver: Driver) => {
@@ -129,6 +88,15 @@ export default function App() {
           type: 'video_link' as const
         };
         mockBackend.addMessage(driver.id, msg);
+        setTimeout(() => {
+          mockBackend.addMessage(driver.id, {
+             id: Date.now().toString() + 'follow',
+             sender: 'system' as const,
+             text: 'Please reply with your Vehicle Registration Number to proceed.',
+             timestamp: Date.now(),
+             type: 'text' as const
+          });
+        }, 1500);
         
         addNotification({
           type: 'success',
@@ -136,6 +104,7 @@ export default function App() {
           message: `Onboarding initiated for ${driver.name}`
         });
     } else {
+        // Trigger backend welcome endpoint
         alert("Action Triggered on Live Server (Implementation Pending)");
     }
   };
@@ -148,7 +117,7 @@ export default function App() {
              sender: 'system',
              text: '[Bulk Template]: Hello! Are you ready to drive?',
              timestamp: Date.now(),
-             type: 'template' as const
+             type: 'template'
            });
         });
         setShowBulkModal(false);
@@ -163,24 +132,6 @@ export default function App() {
     }
   };
 
-  const handleStrategyChange = async (strategy: 'HYBRID_BOT_FIRST' | 'AI_ONLY') => {
-      if (!botSettings) return;
-      const newSettings = { ...botSettings, routingStrategy: strategy };
-      
-      // Optimistic Update
-      setBotSettings(newSettings);
-
-      if (dataSource === 'mock') {
-          mockBackend.updateBotSettings(newSettings);
-      } else {
-          try {
-              await liveApiService.saveBotSettings(newSettings);
-          } catch(e) {
-              alert("Failed to update strategy");
-          }
-      }
-  };
-
   // Derived Stats
   const stats = {
     total: drivers.length,
@@ -192,12 +143,9 @@ export default function App() {
   return (
     <>
       <Layout activeTab={activeTab} onTabChange={setActiveTab}>
-        
-        {/* VIEW: DASHBOARD & LEADS */}
-        {(activeTab === 'dashboard' || activeTab === 'leads') && (
         <div className="p-8 max-w-7xl mx-auto space-y-8">
           
-          {/* Header & Stats (Dashboard Only) */}
+          {/* Dashboard Header Stats */}
           {activeTab === 'dashboard' && (
             <>
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -206,25 +154,8 @@ export default function App() {
                     <p className="text-gray-500">Welcome back. Here is your fleet recruitment overview.</p>
                  </div>
                  
+                 {/* Live Mode Toggle & Webhook Config */}
                  <div className="flex items-center gap-2">
-                   {/* Routing Strategy Widget */}
-                   {botSettings && (
-                     <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg p-1 shadow-sm mr-2">
-                         <button 
-                            onClick={() => handleStrategyChange('HYBRID_BOT_FIRST')}
-                            className={`px-3 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 transition-colors ${botSettings.routingStrategy === 'HYBRID_BOT_FIRST' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-600'}`}
-                         >
-                            <Split size={14} /> Bot Flow
-                         </button>
-                         <button 
-                            onClick={() => handleStrategyChange('AI_ONLY')}
-                            className={`px-3 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 transition-colors ${botSettings.routingStrategy === 'AI_ONLY' ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-gray-600'}`}
-                         >
-                            <SettingsIcon size={14} /> AI Only
-                         </button>
-                     </div>
-                   )}
-
                    {dataSource === 'live' && (
                      <button
                         onClick={() => setShowWebhookModal(true)}
@@ -253,42 +184,6 @@ export default function App() {
                    </div>
                  </div>
               </div>
-
-              {/* LIVE MODE: SYSTEM STATUS WIDGET */}
-              {dataSource === 'live' && (
-                 <div className="bg-gray-900 rounded-xl p-4 text-white flex items-center justify-between shadow-lg">
-                    <div className="flex items-center gap-4">
-                        <div className="flex items-center gap-2">
-                             <div className={`w-3 h-3 rounded-full ${systemHealth.database === 'connected' ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]' : 'bg-red-500'}`}></div>
-                             <span className="text-sm font-medium flex items-center gap-2">
-                                <Server size={14} className="text-gray-400" /> Database
-                             </span>
-                        </div>
-                        <div className="h-6 w-px bg-gray-700"></div>
-                        <div className="flex items-center gap-2">
-                             <div className={`w-3 h-3 rounded-full ${systemHealth.whatsapp === 'configured' ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]' : 'bg-amber-500'}`}></div>
-                             <span className="text-sm font-medium flex items-center gap-2">
-                                <MessageSquare size={14} className="text-gray-400" /> WhatsApp API
-                             </span>
-                        </div>
-                        <div className="h-6 w-px bg-gray-700"></div>
-                         <div className="flex items-center gap-2">
-                             <div className={`w-3 h-3 rounded-full ${systemHealth.ai === 'configured' ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)]' : 'bg-amber-500'}`}></div>
-                             <span className="text-sm font-medium flex items-center gap-2">
-                                <ShieldCheck size={14} className="text-gray-400" /> AI Engine
-                             </span>
-                        </div>
-                    </div>
-                    {systemHealth.whatsapp !== 'configured' && (
-                        <button 
-                          onClick={() => setShowWebhookModal(true)}
-                          className="text-xs bg-amber-500/20 text-amber-300 px-3 py-1 rounded-full border border-amber-500/50 flex items-center gap-1 hover:bg-amber-500/30 transition-colors"
-                        >
-                           <AlertTriangle size={12} /> Configure Credentials
-                        </button>
-                    )}
-                 </div>
-              )}
 
               <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
@@ -332,15 +227,25 @@ export default function App() {
                   <div className="text-3xl font-bold text-gray-900">{stats.new}</div>
                 </div>
               </div>
+
+              <div className="bg-gradient-to-r from-gray-900 to-black rounded-2xl p-8 text-white flex justify-between items-center shadow-xl">
+                 <div>
+                   <h3 className="text-xl font-bold mb-2">Automate your hiring</h3>
+                   <p className="text-gray-400 max-w-lg">
+                     The AI bot (powered by Google Gemini) is active. It is currently monitoring incoming messages for driving licenses and questions about onboarding.
+                   </p>
+                 </div>
+                 <div className="bg-white/10 backdrop-blur-md px-6 py-3 rounded-lg border border-white/10">
+                   <span className="text-green-400 font-mono text-sm">● System Online</span>
+                 </div>
+              </div>
             </>
           )}
 
-          {/* Table Area */}
+          {/* Leads Table View */}
           <div className="h-[600px] flex flex-col">
             <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-bold text-gray-900">
-                {activeTab === 'dashboard' ? 'Recent Activity' : 'Lead Management'}
-              </h3>
+              <h3 className="text-lg font-bold text-gray-900">Recent Activity</h3>
               {selectedBulkIds.length > 0 && (
                 <button 
                   onClick={() => setShowBulkModal(true)}
@@ -367,15 +272,8 @@ export default function App() {
             />
           </div>
         </div>
-        )}
 
-        {/* VIEW: BOT STUDIO */}
-        {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
-
-        {/* VIEW: AI TRAINING */}
-        {activeTab === 'ai-training' && <AITraining isLiveMode={dataSource === 'live'} />}
-
-        {/* Modals & Drawers */}
+        {/* Webhook Configuration Modal */}
         {showWebhookModal && (
           <WebhookConfigModal 
             onClose={() => setShowWebhookModal(false)}
@@ -389,13 +287,39 @@ export default function App() {
           />
         )}
 
+        {/* Bulk Message Modal */}
         {showBulkModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
              <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md m-4">
                <h3 className="text-lg font-bold mb-4">Send Bulk Message</h3>
+               <p className="text-sm text-gray-500 mb-4">
+                 Sending to <span className="font-bold text-black">{selectedBulkIds.length}</span> recipients.
+               </p>
+               
+               <div className="space-y-3 mb-6">
+                 <div className="border p-3 rounded-lg bg-gray-50 border-gray-200 cursor-pointer hover:border-blue-500 transition-colors">
+                   <p className="font-semibold text-sm">Template: Welcome_V1</p>
+                   <p className="text-xs text-gray-500 mt-1">"Hello! Are you ready to drive with Uber? Reply YES to start."</p>
+                 </div>
+                 <div className="border p-3 rounded-lg bg-white border-gray-200 cursor-pointer hover:border-blue-500 transition-colors opacity-50">
+                   <p className="font-semibold text-sm">Template: Follow_Up_Docs</p>
+                   <p className="text-xs text-gray-500 mt-1">"We are still waiting for your documents. Please upload them here."</p>
+                 </div>
+               </div>
+
                <div className="flex gap-3">
-                 <button onClick={() => setShowBulkModal(false)} className="flex-1 px-4 py-2 border rounded-lg">Cancel</button>
-                 <button onClick={handleBulkSend} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg">Send</button>
+                 <button 
+                   onClick={() => setShowBulkModal(false)}
+                   className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                 >
+                   Cancel
+                 </button>
+                 <button 
+                   onClick={handleBulkSend}
+                   className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                 >
+                   Send Blast
+                 </button>
                </div>
              </div>
           </div>
@@ -405,13 +329,12 @@ export default function App() {
           driver={selectedDriver} 
           onClose={() => setSelectedDriver(null)}
           onStatusUpdate={handleStatusUpdate}
-          onUpdateDriver={handleUpdateDriver}
         />
         
         <NotificationToast notifications={notifications} onDismiss={removeNotification} />
       </Layout>
       
-      {/* Simulator: Updated to use new Bot Logic */}
+      {/* Simulator only visible in Mock mode to avoid confusion */}
       {dataSource === 'mock' && <Simulator onNotify={addNotification} />}
     </>
   );

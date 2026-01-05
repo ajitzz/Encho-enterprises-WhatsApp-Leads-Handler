@@ -5,9 +5,7 @@ import {
   Settings, 
   LogOut, 
   Car,
-  Users,
-  Bot,
-  Sparkles
+  Users
 } from 'lucide-react';
 
 interface LayoutProps {
@@ -54,34 +52,6 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
           >
             <Users size={20} />
             Lead Management
-          </button>
-          
-          <div className="pt-4 pb-2">
-            <p className="px-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Automation</p>
-          </div>
-
-          <button
-            onClick={() => onTabChange('bot-studio')}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-              activeTab === 'bot-studio' 
-                ? 'bg-white text-black font-medium' 
-                : 'text-gray-400 hover:bg-gray-900 hover:text-white'
-            }`}
-          >
-            <Bot size={20} />
-            Bot Studio
-          </button>
-
-          <button
-            onClick={() => onTabChange('ai-training')}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-              activeTab === 'ai-training' 
-                ? 'bg-white text-black font-medium' 
-                : 'text-gray-400 hover:bg-gray-900 hover:text-white'
-            }`}
-          >
-            <Sparkles size={20} />
-            AI Training
           </button>
         </nav>
 

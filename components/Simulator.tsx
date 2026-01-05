@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { mockBackend } from '../services/mockBackend';
 import { analyzeMessage } from '../services/geminiService';
 import { MessageSquare, Upload, Smartphone, Facebook } from 'lucide-react';
-import { Notification, LeadStatus } from '../types';
+import { Notification } from '../types';
 
 interface SimulatorProps {
   onNotify: (n: Omit<Notification, 'id'>) => void;
@@ -32,10 +32,7 @@ export const Simulator: React.FC<SimulatorProps> = ({ onNotify }) => {
       const imageUrl = hasImage ? `https://picsum.photos/400/300?random=${Date.now()}` : undefined;
       const text = message || (hasImage ? "Here is the photo" : "");
 
-      // 1. Send Message to Backend (Bot Engine)
-      // @ts-ignore - mockBackend types updated but Simulator not strictly typed in this context yet
-      const result = mockBackend.processIncomingMessage(phone, text, imageUrl);
-      const { driver, actionNeeded } = result;
+      const driver = mockBackend.receiveWebhookMessage(phone, text, imageUrl);
       
       onNotify({
         type: 'info',
@@ -43,64 +40,40 @@ export const Simulator: React.FC<SimulatorProps> = ({ onNotify }) => {
         message: `Message received from ${driver.name}`
       });
 
-      // 2. If Bot didn't handle it, or Bot requested AI Handoff
-      if (actionNeeded === 'AI_REPLY') {
-          // Get current system instruction from settings
-          const settings = mockBackend.getBotSettings();
-          
-          // In Simulator, we always try AI unless key is missing, then fallback
-          // Simulate missing key scenario for demonstration if needed, but here we assume key exists
-          // For strict parity with server.js fallback:
-          const aiResult = await analyzeMessage(text, imageUrl, settings.systemInstruction);
-          
-          if (aiResult.intent === "Analysis Failed" || !aiResult.suggestedReply) {
-               // AI FAILED -> HUMAN AGENT
-               mockBackend.updateDriverStatus(driver.id, LeadStatus.FLAGGED_FOR_REVIEW);
-               setTimeout(() => {
-                mockBackend.addMessage(driver.id, {
-                  id: Date.now().toString(),
-                  sender: 'system',
-                  text: `[Fallback]: Thanks! A human agent will contact you shortly.`,
-                  timestamp: Date.now(),
-                  type: 'text'
-                });
-               }, 1000);
-          } else {
-             // AI SUCCEEDED
-             if (aiResult.extractedData) {
-                mockBackend.updateDriverDetails(driver.id, {
-                    vehicleRegistration: aiResult.extractedData.vehicleRegistration || driver.vehicleRegistration,
-                    availability: (aiResult.extractedData.availability as any) || driver.availability,
-                    qualificationChecks: {
-                    ...driver.qualificationChecks,
-                    hasValidLicense: aiResult.extractedData.isLicenseValid || driver.qualificationChecks.hasValidLicense
-                    }
-                });
-             }
-
-             if (aiResult.recommendedStatus && aiResult.recommendedStatus !== driver.status) {
-                mockBackend.updateDriverStatus(driver.id, aiResult.recommendedStatus);
-                if (aiResult.recommendedStatus === 'Flagged') {
-                    onNotify({
-                    type: 'warning',
-                    title: 'AI Alert: Review Needed',
-                    message: `AI flagged ${driver.name} for manual review.`
-                    });
-                }
-             }
-             
-             // Send AI Reply
-             setTimeout(() => {
-                mockBackend.addMessage(driver.id, {
-                id: Date.now().toString(),
-                sender: 'system',
-                text: `[AI]: ${aiResult.suggestedReply}`,
-                timestamp: Date.now(),
-                type: 'text'
-                });
-             }, 1000);
-          }
+      const aiResult = await analyzeMessage(text, imageUrl);
+      
+      if (aiResult.extractedData) {
+         mockBackend.updateDriverDetails(driver.id, {
+            vehicleRegistration: aiResult.extractedData.vehicleRegistration || driver.vehicleRegistration,
+            availability: (aiResult.extractedData.availability as any) || driver.availability,
+            qualificationChecks: {
+              ...driver.qualificationChecks,
+              hasValidLicense: aiResult.extractedData.isLicenseValid || driver.qualificationChecks.hasValidLicense
+            }
+         });
       }
+
+      if (aiResult.recommendedStatus && aiResult.recommendedStatus !== driver.status) {
+         mockBackend.updateDriverStatus(driver.id, aiResult.recommendedStatus);
+         
+         if (aiResult.recommendedStatus === 'Flagged') {
+            onNotify({
+              type: 'warning',
+              title: 'AI Alert: Review Needed',
+              message: `AI flagged ${driver.name} for manual review.`
+            });
+         }
+      }
+      
+      setTimeout(() => {
+        mockBackend.addMessage(driver.id, {
+          id: Date.now().toString(),
+          sender: 'system',
+          text: `[AI Auto-Reply]: ${aiResult.suggestedReply}`,
+          timestamp: Date.now(),
+          type: 'text'
+        });
+      }, 1000);
 
       setMessage('');
       setHasImage(false);
@@ -122,7 +95,7 @@ export const Simulator: React.FC<SimulatorProps> = ({ onNotify }) => {
         onNotify({
             type: 'success',
             title: 'New Meta Ad Lead',
-            message: `${driver.name} captured from Facebook Ad. Bot sequence started.`
+            message: `${driver.name} captured from Facebook Ad. Auto-reply sent.`
         });
 
         // Reset
@@ -195,7 +168,7 @@ export const Simulator: React.FC<SimulatorProps> = ({ onNotify }) => {
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none h-20 resize-none"
-            placeholder="Type message..."
+            placeholder="Type message (e.g., 'My car number is MH 02 AB 1234')"
           />
         </div>
         
@@ -227,7 +200,7 @@ export const Simulator: React.FC<SimulatorProps> = ({ onNotify }) => {
       ) : (
       <div className="p-4 space-y-4">
           <div className="bg-blue-50 border border-blue-100 p-3 rounded-lg text-xs text-blue-800 mb-2">
-              <p>Simulates a user filling an "Instant Form" on Facebook/Instagram. The <strong>Bot</strong> will start automatically.</p>
+              <p>Simulates a user filling an "Instant Form" on Facebook/Instagram. The system will <strong>automatically</strong> send a WhatsApp Welcome message.</p>
           </div>
           <div>
             <label className="block text-xs font-semibold text-gray-500 mb-1">Lead Name</label>

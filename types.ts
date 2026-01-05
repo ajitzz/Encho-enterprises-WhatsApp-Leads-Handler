@@ -22,8 +22,7 @@ export interface Message {
   text?: string;
   imageUrl?: string;
   timestamp: number;
-  type: 'text' | 'image' | 'video_link' | 'template' | 'options';
-  options?: string[]; // For buttons
+  type: 'text' | 'image' | 'video_link' | 'template';
 }
 
 export interface Driver {
@@ -47,11 +46,6 @@ export interface Driver {
     hasVehicle: boolean;
     isLocallyAvailable: boolean;
   };
-  
-  // Bot State Tracking
-  currentBotStepId?: string; 
-  isBotActive: boolean;
-  flowCompleted?: boolean; // NEW: Tracks if the initial flow is done
 }
 
 export interface MetaTemplate {
@@ -65,34 +59,4 @@ export interface Notification {
   type: 'info' | 'warning' | 'success';
   title: string;
   message: string;
-}
-
-// --- BOT BUILDER TYPES ---
-
-export type InputType = 'text' | 'image' | 'option' | 'location';
-
-export interface BotStep {
-  id: string;
-  title: string;
-  message: string; // What the bot says (Fallback text if template used)
-  inputType: InputType; // What the user should reply with
-  options?: string[]; // If inputType is 'option'
-  saveToField?: 'name' | 'vehicleRegistration' | 'availability' | 'document'; // Where to save the data
-  nextStepId?: string | 'END' | 'AI_HANDOFF';
-  
-  // Template Integration
-  templateName?: string; // The ID/Name of the template in Meta
-  templateLanguage?: string; // e.g. en_US, ml_IN
-}
-
-export interface BotSettings {
-  isEnabled: boolean;
-  routingStrategy: 'BOT_ONLY' | 'AI_ONLY' | 'HYBRID_BOT_FIRST';
-  systemInstruction: string; // The "Training" for Gemini
-  steps: BotStep[];
-  // New Visual Flow Data
-  flowData?: {
-    nodes: any[];
-    edges: any[];
-  };
 }
