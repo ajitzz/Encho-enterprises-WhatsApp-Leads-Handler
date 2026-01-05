@@ -12,7 +12,6 @@ import {
   Node,
   Edge,
   Connection,
-  Panel,
   ReactFlowProvider,
   useReactFlow,
   MarkerType
@@ -22,10 +21,9 @@ import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
 import { TestBotChat } from './TestBotChat';
 import { 
-  Save, MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
-  List, Type, Hash, Mail, Globe, Calendar, Clock, Phone, 
-  CreditCard, ShoppingBag, LayoutGrid, MoreHorizontal, X, Trash2,
-  Zap, CheckCircle, Flag, Pencil, Bold, Italic, Link, Play, Music, Upload
+  MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
+  List, Type, Hash, Mail, Globe, Calendar, Clock, 
+  LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Pencil, Bold, Italic, Link, Play
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
@@ -45,7 +43,6 @@ const CustomNode = ({ data, id, selected }: any) => {
   const [options, setOptions] = useState<string[]>(data.options || []);
   const [variableName, setVariableName] = useState(data.saveToField || '');
   
-  // Sync internal state with data prop when it changes externally
   useEffect(() => {
     setOptions(data.options || []);
     setVariableName(data.saveToField || '');
@@ -74,11 +71,9 @@ const CustomNode = ({ data, id, selected }: any) => {
     handleChange('options', newOpts);
   };
 
-  // Helper to determine icon based on data.label / data.inputType
   const getNodeIcon = () => {
     const size = 14;
     const { label, inputType } = data;
-    
     switch (label) {
       case 'Image': return <ImageIcon size={size} />;
       case 'Video': return <Video size={size} />;
@@ -98,7 +93,6 @@ const CustomNode = ({ data, id, selected }: any) => {
     }
   };
 
-  // --- 1. START NODE (Special Case) ---
   if (data.type === 'start') {
     return (
       <div className={`p-4 bg-white rounded-2xl shadow-sm border-2 min-w-[240px] ${selected ? 'border-blue-500' : 'border-gray-100 hover:border-gray-200'} transition-colors`}>
@@ -114,12 +108,10 @@ const CustomNode = ({ data, id, selected }: any) => {
     );
   }
 
-  // Determine Node Category
   const isInputType = ['text', 'number', 'email', 'website', 'date', 'time'].includes(data.inputType);
   const isMediaType = ['Image', 'Video', 'File', 'Audio'].includes(data.label);
   const isOptionType = ['Quick Reply', 'List'].includes(data.label) || data.inputType === 'option';
 
-  // --- 2. EDIT MODE (Selected) ---
   if (selected) {
     return (
         <div className="w-[400px] bg-white rounded-xl shadow-2xl border-2 border-blue-500 ring-4 ring-blue-50 transition-all duration-200 z-50 relative animate-in zoom-in-95 duration-200">
@@ -132,7 +124,6 @@ const CustomNode = ({ data, id, selected }: any) => {
                     {isInputType && <span className="text-[10px] bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">Input</span>}
                 </div>
 
-                {/* --- MEDIA TYPES (Image, Video, File) --- */}
                 {isMediaType && (
                     <>
                         <div className="flex items-center gap-4 mb-4">
@@ -141,7 +132,6 @@ const CustomNode = ({ data, id, selected }: any) => {
                                 Embed link <span className="text-red-500">*</span>
                             </span>
                         </div>
-
                         <label className="block text-sm font-medium text-gray-900 mb-2">{data.label} URL <span className="text-red-500">*</span></label>
                         <div className="relative mb-4 group/input">
                             <input 
@@ -155,7 +145,6 @@ const CustomNode = ({ data, id, selected }: any) => {
                                 <Pencil size={14} />
                             </div>
                         </div>
-
                         {(data.label === 'Image' || data.label === 'Video') && (
                             <div className="relative group/caption">
                                 <label className="block text-sm font-medium text-gray-900 mb-2">Caption:</label>
@@ -170,7 +159,6 @@ const CustomNode = ({ data, id, selected }: any) => {
                     </>
                 )}
 
-                {/* --- STATEMENT TYPE (Text Message) --- */}
                 {(data.label === 'Text' && !isInputType) && (
                     <div className="rounded-xl border border-green-500 ring-1 ring-green-100 transition-all duration-200">
                         <div className="flex items-center gap-4 px-4 py-3 border-b border-gray-100/50">
@@ -193,7 +181,6 @@ const CustomNode = ({ data, id, selected }: any) => {
                     </div>
                 )}
 
-                {/* --- CHOICE TYPES --- */}
                 {isOptionType && (
                     <div className="space-y-3">
                          <div className="bg-gray-50 p-3 rounded-lg border border-gray-200 mb-3">
@@ -225,16 +212,12 @@ const CustomNode = ({ data, id, selected }: any) => {
                                 </div>
                             ))}
                          </div>
-                         <button 
-                            onClick={addOption}
-                            className="w-full py-2 border border-dashed border-gray-300 rounded-lg text-xs font-medium text-gray-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50 transition-all flex items-center justify-center gap-1"
-                         >
+                         <button onClick={addOption} className="w-full py-2 border border-dashed border-gray-300 rounded-lg text-xs font-medium text-gray-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50 transition-all flex items-center justify-center gap-1">
                             <List size={12} /> Add Choice
                          </button>
                     </div>
                 )}
 
-                {/* --- INPUT TYPES --- */}
                 {isInputType && (
                     <div className="space-y-4">
                         <div className="bg-gray-50 p-3 rounded-lg border border-gray-200">
@@ -274,7 +257,6 @@ const CustomNode = ({ data, id, selected }: any) => {
                     </div>
                 )}
              </div>
-
              {!isOptionType && (
                  <Handle type="source" position={Position.Right} id="main" style={{...ACTIVE_HANDLE_STYLE, right: -12, top: '50%'}} />
              )}
@@ -282,11 +264,9 @@ const CustomNode = ({ data, id, selected }: any) => {
     );
   }
 
-  // --- 3. PREVIEW MODE (Unselected) ---
   return (
     <div className="w-[280px] bg-white rounded-2xl shadow-md border border-gray-200 transition-all hover:border-gray-300 hover:shadow-lg group relative cursor-pointer">
         <Handle type="target" position={Position.Left} style={HANDLE_STYLE} className="-left-2.5" />
-        
         <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
             <div className="flex items-center gap-2">
                 <span className="text-gray-500">{getNodeIcon()}</span>
@@ -301,14 +281,13 @@ const CustomNode = ({ data, id, selected }: any) => {
                 </button>
             </div>
         </div>
-
         <div className="p-4">
             {(data.label === 'Text' && !isInputType) && (
                 <p className="text-sm text-gray-600 line-clamp-3 font-medium">
                     {data.message || <span className="text-gray-300 italic">Empty text message...</span>}
                 </p>
             )}
-
+            {/* Other Previews simplified for brevity, logic identical to previous */}
             {data.label === 'Image' && (
                 <div className="space-y-2">
                      <div className="relative aspect-video bg-gray-100 rounded-lg overflow-hidden border border-gray-100">
@@ -323,8 +302,6 @@ const CustomNode = ({ data, id, selected }: any) => {
                      {data.message && <p className="text-xs text-gray-500 truncate">{data.message}</p>}
                 </div>
             )}
-
-            {/* Video, File, Options previews remain same... */}
             {isOptionType && (
                 <div className="space-y-2">
                     <p className="text-xs text-gray-600 mb-2">{data.message || 'Select an option:'}</p>
@@ -338,7 +315,6 @@ const CustomNode = ({ data, id, selected }: any) => {
                     </div>
                 </div>
              )}
-
              {isInputType && (
                 <div className="space-y-2">
                     <p className="text-xs text-gray-600 mb-2">{data.message || `Ask for ${data.label.toLowerCase()}...`}</p>
@@ -349,7 +325,6 @@ const CustomNode = ({ data, id, selected }: any) => {
                 </div>
              )}
         </div>
-
         {!isOptionType && (
             <Handle type="source" position={Position.Right} id="main" style={{...HANDLE_STYLE, right: -12, top: '50%'}} />
         )}
@@ -357,11 +332,8 @@ const CustomNode = ({ data, id, selected }: any) => {
   );
 };
 
-const nodeTypes = {
-  custom: CustomNode,
-};
+const nodeTypes = { custom: CustomNode };
 
-// --- SIDEBAR CONFIGURATION ---
 const SIDEBAR_CATEGORIES = [
     {
         title: 'Messages (Statements)',
@@ -392,10 +364,9 @@ const SIDEBAR_CATEGORIES = [
     }
 ];
 
-// --- MAIN BUILDER ---
-
 interface BotBuilderProps {
     isLiveMode?: boolean; 
+    currentSettings?: BotSettings | null;
 }
 
 const initialNodes: Node[] = [
@@ -407,29 +378,30 @@ const initialNodes: Node[] = [
     }
 ];
 
-export const BotBuilder: React.FC<BotBuilderProps> = ({ isLiveMode = false }) => {
+export const BotBuilder: React.FC<BotBuilderProps> = ({ isLiveMode = false, currentSettings }) => {
   return (
     <ReactFlowProvider>
-        <FlowEditor isLiveMode={isLiveMode} />
+        <FlowEditor isLiveMode={isLiveMode} currentSettings={currentSettings} />
     </ReactFlowProvider>
   );
 };
 
-const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
+const FlowEditor = ({ isLiveMode, currentSettings }: { isLiveMode: boolean, currentSettings?: BotSettings | null }) => {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [isSaving, setIsSaving] = useState(false);
   const [isTestChatOpen, setIsTestChatOpen] = useState(false);
   const reactFlowInstance = useReactFlow();
 
-  // Load Data
   useEffect(() => {
     const load = async () => {
         let settings: BotSettings;
-        if (isLiveMode) {
-             try {
-                settings = await liveApiService.getBotSettings();
-             } catch(e) { console.error("Could not fetch settings:", e); return; }
+        // Prefer passed settings to ensure sync with App.tsx
+        if (currentSettings) {
+             settings = currentSettings;
+        } else if (isLiveMode) {
+             try { settings = await liveApiService.getBotSettings(); } 
+             catch(e) { return; }
         } else {
              settings = mockBackend.getBotSettings();
         }
@@ -439,7 +411,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 ...n,
                 data: {
                     ...n.data,
-                    icon: undefined, // ensure no icons loaded
+                    icon: undefined,
                     onChange: updateNodeData,
                     onDelete: deleteNode
                 }
@@ -449,7 +421,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         }
     };
     load();
-  }, [isLiveMode]);
+  }, [isLiveMode, currentSettings]);
 
   const onConnect = useCallback(
     (params: Connection) => setEdges((eds) => addEdge({ 
@@ -479,17 +451,13 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const onDrop = useCallback(
     (event: React.DragEvent) => {
       event.preventDefault();
-
       const type = event.dataTransfer.getData('application/reactflow/type');
       const inputType = event.dataTransfer.getData('application/reactflow/inputType');
       const label = event.dataTransfer.getData('application/reactflow/label');
 
       if (typeof type === 'undefined' || !type) return;
 
-      const position = reactFlowInstance.screenToFlowPosition({
-        x: event.clientX,
-        y: event.clientY,
-      });
+      const position = reactFlowInstance.screenToFlowPosition({ x: event.clientX, y: event.clientY });
 
       const newNode: Node = {
         id: `node_${Date.now()}`,
@@ -498,7 +466,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         data: { 
             label: label,
             message: '', 
-            inputType: inputType || 'text', // Default to text if missing
+            inputType: inputType || 'text',
             hasMedia: type === 'image' || type === 'video' || type === 'file',
             onChange: updateNodeData, 
             onDelete: deleteNode,
@@ -513,27 +481,30 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
   const handleSave = async () => {
       setIsSaving(true);
-      // Ensure we don't save React elements in nodes data
       const cleanNodes = nodes.map(n => ({
           ...n,
-          data: {
-              ...n.data,
-              icon: undefined,
-              onChange: undefined,
-              onDelete: undefined
-          }
+          data: { ...n.data, icon: undefined, onChange: undefined, onDelete: undefined }
       }));
 
+      // Use currentSettings (from prop) to preserve routingStrategy
+      // If not available, fallback to fetching
+      let baseSettings = currentSettings;
+      if (!baseSettings) {
+          try {
+             baseSettings = isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
+          } catch(e) {
+             baseSettings = mockBackend.getBotSettings();
+          }
+      }
+
       const newSettings: BotSettings = {
-          ...mockBackend.getBotSettings(),
-          steps: [], // Deprecated in favor of flowData
+          ...baseSettings,
+          steps: [], 
           flowData: { nodes: cleanNodes, edges } 
       };
 
       if (isLiveMode) {
-          try {
-             await liveApiService.saveBotSettings(newSettings);
-          } catch(e) { console.error(e); }
+          try { await liveApiService.saveBotSettings(newSettings); } catch(e) { console.error(e); }
       } else {
           mockBackend.updateBotSettings(newSettings);
       }
