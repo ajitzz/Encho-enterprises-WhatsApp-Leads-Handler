@@ -73,7 +73,11 @@ const initDB = async () => {
       );
     `);
 
-    // 2b. Schema Migration: Ensure columns exist (Fix for "column does not exist" error)
+    // 2b. Schema Migration: Fix Legacy Columns
+    // Drop 'settings' column if it exists (Fixes the Not-Null constraint error)
+    await client.query(`ALTER TABLE bot_settings DROP COLUMN IF EXISTS settings`);
+
+    // Ensure new columns exist
     await client.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN DEFAULT TRUE`);
     await client.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS routing_strategy TEXT DEFAULT 'HYBRID_BOT_FIRST'`);
     await client.query(`ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS system_instruction TEXT`);
