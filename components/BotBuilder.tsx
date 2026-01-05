@@ -436,7 +436,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [isSaving, setIsSaving] = useState(false);
-  const [isTestChatOpen, setIsTestChatOpen] = useState(false); // NEW STATE
+  const [isTestChatOpen, setIsTestChatOpen] = useState(false);
   const reactFlowInstance = useReactFlow();
 
   // Load Data

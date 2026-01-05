@@ -44,8 +44,16 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
       const firstEdge = edges.find(e => e.source === startNode.id);
       if (firstEdge) {
         processNode(firstEdge.target);
+      } else {
+        addBotMessage("Bot flow has no connections from Start.");
       }
+    } else {
+      addBotMessage("No Start node found.");
     }
+  };
+
+  const addBotMessage = (text: string) => {
+      setMessages(prev => [...prev, { id: Date.now().toString(), sender: 'bot', text, type: 'text' }]);
   };
 
   const processNode = async (nodeId: string) => {
@@ -60,34 +68,31 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
       setIsTyping(false);
       
       const label = node.data.label;
-      const rawMessage = node.data.message as string;
-      const mediaUrl = node.data.mediaUrl as string;
-      const options = node.data.options as string[];
+      const rawMessage = (node.data.message as string) || '';
+      const mediaUrl = (node.data.mediaUrl as string) || '';
+      const options = (node.data.options as string[]) || [];
 
       // Replace variables
-      const text = rawMessage.replace(/{{\s*(\w+)\s*}}/g, (_, key) => variables[key] || '');
+      const text = rawMessage.replace(/{{\s*(\w+)\s*}}/g, (_, key) => variables[key] || `[${key}]`);
+
+      let msgType: ChatMessage['type'] = 'text';
+      if (label === 'Image') msgType = 'image';
+      if (label === 'Video') msgType = 'video';
+      if (label === 'File') msgType = 'file';
+      if (label === 'Quick Reply' || label === 'List' || node.data.inputType === 'option') msgType = 'options';
 
       const newMessage: ChatMessage = {
         id: Date.now().toString(),
         sender: 'bot',
         text: text,
         image: (label === 'Image' || label === 'Video') ? mediaUrl : undefined,
-        options: (label === 'Quick Reply' || label === 'List' || node.data.inputType === 'option') ? options : undefined,
-        type: label === 'Image' ? 'image' : label === 'Video' ? 'video' : label === 'File' ? 'file' : 'text'
+        options: (options && options.length > 0) ? options : undefined,
+        type: msgType
       };
 
       setMessages(prev => [...prev, newMessage]);
 
-      // If it's a display-only node (no input required), move to next automatically
-      // Logic: If inputType is NOT 'option' AND label is NOT 'Text'/'Input' related
-      // Simplified: If it's just an Image/Video without a question, usually we wait, 
-      // BUT in this builder logic, 'Image' nodes might just be display. 
-      // However, usually every node waits for a step. 
-      // EXCEPTION: If the node has NO options and NO saveToField and is NOT text input, maybe auto-skip?
-      // For now, let's assume all nodes wait for user ack unless specifically designed otherwise.
-      // Actually, looking at the previous logic, only 'Start' is skipped.
-      
-    }, 800);
+    }, 600);
   };
 
   const handleSendMessage = (text: string) => {
@@ -117,7 +122,7 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
     // Find Edge
     let nextEdge: Edge | undefined;
 
-    // If options, try to match specific handle
+    // If options, try to match specific handle (opt_0, opt_1, etc.)
     if (currentNode.data.inputType === 'option' || currentNode.data.options) {
       const optionIndex = (currentNode.data.options as string[])?.indexOf(text);
       if (optionIndex !== -1) {
@@ -125,7 +130,7 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
       }
     }
 
-    // Fallback to main edge
+    // Fallback to main edge (default flow)
     if (!nextEdge) {
       nextEdge = edges.find(e => e.source === currentNodeId && (e.sourceHandle === 'main' || !e.sourceHandle));
     }
@@ -133,11 +138,9 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
     if (nextEdge) {
       processNode(nextEdge.target);
     } else {
-      setIsTyping(true);
       setTimeout(() => {
-        setIsTyping(false);
         setMessages(prev => [...prev, {
-          id: 'end',
+          id: 'end_' + Date.now(),
           sender: 'bot',
           text: 'End of Flow.',
           type: 'text'
@@ -172,11 +175,18 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
 
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto p-4 bg-[#e5ded8] space-y-4 relative">
-        {/* Background Pattern */}
-        <div className="absolute inset-0 opacity-10 pointer-events-none" style={{ backgroundImage: 'url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png")' }}></div>
+        {/* Background Pattern Simulation */}
+        <div className="absolute inset-0 opacity-5 pointer-events-none" 
+             style={{ backgroundImage: 'radial-gradient(#4a5568 1px, transparent 1px)', backgroundSize: '20px 20px' }}>
+        </div>
 
         {messages.map((msg) => (
           <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'} relative z-10`}>
+            {msg.sender === 'bot' && (
+                <div className="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center mr-2 mt-1 shrink-0 text-gray-500">
+                    <Bot size={14} />
+                </div>
+            )}
             <div className={`max-w-[85%] rounded-lg p-3 shadow-sm text-sm ${
               msg.sender === 'user' 
                 ? 'bg-[#d9fdd3] text-gray-800 rounded-tr-none' 
@@ -188,14 +198,14 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
                  <img src={msg.image} alt="content" className="w-full h-auto rounded-lg mb-2 border border-gray-100" />
               )}
               {msg.type === 'video' && msg.image && (
-                 <div className="relative w-full aspect-video bg-black rounded-lg mb-2 overflow-hidden flex items-center justify-center">
-                    <img src={`https://img.youtube.com/vi/${msg.image.split('v=')[1]}/mqdefault.jpg`} className="w-full h-full object-cover opacity-60" />
-                    <div className="absolute w-10 h-10 bg-red-600 rounded-full flex items-center justify-center text-white">▶</div>
+                 <div className="relative w-full aspect-video bg-black rounded-lg mb-2 overflow-hidden flex items-center justify-center group">
+                    <img src={`https://img.youtube.com/vi/${msg.image.split('v=')[1] || ''}/mqdefault.jpg`} className="w-full h-full object-cover opacity-60" onError={(e) => (e.currentTarget.src = 'https://via.placeholder.com/320x180?text=Video')} />
+                    <div className="absolute w-10 h-10 bg-red-600 rounded-full flex items-center justify-center text-white shadow-lg group-hover:scale-110 transition-transform">▶</div>
                  </div>
               )}
 
               {/* Text Rendering */}
-              <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
+              {msg.text && <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>}
               
               {/* Timestamp */}
               <div className={`text-[9px] mt-1 text-right ${msg.sender === 'user' ? 'text-green-800/60' : 'text-gray-400'}`}>
@@ -206,7 +216,7 @@ export const TestBotChat: React.FC<TestBotChatProps> = ({ nodes, edges, onClose 
         ))}
 
         {isTyping && (
-          <div className="flex justify-start relative z-10">
+          <div className="flex justify-start relative z-10 ml-8">
              <div className="bg-white rounded-lg p-3 rounded-tl-none shadow-sm flex gap-1 items-center">
                 <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"></span>
                 <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce delay-100"></span>
