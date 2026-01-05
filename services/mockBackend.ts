@@ -8,8 +8,8 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
   steps: [],
   flowData: {
       nodes: [
-          { id: 'start', type: 'custom', data: { type: 'start' }, position: { x: 50, y: 100 } },
-          { id: 'node_1', type: 'custom', data: { label: 'Text', message: 'Hello! Welcome to Uber Fleet.', inputType: 'text' }, position: { x: 250, y: 100 } }
+          { id: 'start', type: 'custom', data: { type: 'start', label: 'Start' }, position: { x: 50, y: 100 } },
+          { id: 'node_1', type: 'custom', data: { label: 'Text', message: 'Welcome to Uber Fleet! How can I help you start driving today?', inputType: 'text', saveToField: 'last_inquiry' }, position: { x: 250, y: 100 } }
       ],
       edges: [
           { id: 'e1', source: 'start', target: 'node_1' }

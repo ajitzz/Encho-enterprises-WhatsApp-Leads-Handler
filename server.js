@@ -83,7 +83,7 @@ const initDB = async () => {
 
     // --- FIX: CLEANUP BROKEN FLOWS AND INJECT VALID DEFAULT ---
     const flowCheck = await client.query('SELECT * FROM flows');
-    // Check if empty OR if it contains the broken placeholder text ("Replace this sample message")
+    // Check if empty OR if it contains the broken placeholder text
     const hasBrokenFlow = flowCheck.rows.some(row => 
         JSON.stringify(row.nodes).toLowerCase().includes("replace this sample message")
     );
@@ -232,13 +232,13 @@ const generateAIResponse = async (input, systemInstruction) => {
         const model = ai.models; 
         const response = await model.generateContent({
             model: 'gemini-1.5-flash',
-            // FIX: Ensure contents is formatted correctly for the new SDK
+            // FIX: Correct structure for @google/genai SDK
             contents: [{ role: 'user', parts: [{ text: input }] }],
             config: { systemInstruction: systemInstruction || "You are a helpful assistant." }
         });
         return response.text;
     } catch (error) {
-        console.error("AI Error:", error);
+        console.error("AI Error:", error.message || error);
         return "I'm currently updating my system. Please try again in a few moments.";
     }
 };
@@ -357,11 +357,12 @@ class BotEngine {
         
         const messageText = this.replaceVariables(currentNode.data.message || '', driver);
         
-        // FIX: Block "Replace this sample message" placeholder
+        // FIX: STRICTLY Block "Replace this sample message" placeholder from being sent
         if (messageText && messageText.toLowerCase().includes("replace this sample message")) {
             console.warn("🚫 Placeholder detected. Aborting Bot Flow to AI.");
             await this.client.query('DELETE FROM sessions WHERE phone_number = $1', [phone]);
-            return false; // Return false so AI picks up the welcome
+            // Return FALSE so it falls through to AI immediately
+            return false; 
         }
 
         const { mediaUrl, label, options, inputType } = currentNode.data;
