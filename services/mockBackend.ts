@@ -142,7 +142,7 @@ class MockBackendService {
 
   // --- BOT ENGINE (MOCK) ---
   
-  processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Driver, actionNeeded: 'NONE' | 'AI_REPLY' } {
+  processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Driver, actionNeeded: 'NONE' | 'AI_REPLY' | 'HUMAN_FALLBACK' } {
     let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
     if (!driver) {
       // New Driver Logic
@@ -225,12 +225,17 @@ class MockBackendService {
            }
       } else {
            // Start Flow
-           const startNode = nodes.find(n => n.data.type === 'start');
+           const startNode = nodes.find(n => n.data.type === 'start') || nodes.find(n => n.id === 'start');
            if (startNode) {
                const e = edges.find(e => e.source === startNode.id);
                if (e) {
                    currentNodeId = e.target;
                    currentNode = nodes.find(n => n.id === currentNodeId);
+               } else {
+                 // Start Node has no edges, start here if it has content?
+                 // For mock, just start here.
+                 currentNodeId = startNode.id;
+                 currentNode = startNode;
                }
            }
       }
