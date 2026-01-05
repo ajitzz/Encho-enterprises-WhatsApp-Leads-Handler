@@ -8,7 +8,7 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const { Pool } = require('pg');
+const { Pool } = require('pg'); 
 const { GoogleGenAI } = require('@google/genai');
 require('dotenv').config();
 
@@ -36,65 +36,25 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
 // DATABASE CONNECTION STRINGS
-// Prefer pooled connections for Vercel/Neon, with optional unpooled fallback
+// Use the POOLED connection string for Vercel/Serverless performance
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
-const NEON_DB_URL_UNPOOLED = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 
-const resolveDbUrl = () => {
-  const useUnpooled = process.env.USE_UNPOOLED === 'true' || process.env.POSTGRES_USE_UNPOOLED === 'true';
-  if (useUnpooled) {
-    return (
-      process.env.DATABASE_URL_UNPOOLED ||
-      process.env.POSTGRES_URL_NON_POOLING ||
-      process.env.POSTGRES_URL_NO_SSL ||
-      NEON_DB_URL_UNPOOLED
-    );
-  }
+// --- DATABASE CONNECTION POOL ---
+const pool = new Pool({
+  connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL,
+  ssl: { rejectUnauthorized: false }, // Essential for Neon
+  
+  // VERCEL SERVERLESS OPTIMIZATIONS:
+  max: 1, // Limit to 1 connection per Lambda instance to prevent exhaustion
+  idleTimeoutMillis: 0, // Disable auto-close. Keep connection warm for polling.
+  connectionTimeoutMillis: 15000, // 15s timeout to handle cold starts gracefully
+});
 
-  return (
-    process.env.POSTGRES_URL ||
-    process.env.DATABASE_URL ||
-    process.env.POSTGRES_PRISMA_URL ||
-    process.env.POSTGRES_URL_NO_SSL ||
-    NEON_DB_URL
-  );
-};
-
-const createPool = () => {
-  const connectionString = resolveDbUrl();
-  const newPool = new Pool({
-    connectionString,
-    ssl: { rejectUnauthorized: false }, // Essential for Neon
-    keepAlive: true,
-    max: parseInt(process.env.PG_POOL_MAX || '3', 10),
-    idleTimeoutMillis: parseInt(process.env.PG_IDLE_TIMEOUT_MS || '30000', 10),
-    connectionTimeoutMillis: parseInt(process.env.PG_CONNECTION_TIMEOUT_MS || '15000', 10),
-  });
-
-  // Global error listener to prevent crash on idle client errors
-  newPool.on('error', (err) => {
-    console.error('Unexpected error on idle database client', err);
-  });
-
-  return newPool;
-};
-
-let pool = createPool();
-
-const getDbClient = async () => {
-  try {
-    return await pool.connect();
-  } catch (err) {
-    console.warn('Database pool connection failed, recreating pool...', err.message);
-    try {
-      await pool.end();
-    } catch (closeErr) {
-      console.warn('Error while closing stale pool', closeErr.message);
-    }
-    pool = createPool();
-    return await pool.connect();
-  }
-};
+// Global error listener to prevent crash on idle client errors
+pool.on('error', (err, client) => {
+  console.error('Unexpected error on idle database client', err);
+  // Don't exit; Vercel will recycle the container eventually
+});
 
 // --- SCHEMA DEFINITION (Used for Auto-Recovery) ---
 const SCHEMA_SQL = `
@@ -171,7 +131,7 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // Manual Init Route (Optional)
 app.get('/api/init', async (req, res) => {
-    const client = await getDbClient();
+    const client = await pool.connect();
     try {
         await ensureDatabaseInitialized(client);
         res.status(200).json({ status: 'Database Initialized Successfully' });
@@ -184,15 +144,11 @@ app.get('/api/init', async (req, res) => {
 
 // Health Check
 app.get('/api/health', async (req, res) => {
-    let client;
     try {
-        client = await getDbClient();
-        await client.query('SELECT 1');
+        await pool.query('SELECT 1');
         res.json({ database: 'connected', status: 'healthy' });
     } catch (e) {
         res.status(500).json({ database: 'disconnected', error: e.message });
-    } finally {
-        if (client) client.release();
     }
 });
 
@@ -201,7 +157,7 @@ app.get('/api/health', async (req, res) => {
 app.get('/api/drivers', async (req, res) => {
     let client;
     try {
-        client = await getDbClient();
+        client = await pool.connect();
         
         const fetchDrivers = async () => {
              return await client.query(`
@@ -242,7 +198,7 @@ app.get('/api/drivers', async (req, res) => {
 app.get('/api/bot-settings', async (req, res) => {
     let client;
     try {
-        client = await getDbClient();
+        client = await pool.connect();
         const result = await client.query('SELECT * FROM bot_settings WHERE id = 1');
         res.json(result.rows[0]?.settings || DEFAULT_BOT_SETTINGS);
     } catch (e) {
@@ -262,15 +218,11 @@ app.get('/api/bot-settings', async (req, res) => {
 });
 
 app.post('/api/bot-settings', async (req, res) => {
-    let client;
     try {
-        client = await getDbClient();
-        await client.query(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(req.body)]);
+        await pool.query(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(req.body)]);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
-    } finally {
-        if (client) client.release();
     }
 });
 
@@ -326,7 +278,7 @@ const analyzeWithAI = async (text, systemInstruction) => {
   }
 };
 
-// Core Logic (Refactored for Auto-Recovery)
+// Core Logic (Refactored for Auto-Recovery & Strategy Control)
 const processIncomingMessage = async (from, name, msgBody, msgType = 'text', timestamp = Date.now()) => {
     // We isolate logic in a function to allow retries if DB connection drops
     const runLogic = async (client) => {
@@ -344,6 +296,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
         if (!driver) {
             isNewDriver = true;
+            // Activate Bot only if NOT in AI_ONLY mode
             const shouldActivateBot = botSettings.isEnabled && routingStrategy !== 'AI_ONLY';
             const firstStepId = botSettings.steps?.[0]?.id;
             const insertRes = await client.query(
@@ -354,7 +307,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             driver = insertRes.rows[0];
         }
 
-        // 3. Log
+        // 3. Log Message
         const msgId = `${timestamp}_${Math.random().toString(36).substr(2, 5)}`;
         await client.query(
             `INSERT INTO messages (id, driver_id, sender, text, timestamp, type)
@@ -363,43 +316,60 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         );
         await client.query('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [msgBody, timestamp, driver.id]);
 
-        // 4. Logic
+        // 4. LOGIC ENGINE
         let replyText = null;
         let replyOptions = null;
         let replyTemplate = null;
         let shouldCallAI = false;
 
+        // --- STRATEGY: AI ONLY ---
         if (botSettings.isEnabled && routingStrategy === 'AI_ONLY') {
             shouldCallAI = true;
-        } else if (botSettings.isEnabled) {
-            // RESTART LOGIC FOR BOT_ONLY
-            if (routingStrategy === 'BOT_ONLY' && !driver.is_bot_active && !isNewDriver) {
+        } 
+        // --- STRATEGY: BOT / HYBRID ---
+        else if (botSettings.isEnabled) {
+            
+            // RESTART LOGIC FOR 'BOT_ONLY': 
+            // If bot finished (is_bot_active=false), restart flow from beginning.
+            if (routingStrategy === 'BOT_ONLY' && !driver.is_bot_active) {
                  const firstStepId = botSettings.steps?.[0]?.id;
                  if (firstStepId) {
                      await client.query('UPDATE drivers SET is_bot_active = TRUE, current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
                      driver.is_bot_active = true;
                      driver.current_bot_step_id = firstStepId;
-                     isNewDriver = true;
+                     isNewDriver = true; // Treat as new so we output the first message immediately without processing 'msgBody' as input
                  }
             }
 
+            // PROCESS BOT FLOW
             if (driver.is_bot_active && driver.current_bot_step_id) {
                 const currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
+                
                 if (currentStep) {
+                    // IF NOT NEW (Process Input)
                     if (!isNewDriver) {
+                        // A. Save Data
                         if (currentStep.saveToField === 'name') await client.query('UPDATE drivers SET name = $1 WHERE id = $2', [msgBody, driver.id]);
                         if (currentStep.saveToField === 'availability') await client.query('UPDATE drivers SET availability = $1 WHERE id = $2', [msgBody, driver.id]);
+                        if (currentStep.saveToField === 'vehicleRegistration') await client.query('UPDATE drivers SET vehicle_registration = $1 WHERE id = $2', [msgBody, driver.id]);
                         
+                        // B. Move to Next Step
                         let nextId = currentStep.nextStepId;
+                        
+                        // Check for End of Flow
                         if (nextId === 'AI_HANDOFF' || nextId === 'END') {
                             await client.query('UPDATE drivers SET is_bot_active = FALSE, current_bot_step_id = NULL WHERE id = $1', [driver.id]);
+                            driver.is_bot_active = false;
+
                             if (nextId === 'AI_HANDOFF') {
+                                // If Hybrid, handoff to AI now. If Bot Only, say goodbye.
                                 if (routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
                                 else replyText = "Thank you. We will contact you soon.";
                             } else {
                                 replyText = "Thank you! We have received your details.";
                             }
                         } else {
+                            // Valid Next Step
                             await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [nextId, driver.id]);
                             const nextStep = botSettings.steps.find(s => s.id === nextId);
                             if (nextStep) {
@@ -407,24 +377,33 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                 replyTemplate = nextStep.templateName;
                                 if (nextStep.inputType === 'option') replyOptions = nextStep.options;
                             } else {
+                                // Fallback if broken link
                                 if (routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
-                                else replyText = "Configuration Error.";
                             }
                         }
                     } else {
+                        // NEW DRIVER / RESTARTED: Output current step immediately
                          replyText = currentStep.message;
                          replyTemplate = currentStep.templateName;
                          if (currentStep.inputType === 'option') replyOptions = currentStep.options;
                     }
-                } else if (routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
-            } else if (routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
+                } else {
+                    // Step ID not found in settings
+                    if (routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
+                }
+            } else {
+                // BOT IS INACTIVE (and didn't restart)
+                if (routingStrategy === 'HYBRID_BOT_FIRST') {
+                    shouldCallAI = true;
+                }
+            }
         }
 
         await client.query('COMMIT');
         return { replyText, replyOptions, replyTemplate, shouldCallAI, driver, botSettings };
     };
 
-    const client = await getDbClient();
+    const client = await pool.connect();
     try {
         const result = await runLogic(client);
         
@@ -494,18 +473,16 @@ app.post('/webhook', async (req, res) => {
 app.patch('/api/drivers/:id', async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
-    let client;
     try {
-        client = await getDbClient();
+        const client = await pool.connect();
         if (updates.status) await client.query('UPDATE drivers SET status = $1 WHERE id = $2', [updates.status, id]);
         if (updates.qualificationChecks) await client.query('UPDATE drivers SET qualification_checks = $1 WHERE id = $2', [JSON.stringify(updates.qualificationChecks), id]);
         if (updates.vehicleRegistration) await client.query('UPDATE drivers SET vehicle_registration = $1 WHERE id = $2', [updates.vehicleRegistration, id]);
         if (updates.availability) await client.query('UPDATE drivers SET availability = $1 WHERE id = $2', [updates.availability, id]);
+        client.release();
         res.json({ success: true });
     } catch(e) {
         res.status(500).json({ error: e.message });
-    } finally {
-        if (client) client.release();
     }
 });
 

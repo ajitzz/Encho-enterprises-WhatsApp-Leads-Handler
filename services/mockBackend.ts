@@ -187,10 +187,12 @@ class MockBackendService {
   processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Driver, reply?: Message, actionNeeded: 'NONE' | 'AI_REPLY' } {
     let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
     let isNew = false;
+    const settings = this.botSettings;
 
     // 1. Create or Get Driver
     if (!driver) {
       isNew = true;
+      const shouldActivateBot = settings.isEnabled && settings.routingStrategy !== 'AI_ONLY';
       driver = {
         id: Date.now().toString(),
         phoneNumber,
@@ -203,8 +205,8 @@ class MockBackendService {
         documents: [],
         onboardingStep: OnboardingStep.WELCOME_SENT,
         qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
-        isBotActive: this.botSettings.isEnabled && this.botSettings.routingStrategy !== 'AI_ONLY',
-        currentBotStepId: this.botSettings.steps[0]?.id
+        isBotActive: shouldActivateBot,
+        currentBotStepId: settings.steps[0]?.id
       };
       this.drivers.push(driver);
     }
@@ -221,62 +223,87 @@ class MockBackendService {
     this.addMessage(driver.id, userMsg);
 
     // 3. Logic Engine
-    const settings = this.botSettings;
     
-    // STRATEGY: AI ONLY
+    // STRATEGY: AI ONLY - Immediate Override
     if (settings.isEnabled && settings.routingStrategy === 'AI_ONLY') {
       return { driver, actionNeeded: 'AI_REPLY' };
     }
 
-    // STRATEGY: BOT FLOW
-    if (settings.isEnabled && driver.isBotActive && driver.currentBotStepId) {
+    // STRATEGY: BOT FLOW & HYBRID
+    if (settings.isEnabled) {
       
-      const currentStep = settings.steps.find(s => s.id === driver.currentBotStepId);
-      
-      if (currentStep) {
-        // A. PROCESS DATA CAPTURE from previous input
-        if (!isNew) { // Don't process input on the very first "Hello" triggering the bot
-             if (currentStep.saveToField === 'name') driver.name = text;
-             if (currentStep.saveToField === 'availability') driver.availability = text as any;
-             if (currentStep.saveToField === 'document' && imageUrl) driver.documents.push(imageUrl);
-             
-             // Move to next Step
-             if (currentStep.nextStepId === 'END') {
-                 driver.isBotActive = false;
-                 driver.currentBotStepId = undefined;
-                 this.persist();
-                 return { driver, actionNeeded: 'NONE' };
-             } else if (currentStep.nextStepId === 'AI_HANDOFF') {
-                 driver.isBotActive = false;
-                 driver.currentBotStepId = undefined;
-                 this.persist();
-                 return { driver, actionNeeded: 'AI_REPLY' };
-             } else {
-                 driver.currentBotStepId = currentStep.nextStepId;
-             }
-        }
+      // AUTO RESTART Logic for BOT_ONLY
+      if (settings.routingStrategy === 'BOT_ONLY' && !driver.isBotActive) {
+         // Reactivate bot if it finished previously
+         driver.isBotActive = true;
+         driver.currentBotStepId = settings.steps[0]?.id;
+         isNew = true; // Trigger "send welcome" logic immediately
+         this.persist();
+      }
 
-        // B. SEND NEXT MESSAGE
-        const nextStep = settings.steps.find(s => s.id === driver.currentBotStepId);
-        if (nextStep) {
-            const botMsg: Message = {
-                id: Date.now().toString() + '_bot',
-                sender: 'system',
-                text: nextStep.templateName ? `[Template: ${nextStep.templateName}] ${nextStep.message}` : nextStep.message,
-                timestamp: Date.now() + 500, // Slight delay
-                type: nextStep.templateName ? 'template' : (nextStep.inputType === 'option' ? 'options' : 'text'),
-                options: nextStep.options
-            };
-            this.addMessage(driver.id, botMsg);
-            this.persist();
-            return { driver, reply: botMsg, actionNeeded: 'NONE' };
+      if (driver.isBotActive && driver.currentBotStepId) {
+        
+        const currentStep = settings.steps.find(s => s.id === driver.currentBotStepId);
+        
+        if (currentStep) {
+          // A. PROCESS DATA CAPTURE from previous input (If not new/restart)
+          if (!isNew) { 
+              if (currentStep.saveToField === 'name') driver.name = text;
+              if (currentStep.saveToField === 'availability') driver.availability = text as any;
+              if (currentStep.saveToField === 'document' && imageUrl) driver.documents.push(imageUrl);
+              if (currentStep.saveToField === 'vehicleRegistration') driver.vehicleRegistration = text;
+              
+              // Move to next Step
+              const nextId = currentStep.nextStepId;
+
+              if (nextId === 'END' || nextId === 'AI_HANDOFF') {
+                  driver.isBotActive = false;
+                  driver.currentBotStepId = undefined;
+                  this.persist();
+                  
+                  if (nextId === 'AI_HANDOFF' && settings.routingStrategy === 'HYBRID_BOT_FIRST') {
+                      return { driver, actionNeeded: 'AI_REPLY' };
+                  }
+                  
+                  // Bot Finished message
+                  const endMsg: Message = {
+                      id: Date.now().toString() + '_end',
+                      sender: 'system',
+                      text: nextId === 'AI_HANDOFF' ? "Thank you. We will contact you soon." : "Thank you! We have received your details.",
+                      timestamp: Date.now() + 500,
+                      type: 'text'
+                  };
+                  this.addMessage(driver.id, endMsg);
+                  return { driver, reply: endMsg, actionNeeded: 'NONE' };
+
+              } else {
+                  driver.currentBotStepId = nextId;
+              }
+          }
+
+          // B. SEND NEXT MESSAGE
+          // (Logic proceeds here for new drivers, restarted flows, or valid next steps)
+          const nextStep = settings.steps.find(s => s.id === driver.currentBotStepId);
+          if (nextStep) {
+              const botMsg: Message = {
+                  id: Date.now().toString() + '_bot',
+                  sender: 'system',
+                  text: nextStep.templateName ? `[Template: ${nextStep.templateName}] ${nextStep.message}` : nextStep.message,
+                  timestamp: Date.now() + 500, // Slight delay
+                  type: nextStep.templateName ? 'template' : (nextStep.inputType === 'option' ? 'options' : 'text'),
+                  options: nextStep.options
+              };
+              this.addMessage(driver.id, botMsg);
+              this.persist();
+              return { driver, reply: botMsg, actionNeeded: 'NONE' };
+          }
         }
       }
-    }
-
-    // Fallback to AI if bot is finished or disabled (and strategy allows)
-    if (settings.routingStrategy === 'HYBRID_BOT_FIRST' || settings.routingStrategy === 'AI_ONLY') {
-        return { driver, actionNeeded: 'AI_REPLY' };
+      
+      // Fallback: If bot is inactive (and didn't restart), check Hybrid
+      if (settings.routingStrategy === 'HYBRID_BOT_FIRST' && !driver.isBotActive) {
+          return { driver, actionNeeded: 'AI_REPLY' };
+      }
     }
 
     return { driver, actionNeeded: 'NONE' };
@@ -284,9 +311,12 @@ class MockBackendService {
 
   // --- AD LEAD ---
   createAdLead(name: string, phoneNumber: string): Driver {
-    // ... existing implementation but init bot state ...
     let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
     if (driver) return driver;
+
+    // Check strategy for initial state
+    const settings = this.botSettings;
+    const shouldActivateBot = settings.isEnabled && settings.routingStrategy !== 'AI_ONLY';
 
     driver = {
       id: Date.now().toString(),
@@ -300,27 +330,29 @@ class MockBackendService {
       documents: [],
       onboardingStep: OnboardingStep.WELCOME_SENT,
       qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
-      isBotActive: true,
-      currentBotStepId: this.botSettings.steps[0]?.id
+      isBotActive: shouldActivateBot,
+      currentBotStepId: settings.steps[0]?.id
     };
     
     this.drivers.push(driver);
     this.persist();
     
-    // Trigger first bot message immediately
-    const firstStep = this.botSettings.steps[0];
-    if (firstStep) {
-        setTimeout(() => {
-            const isTemplate = !!firstStep.templateName;
-            this.addMessage(driver!.id, {
-                id: Date.now().toString() + '_auto',
-                sender: 'system',
-                text: isTemplate ? `[Template: ${firstStep.templateName}] Hi ${name}!` : `Hi ${name}! ${firstStep.message}`,
-                type: isTemplate ? 'template' : (firstStep.inputType === 'option' ? 'options' : 'text'),
-                options: firstStep.options,
-                timestamp: Date.now()
-            });
-        }, 500);
+    // Trigger first bot message immediately if active
+    if (shouldActivateBot) {
+        const firstStep = this.botSettings.steps[0];
+        if (firstStep) {
+            setTimeout(() => {
+                const isTemplate = !!firstStep.templateName;
+                this.addMessage(driver!.id, {
+                    id: Date.now().toString() + '_auto',
+                    sender: 'system',
+                    text: isTemplate ? `[Template: ${firstStep.templateName}] Hi ${name}!` : `Hi ${name}! ${firstStep.message}`,
+                    type: isTemplate ? 'template' : (firstStep.inputType === 'option' ? 'options' : 'text'),
+                    options: firstStep.options,
+                    timestamp: Date.now()
+                });
+            }, 500);
+        }
     }
 
     return driver;
