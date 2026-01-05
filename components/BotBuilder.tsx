@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { 
   ReactFlow, 
   MiniMap, 
@@ -14,181 +14,254 @@ import {
   Connection,
   Panel,
   ReactFlowProvider,
-  useReactFlow
+  useReactFlow,
+  MarkerType
 } from '@xyflow/react';
 import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
 import { 
-  Save, MessageSquare, Image as ImageIcon, 
-  List, Type, Split, Zap, GripVertical, Trash2, 
-  Copy, Plus, Settings2, Play, AlertCircle 
+  Save, MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
+  List, Type, Hash, Mail, Globe, Calendar, Clock, Phone, 
+  CreditCard, ShoppingBag, LayoutGrid, MoreHorizontal, X, Copy, Trash2,
+  ChevronDown, ChevronRight, Zap, Play, CheckCircle
 } from 'lucide-react';
 
+// --- STYLES & CONSTANTS ---
+const HANDLE_STYLE = { width: 10, height: 10, background: '#3b82f6', border: '2px solid white' };
+
 // --- CUSTOM NODE COMPONENT ---
-// This component renders the individual card in the canvas
-const BuilderNode = ({ data, id, selected }: any) => {
+const CustomNode = ({ data, id, selected }: any) => {
   const [options, setOptions] = useState<string[]>(data.options || []);
+  const [variableName, setVariableName] = useState(data.saveToField || '');
 
-  const addOption = () => {
-    const newOpts = [...options, `Option ${options.length + 1}`];
-    setOptions(newOpts);
-    data.onChange?.(id, { ...data, options: newOpts });
-  };
-
-  const removeOption = (idx: number) => {
-    const newOpts = options.filter((_, i) => i !== idx);
-    setOptions(newOpts);
-    data.onChange?.(id, { ...data, options: newOpts });
-  };
-
-  const updateOption = (idx: number, val: string) => {
-    const newOpts = [...options];
-    newOpts[idx] = val;
-    setOptions(newOpts);
-    data.onChange?.(id, { ...data, options: newOpts });
-  };
+  // Sync internal state with data prop when it changes externally
+  useEffect(() => {
+    setOptions(data.options || []);
+    setVariableName(data.saveToField || '');
+  }, [data.options, data.saveToField]);
 
   const handleChange = (field: string, value: any) => {
     data.onChange?.(id, { ...data, [field]: value });
   };
 
+  const handleOptionChange = (idx: number, val: string) => {
+    const newOpts = [...options];
+    newOpts[idx] = val;
+    setOptions(newOpts);
+    handleChange('options', newOpts);
+  };
+
+  const addOption = () => {
+    const newOpts = [...options, `Option ${options.length + 1}`];
+    setOptions(newOpts);
+    handleChange('options', newOpts);
+  };
+
+  const removeOption = (idx: number) => {
+    const newOpts = options.filter((_, i) => i !== idx);
+    setOptions(newOpts);
+    handleChange('options', newOpts);
+  };
+
+  // Determine Node Styling based on Type
+  const isStartNode = data.type === 'start';
+
+  if (isStartNode) {
+    return (
+      <div className={`px-6 py-4 bg-white rounded-2xl shadow-md border-2 min-w-[200px] flex items-center gap-3 ${selected ? 'border-blue-500' : 'border-gray-100'}`}>
+        <div className="p-2 bg-gray-100 rounded-lg text-gray-600">
+           <Zap size={20} fill="currentColor" className="text-yellow-500" />
+        </div>
+        <div>
+           <h3 className="font-bold text-gray-900">Start</h3>
+           <p className="text-xs text-gray-400">Entry Point</p>
+        </div>
+        <Handle type="source" position={Position.Right} style={HANDLE_STYLE} />
+      </div>
+    );
+  }
+
   return (
-    <div className={`w-80 bg-white rounded-xl shadow-lg border-2 transition-all duration-200 group ${selected ? 'border-blue-500 ring-4 ring-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
+    <div className={`w-[320px] bg-white rounded-2xl shadow-xl border-2 transition-all duration-200 group ${selected ? 'border-blue-500 ring-4 ring-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
       
       {/* Target Handle (Input) */}
-      <Handle type="target" position={Position.Left} className="!w-3 !h-3 !-left-2 !bg-blue-500 border-2 border-white" />
+      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} className="-left-2.5" />
 
       {/* Header */}
-      <div className="bg-gray-50 px-4 py-3 border-b border-gray-100 rounded-t-lg flex items-center justify-between handle cursor-grab active:cursor-grabbing">
+      <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between bg-white rounded-t-2xl">
         <div className="flex items-center gap-2">
-           <div className="p-1.5 bg-white rounded border border-gray-200 text-gray-500 shadow-sm">
-              {data.icon || <MessageSquare size={14} />}
-           </div>
-           <div>
-             <span className="text-xs font-bold text-gray-400 uppercase tracking-wider block leading-none mb-0.5">{data.label || 'Step'}</span>
-             <input 
-                className="bg-transparent border-none p-0 text-sm font-semibold text-gray-900 focus:ring-0 w-32 leading-none"
-                value={data.title}
-                onChange={(e) => handleChange('title', e.target.value)}
-                placeholder="Step Name"
-             />
-           </div>
+           <span className="text-xs font-bold text-gray-900">Group #{id.split('_')[1] || id}</span>
         </div>
-        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-            <button onClick={() => data.onDelete?.(id)} className="p-1 hover:text-red-500 text-gray-400 transition-colors">
+        <div className="flex gap-1">
+            <button onClick={() => data.onDelete?.(id)} className="text-gray-400 hover:text-red-500 transition-colors p-1">
                 <Trash2 size={14} />
+            </button>
+            <button className="text-gray-400 hover:text-gray-600 transition-colors p-1">
+                <MoreHorizontal size={14} />
             </button>
         </div>
       </div>
 
       {/* Body */}
-      <div className="p-4 space-y-4">
+      <div className="p-5 space-y-4 bg-white rounded-b-2xl">
         
-        {/* Message Input */}
-        <div>
-           <label className="text-[10px] font-bold text-gray-400 uppercase mb-1.5 block">Bot Message</label>
+        {/* Prompt Card (Yellowish like screenshot) */}
+        <div className="bg-amber-50 rounded-xl p-4 border border-amber-100 relative group/prompt">
+           <div className="flex items-center gap-2 mb-2">
+              {data.icon}
+              <span className="text-xs font-bold text-amber-800 uppercase tracking-wide">{data.label}</span>
+           </div>
+           
            <textarea 
-             className="w-full bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none resize-none transition-all"
+             className="w-full bg-transparent border-none p-0 text-sm font-medium text-gray-800 placeholder-amber-800/40 focus:ring-0 resize-none leading-relaxed"
              rows={3}
-             placeholder="Type your question..."
+             placeholder={`Enter ${data.label.toLowerCase()} message...`}
              value={data.message}
              onChange={(e) => handleChange('message', e.target.value)}
            />
+
+           {/* Media Attachment Indicator */}
+           {data.hasMedia && (
+             <div className="mt-2 pt-2 border-t border-amber-200/50 flex items-center gap-2 text-amber-700 text-xs font-medium">
+               <ImageIcon size={12} />
+               <span>Media Attachment Enabled</span>
+             </div>
+           )}
+           
+           <Handle type="source" position={Position.Right} id="main" style={{...HANDLE_STYLE, right: -26, top: '50%'}} />
         </div>
 
-        {/* Media Placeholder */}
-        {data.hasMedia && (
-            <div className="border-2 border-dashed border-gray-200 rounded-lg p-4 flex flex-col items-center justify-center text-gray-400 hover:bg-gray-50 hover:border-blue-300 transition-colors cursor-pointer group/media">
-                <ImageIcon size={24} className="mb-2 group-hover/media:text-blue-500" />
-                <span className="text-xs font-medium">Upload Image/Video</span>
-            </div>
-        )}
-
-        {/* Dynamic Options / Buttons */}
+        {/* Dynamic Options (For Choice/List types) */}
         {data.inputType === 'option' && (
            <div className="space-y-2">
-             <div className="flex items-center justify-between">
-                <label className="text-[10px] font-bold text-gray-400 uppercase">Choices & Branching</label>
-                <button onClick={addOption} className="text-[10px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded font-bold hover:bg-blue-100">
-                    + Add
-                </button>
-             </div>
-             <div className="space-y-2">
-                {options.map((opt, idx) => (
-                    <div key={idx} className="relative flex items-center">
-                        <input 
-                          value={opt}
-                          onChange={(e) => updateOption(idx, e.target.value)}
-                          className="w-full bg-white border border-gray-200 rounded-md px-3 py-1.5 text-sm focus:border-blue-500 outline-none pr-8"
-                        />
-                        <button onClick={() => removeOption(idx)} className="absolute right-2 text-gray-300 hover:text-red-500">
-                            <Trash2 size={12} />
-                        </button>
-                        {/* Source Handle for this specific option */}
-                        <Handle 
-                            type="source" 
-                            position={Position.Right} 
-                            id={`opt_${idx}`}
-                            className="!w-3 !h-3 !-right-5 !bg-blue-500 border-2 border-white"
-                            style={{ top: '50%', transform: 'translateY(-50%)' }}
-                        />
-                    </div>
-                ))}
-             </div>
+             {options.map((opt, idx) => (
+               <div key={idx} className="relative group/opt">
+                  <div className="flex items-center bg-white border border-gray-200 rounded-lg pl-3 pr-1 py-2 shadow-sm focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-transparent">
+                      <span className="text-[10px] text-gray-400 mr-2 font-mono">{idx + 1}</span>
+                      <input 
+                        value={opt}
+                        onChange={(e) => handleOptionChange(idx, e.target.value)}
+                        className="flex-1 bg-transparent border-none p-0 text-sm text-gray-700 outline-none"
+                        placeholder="Option label"
+                      />
+                      <button onClick={() => removeOption(idx)} className="p-1 text-gray-300 hover:text-red-400">
+                        <X size={12} />
+                      </button>
+                  </div>
+                  {/* Handle for this specific option */}
+                  <Handle 
+                    type="source" 
+                    position={Position.Right} 
+                    id={`opt_${idx}`} // Unique ID for connecting specific buttons
+                    style={{...HANDLE_STYLE, right: -12}}
+                  />
+               </div>
+             ))}
+             <button 
+                onClick={addOption}
+                className="w-full py-2 border border-dashed border-gray-300 rounded-lg text-xs font-medium text-gray-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50 transition-all flex items-center justify-center gap-1"
+             >
+                <List size={12} /> Add Choice
+             </button>
            </div>
         )}
 
-        {/* Default Source Handle (If not using options to branch) */}
-        {data.inputType !== 'option' && (
-             <div className="relative h-4 flex items-center justify-end">
-                 <span className="text-[10px] text-gray-400 mr-2">Next Step</span>
-                 <Handle type="source" position={Position.Right} className="!w-3 !h-3 !-right-5 !bg-gray-400 border-2 border-white" />
-             </div>
+        {/* Variable Capture (Purple Pill) */}
+        {(data.inputType !== 'option' || data.saveToField) && (
+            <div className="relative">
+                <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+                    <Hash size={12} className="text-purple-500" />
+                </div>
+                <select 
+                    value={variableName}
+                    onChange={(e) => {
+                        setVariableName(e.target.value);
+                        handleChange('saveToField', e.target.value);
+                    }}
+                    className="w-full pl-8 pr-3 py-2.5 bg-purple-50 border border-purple-100 text-purple-900 text-xs font-bold rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none appearance-none cursor-pointer"
+                >
+                    <option value="">Select variable to save answer...</option>
+                    <option value="name">user_name</option>
+                    <option value="vehicleRegistration">vehicle_number</option>
+                    <option value="availability">availability_status</option>
+                    <option value="document">uploaded_document_url</option>
+                </select>
+                <div className="absolute inset-y-0 right-3 flex items-center pointer-events-none">
+                     <span className="text-[10px] bg-purple-200 text-purple-800 px-1.5 py-0.5 rounded">VAR</span>
+                </div>
+            </div>
         )}
-
-        {/* Variable Capture */}
-        <div className="pt-3 border-t border-gray-100">
-             <div className="flex items-center gap-2 mb-1">
-                 <Zap size={12} className="text-amber-500" />
-                 <label className="text-[10px] font-bold text-gray-600">Save Answer As</label>
-             </div>
-             <select 
-               value={data.saveToField || ''}
-               onChange={(e) => handleChange('saveToField', e.target.value)}
-               className="w-full bg-gray-50 border border-gray-200 rounded-md px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500 outline-none"
-             >
-                <option value="">Don't Save (Flow Logic Only)</option>
-                <option value="name">Driver Name</option>
-                <option value="vehicleRegistration">Vehicle Number</option>
-                <option value="availability">Availability</option>
-                <option value="document">Document List</option>
-             </select>
-        </div>
 
       </div>
     </div>
   );
 };
 
-// --- MAIN BUILDER COMPONENT ---
-
 const nodeTypes = {
-  custom: BuilderNode,
+  custom: CustomNode,
 };
+
+// --- SIDEBAR CONFIGURATION ---
+const SIDEBAR_CATEGORIES = [
+    {
+        title: 'Messages',
+        items: [
+            { type: 'text', label: 'Text', icon: <MessageSquare size={16} /> },
+            { type: 'image', label: 'Image', icon: <ImageIcon size={16} />, hasMedia: true },
+            { type: 'video', label: 'Video', icon: <Video size={16} />, hasMedia: true },
+            { type: 'file', label: 'File', icon: <FileText size={16} /> },
+            { type: 'location', label: 'Location', icon: <MapPin size={16} /> },
+        ]
+    },
+    {
+        title: 'Choices',
+        items: [
+            { type: 'option', inputType: 'option', label: 'Quick Reply', icon: <LayoutGrid size={16} /> },
+            { type: 'option', inputType: 'option', label: 'List', icon: <List size={16} /> },
+        ]
+    },
+    {
+        title: 'Inputs',
+        items: [
+            { type: 'input', inputType: 'text', label: 'Text', icon: <Type size={16} /> },
+            { type: 'input', inputType: 'text', label: 'Number', icon: <Hash size={16} /> },
+            { type: 'input', inputType: 'text', label: 'Email', icon: <Mail size={16} /> },
+            { type: 'input', inputType: 'text', label: 'Website', icon: <Globe size={16} /> },
+            { type: 'input', inputType: 'text', label: 'Date', icon: <Calendar size={16} /> },
+            { type: 'input', inputType: 'text', label: 'Time', icon: <Clock size={16} /> },
+            { type: 'input', inputType: 'text', label: 'Phone', icon: <Phone size={16} /> },
+        ]
+    },
+    {
+        title: 'Payments',
+        items: [
+            { type: 'payment', label: 'Payment Link', icon: <CreditCard size={16} /> },
+        ]
+    },
+    {
+        title: 'Ecommerce',
+        items: [
+            { type: 'catalog', label: 'Catalog', icon: <ShoppingBag size={16} /> },
+            { type: 'status', label: 'Order Status', icon: <CheckCircle size={16} /> },
+        ]
+    }
+];
+
+// --- MAIN BUILDER ---
+
+interface BotBuilderProps {
+    isLiveMode?: boolean; 
+}
 
 const initialNodes: Node[] = [
     { 
         id: 'start', 
         type: 'custom', 
-        position: { x: 100, y: 100 }, 
-        data: { title: 'Welcome', message: 'Hello! Welcome to Uber Fleet.', inputType: 'text' } 
+        position: { x: 50, y: 300 }, 
+        data: { type: 'start' } 
     }
 ];
-
-interface BotBuilderProps {
-    isLiveMode?: boolean; 
-}
 
 export const BotBuilder: React.FC<BotBuilderProps> = ({ isLiveMode = false }) => {
   return (
@@ -204,7 +277,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const [isSaving, setIsSaving] = useState(false);
   const reactFlowInstance = useReactFlow();
 
-  // Load Initial Data
+  // Load Data
   useEffect(() => {
     const load = async () => {
         let settings: BotSettings;
@@ -216,9 +289,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
              settings = mockBackend.getBotSettings();
         }
 
-        if (settings.flowData) {
-            // Restore visual state if exists
-            // We need to re-attach the handlers functions to nodes
+        if (settings.flowData && settings.flowData.nodes.length > 0) {
+            // Restore visual state
             const restoredNodes = settings.flowData.nodes.map((n: any) => ({
                 ...n,
                 data: {
@@ -229,45 +301,19 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             }));
             setNodes(restoredNodes);
             setEdges(settings.flowData.edges);
-        } else if (settings.steps.length > 0) {
-            // Fallback: Convert linear steps to nodes (Basic conversion)
-            // This is a rough conversion for backward compatibility
-            const newNodes: Node[] = settings.steps.map((step, idx) => ({
-                id: step.id,
-                type: 'custom',
-                position: { x: 100 + (idx * 350), y: 100 },
-                data: {
-                    title: step.title,
-                    message: step.message,
-                    inputType: step.inputType,
-                    options: step.options,
-                    saveToField: step.saveToField,
-                    onChange: updateNodeData,
-                    onDelete: deleteNode
-                }
-            }));
-            
-            // Generate linear edges
-            const newEdges: Edge[] = [];
-            settings.steps.forEach((step, idx) => {
-                if (step.nextStepId && step.nextStepId !== 'END' && step.nextStepId !== 'AI_HANDOFF') {
-                    newEdges.push({
-                        id: `e-${step.id}-${step.nextStepId}`,
-                        source: step.id,
-                        target: step.nextStepId
-                    });
-                }
-            });
-            
-            setNodes(newNodes);
-            setEdges(newEdges);
         }
     };
     load();
   }, [isLiveMode]);
 
   const onConnect = useCallback(
-    (params: Connection) => setEdges((eds) => addEdge({ ...params, animated: true, style: { stroke: '#3b82f6', strokeWidth: 2 } }, eds)),
+    (params: Connection) => setEdges((eds) => addEdge({ 
+        ...params, 
+        type: 'smoothstep',
+        animated: true, 
+        style: { stroke: '#94a3b8', strokeWidth: 2 },
+        markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8' } 
+    }, eds)),
     [setEdges],
   );
 
@@ -289,9 +335,9 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
     (event: React.DragEvent) => {
       event.preventDefault();
 
-      const type = event.dataTransfer.getData('application/reactflow');
-      const inputType = event.dataTransfer.getData('application/inputType');
-      const label = event.dataTransfer.getData('application/label');
+      const type = event.dataTransfer.getData('application/reactflow/type');
+      const inputType = event.dataTransfer.getData('application/reactflow/inputType');
+      const label = event.dataTransfer.getData('application/reactflow/label');
 
       if (typeof type === 'undefined' || !type) return;
 
@@ -300,15 +346,21 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         y: event.clientY,
       });
 
+      // Icon Reconstruction (Simplified)
+      let icon = <MessageSquare size={16} className="text-amber-700" />;
+      if(label === 'Image') icon = <ImageIcon size={16} className="text-amber-700" />;
+      if(inputType === 'option') icon = <List size={16} className="text-amber-700" />;
+
       const newNode: Node = {
         id: `node_${Date.now()}`,
         type: 'custom',
         position,
         data: { 
-            title: label, 
-            message: '', 
-            inputType: inputType, 
             label: label,
+            icon: icon,
+            message: '', 
+            inputType: inputType || 'text', 
+            hasMedia: type === 'image' || type === 'video',
             onChange: updateNodeData, 
             onDelete: deleteNode,
             options: inputType === 'option' ? ['Yes', 'No'] : undefined
@@ -320,49 +372,49 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
     [reactFlowInstance],
   );
 
-  // --- SAVE LOGIC ---
+  // --- SAVE & COMPILE ---
   const handleSave = async () => {
       setIsSaving(true);
       
-      // 1. Compile Graph to Linear/Branching Steps for the Backend
-      const compiledSteps: BotStep[] = nodes.map(node => {
-        // Find default next step
-        const defaultEdge = edges.find(e => e.source === node.id && !e.sourceHandle);
-        
-        // If it's an option type, we might not have a simple nextStepId if it branches. 
-        // For the simplified backend model in this demo, we'll try to follow the "first" connection or basic next.
-        // A real production backend would need a graph executor. 
-        // We will adapt the linear 'BotStep' to store 'nextStepId' as the default fall through.
-        
-        let nextId = defaultEdge ? defaultEdge.target : 'END';
-        
-        // Simple heuristic: If it's options, and we have multiple edges, the backend currently
-        // supports linear steps mostly. We will assume the next step is the one connected to the first option 
-        // OR simply set it to AI_HANDOFF if no connection.
-        
-        // In this demo revision, we will persist the visual flow to `flowData` and also update `steps` 
-        // for backward compatibility with the mock engine.
-        
-        return {
+      // Compiler: Visual Graph -> Execution Linear Steps
+      const compiledSteps: BotStep[] = [];
+      
+      // 1. Find Start Node
+      const startNode = nodes.find(n => n.data.type === 'start');
+      let currentId = startNode?.id;
+
+      // 2. Simple Traversal (Heuristic: Convert all nodes to steps)
+      nodes.forEach(node => {
+          if (node.data.type === 'start') return;
+
+          // Find connections FROM this node
+          const outgoingEdges = edges.filter(e => e.source === node.id);
+          
+          let nextStepId = 'END';
+          // If connection from main handle
+          const mainEdge = outgoingEdges.find(e => e.sourceHandle === 'main' || !e.sourceHandle);
+          if (mainEdge) nextStepId = mainEdge.target;
+          else if (outgoingEdges.length > 0) nextStepId = outgoingEdges[0].target; // Fallback
+
+          // Note: Full branching support in backend requires complex graph engine.
+          // For now, we assume linear nextStepId or AI Handoff. 
+          // If multiple branches exist, the backend 'options' logic will handle it if the nextStepId matches the flow order.
+
+          compiledSteps.push({
             id: node.id,
-            title: node.data.title,
+            title: node.data.label,
             message: node.data.message,
             inputType: node.data.inputType,
             options: node.data.options,
             saveToField: node.data.saveToField,
-            nextStepId: nextId
-        };
+            nextStepId: nextStepId
+          });
       });
 
-      // Sort steps to ensure start is first (if possible) or just trust the ID links
-      // The current backend engine just looks up by ID, so order matters less, 
-      // EXCEPT for the entry point which defaults to steps[0].
-      // We should find the node with no incoming edges or the one named 'start' to be first.
-      
       const newSettings: BotSettings = {
           ...mockBackend.getBotSettings(),
           steps: compiledSteps,
-          flowData: { nodes, edges } // Save visual state
+          flowData: { nodes, edges } 
       };
 
       if (isLiveMode) {
@@ -377,39 +429,58 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   };
 
   return (
-    <div className="flex flex-col h-full bg-gray-100">
+    <div className="flex flex-col h-full bg-gray-50 font-sans">
         
-        {/* Top Bar */}
-        <div className="bg-white border-b border-gray-200 px-6 h-16 flex items-center justify-between shrink-0 shadow-sm z-20">
-            <div className="flex items-center gap-3">
-                <div className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white p-2 rounded-lg shadow-md">
-                    <Split size={20} />
+        {/* TOP BAR */}
+        <div className="bg-white border-b border-gray-200 px-6 h-16 flex items-center justify-between shrink-0 z-20">
+            <div className="flex items-center gap-6">
+                <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 bg-gray-900 rounded-full flex items-center justify-center text-white">
+                        <Zap size={16} fill="currentColor" />
+                    </div>
+                    <span className="font-bold text-gray-900">Ecom Bot</span>
                 </div>
-                <div>
-                    <h1 className="text-lg font-bold text-gray-900 leading-tight">Flow Builder</h1>
-                    <p className="text-xs text-gray-400">Drag nodes to design conversation</p>
+                
+                {/* Toggles */}
+                <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-gray-600">Static Variables</span>
+                        <div className="w-9 h-5 bg-green-500 rounded-full relative cursor-pointer">
+                            <div className="absolute right-1 top-1 w-3 h-3 bg-white rounded-full shadow-sm"></div>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-gray-400">Global Variables</span>
+                        <div className="w-9 h-5 bg-gray-200 rounded-full relative cursor-pointer">
+                            <div className="absolute left-1 top-1 w-3 h-3 bg-white rounded-full shadow-sm"></div>
+                        </div>
+                    </div>
                 </div>
             </div>
-            <div className="flex items-center gap-3">
-                 <button className="text-gray-500 hover:text-gray-900 px-3 py-2 text-sm font-medium transition-colors">
-                    Variables
-                 </button>
+
+            <div className="flex items-center gap-4">
+                 <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-gray-400">Autosave</span>
+                    <div className="w-8 h-4 bg-gray-200 rounded-full relative cursor-pointer">
+                         <div className="absolute left-0.5 top-0.5 w-3 h-3 bg-white rounded-full shadow-sm"></div>
+                    </div>
+                 </div>
                  <div className="h-6 w-px bg-gray-200"></div>
                  <button 
                     onClick={handleSave}
                     disabled={isSaving}
-                    className="bg-gray-900 text-white px-5 py-2.5 rounded-lg text-sm font-bold shadow-lg hover:shadow-xl hover:-translate-y-0.5 transition-all flex items-center gap-2"
+                    className="bg-green-500 hover:bg-green-600 text-white px-6 py-2 rounded-full text-sm font-bold shadow-md hover:shadow-lg transition-all flex items-center gap-2"
                  >
-                    {isSaving ? 'Saving...' : <><Save size={16} /> Save Flow</>}
+                    {isSaving ? <span className="animate-pulse">Saving...</span> : <><CheckCircle size={16} /> Save</>}
                  </button>
             </div>
         </div>
 
-        {/* Main Workspace */}
+        {/* WORKSPACE */}
         <div className="flex-1 flex overflow-hidden relative">
             
             {/* CANVAS */}
-            <div className="flex-1 h-full bg-gray-50 relative" onDragOver={onDragOver} onDrop={onDrop}>
+            <div className="flex-1 h-full bg-[#f8f9fa] relative" onDragOver={onDragOver} onDrop={onDrop}>
                  <ReactFlow
                     nodes={nodes}
                     edges={edges}
@@ -417,65 +488,33 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     onEdgesChange={onEdgesChange}
                     onConnect={onConnect}
                     nodeTypes={nodeTypes}
-                    defaultViewport={{ x: 0, y: 0, zoom: 1 }}
+                    defaultViewport={{ x: 0, y: 0, zoom: 0.8 }}
                     minZoom={0.2}
                     maxZoom={2}
+                    attributionPosition="bottom-left"
                  >
-                    <Background color="#e5e7eb" gap={20} size={1} />
-                    <Controls className="bg-white border border-gray-200 shadow-sm rounded-lg p-1" />
-                    <MiniMap className="border border-gray-200 rounded-lg shadow-sm" zoomable pannable />
-                    <Panel position="top-left" className="bg-white/80 backdrop-blur p-2 rounded-lg border border-gray-200 text-xs text-gray-500 shadow-sm">
-                        Total Steps: {nodes.length}
-                    </Panel>
+                    {/* Dot Pattern Background matching screenshot */}
+                    <Background color="#e2e8f0" gap={24} size={2} />
+                    <Controls className="bg-white border border-gray-200 shadow-sm rounded-lg p-1 m-4" />
+                    <MiniMap className="border border-gray-200 rounded-lg shadow-sm m-4" zoomable pannable />
                  </ReactFlow>
             </div>
 
-            {/* SIDEBAR TOOLBOX */}
-            <div className="w-72 bg-white border-l border-gray-200 flex flex-col shadow-xl z-10">
-                <div className="p-4 border-b border-gray-100">
-                    <h3 className="text-xs font-bold text-gray-900 uppercase tracking-wider flex items-center gap-2">
-                        <GripVertical size={14} /> Toolbox
-                    </h3>
-                </div>
-                
-                <div className="flex-1 overflow-y-auto p-4 space-y-6">
-                    
-                    {/* Section: Messages */}
-                    <div>
-                        <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-3 px-1">Send Message</h4>
-                        <div className="grid grid-cols-2 gap-2">
-                             <DraggableItem type="custom" inputType="text" label="Text Msg" icon={<MessageSquare size={16} />} />
-                             <DraggableItem type="custom" inputType="text" label="Image" icon={<ImageIcon size={16} />} />
-                             <DraggableItem type="custom" inputType="text" label="Template" icon={<Settings2 size={16} />} />
-                        </div>
+            {/* RIGHT SIDEBAR */}
+            <div className="w-[300px] bg-white border-l border-gray-200 flex flex-col shadow-xl z-10 overflow-hidden">
+                <div className="flex-1 overflow-y-auto custom-scrollbar">
+                    <div className="p-4 space-y-6">
+                        {SIDEBAR_CATEGORIES.map((cat, idx) => (
+                            <div key={idx}>
+                                <h4 className="text-xs font-bold text-gray-900 mb-3 ml-1">{cat.title}</h4>
+                                <div className="grid grid-cols-2 gap-3">
+                                    {cat.items.map((item, i) => (
+                                        <DraggableSidebarItem key={i} {...item} />
+                                    ))}
+                                </div>
+                            </div>
+                        ))}
                     </div>
-
-                    {/* Section: Interaction */}
-                    <div>
-                        <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-3 px-1">Ask User</h4>
-                        <div className="space-y-2">
-                             <DraggableItem type="custom" inputType="text" label="Collect Input" icon={<Type size={16} />} />
-                             <DraggableItem type="custom" inputType="option" label="Buttons / Options" icon={<List size={16} />} />
-                        </div>
-                    </div>
-
-                    {/* Section: Logic */}
-                    <div>
-                        <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-3 px-1">Logic</h4>
-                        <div className="space-y-2">
-                             <div className="opacity-50 cursor-not-allowed border border-dashed border-gray-300 rounded-lg p-3 text-xs text-gray-400 flex items-center gap-2">
-                                <Split size={16} /> Conditions (Pro)
-                             </div>
-                             <div className="opacity-50 cursor-not-allowed border border-dashed border-gray-300 rounded-lg p-3 text-xs text-gray-400 flex items-center gap-2">
-                                <Zap size={16} /> Webhook (Pro)
-                             </div>
-                        </div>
-                    </div>
-
-                </div>
-                
-                <div className="p-4 bg-gray-50 border-t border-gray-100 text-[10px] text-gray-400 text-center">
-                    Drag items onto the canvas to add steps.
                 </div>
             </div>
 
@@ -484,25 +523,27 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   );
 };
 
-// Helper for Sidebar Items
-const DraggableItem = ({ type, inputType, label, icon }: any) => {
-    const onDragStart = (event: React.DragEvent, nodeType: string) => {
-      event.dataTransfer.setData('application/reactflow', nodeType);
-      event.dataTransfer.setData('application/inputType', inputType);
-      event.dataTransfer.setData('application/label', label);
+// --- DRAGGABLE ITEM ---
+const DraggableSidebarItem = ({ type, inputType, label, icon }: any) => {
+    const onDragStart = (event: React.DragEvent) => {
+      event.dataTransfer.setData('application/reactflow/type', type);
+      event.dataTransfer.setData('application/reactflow/inputType', inputType);
+      event.dataTransfer.setData('application/reactflow/label', label);
       event.dataTransfer.effectAllowed = 'move';
     };
   
     return (
       <div 
-        className="bg-white border border-gray-200 rounded-lg p-3 cursor-grab hover:border-blue-500 hover:shadow-md transition-all flex items-center gap-3 group"
-        onDragStart={(event) => onDragStart(event, type)} 
+        className="flex flex-col gap-2 cursor-grab group"
+        onDragStart={onDragStart} 
         draggable
       >
-        <div className="text-gray-500 group-hover:text-blue-600 transition-colors">
-            {icon}
+        <div className="bg-white border border-gray-200 border-dashed hover:border-solid hover:border-blue-500 rounded-xl p-3 flex items-center gap-3 transition-all hover:shadow-md hover:-translate-y-0.5">
+            <div className="text-gray-400 group-hover:text-blue-500 transition-colors">
+                {icon}
+            </div>
+            <span className="text-sm font-medium text-gray-600 group-hover:text-gray-900">{label}</span>
         </div>
-        <span className="text-sm font-medium text-gray-700">{label}</span>
       </div>
     );
 };
