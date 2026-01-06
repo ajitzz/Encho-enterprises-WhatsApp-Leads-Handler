@@ -1,21 +1,30 @@
-
 import { Driver, BotSettings } from '../types';
 
 const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 const API_BASE_URL = isLocal ? 'http://localhost:3001' : ''; 
 
-const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, delay = 500): Promise<Response> => {
+// Helper: Custom fetch with configurable timeout and retry logic
+const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, delay = 500, timeout = 10000): Promise<Response> => {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    
     try {
-        const response = await fetch(url, options);
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(id);
+        
         if (!response.ok) {
              if (response.status >= 500 && retries > 0) throw new Error('Server Error');
              return response;
         }
         return response;
-    } catch (err) {
+    } catch (err: any) {
+        clearTimeout(id);
+        if (err.name === 'AbortError') {
+             throw new Error(`Request timed out after ${timeout}ms`);
+        }
         if (retries > 0) {
             await new Promise(res => setTimeout(res, delay));
-            return fetchWithRetry(url, options, retries - 1, delay * 2);
+            return fetchWithRetry(url, options, retries - 1, delay * 2, timeout);
         }
         throw err;
     }
@@ -95,18 +104,20 @@ export const liveApiService = {
   },
 
   getProjectContext: async (): Promise<{files: Array<{path: string, content: string}>}> => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/project-context`);
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/project-context`, undefined, 3, 500, 30000); // 30s timeout
       if (!response.ok) throw new Error('Failed to read project context');
       return await response.json();
   },
 
   // --- SYSTEM DOCTOR NEW API ---
   analyzeSystem: async (issueDescription: string): Promise<{ diagnosis: string, changes: any[] }> => {
+      // 90s timeout for heavy AI analysis + GitHub Fetching
       const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/analyze-system`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ issueDescription })
-      });
+      }, 0, 0, 90000); 
+      
       if (!response.ok) throw new Error('Analysis Failed');
       return await response.json();
   },
@@ -122,17 +133,19 @@ export const liveApiService = {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ changes })
-      });
+      }, 0, 0, 60000);
       if (!response.ok) throw new Error('Failed to patch system');
       return await response.json();
   },
 
   sendAssistantMessage: async (message: string, history: any[]) => {
+      // 90s timeout for chat with tool use (GitHub calls can be slow)
       const response = await fetchWithRetry(`${API_BASE_URL}/api/assistant/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message, history })
-      });
+      }, 0, 500, 90000); 
+      
       if (!response.ok) throw new Error('Failed to chat with assistant');
       return await response.json();
   }

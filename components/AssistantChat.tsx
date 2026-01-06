@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { liveApiService } from '../services/liveApiService';
-import { Send, Bot, Sparkles, X, ChevronDown, Minimize2, Loader2 } from 'lucide-react';
+import { Send, Bot, Sparkles, X, ChevronDown, Minimize2, Loader2, Terminal } from 'lucide-react';
 
 interface ChatMessage {
     role: 'user' | 'model';
@@ -36,7 +36,7 @@ export const AssistantChat = () => {
             const botMsg: ChatMessage = { role: 'model', parts: [{ text: result.text }] };
             setMessages([...newHistory, botMsg]);
         } catch (e) {
-            const errorMsg: ChatMessage = { role: 'model', parts: [{ text: "I'm having trouble connecting to the command center. Please ensure the server is running." }] };
+            const errorMsg: ChatMessage = { role: 'model', parts: [{ text: "I'm having trouble connecting to the command center. If this operation took too long, it might still complete in the background." }] };
             setMessages([...newHistory, errorMsg]);
         } finally {
             setIsLoading(false);
@@ -95,11 +95,11 @@ export const AssistantChat = () => {
                         <Bot size={48} className="text-gray-300 mb-4" />
                         <h4 className="font-bold text-gray-700">How can I help you?</h4>
                         <p className="text-xs text-gray-500 mt-2 max-w-[200px]">
-                            I can manage leads, analyze data, and update recruitment settings.
+                            I have full access to manage leads, read code, and deploy updates via GitHub.
                         </p>
                         <div className="mt-6 flex flex-col gap-2 w-full">
-                            <button onClick={() => { setInput("Show me new leads"); }} className="text-xs bg-white border border-gray-200 py-2 px-3 rounded-lg hover:bg-blue-50 hover:text-blue-600 transition-colors">"Show me new leads"</button>
-                            <button onClick={() => { setInput("Make the bot more professional"); }} className="text-xs bg-white border border-gray-200 py-2 px-3 rounded-lg hover:bg-blue-50 hover:text-blue-600 transition-colors">"Make the bot more professional"</button>
+                            <button onClick={() => { setInput("List all files in the project"); }} className="text-xs bg-white border border-gray-200 py-2 px-3 rounded-lg hover:bg-blue-50 hover:text-blue-600 transition-colors">"List all files in the project"</button>
+                            <button onClick={() => { setInput("Check the status of new leads"); }} className="text-xs bg-white border border-gray-200 py-2 px-3 rounded-lg hover:bg-blue-50 hover:text-blue-600 transition-colors">"Check status of new leads"</button>
                         </div>
                     </div>
                 )}
@@ -120,9 +120,18 @@ export const AssistantChat = () => {
                 
                 {isLoading && (
                     <div className="flex justify-start">
-                        <div className="bg-white border border-gray-100 rounded-2xl rounded-tl-none px-4 py-3 shadow-sm flex items-center gap-2">
-                            <Loader2 size={14} className="animate-spin text-blue-600" />
-                            <span className="text-xs text-gray-500 font-medium">Executing commands...</span>
+                        <div className="bg-white border border-gray-100 rounded-2xl rounded-tl-none px-4 py-3 shadow-sm flex items-center gap-3">
+                            <div className="relative">
+                                <Terminal size={16} className="text-blue-600" />
+                                <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                                  <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500"></span>
+                                </span>
+                            </div>
+                            <div className="flex flex-col">
+                                <span className="text-xs text-gray-700 font-bold">Processing...</span>
+                                <span className="text-[10px] text-gray-400">Interacting with GitHub & Database</span>
+                            </div>
                         </div>
                     </div>
                 )}
@@ -136,7 +145,7 @@ export const AssistantChat = () => {
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         onKeyDown={handleKeyDown}
-                        placeholder="Type your command..."
+                        placeholder="Type a command..."
                         className="w-full bg-gray-50 border border-gray-200 rounded-xl pl-4 pr-12 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-black/5 focus:border-gray-300 resize-none h-12 max-h-32"
                         rows={1}
                     />
