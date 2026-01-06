@@ -316,7 +316,8 @@ app.post('/api/admin/analyze-system', async (req, res) => {
 
         const files = await getProjectFiles();
         const dbSchema = await getDatabaseSchema();
-        const fileContext = files.map(f => `--- FILE: ${f.path} ---\n${f.content}\n`).join("\n");
+        // Truncate file content to prevent token overflow if files are massive
+        const fileContext = files.map(f => `--- FILE: ${f.path} ---\n${f.content.substring(0, 15000)}\n`).join("\n");
 
         const prompt = `
         You are "System Doctor Ultimate".
@@ -333,15 +334,21 @@ app.post('/api/admin/analyze-system', async (req, res) => {
         `;
 
         const response = await ai.models.generateContent({
-            model: "gemini-3-pro-preview",
+            model: "gemini-3-flash-preview", // Use Flash for large context and high quota
             contents: prompt,
             config: { responseMimeType: "application/json" }
         });
 
-        const jsonStr = response.text().replace(/```json/g, '').replace(/```/g, '').trim();
+        const text = response.text;
+        if (!text) throw new Error("AI returned empty response");
+        
+        const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
         res.json(JSON.parse(jsonStr));
     } catch (e) {
         console.error("Analysis Failed:", e);
+        if (e.status === 429 || e.message.includes('429')) {
+             return res.status(429).json({ error: "System Overloaded (429). Please wait 30s and try again." });
+        }
         res.status(500).json({ error: e.message });
     }
 });
@@ -375,10 +382,16 @@ app.post('/api/admin/audit-flow', async (req, res) => {
             config: { responseMimeType: "application/json" }
         });
 
-        const jsonStr = response.text().replace(/```json/g, '').replace(/```/g, '').trim();
+        const text = response.text;
+        if (!text) throw new Error("AI returned empty response");
+
+        const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
         res.json(JSON.parse(jsonStr));
     } catch (e) {
         console.error("Audit Failed:", e);
+        if (e.status === 429 || e.message.includes('429')) {
+             return res.status(429).json({ error: "System Overloaded (429). Please wait 30s and try again." });
+        }
         res.status(500).json({ error: e.message });
     }
 });
@@ -516,7 +529,7 @@ app.post('/api/assistant/chat', async (req, res) => {
     const { message, history } = req.body; 
     try {
         const chat = ai.chats.create({
-            model: "gemini-3-pro-preview",
+            model: "gemini-3-flash-preview", // Switched to Flash to save quota
             history: history || [],
             config: {
                 tools: ASSISTANT_TOOLS,
@@ -609,8 +622,11 @@ app.post('/api/assistant/chat', async (req, res) => {
             result = await chat.sendMessage(functionResponses); 
             response = result.response;
         }
-        res.json({ text: response.text() });
+        res.json({ text: response.text });
     } catch (e) {
+        if (e.status === 429 || e.message.includes('429')) {
+             return res.status(429).json({ error: "Assistant Overloaded (429). Please wait 30s." });
+        }
         res.status(500).json({ error: e.message });
     }
 });
