@@ -10,7 +10,7 @@ import { AITraining } from './components/AITraining';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
 import { Driver, LeadStatus, Notification, BotSettings } from './types';
-import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split } from 'lucide-react';
+import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split, Bot } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -52,8 +52,6 @@ export default function App() {
                try {
                    const updated = await liveApiService.getDrivers();
                    setDrivers(updated);
-                   // Optionally re-fetch settings occasionally if multiple users? 
-                   // For now, assume settings don't change frequently from other users.
                } catch (e) {
                    // Silent fail on poll error to avoid spamming console
                }
@@ -147,7 +145,7 @@ export default function App() {
     }
   };
 
-  const handleStrategyChange = async (strategy: 'HYBRID_BOT_FIRST' | 'AI_ONLY') => {
+  const handleStrategyChange = async (strategy: 'HYBRID_BOT_FIRST' | 'AI_ONLY' | 'BOT_ONLY') => {
       if (!botSettings) return;
       const newSettings = { ...botSettings, routingStrategy: strategy };
       
@@ -198,7 +196,13 @@ export default function App() {
                             onClick={() => handleStrategyChange('HYBRID_BOT_FIRST')}
                             className={`px-3 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 transition-colors ${botSettings.routingStrategy === 'HYBRID_BOT_FIRST' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-600'}`}
                          >
-                            <Split size={14} /> Bot Flow
+                            <Split size={14} /> Hybrid
+                         </button>
+                         <button 
+                            onClick={() => handleStrategyChange('BOT_ONLY')}
+                            className={`px-3 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 transition-colors ${botSettings.routingStrategy === 'BOT_ONLY' ? 'bg-green-600 text-white' : 'text-gray-400 hover:text-gray-600'}`}
+                         >
+                            <Bot size={14} /> Bot Only
                          </button>
                          <button 
                             onClick={() => handleStrategyChange('AI_ONLY')}

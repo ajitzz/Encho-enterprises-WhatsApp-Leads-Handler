@@ -5,7 +5,7 @@
  * Strategy:
  * 1. Singleton Pool with TCP Keep-Alive
  * 2. Automatic Query Retries (Self-Healing)
- * 3. Lazy Schema Initialization
+ * 3. Circuit Breaker for Connection Deadlocks
  */
 
 const express = require('express');
@@ -30,15 +30,14 @@ app.use((req, res, next) => {
 
 // --- CONFIGURATION ---
 const PORT = process.env.PORT || 3001;
-let META_API_TOKEN = process.env.META_API_TOKEN || ""; 
-let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || ""; 
+let META_API_TOKEN = process.env.META_API_TOKEN || "EAAkr7Y9S2qYBQfHTNZASIugAzOi8b2MZCBct4z4jZBHSmQ2KGlFduuDQQGEYC9NRDtZBUdhMPdeJ06OjYUiJYGfFkZCAxzyh4TdidN7ZA10K3XPOVEiQh01jo22xLsQjXrEtMHc5ZCHZBbRZAyA5d0pl26Jsg3IuNKY272QYmqEjHghf11OKJmbUZBfJLe5EvHzl48gAZDZD"; 
+let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "982841698238647"; 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0";
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
 // --- ROBUST DATABASE CONNECTION ---
 
-// 1. Force the Pooled Connection String (Port 5432/6543 with PgBouncer)
-// Using the POOLED url provided by the user to prevent connection limit errors
+// 1. Force the Pooled Connection String
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL;
 
@@ -58,11 +57,9 @@ const pool = new Pool({
 
 pool.on('error', (err) => {
   console.error('Unexpected error on idle client', err);
-  // Do not exit process; Vercel will handle container recycling
 });
 
-// 3. THE "ANTI-DROP" WRAPPER (Enterprise Strategy)
-// This function wraps every DB query. If the connection is lost, it retries automatically.
+// 3. THE "ANTI-DROP" WRAPPER (Fixed Deadlock)
 const queryWithRetry = async (text, params, retries = 2) => {
     let client;
     try {
@@ -70,13 +67,15 @@ const queryWithRetry = async (text, params, retries = 2) => {
         const res = await client.query(text, params);
         return res;
     } catch (err) {
-        // If it's a connection error or undefined table (cold start), retry
-        // 57P01: Admin shutdown, EPIPE: Broken pipe, ECONNRESET: Connection reset
+        // CRITICAL FIX: Release client IMMEDIATELY so the slot opens for the retry
+        if (client) {
+            try { client.release(true); } catch(e) {}
+            client = null;
+        }
+
+        // Retry on Connection Errors or Missing Table
         if ((err.code === '57P01' || err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === '42P01') && retries > 0) {
             console.warn(`⚠️ DB Glitch (${err.code}). Retrying... (${retries} left)`);
-            
-            // If we have a client reference, try to release it with error to discard it
-            try { if (client) client.release(true); } catch(e) {}
             
             // If table missing, auto-heal first
             if (err.code === '42P01') {
@@ -150,6 +149,7 @@ const ensureDatabaseInitialized = async (client) => {
             await client.query('INSERT INTO bot_settings (id, settings) VALUES (1, $1)', [JSON.stringify(DEFAULT_BOT_SETTINGS)]);
         }
         await client.query('COMMIT');
+        console.log("✅ Database initialized successfully");
     } catch (e) {
         await client.query('ROLLBACK');
         console.error("Schema Init Failed:", e);
@@ -286,31 +286,49 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             let replyTemplate = null;
             let shouldCallAI = false;
 
+            // STRATEGY: AI ONLY
             if (botSettings.isEnabled && routingStrategy === 'AI_ONLY') {
                 shouldCallAI = true;
-            } else if (botSettings.isEnabled) {
+            } 
+            // STRATEGY: BOT / HYBRID
+            else if (botSettings.isEnabled) {
+                 
+                 // RESTART LOGIC FOR 'BOT_ONLY': 
+                 // If bot finished (is_bot_active=false), restart flow from beginning.
                  if (routingStrategy === 'BOT_ONLY' && !driver.is_bot_active) {
-                     // Auto Restart
-                     await client.query('UPDATE drivers SET is_bot_active = TRUE, current_bot_step_id = $1 WHERE id = $2', [botSettings.steps?.[0]?.id, driver.id]);
-                     driver.is_bot_active = true;
-                     driver.current_bot_step_id = botSettings.steps?.[0]?.id;
-                     isNewDriver = true;
+                     const firstStepId = botSettings.steps?.[0]?.id;
+                     if (firstStepId) {
+                         await client.query('UPDATE drivers SET is_bot_active = TRUE, current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
+                         driver.is_bot_active = true;
+                         driver.current_bot_step_id = firstStepId;
+                         isNewDriver = true; // Force restart
+                     }
                  }
 
                  if (driver.is_bot_active && driver.current_bot_step_id) {
                      const currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
                      if (currentStep) {
+                         // Process Input (Only if not restarting/new)
                          if (!isNewDriver) {
                              if (currentStep.saveToField === 'name') await client.query('UPDATE drivers SET name = $1 WHERE id = $2', [msgBody, driver.id]);
                              if (currentStep.saveToField === 'availability') await client.query('UPDATE drivers SET availability = $1 WHERE id = $2', [msgBody, driver.id]);
                              if (currentStep.saveToField === 'vehicleRegistration') await client.query('UPDATE drivers SET vehicle_registration = $1 WHERE id = $2', [msgBody, driver.id]);
 
                              let nextId = currentStep.nextStepId;
+                             
+                             // End of Flow Handling
                              if (nextId === 'AI_HANDOFF' || nextId === 'END') {
                                  await client.query('UPDATE drivers SET is_bot_active = FALSE, current_bot_step_id = NULL WHERE id = $1', [driver.id]);
-                                 if (nextId === 'AI_HANDOFF' && routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
-                                 else if (nextId !== 'AI_HANDOFF') replyText = "Thank you! We have received your details.";
+                                 
+                                 if (nextId === 'AI_HANDOFF') {
+                                     // Hybrid: Switch to AI. Bot Only: End.
+                                     if (routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
+                                     else replyText = "Thank you. We will contact you soon.";
+                                 } else {
+                                     replyText = "Thank you! We have received your details.";
+                                 }
                              } else {
+                                 // Next Step
                                  await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [nextId, driver.id]);
                                  const nextStep = botSettings.steps.find(s => s.id === nextId);
                                  if (nextStep) {
@@ -320,12 +338,15 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                  }
                              }
                          } else {
+                             // Send Current Step (Start/Restart)
                              replyText = currentStep.message;
                              replyTemplate = currentStep.templateName;
                              if(currentStep.inputType === 'option') replyOptions = currentStep.options;
                          }
                      }
-                 } else if (routingStrategy === 'HYBRID_BOT_FIRST') {
+                 } 
+                 // If Bot Inactive, check Hybrid Fallback
+                 else if (routingStrategy === 'HYBRID_BOT_FIRST') {
                      shouldCallAI = true;
                  }
             }
