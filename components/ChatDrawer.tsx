@@ -1,15 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, LeadStatus, OnboardingStep } from '../types';
-import { mockBackend } from '../services/mockBackend';
 import { X, Send, Image as ImageIcon, Video, CheckCircle, AlertTriangle, UserX, Car, Clock, ShieldCheck, ChevronRight, Facebook, Globe } from 'lucide-react';
 
 interface ChatDrawerProps {
   driver: Driver | null;
   onClose: () => void;
-  onStatusUpdate: (id: string, status: LeadStatus) => void;
+  onSendMessage: (text: string) => void;
+  onUpdateDriver: (id: string, updates: Partial<Driver>) => void;
 }
 
-export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatusUpdate }) => {
+export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver }) => {
   const [replyText, setReplyText] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -23,16 +23,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
 
   const handleSend = () => {
     if (!replyText.trim()) return;
-    
-    const newMsg: Message = {
-      id: Date.now().toString(),
-      sender: 'agent',
-      text: replyText,
-      timestamp: Date.now(),
-      type: 'text'
-    };
-    
-    mockBackend.addMessage(driver.id, newMsg);
+    onSendMessage(replyText);
     setReplyText('');
   };
 
@@ -43,9 +34,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
     }
   };
 
-  // Helper to update specific driver fields locally (and backend)
+  // Helper to update specific driver fields
   const handleUpdateDetails = (updates: Partial<Driver>) => {
-    mockBackend.updateDriverDetails(driver.id, updates);
+    onUpdateDriver(driver.id, updates);
   };
 
   const steps = [
@@ -90,7 +81,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
                <select 
                   className="bg-gray-800 text-white text-sm border-none rounded-md px-3 py-1.5 cursor-pointer outline-none focus:ring-2 focus:ring-blue-500"
                   value={driver.status}
-                  onChange={(e) => onStatusUpdate(driver.id, e.target.value as LeadStatus)}
+                  onChange={(e) => onUpdateDriver(driver.id, { status: e.target.value as LeadStatus })}
                 >
                   {Object.values(LeadStatus).map(s => (
                     <option key={s} value={s}>{s}</option>
@@ -122,7 +113,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
                     >
                       {msg.type === 'image' && msg.imageUrl && (
                          <div className="mb-2 rounded-lg overflow-hidden border border-gray-200/20">
-                           <img src={msg.imageUrl} alt="Attachment" className="w-full h-auto object-cover max-h-60" />
+                           <img src={msg.imageUrl} alt="Attachment" className="w-full h-full object-cover max-h-60" />
                          </div>
                       )}
                       {msg.text && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
@@ -227,15 +218,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
                            className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
                          />
                          <button 
-                           onClick={() => {
-                             mockBackend.addMessage(driver.id, {
-                               id: Date.now().toString(),
-                               sender: 'system',
-                               text: 'Please provide your vehicle registration number.',
-                               type: 'text',
-                               timestamp: Date.now()
-                             });
-                           }}
+                           onClick={() => onSendMessage('Please provide your vehicle registration number.')}
                            className="text-blue-600 hover:bg-blue-50 p-2 rounded-lg text-xs font-medium"
                            title="Request Info"
                          >
@@ -265,15 +248,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
                         ))}
                      </div>
                      <button 
-                       onClick={() => {
-                         mockBackend.addMessage(driver.id, {
-                           id: Date.now().toString(),
-                           sender: 'system',
-                           text: 'What is your driving availability? (Full-time / Part-time / Weekends)',
-                           type: 'text',
-                           timestamp: Date.now()
-                         });
-                       }}
+                       onClick={() => onSendMessage('What is your driving availability? (Full-time / Part-time / Weekends)')}
                        className="w-full text-center text-blue-600 hover:bg-blue-50 py-2 rounded-lg text-xs font-medium border border-transparent hover:border-blue-100 transition-colors"
                      >
                        Request Availability Info
@@ -307,7 +282,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
                   <button 
                     onClick={() => {
                       if (driver.qualificationChecks.hasValidLicense) {
-                        onStatusUpdate(driver.id, LeadStatus.QUALIFIED);
+                        onUpdateDriver(driver.id, { status: LeadStatus.QUALIFIED });
                       } else {
                         alert("Cannot qualify driver without a valid license check.");
                       }
@@ -318,7 +293,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onStatu
                     Approve & Qualify Driver
                   </button>
                   <button 
-                    onClick={() => onStatusUpdate(driver.id, LeadStatus.REJECTED)}
+                    onClick={() => onUpdateDriver(driver.id, { status: LeadStatus.REJECTED })}
                     className="w-full mt-3 text-red-600 py-3 rounded-lg font-medium hover:bg-red-50 transition-colors flex items-center justify-center gap-2"
                   >
                     <UserX size={18} />
