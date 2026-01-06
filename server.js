@@ -267,13 +267,17 @@ const ensureDatabaseInitialized = async (client) => {
 // --- AI ENGINE ---
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
+const cleanJSON = (text) => {
+  if (!text) return "{}";
+  return text.replace(/```json/g, '').replace(/```/g, '').trim();
+};
+
 const getCacheKey = (task, content) => {
     const str = typeof content === 'string' ? content : JSON.stringify(content);
     return crypto.createHash('md5').update(`${task}:${str}`).digest('hex');
 };
 
 const generateContentSmart = async (contents, config = {}, systemInstruction = undefined, taskName = 'General Task') => {
-    // ... [AI logic remains same as provided previously] ...
     if (isCircuitOpen) {
         const timeLeft = Math.ceil((circuitResetTime - Date.now()) / 1000);
         throw new Error(`System Cooling Down. Please wait ${timeLeft} seconds.`);
@@ -284,6 +288,7 @@ const generateContentSmart = async (contents, config = {}, systemInstruction = u
         const runModel = async (model) => {
             const reqConfig = { ...config };
             if (systemInstruction) reqConfig.systemInstruction = systemInstruction;
+            console.log(`🤖 [AI SMART] Starting '${taskName}' using model: ${model}`);
             return await ai.models.generateContent({ model, contents, config: reqConfig });
         };
 
@@ -296,6 +301,7 @@ const generateContentSmart = async (contents, config = {}, systemInstruction = u
             }
             return result;
         } catch (e) {
+            console.warn(`⚠️ [AI SMART] Quota Hit on ${targetModel}. Backing off...`);
             if (e.status === 429 || e.message?.includes('429')) {
                 if (targetModel === MODEL_LITE || isCircuitOpen) {
                      isCircuitOpen = true;
@@ -306,10 +312,14 @@ const generateContentSmart = async (contents, config = {}, systemInstruction = u
                 }
                 await new Promise(r => setTimeout(r, 2000));
                 try {
+                    console.log(`♻️ [AI SMART] Retry '${taskName}' with LITE model`);
                     const result = await runModel(MODEL_LITE);
                     aiStatusCache = { status: 'degraded', message: 'Fallback to Lite Active', lastCheck: Date.now(), activeModel: MODEL_LITE };
                     return result;
-                } catch (e2) { throw e2; }
+                } catch (e2) { 
+                    console.error("💥 [AI SMART] Fallback Failed. Tripping Circuit.");
+                    throw e2; 
+                }
             }
             throw e;
         }
@@ -318,20 +328,53 @@ const generateContentSmart = async (contents, config = {}, systemInstruction = u
 };
 
 const runLocalAudit = (nodes) => {
-    // ... [Local Audit Logic] ...
+    console.log("🛡️ [Local Auditor] Running heuristic check...");
     const issues = [];
     nodes.forEach(node => {
-        if (node.type === 'start' || node.type === 'end' || node.data?.type === 'start' || node.data?.type === 'end') return;
+        // Skip structural nodes
+        if (node.id === 'start' || node.type === 'start' || node.data?.type === 'start' || 
+            node.id === 'end' || node.type === 'end' || node.data?.type === 'end') return;
+        
         const data = node.data || {};
-        if ((data.label === 'Text' || data.inputType === 'text') && (!data.message || !data.message.trim())) {
-            issues.push({ nodeId: node.id, severity: 'CRITICAL', issue: 'Empty Message', suggestion: 'Empty text bubble.', autoFixValue: 'Please reply.' });
+        
+        // 1. Check for Placeholder
+        if (data.message && BLOCKED_REGEX.test(data.message)) {
+             issues.push({ 
+                 nodeId: node.id, 
+                 severity: 'CRITICAL', 
+                 issue: 'Placeholder Text Detected', 
+                 suggestion: 'You are using default text. Please write a real message.', 
+                 autoFixValue: 'Please reply.' 
+             });
+        }
+        // 2. Check for Empty Text
+        else if ((data.label === 'Text' || data.inputType === 'text') && (!data.message || !data.message.trim())) {
+            issues.push({ 
+                nodeId: node.id, 
+                severity: 'CRITICAL', 
+                issue: 'Empty Message', 
+                suggestion: 'This message bubble is empty.', 
+                autoFixValue: 'Hello!' 
+            });
+        }
+        // 3. Check for Empty Options
+        else if (data.inputType === 'option') {
+            if (!data.options || data.options.length === 0) {
+                 issues.push({
+                     nodeId: node.id,
+                     severity: 'CRITICAL',
+                     issue: 'No Options',
+                     suggestion: 'Add at least one button option.',
+                     autoFixValue: ['Yes', 'No']
+                 });
+            }
         }
     });
+    console.log(`🛡️ [Local Auditor] Found ${issues.length} issues.`);
     return { isValid: issues.length === 0, issues };
 };
 
 // --- ROUTES ---
-// ... [File/Admin Routes] ...
 
 app.get('/api/drivers', async (req, res) => {
     try {
@@ -352,6 +395,74 @@ app.post('/api/bot-settings', async (req, res) => {
         await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(req.body)]);
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- NEW AI AUDIT ROUTE ---
+app.post('/api/admin/audit-flow', async (req, res) => {
+    try {
+        const { nodes, edges } = req.body;
+        console.log(`🕵️ [AI AUDIT] Request received for ${nodes?.length} nodes...`);
+        
+        if (!nodes || nodes.length === 0) {
+            return res.json({ isValid: true, issues: [] });
+        }
+
+        // Prepare context for AI
+        const flowContext = JSON.stringify(nodes.map(n => ({ 
+            id: n.id, 
+            type: n.data.label, 
+            message: n.data.message, 
+            options: n.data.options, 
+            mediaUrl: n.data.mediaUrl 
+        })));
+
+        const prompt = `
+        You are a Quality Assurance AI for a Chatbot Flow.
+        Analyze this flow for empty messages, placeholder text, and logic errors.
+
+        STRICT RULES:
+        1. "Placeholder Text": Any message containing "replace this", "sample message", "type here".
+        2. "Empty Options": An Options node where the 'options' array is empty.
+        3. "Empty Text": A Text node with an empty or whitespace-only message.
+        4. "Missing Media": A Media node (Image/Video) with no URL.
+
+        INPUT: ${flowContext}
+
+        OUTPUT JSON:
+        {
+            "isValid": boolean,
+            "issues": [
+                {
+                    "nodeId": "string",
+                    "severity": "CRITICAL" | "WARNING",
+                    "issue": "string description",
+                    "suggestion": "how to fix",
+                    "autoFixValue": "string or array or null" 
+                }
+            ]
+        }
+        `;
+
+        try {
+            const response = await generateContentSmart(prompt, { 
+                responseMimeType: "application/json"
+            }, "You are a rigid code validator.", "Audit Flow");
+            
+            const report = JSON.parse(cleanJSON(response.text));
+            console.log(`✅ [AI AUDIT] Complete. Found ${report.issues?.length || 0} issues.`);
+            res.json(report);
+
+        } catch (aiError) {
+            console.warn("⚠️ AI Audit Failed/Blocked. Switching to Local Logic.", aiError.message);
+            // Fallback to heuristic check
+            const localReport = runLocalAudit(nodes);
+            res.json(localReport);
+        }
+
+    } catch (e) {
+        console.error("❌ [AI AUDIT] Fatal Error:", e);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.post('/api/messages/send', async (req, res) => {
