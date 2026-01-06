@@ -286,8 +286,6 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
   else if (mediaUrl) {
       if (isPlaceholder) {
           console.error(`⛔ FIREWALL: Blocked Media Caption containing placeholder: "${body}"`);
-          // We clear the caption but still send the media to prevent breaking flow completely? 
-          // NO, user asked for strict blocking.
           isBlocked = true; 
       }
   }
@@ -404,7 +402,23 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             await client.query('BEGIN');
 
             const settingsRes = await client.query('SELECT settings FROM bot_settings WHERE id = 1');
-            const botSettings = settingsRes.rows[0]?.settings || DEFAULT_BOT_SETTINGS;
+            let botSettings = settingsRes.rows[0]?.settings || DEFAULT_BOT_SETTINGS;
+            
+            // --- CRITICAL: RUNTIME SANITIZATION ---
+            // This cleans dirty data from the DB before it can be used
+            if (botSettings.steps && Array.isArray(botSettings.steps)) {
+                botSettings.steps = botSettings.steps.map(step => {
+                    const msg = step.message || "";
+                    if (BLOCKED_PHRASES.some(phrase => msg.toLowerCase().includes(phrase))) {
+                        console.warn(`🧹 Sanitized Step ${step.id}: Removed placeholder text.`);
+                        // Replace with empty string (which firewall will block, stopping the flow safely)
+                        step.message = ""; 
+                    }
+                    return step;
+                });
+            }
+            // --------------------------------------
+
             const routingStrategy = botSettings.routingStrategy || 'HYBRID_BOT_FIRST';
 
             let driverRes = await client.query('SELECT * FROM drivers WHERE phone_number = $1', [from]);
@@ -521,6 +535,10 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             // This is a HARD OVERRIDE to prevent any leakage.
             if (routingStrategy === 'BOT_ONLY') {
                 shouldCallAI = false; 
+                if (!replyText && !driver.is_bot_active) {
+                     // If bot finished and mode is BOT_ONLY, do nothing (No AI Fallback)
+                     console.log("Bot finished in BOT_ONLY mode. Silence.");
+                }
             }
 
             await client.query('COMMIT');
