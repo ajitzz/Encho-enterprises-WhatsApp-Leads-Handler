@@ -265,6 +265,18 @@ app.post('/api/messages/send', async (req, res) => {
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return;
   
+  // SANITIZATION: Fix "Replace this sample message!" issue (Meta placeholder)
+  // Also handle empty body for interactive messages to prevent API errors
+  let safeBody = body;
+  if (!safeBody || safeBody.trim() === "" || safeBody === "Replace this sample message!") {
+      if (options && options.length > 0) {
+          safeBody = "Please select an option:";
+      } else if (!templateName && !mediaUrl) {
+          // If pure text but empty, fallback to a generic greeting to avoid crash
+          safeBody = "Hello"; 
+      }
+  }
+
   let payload = { messaging_product: 'whatsapp', to: to };
   
   if (templateName) {
@@ -274,21 +286,21 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
     // Media Message (Image, Video, or Document)
     payload.type = mediaType;
     payload[mediaType] = { link: mediaUrl };
-    if (body) payload[mediaType].caption = body; // Add caption if provided
+    if (safeBody && safeBody !== "Hello") payload[mediaType].caption = safeBody; // Add caption if provided
   } else if (options && options.length > 0) {
     // FILTER: Remove empty options
     const validOptions = options.filter(o => o && o.trim().length > 0);
     
     if (validOptions.length === 0) {
         payload.type = 'text';
-        payload.text = { body: body };
+        payload.text = { body: safeBody };
     } 
     // IF > 3 OPTIONS: Use LIST MESSAGE (Menu)
     else if (validOptions.length > 3) {
         payload.type = 'interactive';
         payload.interactive = {
             type: 'list',
-            body: { text: body },
+            body: { text: safeBody },
             action: {
                 button: "Select Option",
                 sections: [
@@ -308,7 +320,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
         payload.type = 'interactive';
         payload.interactive = {
             type: 'button',
-            body: { text: body },
+            body: { text: safeBody },
             action: { 
                 buttons: validOptions.map((opt, i) => ({ 
                     type: 'reply', 
@@ -319,7 +331,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
     }
   } else {
     payload.type = 'text';
-    payload.text = { body: body };
+    payload.text = { body: safeBody };
   }
   
   try {
