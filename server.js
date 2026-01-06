@@ -36,36 +36,26 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
 // --- SECURITY: CONTENT FIREWALL ---
-const BLOCKED_PHRASES = [
-    "replace this sample message",
-    "enter your message",
-    "type your message here",
-    "replace this text"
-];
+// Regex matches: "replace this sample message", "enter your message", etc., case insensitive, ignoring extra spaces
+const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
 
 // --- ROBUST DATABASE CONNECTION ---
 
-// 1. Force the Pooled Connection String
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL;
 
-// 2. Configure Pool with Keep-Alive
 const pool = new Pool({
   connectionString: CONNECTION_STRING,
-  ssl: { 
-    rejectUnauthorized: false, // Required for Neon. Do NOT use requestCert: true
-  },
-  // Serverless Optimization
-  max: 1, // Max 1 connection per Lambda container
-  idleTimeoutMillis: 1000, // Close idle connections quickly to avoid exhaustion
-  connectionTimeoutMillis: 5000, // Fail fast if Neon is down
+  ssl: { rejectUnauthorized: false },
+  max: 1, 
+  idleTimeoutMillis: 1000, 
+  connectionTimeoutMillis: 5000, 
 });
 
 pool.on('error', (err) => {
   console.error('Unexpected error on idle client', err);
 });
 
-// 3. THE "ANTI-DROP" WRAPPER (Fixed Deadlock & Logic)
 const queryWithRetry = async (text, params, retries = 2) => {
     let client;
     try {
@@ -73,36 +63,21 @@ const queryWithRetry = async (text, params, retries = 2) => {
         const res = await client.query(text, params);
         return res;
     } catch (err) {
-        // CRITICAL: Release client IMMEDIATELY
-        if (client) {
-            try { client.release(true); } catch(e) {}
-            client = null;
-        }
-
+        if (client) { try { client.release(true); } catch(e) {} client = null; }
         console.warn(`⚠️ DB Error (${err.code}): ${err.message}`);
-
-        // Retry on Connection Errors, Missing Table (42P01), OR Missing Column (42703)
-        // 42703: undefined_column (Happens when code expects a new column that isn't in DB yet)
         if ((err.code === '57P01' || err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === '42P01' || err.code === '42703') && retries > 0) {
             console.log(`♻️ Retrying... (${retries} left)`);
-            
-            // If table or column missing, auto-heal schema
             if (err.code === '42P01' || err.code === '42703') {
-                console.log("🛠️ Attempting Schema Auto-Heal (Missing Table or Column)...");
                 const healClient = await pool.connect();
                 await ensureDatabaseInitialized(healClient);
                 healClient.release();
             }
-            
-            // Wait 500ms before retry
             await new Promise(res => setTimeout(res, 500));
             return queryWithRetry(text, params, retries - 1);
         }
         throw err;
     } finally {
-        if (client) {
-            try { client.release(); } catch(e) {}
-        }
+        if (client) { try { client.release(); } catch(e) {} }
     }
 };
 
@@ -150,12 +125,49 @@ const DEFAULT_BOT_SETTINGS = {
   steps: []
 };
 
+// --- DATABASE CLEANER (Runs on Startup) ---
+const sanitizeDatabaseOnStartup = async (client) => {
+    try {
+        console.log("🧹 Running Database Sanitizer...");
+        const res = await client.query('SELECT settings FROM bot_settings WHERE id = 1');
+        if (res.rows.length > 0) {
+            let settings = res.rows[0].settings;
+            let dirty = false;
+
+            if (settings.steps && Array.isArray(settings.steps)) {
+                settings.steps = settings.steps.map(step => {
+                    if (step.message && BLOCKED_REGEX.test(step.message)) {
+                        console.warn(`   ⚠️  Purging prohibited text from Step ${step.id}`);
+                        // If it has options, give it a safe label so buttons still work
+                        if (step.options && step.options.length > 0) {
+                            step.message = "Please select an option:";
+                        } else {
+                            step.message = ""; // Empty string (will be blocked by firewall)
+                        }
+                        dirty = true;
+                    }
+                    return step;
+                });
+            }
+
+            if (dirty) {
+                await client.query('UPDATE bot_settings SET settings = $1 WHERE id = 1', [JSON.stringify(settings)]);
+                console.log("   ✅ Database Cleaned & Updated.");
+            } else {
+                console.log("   ✨ Database is clean.");
+            }
+        }
+    } catch (e) {
+        console.error("   ❌ Sanitizer Failed:", e.message);
+    }
+};
+
 const ensureDatabaseInitialized = async (client) => {
     try {
         await client.query('BEGIN');
         await client.query(SCHEMA_SQL);
         
-        // --- MIGRATIONS: Force add columns for existing tables ---
+        // --- MIGRATIONS ---
         await client.query(`
             ALTER TABLE messages ADD COLUMN IF NOT EXISTS options TEXT[];
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS current_bot_step_id TEXT;
@@ -170,6 +182,10 @@ const ensureDatabaseInitialized = async (client) => {
         if (settingsRes.rows.length === 0) {
             await client.query('INSERT INTO bot_settings (id, settings) VALUES (1, $1)', [JSON.stringify(DEFAULT_BOT_SETTINGS)]);
         }
+        
+        // RUN SANITIZER
+        await sanitizeDatabaseOnStartup(client);
+
         await client.query('COMMIT');
         console.log("✅ Database initialized & Migrated successfully");
     } catch (e) {
@@ -183,7 +199,6 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // --- ROUTES ---
 
-// Health Check
 app.get('/api/health', async (req, res) => {
     try {
         await queryWithRetry('SELECT 1');
@@ -193,7 +208,6 @@ app.get('/api/health', async (req, res) => {
     }
 });
 
-// Drivers List
 app.get('/api/drivers', async (req, res) => {
     try {
         const result = await queryWithRetry(`
@@ -207,12 +221,10 @@ app.get('/api/drivers', async (req, res) => {
         `);
         res.json(result.rows);
     } catch (e) {
-        console.error("GET /api/drivers Error:", e);
-        res.status(500).json({ error: e.message, code: e.code });
+        res.status(500).json({ error: e.message });
     }
 });
 
-// Bot Settings
 app.get('/api/bot-settings', async (req, res) => {
     try {
         const result = await queryWithRetry('SELECT * FROM bot_settings WHERE id = 1');
@@ -224,50 +236,13 @@ app.get('/api/bot-settings', async (req, res) => {
 
 app.post('/api/bot-settings', async (req, res) => {
     try {
-        const incoming = req.body || {};
-        const steps = Array.isArray(incoming.steps) ? incoming.steps : [];
-
-        // --- STRICT BACKEND VALIDATION ---
-        const invalidSteps = [];
-        const sanitizedSteps = steps.map((step) => {
-            const msg = (step.message || '').trim();
-            const lowerMsg = msg.toLowerCase();
-            const isPlaceholder = BLOCKED_PHRASES.some((p) => lowerMsg.includes(p));
-            const requiresBody = !['image', 'video', 'file', 'audio'].includes((step.title || '').toLowerCase());
-            const filteredOptions = Array.isArray(step.options)
-                ? step.options.map((o) => (o || '').trim()).filter(Boolean)
-                : [];
-
-            let error = null;
-            if (requiresBody && !msg) error = 'Empty message blocked';
-            else if (isPlaceholder) error = 'Placeholder text blocked';
-            else if (step.inputType === 'option' && filteredOptions.length === 0) error = 'Missing options';
-
-            if (error) {
-                invalidSteps.push({ id: step.id, title: step.title, error });
-            }
-
-            return {
-                ...step,
-                message: msg,
-                options: step.inputType === 'option' ? filteredOptions : step.options,
-            };
-        });
-
-        if (invalidSteps.length > 0) {
-            console.warn('⚠️ Bot settings rejected by firewall:', invalidSteps);
-            return res.status(400).json({ error: 'Invalid bot configuration', details: invalidSteps });
-        }
-
-        const sanitizedSettings = { ...incoming, steps: sanitizedSteps };
-        await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(sanitizedSettings)]);
+        await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(req.body)]);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// Send Manual Message
 app.post('/api/messages/send', async (req, res) => {
     try {
         const { driverId, text } = req.body;
@@ -278,7 +253,7 @@ app.post('/api/messages/send', async (req, res) => {
         const sent = await sendWhatsAppMessage(phoneNumber, text);
         
         if (!sent) {
-            return res.status(400).json({ error: 'Message blocked by firewall: Invalid content or placeholder detected.' });
+            return res.status(400).json({ error: 'Message blocked by firewall: Invalid content.' });
         }
 
         const msgId = Date.now().toString(); 
@@ -293,7 +268,6 @@ app.post('/api/messages/send', async (req, res) => {
 
         res.json({ success: true, messageId: msgId });
     } catch (e) {
-        console.error("Send Message Error:", e);
         res.status(500).json({ error: e.message });
     }
 });
@@ -303,38 +277,41 @@ app.post('/api/messages/send', async (req, res) => {
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
   
-  // --- STRICT CONTENT FIREWALL ---
-  // Blocks empty messages and known placeholders
-  
-  // 1. Check for Blocked Phrases (Case Insensitive)
+  // --- FIREWALL ---
   const lowerBody = body ? body.toLowerCase() : "";
-  const isPlaceholder = BLOCKED_PHRASES.some(phrase => lowerBody.includes(phrase));
+  const isPlaceholder = BLOCKED_REGEX.test(lowerBody);
   const isEmpty = !body || !body.trim();
 
-  // 2. Filter logic based on message type
   let isBlocked = false;
 
-  // Case A: Templates (Safe, body ignored usually)
   if (templateName) {
       isBlocked = false;
-  }
-  // Case B: Media (Body is caption, optional, BUT must not be placeholder)
-  else if (mediaUrl) {
+  } else if (mediaUrl) {
       if (isPlaceholder) {
-          console.error(`⛔ FIREWALL: Blocked Media Caption containing placeholder: "${body}"`);
-          isBlocked = true; 
+          console.error(`⛔ FIREWALL: Blocked Media Caption: "${body}"`);
+          // Strip caption but allow media
+          body = ""; 
       }
-  }
-  // Case C: Text / Interactive
-  else {
-      if (isEmpty || isPlaceholder) {
-           console.error(`⛔ FIREWALL: Blocked Text/Interactive message: "${body}"`);
-           isBlocked = true;
+  } else {
+      // Text / Interactive
+      if (isPlaceholder) {
+          console.error(`⛔ FIREWALL: Blocked Restricted Phrase: "${body}"`);
+          isBlocked = true;
+      }
+      else if (isEmpty) {
+          // If empty but has options, we MUST provide a body for WhatsApp API
+          if (options && options.length > 0) {
+              console.log("⚠️ Fixed Empty Body for Options Message");
+              body = "Please select an option:";
+          } else {
+              isBlocked = true;
+          }
       }
   }
 
   if (isBlocked) {
-      return false; // ABORT TRANSMISSION
+      console.warn("🚫 Message NOT sent due to firewall rules.");
+      return false; 
   }
 
   let payload = { messaging_product: 'whatsapp', to: to };
@@ -345,49 +322,37 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
   } else if (mediaUrl) {
     payload.type = mediaType;
     payload[mediaType] = { link: mediaUrl };
-    if (body && body.trim().length > 0) {
-        payload[mediaType].caption = body; 
-    }
+    if (body && body.trim().length > 0) payload[mediaType].caption = body; 
   } else if (options && options.length > 0) {
-    const validOptions = options
-        .map((o) => (o || '').trim())
-        .filter((o) => o.length > 0);
-    
+    const validOptions = options.filter(o => o && o.trim().length > 0);
     if (validOptions.length === 0) {
         payload.type = 'text';
         payload.text = { body: body };
     } 
-    else if (validOptions.length > 3) {
-        payload.type = 'interactive';
-        payload.interactive = {
-            type: 'list',
-            body: { text: body },
-            action: {
-                button: "Select Option",
-                sections: [
-                    {
-                        title: "Choices",
-                        rows: validOptions.slice(0, 10).map((opt, i) => ({
-                            id: `opt_${i}`,
-                            title: opt.substring(0, 24) 
-                        }))
-                    }
-                ]
-            }
-        };
-    } 
     else {
-        payload.type = 'interactive';
-        payload.interactive = {
-            type: 'button',
-            body: { text: body },
-            action: { 
-                buttons: validOptions.map((opt, i) => ({ 
-                    type: 'reply', 
-                    reply: { id: `btn_${i}`, title: opt.substring(0, 20) } 
-                })) 
-            }
-        };
+        // WhatsApp requires body text for interactive messages
+        const safeBody = body || "Select an option:";
+        
+        if (validOptions.length > 3) {
+            payload.type = 'interactive';
+            payload.interactive = {
+                type: 'list',
+                body: { text: safeBody },
+                action: {
+                    button: "Select",
+                    sections: [{ title: "Options", rows: validOptions.slice(0, 10).map((opt, i) => ({ id: `opt_${i}`, title: opt.substring(0, 24) })) }]
+                }
+            };
+        } else {
+            payload.type = 'interactive';
+            payload.interactive = {
+                type: 'button',
+                body: { text: safeBody },
+                action: { 
+                    buttons: validOptions.map((opt, i) => ({ type: 'reply', reply: { id: `btn_${i}`, title: opt.substring(0, 20) } })) 
+                }
+            };
+        }
     }
   } else {
     payload.type = 'text';
@@ -415,12 +380,10 @@ const analyzeWithAI = async (text, systemInstruction) => {
   } catch (e) { return "Thanks for contacting Uber Fleet."; }
 };
 
-// HELPER: Log system messages
 const logSystemMessage = async (driverId, text, type = 'text', options = null, imageUrl = null) => {
     try {
         const msgId = Date.now().toString() + '_' + Math.random().toString(36).substr(2, 5);
         const opts = options && options.length > 0 ? options : null;
-        
         await queryWithRetry(
             `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, options, image_url) VALUES ($1, $2, 'system', $3, $4, $5, $6, $7)`,
             [msgId, driverId, text, Date.now(), type, opts, imageUrl]
@@ -438,24 +401,24 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         
         try {
             await client.query('BEGIN');
-
             const settingsRes = await client.query('SELECT settings FROM bot_settings WHERE id = 1');
             let botSettings = settingsRes.rows[0]?.settings || DEFAULT_BOT_SETTINGS;
             
-            // --- CRITICAL: RUNTIME SANITIZATION ---
-            // This cleans dirty data from the DB before it can be used
+            // --- RUNTIME SANITIZATION & FALLBACK ---
             if (botSettings.steps && Array.isArray(botSettings.steps)) {
                 botSettings.steps = botSettings.steps.map(step => {
                     const msg = step.message || "";
-                    if (BLOCKED_PHRASES.some(phrase => msg.toLowerCase().includes(phrase))) {
-                        console.warn(`🧹 Sanitized Step ${step.id}: Removed placeholder text.`);
-                        // Replace with empty string (which firewall will block, stopping the flow safely)
-                        step.message = ""; 
+                    if (BLOCKED_REGEX.test(msg)) {
+                        console.warn(`🧹 Runtime Scrub: Step ${step.id}`);
+                        if (step.options && step.options.length > 0) {
+                            step.message = "Please select an option:"; // Fallback for buttons
+                        } else {
+                            step.message = ""; // Empty (Block)
+                        }
                     }
                     return step;
                 });
             }
-            // --------------------------------------
 
             const routingStrategy = botSettings.routingStrategy || 'HYBRID_BOT_FIRST';
 
@@ -474,14 +437,12 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                 driver = insertRes.rows[0];
             }
 
-            // Log Driver Message
             await client.query(
                 `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'driver', $3, $4, $5)`,
                 [`${timestamp}_${Math.random().toString(36).substr(2, 5)}`, driver.id, msgBody, timestamp, msgType]
             );
             await client.query('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [msgBody, timestamp, driver.id]);
 
-            // Logic
             let replyText = null;
             let replyOptions = null;
             let replyTemplate = null;
@@ -489,14 +450,10 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             let replyMediaType = null;
             let shouldCallAI = false;
 
-            // STRATEGY: AI ONLY
             if (botSettings.isEnabled && routingStrategy === 'AI_ONLY') {
                 shouldCallAI = true;
             } 
-            // STRATEGY: BOT / HYBRID
             else if (botSettings.isEnabled) {
-                 
-                 // RESTART LOGIC
                  if (!driver.is_bot_active) {
                      if (routingStrategy === 'BOT_ONLY') {
                          const firstStepId = botSettings.steps?.[0]?.id;
@@ -522,7 +479,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      }
 
                      if (currentStep) {
-                         // Process Input
                          if (!isNewDriver) {
                              if (currentStep.saveToField === 'name') await client.query('UPDATE drivers SET name = $1 WHERE id = $2', [msgBody, driver.id]);
                              if (currentStep.saveToField === 'availability') await client.query('UPDATE drivers SET availability = $1 WHERE id = $2', [msgBody, driver.id]);
@@ -533,17 +489,11 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                              if (nextId === 'AI_HANDOFF' || nextId === 'END' || !nextId) {
                                  await client.query('UPDATE drivers SET is_bot_active = FALSE, current_bot_step_id = NULL WHERE id = $1', [driver.id]);
                                  driver.is_bot_active = false; 
-
-                                 if (nextId === 'AI_HANDOFF' && routingStrategy === 'HYBRID_BOT_FIRST') {
-                                     shouldCallAI = true;
-                                 } else {
-                                     replyText = "Thank you! We have received your details.";
-                                 }
+                                 if (nextId === 'AI_HANDOFF' && routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
+                                 else replyText = "Thank you! We have received your details.";
                              } else {
                                  await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [nextId, driver.id]);
                                  const nextStep = botSettings.steps.find(s => s.id === nextId);
-                                 
-                                 // Prepare Next Step
                                  if (nextStep) {
                                      replyText = nextStep.message;
                                      replyTemplate = nextStep.templateName;
@@ -555,7 +505,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                  }
                              }
                          } else {
-                             // Send Current Step
                              replyText = currentStep.message;
                              replyTemplate = currentStep.templateName;
                              replyMedia = currentStep.mediaUrl;
@@ -568,15 +517,8 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                  } 
             }
             
-            // --- STRICT AI LOCK ---
-            // If strategy is BOT_ONLY, completely disable AI.
-            // This is a HARD OVERRIDE to prevent any leakage.
             if (routingStrategy === 'BOT_ONLY') {
                 shouldCallAI = false; 
-                if (!replyText && !driver.is_bot_active) {
-                     // If bot finished and mode is BOT_ONLY, do nothing (No AI Fallback)
-                     console.log("Bot finished in BOT_ONLY mode. Silence.");
-                }
             }
 
             await client.query('COMMIT');
@@ -589,18 +531,8 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         } finally {
             client.release();
         }
-
-        // Post-Transaction Actions
-
+        
         let sent = false;
-
-        if (result.replyText && !result.replyText.trim()) {
-            // Prevent silently sending empty responses
-            if (result.driver) {
-                await logSystemMessage(result.driver.id, '⚠️ Blocked empty message', 'warning');
-            }
-            result.replyText = null;
-        }
         
         if (result.replyTemplate) {
             sent = await sendWhatsAppMessage(from, null, null, result.replyTemplate);
@@ -609,17 +541,14 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         else if (result.replyMedia) {
             sent = await sendWhatsAppMessage(from, result.replyText, null, null, 'en_US', result.replyMedia, result.replyMediaType);
             if (sent) await logSystemMessage(result.driver.id, result.replyText || `[${result.replyMediaType}]`, 'image', null, result.replyMedia);
-            else if (result.driver) await logSystemMessage(result.driver.id, "⚠️ Blocked invalid media caption", "warning");
         }
-        else if (result.replyText) {
+        else if (result.replyText || (result.replyOptions && result.replyOptions.length > 0)) {
+            // NOTE: We allow sending if text is present OR if options are present (in which case sendWhatsAppMessage handles fallback text)
             sent = await sendWhatsAppMessage(from, result.replyText, result.replyOptions);
             if (sent) {
                 const type = result.replyOptions && result.replyOptions.length > 0 ? 'options' : 'text';
-                await logSystemMessage(result.driver.id, result.replyText, type, result.replyOptions);
-            } else {
-                if (result.driver && result.driver.is_bot_active) {
-                    await logSystemMessage(result.driver.id, "⚠️ Blocked: Invalid content or placeholder.", 'warning');
-                }
+                const loggedText = !result.replyText && result.replyOptions ? "Please select an option:" : result.replyText;
+                await logSystemMessage(result.driver.id, loggedText, type, result.replyOptions);
             }
         }
         else if (result.shouldCallAI) {
@@ -635,7 +564,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
     }
 };
 
-// Webhook
 app.get('/webhook', (req, res) => {
     if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) res.send(req.query['hub.challenge']);
     else res.sendStatus(403);
@@ -662,7 +590,6 @@ app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
 });
 
-// Update Driver
 app.patch('/api/drivers/:id', async (req, res) => {
     try {
         const { id } = req.params;

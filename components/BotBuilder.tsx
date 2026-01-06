@@ -44,12 +44,12 @@ const CustomNode = ({ data, id, selected }: any) => {
     updateNodeData(id, { [field]: value });
   };
 
-    const handleOptionChange = (idx: number, val: string) => {
-        const newOpts = [...options];
-        newOpts[idx] = val;
-        setOptions(newOpts);
-        handleChange('options', newOpts);
-    };
+  const handleOptionChange = (idx: number, val: string) => {
+    const newOpts = [...options];
+    newOpts[idx] = val;
+    setOptions(newOpts);
+    handleChange('options', newOpts);
+  };
 
   const addOption = () => {
     const newOpts = [...options, `Option ${options.length + 1}`];
@@ -296,7 +296,9 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             // If we find placeholders in loaded data, we wipe them so the user is forced to fix them.
             const cleanedNodes = settings.flowData.nodes.map((n: any) => {
                 const newData = { ...n.data };
-                if (newData.message && PLACEHOLDER_TEXTS.some(p => newData.message.toLowerCase().includes(p))) {
+                // Using regex for consistent client-side cleaning
+                const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
+                if (newData.message && BLOCKED_REGEX.test(newData.message)) {
                     console.log(`Auto-cleaned node ${n.id}`);
                     newData.message = ""; // Empty it out
                     newData.hasError = true;
@@ -338,7 +340,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         position,
         data: { 
             label: label,
-            message: '', 
+            message: '', // STRICTLY EMPTY
             inputType: inputType || 'text', 
             // Dynamic Icon based on label for header
             icon: undefined, 
@@ -356,90 +358,69 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   // --- STRICT SAVE VALIDATION ---
   const handleSave = async () => {
       let hasValidationErrors = false;
+      
+      const newNodes = nodes.map(node => {
+          if (node.data.type === 'start') return node;
+          
+          let error = false;
+          let errorMsg = '';
+          const { label, message, mediaUrl, inputType, options } = node.data;
+          
+          // 1. Placeholder & Empty Check
+          if (label === 'Text' || inputType === 'option' || inputType === 'text') {
+             const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
+             if (!message || !message.trim()) {
+                 error = true;
+                 errorMsg = 'Empty Message';
+             } else if (BLOCKED_REGEX.test(message)) {
+                 error = true;
+                 errorMsg = 'Placeholder Detected';
+             }
+          }
 
-      const validatedNodes = nodes.map(node => {
-            if (node.data.type === 'start') return node;
+          // 2. Media Check
+          if ((label === 'Image' || label === 'Video') && (!mediaUrl || !mediaUrl.trim())) {
+              error = true;
+              errorMsg = 'Missing URL';
+          }
 
-            let error = false;
-            let errorMsg = '';
-            const { label, message, mediaUrl, inputType } = node.data;
+          // 3. Option Check
+          if (inputType === 'option' && (!options || options.length === 0)) {
+              error = true;
+              errorMsg = 'No Options';
+          }
 
-            const trimmedMessage = (message || '').trim();
-            const normalizedLabel = (label || '').toLowerCase();
-            const requiresMessage = !['image', 'video', 'file', 'audio'].includes(normalizedLabel);
-            const isPlaceholder = trimmedMessage && PLACEHOLDER_TEXTS.some(ph => trimmedMessage.toLowerCase().includes(ph));
+          if (error) hasValidationErrors = true;
+          return { ...node, data: { ...node.data, hasError: error, errorMessage: errorMsg } };
+      });
 
-            // 1. Placeholder & Empty Check (applies to all non-media nodes)
-            if (requiresMessage) {
-               if (!trimmedMessage) {
-                   error = true;
-                   errorMsg = 'Empty Message';
-               } else if (isPlaceholder) {
-                   error = true;
-                   errorMsg = 'Placeholder Detected';
-               }
-            } else if (isPlaceholder) {
-                error = true;
-                errorMsg = 'Placeholder Detected';
-            }
+      if (hasValidationErrors) {
+          setNodes(newNodes);
+          alert("❌ SAVE BLOCKED: Strict Validation Failed.\n\nPlease fix red nodes. Ensure no 'Replace this sample message' text remains.");
+          return;
+      }
 
-            // 2. Media Check
-            if (['image', 'video', 'file', 'audio'].includes(normalizedLabel) && (!mediaUrl || !mediaUrl.trim())) {
-                error = true;
-                errorMsg = 'Missing URL';
-            }
+      setIsSaving(true);
+      
+      // Compiler: Nodes -> BotStep[]
+      const compiledSteps: BotStep[] = [];
+      nodes.forEach(node => {
+          if (node.data.type === 'start') return;
+          const outgoingEdges = edges.filter(e => e.source === node.id);
+          let nextStepId = 'END';
+          if (outgoingEdges.length > 0) nextStepId = outgoingEdges[0].target;
 
-            // 3. Option Check
-            const filteredOptions = (node.data.options || []).map((opt: string) => opt?.trim()).filter(Boolean);
-            if (inputType === 'option') {
-                if (filteredOptions.length === 0) {
-                    error = true;
-                    errorMsg = 'No Options';
-                }
-            }
-
-            if (error) hasValidationErrors = true;
-
-            return {
-                ...node,
-                data: {
-                    ...node.data,
-                    message: trimmedMessage,
-                    options: inputType === 'option' ? filteredOptions : node.data.options,
-                    hasError: error,
-                    errorMessage: errorMsg
-                }
-            };
-        });
-
-        if (hasValidationErrors) {
-            setNodes(validatedNodes);
-            alert("❌ SAVE BLOCKED: Strict Validation Failed.\n\nPlease fix red nodes. Ensure no 'Replace this sample message' text remains.");
-            return;
-        }
-
-        setNodes(validatedNodes);
-        setIsSaving(true);
-
-        // Compiler: Nodes -> BotStep[]
-        const compiledSteps: BotStep[] = [];
-        validatedNodes.forEach(node => {
-            if (node.data.type === 'start') return;
-            const outgoingEdges = edges.filter(e => e.source === node.id);
-            let nextStepId = 'END';
-            if (outgoingEdges.length > 0) nextStepId = outgoingEdges[0].target;
-
-            compiledSteps.push({
-              id: node.id,
-              title: node.data.label,
-              message: node.data.message?.trim() || '',
-              inputType: node.data.inputType,
-              options: node.data.inputType === 'option' ? (node.data.options || []).map((opt: string) => opt?.trim()).filter(Boolean) : node.data.options,
-              saveToField: node.data.saveToField,
-              nextStepId: nextStepId,
-              mediaUrl: node.data.mediaUrl?.trim()
-            });
-        });
+          compiledSteps.push({
+            id: node.id,
+            title: node.data.label,
+            message: node.data.message,
+            inputType: node.data.inputType,
+            options: node.data.options,
+            saveToField: node.data.saveToField,
+            nextStepId: nextStepId,
+            mediaUrl: node.data.mediaUrl
+          });
+      });
 
       const newSettings: BotSettings = {
           ...mockBackend.getBotSettings(),

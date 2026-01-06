@@ -4,28 +4,7 @@ import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, B
 const DEFAULT_BOT_SETTINGS: BotSettings = {
   isEnabled: true,
   routingStrategy: 'HYBRID_BOT_FIRST',
-  systemInstruction: `You are a friendly and persuasive recruiter for Uber Fleet in Kerala.
-
-**Language & Tone:**
-- Communicate in casual, conversational Malayalam using **Malayalam Script** (Malayalam letters).
-- Freely mix **English words** for common terms (like 'Driver', 'License', 'Payment', 'Trip', 'Bonus', 'Account', 'Join').
-- Do NOT use Manglish (Malayalam written in English text). Use real Malayalam characters.
-- Do NOT use overly formal/bookish Malayalam. Talk like a helpful friend.
-
-**Example Style:**
-- "Uber Fleet-ൽ join ചെയ്യാൻ താല്പര്യമുണ്ടോ? നല്ല income earn ചെയ്യാം."
-- "നിങ്ങളുടെ ലൈസൻസ് (License) ഡീറ്റെയിൽസ് അയച്ചുതരൂ."
-- "ആഴ്ച തോറും പേയ്മെന്റ് ലഭിക്കും."
-
-**Your Goal:** 
-- Help the user understand the benefits of joining Uber Fleet.
-- Answer their doubts clearly regarding salary and work nature.
-- Encourage them to complete the application process.
-
-**Key Selling Points:**
-- Potential to earn up to ₹50,000/month based on performance.
-- Weekly payments (ആഴ്ച തോറും പേയ്മെന്റ്).
-- Flexible timings (നമ്മുടെ സമയം പോലെ വർക്ക് ചെയ്യാം).`,
+  systemInstruction: `You are a friendly and persuasive recruiter for Uber Fleet in Kerala.`,
   steps: [
     {
       id: 'step_1',
@@ -42,8 +21,6 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
       inputType: 'option',
       options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'],
       nextStepId: 'step_3',
-      templateName: 'encho_enterprises', // USING TEMPLATE HERE
-      templateLanguage: 'en_US'
     },
     {
       id: 'step_3',
@@ -60,10 +37,13 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
       inputType: 'option',
       options: ['Full-time', 'Part-time', 'Weekends'],
       saveToField: 'availability',
-      nextStepId: 'AI_HANDOFF' // Hand over to AI for Q&A after basic details
+      nextStepId: 'AI_HANDOFF' 
     }
   ]
 };
+
+// FIREWALL REGEX
+const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
 
 // Initial Mock Data
 const MOCK_DRIVERS: Driver[] = [
@@ -101,7 +81,6 @@ class MockBackendService {
   private listeners: (() => void)[] = [];
 
   constructor() {
-    // Load from local storage
     const savedDrivers = localStorage.getItem('uber_fleet_drivers');
     const savedBot = localStorage.getItem('uber_fleet_bot_settings');
     
@@ -183,13 +162,23 @@ class MockBackendService {
 
   // --- BOT ENGINE ---
 
-  // Called when a user sends a message. Determines if Bot or AI should reply.
   processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Driver, reply?: Message, actionNeeded: 'NONE' | 'AI_REPLY' } {
     let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
     let isNew = false;
-    const settings = this.botSettings;
+    let settings = this.botSettings;
 
-    // 1. Create or Get Driver
+    // --- MOCK SANITIZATION ---
+    if (settings.steps) {
+        settings.steps = settings.steps.map(s => {
+             const m = s.message || "";
+             if (BLOCKED_REGEX.test(m)) {
+                 if (s.options && s.options.length > 0) s.message = "Please select an option:";
+                 else s.message = ""; 
+             }
+             return s;
+        });
+    }
+
     if (!driver) {
       isNew = true;
       const shouldActivateBot = settings.isEnabled && settings.routingStrategy !== 'AI_ONLY';
@@ -211,7 +200,6 @@ class MockBackendService {
       this.drivers.push(driver);
     }
 
-    // 2. Add User Message
     const userMsg: Message = {
       id: Date.now().toString(),
       sender: 'driver',
@@ -222,44 +210,33 @@ class MockBackendService {
     };
     this.addMessage(driver.id, userMsg);
 
-    // 3. Logic Engine
-    
-    // STRATEGY: AI ONLY - Immediate Override
     if (settings.isEnabled && settings.routingStrategy === 'AI_ONLY') {
       return { driver, actionNeeded: 'AI_REPLY' };
     }
 
-    // STRATEGY: BOT FLOW & HYBRID
     if (settings.isEnabled) {
-      
-      // STRICT RULE: AUTO RESTART Logic for BOT_ONLY
-      // If flow finished, NEXT message restarts it.
       if (settings.routingStrategy === 'BOT_ONLY' && !driver.isBotActive) {
          driver.isBotActive = true;
          driver.currentBotStepId = settings.steps[0]?.id;
-         isNew = true; // Trigger "send welcome" logic immediately
+         isNew = true; 
          this.persist();
       }
 
       if (driver.isBotActive && driver.currentBotStepId) {
-        
-        // ORPHAN STEP CHECK (Simulator)
         let currentStep = settings.steps.find(s => s.id === driver.currentBotStepId);
         if (!currentStep && settings.steps.length > 0) {
              driver.currentBotStepId = settings.steps[0].id;
              currentStep = settings.steps[0];
-             isNew = true; // Restart
+             isNew = true; 
         }
         
         if (currentStep) {
-          // A. PROCESS DATA CAPTURE from previous input (If not new/restart)
           if (!isNew) { 
               if (currentStep.saveToField === 'name') driver.name = text;
               if (currentStep.saveToField === 'availability') driver.availability = text as any;
               if (currentStep.saveToField === 'document' && imageUrl) driver.documents.push(imageUrl);
               if (currentStep.saveToField === 'vehicleRegistration') driver.vehicleRegistration = text;
               
-              // Move to next Step
               const nextId = currentStep.nextStepId;
 
               if (nextId === 'END' || nextId === 'AI_HANDOFF' || !nextId) {
@@ -271,7 +248,6 @@ class MockBackendService {
                       return { driver, actionNeeded: 'AI_REPLY' };
                   }
                   
-                  // Bot Finished message
                   const endMsg: Message = {
                       id: Date.now().toString() + '_end',
                       sender: 'system',
@@ -287,18 +263,22 @@ class MockBackendService {
               }
           }
 
-          // B. SEND NEXT MESSAGE
-          // (Logic proceeds here for new drivers, restarted flows, or valid next steps)
           const nextStep = settings.steps.find(s => s.id === driver.currentBotStepId);
           if (nextStep) {
+              const safeText = nextStep.message || (nextStep.options?.length ? "Select Option:" : "");
+              if (!safeText && !nextStep.mediaUrl && !nextStep.templateName) {
+                  // If safeText is still empty and no media/template, block.
+                  return { driver, actionNeeded: 'NONE' };
+              }
+
               const botMsg: Message = {
                   id: Date.now().toString() + '_bot',
                   sender: 'system',
-                  text: nextStep.templateName ? `[Template: ${nextStep.templateName}] ${nextStep.message}` : nextStep.message,
-                  timestamp: Date.now() + 500, // Slight delay
+                  text: nextStep.templateName ? `[Template: ${nextStep.templateName}] ${safeText}` : safeText,
+                  timestamp: Date.now() + 500,
                   type: nextStep.templateName ? 'template' : (nextStep.options && nextStep.options.length > 0 ? 'options' : (nextStep.mediaUrl ? 'image' : 'text')),
                   options: nextStep.options,
-                  imageUrl: nextStep.mediaUrl // Pass media url as imageUrl for simulator display
+                  imageUrl: nextStep.mediaUrl
               };
               this.addMessage(driver.id, botMsg);
               this.persist();
@@ -307,7 +287,6 @@ class MockBackendService {
         }
       }
       
-      // Fallback: If bot is inactive (and didn't restart), check Hybrid
       if (settings.routingStrategy === 'HYBRID_BOT_FIRST' && !driver.isBotActive) {
           return { driver, actionNeeded: 'AI_REPLY' };
       }
@@ -316,12 +295,9 @@ class MockBackendService {
     return { driver, actionNeeded: 'NONE' };
   }
 
-  // --- AD LEAD ---
   createAdLead(name: string, phoneNumber: string): Driver {
     let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
     if (driver) return driver;
-
-    // Check strategy for initial state
     const settings = this.botSettings;
     const shouldActivateBot = settings.isEnabled && settings.routingStrategy !== 'AI_ONLY';
 
@@ -344,16 +320,20 @@ class MockBackendService {
     this.drivers.push(driver);
     this.persist();
     
-    // Trigger first bot message immediately if active
     if (shouldActivateBot) {
         const firstStep = this.botSettings.steps[0];
         if (firstStep) {
             setTimeout(() => {
                 const isTemplate = !!firstStep.templateName;
+                const safeText = firstStep.message || (firstStep.options?.length ? "Select Option:" : "");
+                
+                // Firewall check for ad lead start
+                if (!safeText && !firstStep.mediaUrl && !isTemplate) return;
+
                 this.addMessage(driver!.id, {
                     id: Date.now().toString() + '_auto',
                     sender: 'system',
-                    text: isTemplate ? `[Template: ${firstStep.templateName}] Hi ${name}!` : `Hi ${name}! ${firstStep.message}`,
+                    text: isTemplate ? `[Template: ${firstStep.templateName}] Hi ${name}!` : `Hi ${name}! ${safeText}`,
                     type: isTemplate ? 'template' : (firstStep.options && firstStep.options.length > 0 ? 'options' : (firstStep.mediaUrl ? 'image' : 'text')),
                     options: firstStep.options,
                     imageUrl: firstStep.mediaUrl,
