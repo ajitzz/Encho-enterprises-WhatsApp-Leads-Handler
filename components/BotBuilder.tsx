@@ -1,4 +1,3 @@
-
 import React, { useState, useCallback, useEffect } from 'react';
 import { 
   ReactFlow, 
@@ -16,12 +15,13 @@ import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
 import { useFlowStore } from '../services/flowStore'; 
+import { auditBotFlow, analyzeSystemCode } from '../services/geminiService';
 import { 
   MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
   List, Type, Hash, Mail, Globe, Calendar, Clock, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Play, AlertTriangle, ShieldAlert, GripVertical, Settings,
   MousePointerClick, Bold, Italic, Link, MoreHorizontal, Upload, Cloud, Stethoscope, Wand2, Terminal, Code,
-  FileCode, Layers, RotateCcw
+  FileCode, Layers, Youtube
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
@@ -45,6 +45,10 @@ const CustomNode = ({ data, id, selected }: any) => {
   }, [data.options, data.saveToField]);
 
   const handleChange = (field: string, value: any) => {
+    // Auto-fix URL inputs
+    if (field === 'mediaUrl' && typeof value === 'string') {
+        value = value.replace(/(https?:\/\/){2,}/g, '$1'); // Replace double protocols
+    }
     updateNodeData(id, { [field]: value });
   };
 
@@ -72,6 +76,7 @@ const CustomNode = ({ data, id, selected }: any) => {
   const isMediaType = ['Image', 'Video', 'File', 'Audio'].includes(data.label);
   const isOptionType = ['Quick Reply', 'List'].includes(data.label);
   const hasError = data.hasError;
+  const isYouTube = data.mediaUrl && (data.mediaUrl.includes('youtube.com') || data.mediaUrl.includes('youtu.be'));
 
   // --- START NODE (Always Simple) ---
   if (data.type === 'start') {
@@ -114,18 +119,25 @@ const CustomNode = ({ data, id, selected }: any) => {
                     {data.mediaUrl ? (
                         data.label === 'Image' ? (
                             <img src={data.mediaUrl} alt="Preview" className="w-full h-full object-cover" />
-                        ) : data.label === 'Video' ? (
-                            <>
-                                <div className="absolute inset-0 bg-black/10" />
-                                <div className="h-10 w-10 bg-white/90 rounded-full flex items-center justify-center shadow-lg z-10">
-                                    <Play size={16} className="text-gray-900 ml-0.5" />
-                                </div>
-                            </>
                         ) : (
-                            <div className="flex flex-col items-center text-gray-400 gap-1">
-                                <FileText size={24} />
-                                <span className="text-[10px] font-mono">FILE LINK</span>
-                            </div>
+                            isYouTube ? (
+                                <div className="flex flex-col items-center justify-center bg-red-50 w-full h-full text-red-600">
+                                    <Youtube size={24} />
+                                    <span className="text-[10px] font-bold mt-1">YouTube Preview</span>
+                                </div>
+                            ) : data.label === 'Video' ? (
+                                <>
+                                    <div className="absolute inset-0 bg-black/10" />
+                                    <div className="h-10 w-10 bg-white/90 rounded-full flex items-center justify-center shadow-lg z-10">
+                                        <Play size={16} className="text-gray-900 ml-0.5" />
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="flex flex-col items-center text-gray-400 gap-1">
+                                    <FileText size={24} />
+                                    <span className="text-[10px] font-mono">FILE LINK</span>
+                                </div>
+                            )
                         )
                     ) : (
                         <span className="text-[10px] text-gray-400 font-medium">No Media Set</span>
@@ -255,6 +267,12 @@ const CustomNode = ({ data, id, selected }: any) => {
                                 value={data.mediaUrl || ''}
                                 onChange={(e) => handleChange('mediaUrl', e.target.value)}
                             />
+                            {isYouTube && (
+                                <div className="mt-2 text-[10px] text-green-600 bg-green-50 p-2 rounded border border-green-100 flex items-center gap-1">
+                                    <Youtube size={12} />
+                                    YouTube link detected. Will send as text with preview.
+                                </div>
+                            )}
                         </div>
                      ) : (
                         <div className="border-2 border-dashed border-gray-200 rounded-lg p-6 flex flex-col items-center justify-center text-gray-400 bg-gray-50 hover:bg-gray-100 hover:border-gray-300 transition-all cursor-pointer">
@@ -411,12 +429,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   
   // SYSTEM DOCTOR STATES
   const [showSystemDoctor, setShowSystemDoctor] = useState(false);
+  const [files, setFiles] = useState<Array<{path: string, content: string}>>([]);
   const [issueDescription, setIssueDescription] = useState('Chat flow errors regarding empty options');
   const [doctorDiagnosis, setDoctorDiagnosis] = useState<any>(null);
   const [isAnalyzingCode, setIsAnalyzingCode] = useState(false);
   const [isPatching, setIsPatching] = useState(false);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [undoStatus, setUndoStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
   const reactFlowInstance = useReactFlow();
 
@@ -431,7 +449,19 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         }
 
         if (settings.flowData && settings.flowData.nodes.length > 0) {
-            setNodes(settings.flowData.nodes);
+            // Auto-clean placeholders on load
+            const cleanedNodes = settings.flowData.nodes.map((n: any) => {
+                const newData = { ...n.data };
+                const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
+                if (newData.message && BLOCKED_REGEX.test(newData.message)) {
+                    newData.message = ""; 
+                    newData.hasError = true;
+                    newData.errorMessage = "Placeholder Removed";
+                }
+                return { ...n, data: newData };
+            });
+
+            setNodes(cleanedNodes);
             setEdges(settings.flowData.edges);
         }
     };
@@ -479,16 +509,13 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   );
 
   const runAIAudit = async () => {
-      if (!isLiveMode) {
-          alert("AI Audit requires Live Mode (node server.js)");
-          return;
-      }
       setIsAuditing(true);
       try {
-          const report = await liveApiService.auditBotFlow(nodes);
+          const report = await auditBotFlow(nodes);
           setAuditReport(report);
           
           if (report.issues.length > 0) {
+              // Highlight faulty nodes
               const badNodeIds = report.issues.map((i: any) => i.nodeId);
               const newNodes = nodes.map(n => {
                   if (badNodeIds.includes(n.id)) {
@@ -505,12 +532,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               });
               setNodes(newNodes);
           }
-      } catch (e: any) {
-          if (e.message.includes('429')) {
-             alert("System Overloaded. Please wait 30 seconds before auditing again.");
-          } else {
-             alert("AI Audit Failed. Check server logs.");
-          }
+      } catch (e) {
+          alert("AI Audit Failed");
       } finally {
           setIsAuditing(false);
       }
@@ -519,6 +542,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const applyFix = (issue: any) => {
       if (issue.autoFixValue === 'DELETE_NODE') {
           deleteNode(issue.nodeId);
+          // Update report UI by removing the issue
           setAuditReport((prev: any) => ({
               ...prev,
               issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
@@ -539,6 +563,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               return n;
           });
           setNodes(newNodes);
+          // Remove from report
           setAuditReport((prev: any) => ({
             ...prev,
             issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
@@ -546,31 +571,34 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       }
   };
 
-  const openSystemDoctor = () => {
+  const openSystemDoctor = async () => {
       if (!isLiveMode) {
           alert("System Doctor requires Live Mode (node server.js)");
           return;
       }
       setShowSystemDoctor(true);
-      setDoctorDiagnosis(null);
+      try {
+          // Fetch complete project structure now
+          const res = await liveApiService.getProjectContext();
+          setFiles(res.files);
+          setDoctorDiagnosis(null);
+      } catch(e) {
+          alert("Could not access project files. Ensure server is running.");
+          setShowSystemDoctor(false);
+      }
   };
 
   const analyzeCode = async () => {
       setIsAnalyzingCode(true);
       try {
-          // CRITICAL FIX: Call the server to analyze, do NOT do it in browser
-          const res = await liveApiService.analyzeSystem(issueDescription);
+          const res = await analyzeSystemCode(files, issueDescription);
           setDoctorDiagnosis(res);
+          // Select first changed file if any
           if (res.changes && res.changes.length > 0) {
               setSelectedFile(res.changes[0].filePath);
           }
-      } catch(e: any) {
-          console.error(e);
-          if (e.message.includes('429')) {
-              alert("System Overloaded (429). Please wait 30s before trying again.");
-          } else {
-              alert("Analysis Failed. Check server console.");
-          }
+      } catch(e) {
+          alert("Analysis Failed");
       } finally {
           setIsAnalyzingCode(false);
       }
@@ -590,26 +618,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       }
   };
 
-  const handleUndoPatch = async () => {
-    if (!window.confirm("Undo the last update? This will revert code changes.")) return;
-    setUndoStatus('loading');
-    try {
-        const res = await liveApiService.undoLastPatch();
-        alert(res.message || "System restored.");
-        setUndoStatus('success');
-    } catch (e: any) {
-        alert(e.message);
-        setUndoStatus('error');
-    } finally {
-        setTimeout(() => setUndoStatus('idle'), 2000);
-    }
-  };
-
   const handleSave = async () => {
-      // ... (Validation logic unchanged) ...
       let hasValidationErrors = false;
+      
       const newNodes = nodes.map(node => {
           if (node.data.type === 'start') return node;
+          
           let error = false;
           let errorMsg = '';
           const { label, message, mediaUrl, inputType, options } = node.data;
@@ -797,19 +811,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                                  <p className="text-gray-400 text-xs">Full Project Analysis & Patching</p>
                              </div>
                          </div>
-                         <div className="flex gap-3">
-                             {/* UNDO BUTTON */}
-                             <button 
-                                onClick={handleUndoPatch}
-                                disabled={undoStatus === 'loading'}
-                                className="px-4 py-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 text-xs font-bold flex items-center gap-2 transition-colors border border-gray-700"
-                             >
-                                {undoStatus === 'loading' ? <span className="animate-spin"><RotateCcw size={14} /></span> : <RotateCcw size={14} />}
-                                {undoStatus === 'loading' ? 'Reverting...' : 'Undo Last Patch'}
-                             </button>
-
-                             <button onClick={() => setShowSystemDoctor(false)} className="text-gray-400 hover:text-white"><X size={24} /></button>
-                         </div>
+                         <button onClick={() => setShowSystemDoctor(false)} className="text-gray-400 hover:text-white"><X size={24} /></button>
                      </div>
 
                      <div className="flex-1 flex overflow-hidden">
@@ -833,7 +835,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                                     className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50"
                                  >
                                      {isAnalyzingCode ? <span className="animate-spin"><Stethoscope /></span> : <Stethoscope />}
-                                     {isAnalyzingCode ? 'Scanning Project (Server)...' : 'Analyze on Server'}
+                                     {isAnalyzingCode ? 'Scanning Project...' : 'Analyze Full Project'}
                                  </button>
 
                                  {doctorDiagnosis && (
