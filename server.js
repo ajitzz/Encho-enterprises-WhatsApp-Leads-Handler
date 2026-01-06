@@ -8,6 +8,7 @@
  * 2. Automatic Query Retries (Self-Healing)
  * 3. Circuit Breaker for Connection Deadlocks
  * 4. Auto-Scaling AI Model Selection (Pro -> Flash -> Lite -> Local)
+ * 5. Smart Traffic Control (Queueing + Caching + Circuit Breaker)
  */
 
 const express = require('express');
@@ -17,6 +18,7 @@ const { Pool } = require('pg');
 const { GoogleGenAI } = require('@google/genai');
 const fs = require('fs'); 
 const path = require('path'); 
+const crypto = require('crypto'); // For cache hashing
 require('dotenv').config();
 
 const app = express();
@@ -42,22 +44,33 @@ let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 // --- STATE TRACKING ---
 let lastWebhookTime = 0;
 
-// --- AI MODEL MANAGEMENT ---
+// --- AI TRAFFIC CONTROL ---
 const MODEL_PRO = "gemini-3-pro-preview";
 const MODEL_FLASH = "gemini-3-flash-preview";
-const MODEL_LITE = "gemini-flash-lite-latest"; // Lightest model for high-volume fallbacks
+const MODEL_LITE = "gemini-flash-lite-latest";
 
-const QUOTA_COOLDOWN = 60 * 1000; // 1 Minute Cooldown after 429
-let lastDowngradeTime = 0;
+// 1. Circuit Breaker
+let isCircuitOpen = false;
+let circuitResetTime = 0;
+const CIRCUIT_COOLDOWN_MS = 60000; // 60 seconds full stop on 429
+
+// 2. Caching
+const responseCache = new Map();
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes cache for heavy tasks
+
+// 3. Background Queue
+let backgroundQueue = Promise.resolve();
+
 let aiStatusCache = { status: 'unknown', message: 'Initializing...', lastCheck: 0, activeModel: MODEL_PRO };
 
 const getActiveModel = () => {
-    // If we are within the cooldown period, force Flash (or Lite if Flash failed previously)
-    if (Date.now() - lastDowngradeTime < QUOTA_COOLDOWN) {
-        if (aiStatusCache.activeModel === MODEL_LITE) return MODEL_LITE;
-        return MODEL_FLASH;
+    if (isCircuitOpen) return 'NONE'; // Should catch before this
+    // If recently downgraded, stick to Flash
+    if (aiStatusCache.activeModel === MODEL_LITE || aiStatusCache.activeModel === MODEL_FLASH) {
+        // Try to upgrade back to Pro after 2 minutes of stability
+        if (Date.now() - aiStatusCache.lastCheck > 120000) return MODEL_PRO;
+        return aiStatusCache.activeModel;
     }
-    // Otherwise try Pro
     return MODEL_PRO;
 };
 
@@ -217,74 +230,136 @@ const ensureDatabaseInitialized = async (client) => {
 // --- AI ENGINE ---
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-// **SMART GENERATE: TRIPLE-LAYER AUTO-SCALING LOGIC**
-// Strategy: Pro -> Flash -> Lite
+const getCacheKey = (task, content) => {
+    const str = typeof content === 'string' ? content : JSON.stringify(content);
+    return crypto.createHash('md5').update(`${task}:${str}`).digest('hex');
+};
+
+// **SMART GENERATE: TRIPLE-LAYER AUTO-SCALING LOGIC WITH TRAFFIC CONTROL**
 const generateContentSmart = async (contents, config = {}, systemInstruction = undefined, taskName = 'General Task') => {
-    let targetModel = getActiveModel();
-    console.log(`🤖 [AI SMART] Starting '${taskName}' using model: ${targetModel}`);
+    
+    // 1. CIRCUIT BREAKER CHECK
+    if (isCircuitOpen) {
+        const timeLeft = Math.ceil((circuitResetTime - Date.now()) / 1000);
+        console.warn(`🛑 [AI TRAFFIC] Circuit Open. Blocking '${taskName}'. Cooldown: ${timeLeft}s`);
+        throw new Error(`System Cooling Down. Please wait ${timeLeft} seconds.`);
+    }
 
-    const executeCall = async (model) => {
-        const reqConfig = { ...config };
-        if (systemInstruction) reqConfig.systemInstruction = systemInstruction;
-        return await ai.models.generateContent({ model, contents, config: reqConfig });
-    };
-
-    try {
-        // ATTEMPT 1: Target Model (Pro or Flash)
-        const result = await executeCall(targetModel);
-        
-        // Update Cache Status on Success
-        if (targetModel === MODEL_PRO) {
-            aiStatusCache = { status: 'operational', message: 'Gemini Pro Active', lastCheck: Date.now(), activeModel: MODEL_PRO };
-        } else if (targetModel === MODEL_FLASH) {
-            aiStatusCache = { status: 'degraded', message: 'Using Flash Model', lastCheck: Date.now(), activeModel: MODEL_FLASH };
-        } else {
-             aiStatusCache = { status: 'degraded', message: 'Using Lite Model', lastCheck: Date.now(), activeModel: MODEL_LITE };
+    // 2. CACHE CHECK (Only for heavy tasks like Audit/Diagnosis)
+    const isHeavyTask = taskName.includes('Audit') || taskName.includes('Diagnosis');
+    let cacheKey = null;
+    
+    if (isHeavyTask) {
+        cacheKey = getCacheKey(taskName, contents);
+        const cached = responseCache.get(cacheKey);
+        if (cached && (Date.now() - cached.timestamp < CACHE_TTL_MS)) {
+            console.log(`⚡ [AI TRAFFIC] Serving cached result for '${taskName}'`);
+            return cached.data;
         }
-        
-        console.log(`✅ [AI SMART] '${taskName}' completed with ${targetModel}`);
-        return result;
+    }
 
-    } catch (e) {
-        if (e.status === 429 || e.message?.includes('429') || e.message?.includes('Quota')) {
-            console.warn(`⚠️ [AI SMART] Quota Hit on ${targetModel}. Initiating Fallback sequence...`);
-            lastDowngradeTime = Date.now();
+    // INTERNAL EXECUTION FUNCTION
+    const executeCall = async () => {
+        let targetModel = getActiveModel();
+        console.log(`🤖 [AI SMART] Starting '${taskName}' using model: ${targetModel}`);
 
-            // BACKOFF: Wait 2 seconds to allow rate limit bucket to refill slightly
-            await new Promise(resolve => setTimeout(resolve, 2000));
+        const runModel = async (model) => {
+            const reqConfig = { ...config };
+            if (systemInstruction) reqConfig.systemInstruction = systemInstruction;
+            return await ai.models.generateContent({ model, contents, config: reqConfig });
+        };
 
-            // ATTEMPT 2: Fallback to FLASH (if we weren't already using Lite)
-            if (targetModel !== MODEL_FLASH && targetModel !== MODEL_LITE) {
-                try {
-                    console.log(`♻️ [AI SMART] Retrying '${taskName}' with ${MODEL_FLASH}`);
-                    const result = await executeCall(MODEL_FLASH);
-                    aiStatusCache = { status: 'degraded', message: 'Fallback to Flash Active', lastCheck: Date.now(), activeModel: MODEL_FLASH };
-                    return result;
-                } catch (e2) {
-                     if (!e2.message?.includes('429')) throw e2;
-                     console.warn(`⚠️ [AI SMART] Flash also overloaded. Trying Lite...`);
-                     await new Promise(resolve => setTimeout(resolve, 1000)); // Additional 1s wait
+        try {
+            // ATTEMPT 1: Target Model
+            const result = await runModel(targetModel);
+            
+            // Success - Update Status
+            if (targetModel === MODEL_PRO) {
+                aiStatusCache = { status: 'operational', message: 'Gemini Pro Active', lastCheck: Date.now(), activeModel: MODEL_PRO };
+            } else {
+                aiStatusCache = { status: 'degraded', message: 'Using Lite Model', lastCheck: Date.now(), activeModel: targetModel };
+            }
+            
+            // Cache result if applicable
+            if (cacheKey) {
+                responseCache.set(cacheKey, { timestamp: Date.now(), data: result });
+                // Prune cache if too big
+                if (responseCache.size > 50) {
+                    const firstKey = responseCache.keys().next().value;
+                    responseCache.delete(firstKey);
                 }
             }
 
-            // ATTEMPT 3: Fallback to LITE (Last Resort)
-            try {
-                console.log(`♻️ [AI SMART] Emergency Retry '${taskName}' with ${MODEL_LITE}`);
-                const result = await executeCall(MODEL_LITE);
-                aiStatusCache = { status: 'degraded', message: 'Fallback to Lite Active', lastCheck: Date.now(), activeModel: MODEL_LITE };
-                return result;
-            } catch (e3) {
-                console.error(`❌ [AI SMART] All models exhausted.`);
-                aiStatusCache = { status: 'error', message: 'System Overloaded (All Models)', lastCheck: Date.now(), activeModel: 'NONE' };
-                throw new Error(`System Overloaded. All models (Pro, Flash, Lite) exhausted.`);
+            console.log(`✅ [AI SMART] '${taskName}' completed.`);
+            return result;
+
+        } catch (e) {
+            // RATE LIMIT HANDLING
+            if (e.status === 429 || e.message?.includes('429') || e.message?.includes('Quota')) {
+                
+                // TRIP CIRCUIT BREAKER?
+                // If even the Lite model fails, or if we want to be conservative
+                if (targetModel === MODEL_LITE || isCircuitOpen) {
+                     console.error(`💥 [AI SMART] CRITICAL 429. TRIPPING CIRCUIT BREAKER.`);
+                     isCircuitOpen = true;
+                     circuitResetTime = Date.now() + CIRCUIT_COOLDOWN_MS;
+                     aiStatusCache = { status: 'cooldown', message: 'System Cooling Down (60s)', lastCheck: Date.now(), activeModel: 'NONE' };
+                     
+                     setTimeout(() => {
+                         isCircuitOpen = false;
+                         console.log("🟢 [AI TRAFFIC] Circuit Breaker Reset. Resuming operations.");
+                         aiStatusCache.status = 'operational'; 
+                     }, CIRCUIT_COOLDOWN_MS);
+                     
+                     throw new Error("System Overload. Auto-pause for 60s.");
+                }
+
+                console.warn(`⚠️ [AI SMART] Quota Hit on ${targetModel}. Backing off...`);
+                await new Promise(r => setTimeout(r, 2000)); // 2s pause
+
+                // FALLBACK ATTEMPTS
+                try {
+                    console.log(`♻️ [AI SMART] Retry '${taskName}' with LITE model`);
+                    const result = await runModel(MODEL_LITE);
+                    aiStatusCache = { status: 'degraded', message: 'Fallback to Lite Active', lastCheck: Date.now(), activeModel: MODEL_LITE };
+                    return result;
+                } catch (e2) {
+                    // If fallback also fails, trip circuit
+                    if (e2.status === 429 || e2.message?.includes('429')) {
+                        console.error(`💥 [AI SMART] Fallback Failed. Tripping Circuit.`);
+                        isCircuitOpen = true;
+                        circuitResetTime = Date.now() + CIRCUIT_COOLDOWN_MS;
+                        setTimeout(() => isCircuitOpen = false, CIRCUIT_COOLDOWN_MS);
+                    }
+                    throw e2;
+                }
             }
+            throw e;
         }
-        throw e;
+    };
+
+    // 3. QUEUE LOGIC (Only for Heavy Tasks)
+    if (isHeavyTask) {
+        // Chain to background queue
+        return new Promise((resolve, reject) => {
+            backgroundQueue = backgroundQueue.then(async () => {
+                try {
+                    const res = await executeCall();
+                    resolve(res);
+                } catch (e) {
+                    reject(e);
+                }
+                // Mandatory cool-down between heavy tasks in the queue
+                await new Promise(r => setTimeout(r, 2000)); 
+            });
+        });
+    } else {
+        // Chat / High Priority: Run immediately
+        return executeCall();
     }
 };
 
 // --- LOCAL HEURISTIC AUDITOR (ZERO-AI FALLBACK) ---
-// Runs if AI completely fails so the user never sees a 500 error for auditing.
 const runLocalAudit = (nodes) => {
     console.log("🛡️ [Local Auditor] Running heuristic check...");
     const issues = [];
@@ -487,6 +562,7 @@ app.post('/api/admin/analyze-system', async (req, res) => {
 
     } catch (e) {
         console.error("Analyze System Error:", e);
+        if (e.message?.includes('System Cooling Down')) return res.status(429).json({ error: e.message });
         if (e.status === 429 || e.message?.includes('429')) return res.status(429).json({ error: "AI Overloaded (429). System recovering..." });
         res.status(500).json({ error: e.message });
     }
@@ -530,7 +606,7 @@ app.post('/api/admin/audit-flow', async (req, res) => {
         const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
         res.json(JSON.parse(jsonStr));
     } catch (e) {
-        console.warn("⚠️ All AI Models Failed for Audit. Switching to Local Logic.");
+        console.warn("⚠️ AI Audit Failed/Blocked. Switching to Local Logic.", e.message);
         
         // FINAL FALLBACK: Local Heuristic Check
         try {
@@ -560,13 +636,10 @@ app.post('/api/assistant/chat', async (req, res) => {
         let result = await chat.sendMessage(message);
         let response = result.response;
         
-        // Tool execution logic (omitted for brevity, same as before) ...
-        // Note: In real production, this also needs the fallback logic, but chat statefulness makes 
-        // hot-swapping models mid-conversation harder. For now, it relies on getActiveModel() initial selection.
-        
         res.json({ text: response.text });
 
     } catch (e) {
+        if (e.message?.includes('System Cooling Down')) return res.status(429).json({ error: e.message });
         if (e.status === 429 || e.message?.includes('429')) {
              console.warn("429 in Chat. Downgrading Global Model.");
              lastDowngradeTime = Date.now();
@@ -591,18 +664,28 @@ app.get('/api/health', async (req, res) => {
         dbStatus = 'error: ' + e.message;
     }
 
-    // 2. Check AI (Lightweight Ping using Smart Model)
-    // Only verify if cache is stale > 1 min
-    if (Date.now() - aiStatusCache.lastCheck > 60000) {
-        try {
-            // Use Lite for Pings to save quota
-            await ai.models.generateContent({
-                model: MODEL_LITE, 
-                contents: "ping", 
-                config: { maxOutputTokens: 1 } 
-            });
-            aiStatusCache.lastCheck = Date.now();
-        } catch(e) { /* Status cache updated inside generateContentSmart */ }
+    // 2. Check AI 
+    if (isCircuitOpen) {
+        const timeLeft = Math.ceil((circuitResetTime - Date.now()) / 1000);
+        aiStatusCache.status = 'cooldown';
+        aiStatusCache.message = `Cooling down (${timeLeft}s)`;
+    } else {
+        // Lightweight Ping using Smart Model only if cache is stale > 1 min
+        if (Date.now() - aiStatusCache.lastCheck > 60000) {
+            try {
+                // Use Lite for Pings to save quota
+                await ai.models.generateContent({
+                    model: MODEL_LITE, 
+                    contents: "ping", 
+                    config: { maxOutputTokens: 1 } 
+                });
+                aiStatusCache.lastCheck = Date.now();
+                if (aiStatusCache.status !== 'degraded') {
+                    aiStatusCache.status = 'operational';
+                    aiStatusCache.message = 'System Operational';
+                }
+            } catch(e) { /* Status cache updated inside generateContentSmart */ }
+        }
     }
 
     // 3. Check WhatsApp
