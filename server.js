@@ -286,7 +286,7 @@ const runLocalAudit = (nodes) => {
     const issues = [];
     
     nodes.forEach(node => {
-        if (node.type === 'start') return;
+        if (node.type === 'start' || node.type === 'end' || node.data?.type === 'start' || node.data?.type === 'end') return;
         const data = node.data || {};
         
         // 1. Check Empty Message
@@ -492,7 +492,7 @@ app.post('/api/admin/analyze-system', async (req, res) => {
 app.post('/api/admin/audit-flow', async (req, res) => {
     const { nodes, edges } = req.body; // Now receiving edges too
     try {
-        const nodesLite = nodes.map(n => ({ id: n.id, type: n.data?.label || n.type, message: n.data?.message, options: n.data?.options }));
+        const nodesLite = nodes.map(n => ({ id: n.id, type: n.data?.label || n.data?.type || n.type, message: n.data?.message, options: n.data?.options }));
         const edgesLite = edges ? edges.map(e => ({ source: e.source, target: e.target })) : [];
 
         const prompt = `
@@ -505,9 +505,9 @@ app.post('/api/admin/audit-flow', async (req, res) => {
         
         VALIDATION RULES:
         1. "Start" node must have at least one outgoing connection. If disconnected, Issue: "Start node disconnected", Suggestion: "Connect the start node to a welcome message.", AutoFix: "AUTOFIX_ADD_WELCOME".
-        2. Any text node with empty message is Critical.
+        2. Any text node with empty message is Critical. Note: "Start" and "End" nodes are structural and SHOULD NOT have messages. Ignore them.
         3. Placeholder text like "replace this" is a Warning.
-        4. "Missing End Node" is ONLY an error if a branch dead-ends without logic (implicit end is okay).
+        4. "Missing End Node" is ONLY an error if a branch dead-ends without logic (implicit end is okay). If a node connects to an "End" node, it is valid termination.
 
         AUTOFIX CONTENT GENERATION (IMPORTANT):
         - For empty/placeholder TEXT nodes: Generate a SPECIFIC, friendly sentence based on context (e.g. "Could you please provide your details?"). DO NOT use "AUTOFIX_..." tokens.

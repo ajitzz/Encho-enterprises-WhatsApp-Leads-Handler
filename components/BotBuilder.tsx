@@ -22,7 +22,7 @@ import {
   List, Type, Hash, Mail, Globe, Calendar, Clock, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Play, AlertTriangle, ShieldAlert, GripVertical, Settings,
   MousePointerClick, Bold, Italic, Link, MoreHorizontal, Upload, Cloud, Stethoscope, Wand2, Terminal, Code,
-  FileCode, Layers, Youtube
+  FileCode, Layers, Youtube, StopCircle
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
@@ -79,18 +79,34 @@ const CustomNode = ({ data, id, selected }: any) => {
   const hasError = data.hasError;
   const isYouTube = data.mediaUrl && (data.mediaUrl.includes('youtube.com') || data.mediaUrl.includes('youtu.be'));
 
-  // --- START NODE (Always Simple) ---
+  // --- START NODE (Visual Only) ---
   if (data.type === 'start') {
     return (
       <div className={`group relative shadow-md rounded-xl bg-white border-2 transition-all ${selected ? 'border-green-500 ring-4 ring-green-50' : 'border-gray-100'}`}>
         <div className="bg-green-50 px-4 py-2 rounded-t-xl border-b border-green-100 flex items-center gap-2">
            <Flag size={14} className="text-green-600" />
-           <span className="text-xs font-bold text-green-800 uppercase tracking-wide">Starting Step</span>
+           <span className="text-xs font-bold text-green-800 uppercase tracking-wide">Start Point</span>
         </div>
         <div className="p-4 flex items-center justify-center">
-            <p className="text-sm font-medium text-gray-600">Conversation Begins Here</p>
+            <p className="text-xs font-medium text-gray-500">Entry Point</p>
         </div>
         <Handle type="source" position={Position.Right} style={ACTIVE_HANDLE_STYLE} className="-right-3" />
+      </div>
+    );
+  }
+
+  // --- END NODE (Visual Only) ---
+  if (data.type === 'end') {
+    return (
+      <div className={`group relative shadow-md rounded-xl bg-white border-2 transition-all ${selected ? 'border-red-500 ring-4 ring-red-50' : 'border-gray-100'}`}>
+        <Handle type="target" position={Position.Left} style={ACTIVE_HANDLE_STYLE} className="-left-3 !bg-red-500" />
+        <div className="bg-red-50 px-4 py-2 rounded-t-xl border-b border-red-100 flex items-center gap-2">
+           <StopCircle size={14} className="text-red-600" />
+           <span className="text-xs font-bold text-red-800 uppercase tracking-wide">End Point</span>
+        </div>
+        <div className="p-4 flex items-center justify-center">
+            <p className="text-xs font-medium text-gray-500">Flow Terminates</p>
+        </div>
       </div>
     );
   }
@@ -488,6 +504,18 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         y: event.clientY,
       });
 
+      // Handle 'end' node drop separately
+      if (type === 'end') {
+          const endNode: Node = {
+              id: `end_${Date.now()}`,
+              type: 'custom',
+              position,
+              data: { type: 'end', label: 'End' }
+          };
+          addNode(endNode);
+          return;
+      }
+
       const newNode: Node = {
         id: `node_${Date.now()}`,
         type: 'custom',
@@ -668,7 +696,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const handleSave = async () => {
       let hasValidationErrors = false;
       const newNodes = nodes.map(node => {
-          if (node.data.type === 'start') return node;
+          if (node.data.type === 'start' || node.data.type === 'end') return node;
           
           let error = false;
           let errorMsg = '';
@@ -712,12 +740,30 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
       setIsSaving(true);
       
+      // --- INTELLIGENT FLOW COMPILATION ---
       const compiledSteps: BotStep[] = [];
-      nodes.forEach(node => {
-          if (node.data.type === 'start') return;
-          const outgoingEdges = edges.filter(e => e.source === node.id);
+      
+      // 1. Identify Entry Point (Node connected to Start)
+      const startNode = nodes.find(n => n.data.type === 'start' || n.type === 'start');
+      const startEdge = edges.find(e => e.source === startNode?.id);
+      const firstStepId = startEdge?.target;
+
+      // 2. Filter out structural nodes (start/end) so they are NEVER saved as messages
+      const contentNodes = nodes.filter(n => n.data.type !== 'start' && n.data.type !== 'end');
+
+      contentNodes.forEach(node => {
+          const outgoingEdge = edges.find(e => e.source === node.id);
           let nextStepId = 'END';
-          if (outgoingEdges.length > 0) nextStepId = outgoingEdges[0].target;
+          
+          if (outgoingEdge) {
+              const targetNode = nodes.find(n => n.id === outgoingEdge.target);
+              // If connected to an 'end' node, explicitly terminate
+              if (targetNode?.data.type === 'end') {
+                  nextStepId = 'END';
+              } else {
+                  nextStepId = outgoingEdge.target;
+              }
+          }
 
           compiledSteps.push({
             id: node.id,
@@ -730,6 +776,15 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             mediaUrl: node.data.mediaUrl
           });
       });
+
+      // 3. Reorder: Ensure the first step matches the Start connection
+      if (firstStepId) {
+          const firstIdx = compiledSteps.findIndex(s => s.id === firstStepId);
+          if (firstIdx > -1) {
+              const [first] = compiledSteps.splice(firstIdx, 1);
+              compiledSteps.unshift(first);
+          }
+      }
 
       const newSettings: BotSettings = {
           ...mockBackend.getBotSettings(),
@@ -775,6 +830,13 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                         <DraggableSidebarItem type="option" inputType="option" label="Buttons / List" icon={<List size={16} />} />
                         <DraggableSidebarItem type="input" inputType="text" label="Collect Text" icon={<Type size={16} />} />
                         <DraggableSidebarItem type="input" inputType="text" label="Collect Number" icon={<Hash size={16} />} />
+                    </div>
+                </div>
+
+                <div>
+                    <h4 className="text-xs font-bold text-gray-400 uppercase mb-3 tracking-wider">Logic</h4>
+                    <div className="space-y-2">
+                        <DraggableSidebarItem type="end" label="End Point" icon={<StopCircle size={16} className="text-red-500" />} />
                     </div>
                 </div>
             </div>
@@ -829,7 +891,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     <Controls className="bg-white border border-gray-200 shadow-xl rounded-lg p-1" />
                     <MiniMap 
                         className="border border-gray-200 rounded-lg shadow-xl" 
-                        nodeColor={(n) => n.type === 'start' ? '#10b981' : '#3b82f6'} 
+                        nodeColor={(n) => n.type === 'start' ? '#10b981' : (n.data.type === 'end' ? '#ef4444' : '#3b82f6')} 
                         maskColor="rgba(240, 242, 245, 0.7)"
                     />
                     
