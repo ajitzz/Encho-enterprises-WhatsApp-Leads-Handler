@@ -73,13 +73,14 @@ const queryWithRetry = async (text, params, retries = 2) => {
 
         console.warn(`⚠️ DB Error (${err.code}): ${err.message}`);
 
-        // Retry on Connection Errors or Missing Table (42P01)
-        if ((err.code === '57P01' || err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === '42P01') && retries > 0) {
+        // Retry on Connection Errors, Missing Table (42P01), OR Missing Column (42703)
+        // 42703: undefined_column (Happens when code expects a new column that isn't in DB yet)
+        if ((err.code === '57P01' || err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === '42P01' || err.code === '42703') && retries > 0) {
             console.log(`♻️ Retrying... (${retries} left)`);
             
-            // If table missing, auto-heal
-            if (err.code === '42P01') {
-                console.log("🛠️ Attempting Schema Auto-Heal...");
+            // If table or column missing, auto-heal schema
+            if (err.code === '42P01' || err.code === '42703') {
+                console.log("🛠️ Attempting Schema Auto-Heal (Missing Table or Column)...");
                 const healClient = await pool.connect();
                 await ensureDatabaseInitialized(healClient);
                 healClient.release();
@@ -145,12 +146,25 @@ const ensureDatabaseInitialized = async (client) => {
     try {
         await client.query('BEGIN');
         await client.query(SCHEMA_SQL);
+        
+        // --- MIGRATIONS: Force add columns for existing tables ---
+        // This fixes the "column m.options does not exist" (42703) error
+        await client.query(`
+            ALTER TABLE messages ADD COLUMN IF NOT EXISTS options TEXT[];
+            ALTER TABLE drivers ADD COLUMN IF NOT EXISTS current_bot_step_id TEXT;
+            ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_bot_active BOOLEAN DEFAULT FALSE;
+            ALTER TABLE drivers ADD COLUMN IF NOT EXISTS onboarding_step INTEGER DEFAULT 0;
+            ALTER TABLE drivers ADD COLUMN IF NOT EXISTS vehicle_registration TEXT;
+            ALTER TABLE drivers ADD COLUMN IF NOT EXISTS availability TEXT;
+            ALTER TABLE drivers ADD COLUMN IF NOT EXISTS qualification_checks JSONB DEFAULT '{"hasValidLicense": false, "hasVehicle": false, "isLocallyAvailable": true}'::jsonb;
+        `);
+
         const settingsRes = await client.query('SELECT * FROM bot_settings WHERE id = 1');
         if (settingsRes.rows.length === 0) {
             await client.query('INSERT INTO bot_settings (id, settings) VALUES (1, $1)', [JSON.stringify(DEFAULT_BOT_SETTINGS)]);
         }
         await client.query('COMMIT');
-        console.log("✅ Database initialized successfully");
+        console.log("✅ Database initialized & Migrated successfully");
     } catch (e) {
         await client.query('ROLLBACK');
         console.error("Schema Init Failed:", e);
