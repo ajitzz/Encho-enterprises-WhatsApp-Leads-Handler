@@ -243,7 +243,13 @@ class MockBackendService {
 
       if (driver.isBotActive && driver.currentBotStepId) {
         
-        const currentStep = settings.steps.find(s => s.id === driver.currentBotStepId);
+        // ORPHAN STEP CHECK (Simulator)
+        let currentStep = settings.steps.find(s => s.id === driver.currentBotStepId);
+        if (!currentStep && settings.steps.length > 0) {
+             driver.currentBotStepId = settings.steps[0].id;
+             currentStep = settings.steps[0];
+             isNew = true; // Restart
+        }
         
         if (currentStep) {
           // A. PROCESS DATA CAPTURE from previous input (If not new/restart)
