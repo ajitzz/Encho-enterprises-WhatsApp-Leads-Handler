@@ -9,7 +9,7 @@ import { BotBuilder } from './components/BotBuilder';
 import { AITraining } from './components/AITraining';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
-import { Driver, LeadStatus, Notification, BotSettings } from './types';
+import { Driver, LeadStatus, Notification, BotSettings, Message } from './types';
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split, Bot } from 'lucide-react';
 
 export default function App() {
@@ -38,6 +38,11 @@ export default function App() {
          unsubscribe = mockBackend.subscribe(() => {
              setDrivers(mockBackend.getDrivers());
              setBotSettings(mockBackend.getBotSettings());
+             // Update selected driver if open
+             if (selectedDriver) {
+                const updated = mockBackend.getDriver(selectedDriver.id);
+                if (updated) setSelectedDriver(updated);
+             }
          });
       } else {
          // Live Mode: Poll the real server
@@ -52,6 +57,11 @@ export default function App() {
                try {
                    const updated = await liveApiService.getDrivers();
                    setDrivers(updated);
+                   // Update selected driver if open
+                   if (selectedDriver) {
+                       const current = updated.find(d => d.id === selectedDriver.id);
+                       if (current) setSelectedDriver(current);
+                   }
                } catch (e) {
                    // Silent fail on poll error to avoid spamming console
                }
@@ -90,14 +100,59 @@ export default function App() {
   };
 
   // Handlers
-  const handleStatusUpdate = (id: string, status: LeadStatus) => {
+  const handleUpdateDriver = async (id: string, updates: Partial<Driver>) => {
     if (dataSource === 'mock') {
-        mockBackend.updateDriverStatus(id, status);
-        if (selectedDriver && selectedDriver.id === id) {
-          setSelectedDriver(prev => prev ? ({ ...prev, status }) : null);
-        }
+        if (updates.status) mockBackend.updateDriverStatus(id, updates.status);
+        mockBackend.updateDriverDetails(id, updates);
     } else {
-        alert("Status updates in Live Mode require the full backend implementation. Currently Read-Only.");
+        try {
+            await liveApiService.updateDriver(id, updates);
+            // Optimistic update
+            const updated = drivers.map(d => d.id === id ? { ...d, ...updates } : d);
+            setDrivers(updated);
+            if (selectedDriver && selectedDriver.id === id) {
+                setSelectedDriver({ ...selectedDriver, ...updates });
+            }
+        } catch (e) {
+            alert("Failed to update driver details");
+        }
+    }
+  };
+
+  const handleSendMessage = async (text: string) => {
+    if (!selectedDriver) return;
+    
+    if (dataSource === 'mock') {
+        const msg: Message = {
+            id: Date.now().toString(),
+            sender: 'agent',
+            text: text,
+            timestamp: Date.now(),
+            type: 'text'
+        };
+        mockBackend.addMessage(selectedDriver.id, msg);
+    } else {
+        try {
+            await liveApiService.sendMessage(selectedDriver.id, text);
+            // Optimistic update for immediate feedback
+            const msg: Message = {
+                id: Date.now().toString(),
+                sender: 'agent',
+                text: text,
+                timestamp: Date.now(),
+                type: 'text'
+            };
+            const updatedDriver = {
+                ...selectedDriver,
+                lastMessage: text,
+                lastMessageTime: Date.now(),
+                messages: [...selectedDriver.messages, msg]
+            };
+            setSelectedDriver(updatedDriver);
+            setDrivers(prev => prev.map(d => d.id === selectedDriver.id ? updatedDriver : d));
+        } catch (e) {
+            alert("Failed to send message via WhatsApp API");
+        }
     }
   };
 
@@ -118,7 +173,12 @@ export default function App() {
           message: `Onboarding initiated for ${driver.name}`
         });
     } else {
-        alert("Action Triggered on Live Server (Implementation Pending)");
+         handleSendMessage('https://youtube.com/shorts/welcome-video');
+         addNotification({
+            type: 'success',
+            title: 'Welcome Video Sent',
+            message: 'Video link sent via WhatsApp'
+         });
     }
   };
 
@@ -356,7 +416,8 @@ export default function App() {
         <ChatDrawer 
           driver={selectedDriver} 
           onClose={() => setSelectedDriver(null)}
-          onStatusUpdate={handleStatusUpdate}
+          onSendMessage={handleSendMessage}
+          onUpdateDriver={handleUpdateDriver}
         />
         
         <NotificationToast notifications={notifications} onDismiss={removeNotification} />
