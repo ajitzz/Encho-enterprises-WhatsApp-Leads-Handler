@@ -99,3 +99,18 @@ export interface BotSettings {
     edges: any[];
   };
 }
+
+// --- AI AUDIT TYPES ---
+export interface AuditIssue {
+  nodeId: string;
+  severity: 'CRITICAL' | 'WARNING';
+  issue: string; // "Placeholder text detected"
+  suggestion: string; // "Change to 'Please reply...'"
+  autoFixValue?: any; // The sanitized value
+}
+
+export interface AuditReport {
+  isValid: boolean;
+  issues: AuditIssue[];
+  fixedNodes?: any[]; // The auto-healed node list
+}

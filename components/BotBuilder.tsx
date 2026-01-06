@@ -15,26 +15,29 @@ import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
 import { useFlowStore } from '../services/flowStore'; 
+import { auditBotFlow } from '../services/geminiService';
 import { 
   MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
   List, Type, Hash, Mail, Globe, Calendar, Clock, 
-  LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Play, AlertTriangle, ShieldAlert, GripVertical, Settings
+  LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Play, AlertTriangle, ShieldAlert, GripVertical, Settings,
+  MousePointerClick, Bold, Italic, Link, MoreHorizontal, Upload, Cloud, Stethoscope, Wand2
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
-const HANDLE_STYLE = { width: 10, height: 10, background: '#64748b', border: '2px solid white' };
-const ACTIVE_HANDLE_STYLE = { width: 12, height: 12, background: '#3b82f6', border: '2px solid white' };
+const HANDLE_STYLE = { width: 10, height: 10, background: '#64748b', border: '2px solid white', zIndex: 50 };
+const ACTIVE_HANDLE_STYLE = { width: 12, height: 12, background: '#3b82f6', border: '2px solid white', zIndex: 50 };
 const PLACEHOLDER_TEXTS = ['replace this sample message', 'enter your message', 'type your message here'];
 
-// --- CUSTOM NODE COMPONENT (WATI/AiSensy Style) ---
+// --- CUSTOM NODE COMPONENT ---
 const CustomNode = ({ data, id, selected }: any) => {
   const updateNodeData = useFlowStore((state) => state.updateNodeData);
   const deleteNode = useFlowStore((state) => state.deleteNode);
 
   const [options, setOptions] = useState<string[]>(data.options || []);
   const [variableName, setVariableName] = useState(data.saveToField || '');
-  
-  // Local sync
+  const [activeTab, setActiveTab] = useState<'link' | 'upload'>('link'); // For Media Nodes
+
+  // Sync internal state with props
   useEffect(() => {
     setOptions(data.options || []);
     setVariableName(data.saveToField || '');
@@ -63,10 +66,16 @@ const CustomNode = ({ data, id, selected }: any) => {
     handleChange('options', newOpts);
   };
 
-  // --- START NODE ---
+  // --- NODE TYPES IDENTIFICATION ---
+  const isInputType = ['Text', 'Number', 'Email', 'Website', 'Date', 'Time'].includes(data.label);
+  const isMediaType = ['Image', 'Video', 'File', 'Audio'].includes(data.label);
+  const isOptionType = ['Quick Reply', 'List'].includes(data.label);
+  const hasError = data.hasError;
+
+  // --- START NODE (Always Simple) ---
   if (data.type === 'start') {
     return (
-      <div className={`group relative shadow-lg rounded-xl bg-white border-2 transition-all ${selected ? 'border-green-500 ring-2 ring-green-100' : 'border-gray-100'}`}>
+      <div className={`group relative shadow-md rounded-xl bg-white border-2 transition-all ${selected ? 'border-green-500 ring-4 ring-green-50' : 'border-gray-100'}`}>
         <div className="bg-green-50 px-4 py-2 rounded-t-xl border-b border-green-100 flex items-center gap-2">
            <Flag size={14} className="text-green-600" />
            <span className="text-xs font-bold text-green-800 uppercase tracking-wide">Starting Step</span>
@@ -79,126 +88,245 @@ const CustomNode = ({ data, id, selected }: any) => {
     );
   }
 
-  const isInputType = ['Text', 'Number', 'Email', 'Website', 'Date', 'Time'].includes(data.label);
-  const isMediaType = ['Image', 'Video', 'File', 'Audio'].includes(data.label);
-  const isOptionType = ['Quick Reply', 'List'].includes(data.label);
-  const hasError = data.hasError;
+  // --- 1. PREVIEW CARD (UNSELECTED) ---
+  if (!selected) {
+    return (
+      <div className={`w-[280px] bg-white rounded-xl shadow-sm border transition-all hover:shadow-md
+          ${hasError ? 'border-red-300 bg-red-50/10' : 'border-gray-200'}
+      `}>
+          <Handle type="target" position={Position.Left} style={HANDLE_STYLE} className="-left-2.5" />
+          
+          {/* Header */}
+          <div className="px-4 py-3 flex items-center gap-2 border-b border-gray-100 bg-gray-50/50 rounded-t-xl">
+             <div className={`p-1.5 rounded-md ${isMediaType ? 'bg-amber-100 text-amber-600' : isInputType ? 'bg-purple-100 text-purple-600' : 'bg-blue-100 text-blue-600'}`}>
+                {data.icon || <MessageSquare size={14} />}
+             </div>
+             <span className="text-xs font-bold text-gray-700 uppercase tracking-wide">{data.label}</span>
+             {hasError && <ShieldAlert size={14} className="ml-auto text-red-500" />}
+          </div>
 
-  // --- STANDARD NODE ---
+          {/* Preview Body */}
+          <div className="p-4">
+             {/* Media Preview */}
+             {isMediaType && (
+                <div className="mb-3 relative group overflow-hidden rounded-lg bg-gray-100 border border-gray-200 aspect-video flex items-center justify-center">
+                    {data.mediaUrl ? (
+                        data.label === 'Image' ? (
+                            <img src={data.mediaUrl} alt="Preview" className="w-full h-full object-cover" />
+                        ) : data.label === 'Video' ? (
+                            <>
+                                <div className="absolute inset-0 bg-black/10" />
+                                <div className="h-10 w-10 bg-white/90 rounded-full flex items-center justify-center shadow-lg z-10">
+                                    <Play size={16} className="text-gray-900 ml-0.5" />
+                                </div>
+                            </>
+                        ) : (
+                            <div className="flex flex-col items-center text-gray-400 gap-1">
+                                <FileText size={24} />
+                                <span className="text-[10px] font-mono">FILE LINK</span>
+                            </div>
+                        )
+                    ) : (
+                        <span className="text-[10px] text-gray-400 font-medium">No Media Set</span>
+                    )}
+                </div>
+             )}
+
+             {/* Text Preview */}
+             <p className={`text-xs text-gray-600 line-clamp-3 ${!data.message && 'italic text-gray-400'}`}>
+                {data.message || 'No message text...'}
+             </p>
+
+             {/* Options Preview */}
+             {isOptionType && options.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                    {options.slice(0, 3).map((opt, i) => (
+                        <span key={i} className="text-[10px] bg-gray-100 border border-gray-200 px-2 py-1 rounded-md text-gray-600 font-medium">
+                            {opt}
+                        </span>
+                    ))}
+                    {options.length > 3 && <span className="text-[10px] text-gray-400">+{options.length - 3}</span>}
+                </div>
+             )}
+             
+             {/* Input Variable Preview */}
+             {isInputType && variableName && (
+                 <div className="mt-3 flex items-center gap-1.5 text-[10px] text-purple-600 bg-purple-50 px-2 py-1 rounded border border-purple-100 w-fit">
+                    <Hash size={10} />
+                    <span className="font-mono">{variableName}</span>
+                 </div>
+             )}
+          </div>
+
+          {/* Outlets */}
+          {isOptionType ? (
+               <div className="absolute -right-2 top-1/2 -translate-y-1/2 flex flex-col gap-1">
+                   {options.map((_, i) => <div key={i} className="w-1 h-1" />)} 
+                   {/* Ghost spacers for handles alignment logic if needed, simplified here */}
+               </div> 
+          ) : (
+              <Handle type="source" position={Position.Right} id="main" style={HANDLE_STYLE} className="-right-2.5" />
+          )}
+          
+          {/* Specific Handles for Options in Preview Mode (To keep connections visible) */}
+          {isOptionType && options.map((_, idx) => (
+             <Handle 
+                key={idx} 
+                type="source" 
+                position={Position.Right} 
+                id={`opt_${idx}`} 
+                style={{ ...HANDLE_STYLE, top: 'auto', bottom: 'auto', right: -6, marginTop: (idx * 10) }} 
+                className="opacity-0" // Hidden but functional
+             />
+          ))}
+      </div>
+    );
+  }
+
+  // --- 2. EDITOR POPUP (SELECTED) ---
   return (
-    <div className={`w-[320px] bg-white rounded-xl shadow-xl transition-all duration-200 group animate-in fade-in zoom-in-95
-        ${selected ? 'ring-2 ring-blue-500 border-transparent' : 'border border-gray-200'}
-        ${hasError ? 'ring-2 ring-red-500 border-red-500' : ''}
-    `}>
-        <Handle type="target" position={Position.Left} style={HANDLE_STYLE} className="-left-2.5" />
+    <div className={`w-[400px] bg-white rounded-xl shadow-2xl ring-4 ring-blue-500/20 transition-all duration-200 animate-in fade-in zoom-in-95 z-50`}>
+        <Handle type="target" position={Position.Left} style={ACTIVE_HANDLE_STYLE} className="-left-3" />
         
         {/* Error Flag */}
         {hasError && (
-             <div className="absolute -top-3 right-4 bg-red-600 text-white px-2 py-0.5 rounded-full shadow-sm z-20 flex items-center gap-1">
-                <ShieldAlert size={10} />
-                <span className="text-[10px] font-bold uppercase tracking-wider">{data.errorMessage || "Invalid"}</span>
+             <div className="absolute -top-3 right-4 bg-red-600 text-white px-3 py-1 rounded-full shadow-md z-50 flex items-center gap-1.5">
+                <ShieldAlert size={12} />
+                <span className="text-[10px] font-bold uppercase tracking-wider">{data.errorMessage || "Validation Error"}</span>
              </div>
         )}
 
         {/* Header */}
-        <div className={`px-4 py-3 rounded-t-xl border-b flex items-center justify-between cursor-grab active:cursor-grabbing
-            ${isInputType ? 'bg-purple-50 border-purple-100' : ''}
-            ${isMediaType ? 'bg-amber-50 border-amber-100' : ''}
-            ${!isInputType && !isMediaType ? 'bg-blue-50 border-blue-100' : ''}
-        `}>
-            <div className="flex items-center gap-2">
-                <span className={`
-                    ${isInputType ? 'text-purple-600' : ''}
-                    ${isMediaType ? 'text-amber-600' : ''}
-                    ${!isInputType && !isMediaType ? 'text-blue-600' : ''}
-                `}>
-                    {data.icon || <MessageSquare size={16} />}
-                </span>
-                <span className="text-xs font-bold text-gray-700 uppercase">{data.label}</span>
+        <div className={`px-5 py-4 rounded-t-xl border-b flex items-center justify-between bg-white`}>
+            <div className="flex items-center gap-3">
+                <div className={`p-2 rounded-lg ${isMediaType ? 'bg-amber-100 text-amber-600' : isInputType ? 'bg-purple-100 text-purple-600' : 'bg-blue-100 text-blue-600'}`}>
+                    {data.icon || <MessageSquare size={18} />}
+                </div>
+                <div>
+                    <h3 className="text-sm font-bold text-gray-900">{data.label} Step</h3>
+                    <p className="text-[10px] text-gray-500 font-medium">Configure this interaction</p>
+                </div>
             </div>
-            <div className="flex items-center gap-1">
-                <button onClick={() => deleteNode(id)} className="text-gray-400 hover:text-red-500 p-1 rounded hover:bg-white/50 transition-colors">
-                    <Trash2 size={14} />
-                </button>
-            </div>
+            <button onClick={() => deleteNode(id)} className="text-gray-400 hover:text-red-500 hover:bg-red-50 p-2 rounded-lg transition-colors" title="Delete Step">
+                <Trash2 size={16} />
+            </button>
         </div>
 
         {/* Body */}
-        <div className="p-4 space-y-4">
+        <div className="p-5 space-y-5 max-h-[400px] overflow-y-auto custom-scrollbar">
             
-            {/* Media Input */}
-            {isMediaType && (
-                <div>
-                     <label className="text-[10px] font-bold text-gray-500 uppercase mb-1 block">Media URL <span className="text-red-500">*</span></label>
-                     <input 
-                        type="text" 
-                        className={`w-full bg-gray-50 border rounded-lg px-3 py-2 text-xs text-gray-700 outline-none transition-all ${hasError && !data.mediaUrl ? 'border-red-300 bg-red-50' : 'border-gray-200 focus:border-blue-500'}`}
-                        placeholder={`https://...`}
-                        value={data.mediaUrl || ''}
-                        onChange={(e) => handleChange('mediaUrl', e.target.value)}
-                     />
+            {/* 1. TEXT TOOLBAR (Text Nodes) */}
+            {(data.label === 'Text' || isInputType) && (
+                <div className="flex items-center gap-1 pb-2 border-b border-gray-100 mb-2">
+                    <button className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded"><Bold size={14} /></button>
+                    <button className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded"><Italic size={14} /></button>
+                    <div className="w-px h-4 bg-gray-200 mx-1" />
+                    <button className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded"><Link size={14} /></button>
+                    <button className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded ml-auto"><MoreHorizontal size={14} /></button>
                 </div>
             )}
 
-            {/* Message Input */}
+            {/* 2. MEDIA TABS (Image/Video) */}
+            {isMediaType && (
+                <div>
+                     <div className="flex p-1 bg-gray-100 rounded-lg mb-3">
+                         <button 
+                            onClick={() => setActiveTab('link')}
+                            className={`flex-1 flex items-center justify-center gap-2 py-1.5 text-[10px] font-bold uppercase rounded-md transition-all ${activeTab === 'link' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                         >
+                            <Link size={12} /> URL Link
+                         </button>
+                         <button 
+                            onClick={() => setActiveTab('upload')}
+                            className={`flex-1 flex items-center justify-center gap-2 py-1.5 text-[10px] font-bold uppercase rounded-md transition-all ${activeTab === 'upload' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                         >
+                            <Upload size={12} /> Upload
+                         </button>
+                     </div>
+
+                     {activeTab === 'link' ? (
+                        <div>
+                            <label className="text-[10px] font-bold text-gray-500 uppercase mb-1.5 block">File URL <span className="text-red-500">*</span></label>
+                            <input 
+                                type="text" 
+                                className={`w-full bg-gray-50 border rounded-lg px-3 py-2.5 text-xs text-gray-700 outline-none transition-all ${hasError && !data.mediaUrl ? 'border-red-300 bg-red-50' : 'border-gray-200 focus:border-blue-500'}`}
+                                placeholder={`https://example.com/media.mp4`}
+                                value={data.mediaUrl || ''}
+                                onChange={(e) => handleChange('mediaUrl', e.target.value)}
+                            />
+                        </div>
+                     ) : (
+                        <div className="border-2 border-dashed border-gray-200 rounded-lg p-6 flex flex-col items-center justify-center text-gray-400 bg-gray-50 hover:bg-gray-100 hover:border-gray-300 transition-all cursor-pointer">
+                            <Cloud size={24} className="mb-2" />
+                            <span className="text-xs font-medium">Click to upload file</span>
+                        </div>
+                     )}
+                </div>
+            )}
+
+            {/* 3. MESSAGE INPUT */}
             <div>
-                 <label className="text-[10px] font-bold text-gray-500 uppercase mb-1 block">
-                    {isInputType ? "Question Text" : "Message Body"} <span className="text-red-500">*</span>
+                 <label className="text-[10px] font-bold text-gray-500 uppercase mb-1.5 block">
+                    {isInputType ? "Question / Prompt" : "Message Text"} <span className="text-red-500">*</span>
                  </label>
                  <textarea 
-                    className={`w-full bg-gray-50 border rounded-lg p-3 text-sm text-gray-800 outline-none resize-none transition-all h-24
+                    className={`w-full bg-gray-50 border rounded-lg p-3 text-sm text-gray-800 outline-none resize-none transition-all min-h-[100px]
                         ${hasError && (!data.message || PLACEHOLDER_TEXTS.some(t => data.message?.toLowerCase().includes(t))) 
                             ? 'border-red-300 bg-red-50 focus:border-red-500' 
                             : 'border-gray-200 focus:border-blue-500 focus:bg-white focus:shadow-sm'}
                     `}
-                    placeholder="Type your message..."
+                    placeholder="Type the message sent to the user..."
                     value={data.message}
                     onChange={(e) => handleChange('message', e.target.value)}
                  />
-                 {/* Strict Warning Helper */}
                  {hasError && data.message && PLACEHOLDER_TEXTS.some(t => data.message.toLowerCase().includes(t)) && (
-                     <p className="text-[10px] text-red-500 mt-1 font-bold">⚠️ Remove placeholder text</p>
+                     <p className="text-[10px] text-red-500 mt-1.5 font-bold flex items-center gap-1"><AlertTriangle size={10} /> Placeholder text detected</p>
                  )}
             </div>
 
-            {/* Options Input */}
+            {/* 4. OPTIONS (Buttons/List) */}
             {isOptionType && (
                 <div>
-                    <label className="text-[10px] font-bold text-gray-500 uppercase mb-1 block">Buttons / List Options</label>
-                    <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-gray-500 uppercase mb-2 block flex items-center justify-between">
+                        <span>Response Options</span>
+                        <span className="text-xs font-normal text-gray-400">{options.length} items</span>
+                    </label>
+                    <div className="space-y-2 mb-3">
                         {options.map((opt, idx) => (
-                            <div key={idx} className="flex items-center gap-2">
-                                <div className="flex-1 flex items-center bg-gray-50 border border-gray-200 rounded-lg pl-3 pr-1 py-1.5 focus-within:ring-1 focus-within:ring-blue-500">
-                                    <span className="text-[10px] text-gray-400 mr-2 font-mono">{idx + 1}</span>
+                            <div key={idx} className="flex items-center gap-2 group">
+                                <div className="flex-1 flex items-center bg-gray-50 border border-gray-200 rounded-lg pl-3 pr-1 py-1.5 focus-within:ring-1 focus-within:ring-blue-500 focus-within:bg-white transition-all shadow-sm">
+                                    <span className="text-[10px] text-gray-400 mr-2 font-mono flex items-center justify-center w-4 h-4 rounded bg-gray-200">{idx + 1}</span>
                                     <input 
                                         value={opt}
                                         onChange={(e) => handleOptionChange(idx, e.target.value)}
-                                        className="flex-1 bg-transparent border-none p-0 text-xs text-gray-700 outline-none"
-                                        placeholder="Option label"
+                                        className="flex-1 bg-transparent border-none p-0 text-xs text-gray-700 outline-none font-medium"
+                                        placeholder={`Option ${idx + 1}`}
                                     />
-                                    <button onClick={() => removeOption(idx)} className="p-1 text-gray-300 hover:text-red-400">
-                                        <X size={12} />
+                                    <button onClick={() => removeOption(idx)} className="p-1 text-gray-300 hover:text-red-500 rounded hover:bg-red-50 transition-colors">
+                                        <X size={14} />
                                     </button>
                                 </div>
-                                {/* Option Outlet */}
-                                <Handle type="source" position={Position.Right} id={`opt_${idx}`} style={{...ACTIVE_HANDLE_STYLE, position: 'relative', transform: 'none', right: 0}} />
+                                <div className="flex items-center gap-1">
+                                    <span className="text-[10px] text-gray-400">→</span>
+                                    <Handle type="source" position={Position.Right} id={`opt_${idx}`} style={{...ACTIVE_HANDLE_STYLE, position: 'relative', transform: 'none', right: 0}} />
+                                </div>
                             </div>
                         ))}
                     </div>
                     <button 
                         onClick={addOption}
-                        className="mt-2 w-full py-2 border border-dashed border-gray-300 rounded-lg text-xs font-medium text-gray-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50 transition-all flex items-center justify-center gap-1"
+                        className="w-full py-2.5 border border-dashed border-gray-300 rounded-lg text-xs font-bold text-gray-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50 transition-all flex items-center justify-center gap-1.5"
                      >
-                        <List size={12} /> Add Option
+                        <MousePointerClick size={14} /> Add Button Option
                      </button>
                 </div>
             )}
 
-            {/* Variable Save (Input Only) */}
+            {/* 5. VARIABLE SAVE (Input) */}
             {isInputType && (
-                 <div>
-                    <label className="text-[10px] font-bold text-purple-600 uppercase mb-1 flex items-center gap-1">
-                        <Hash size={10} /> Save Answer To
+                 <div className="bg-purple-50 rounded-lg p-3 border border-purple-100">
+                    <label className="text-[10px] font-bold text-purple-700 uppercase mb-1.5 flex items-center gap-1.5">
+                        <Hash size={12} /> Save Response To
                     </label>
                     <select 
                         value={variableName}
@@ -206,9 +334,9 @@ const CustomNode = ({ data, id, selected }: any) => {
                             setVariableName(e.target.value);
                             handleChange('saveToField', e.target.value);
                         }}
-                        className="w-full bg-purple-50 border border-purple-100 text-purple-900 text-xs font-bold rounded-lg px-2 py-2 focus:ring-1 focus:ring-purple-500 outline-none cursor-pointer"
+                        className="w-full bg-white border border-purple-200 text-purple-900 text-xs font-medium rounded-lg px-3 py-2 focus:ring-2 focus:ring-purple-500 outline-none cursor-pointer shadow-sm"
                     >
-                        <option value="">Select variable...</option>
+                        <option value="">-- Do not save --</option>
                         <option value="name">user_name</option>
                         <option value="vehicleRegistration">vehicle_number</option>
                         <option value="availability">availability_status</option>
@@ -220,9 +348,9 @@ const CustomNode = ({ data, id, selected }: any) => {
             )}
         </div>
         
-        {/* Main Outlet (if not option type) */}
+        {/* Main Outlet for non-branching nodes */}
         {!isOptionType && (
-            <Handle type="source" position={Position.Right} id="main" style={{...ACTIVE_HANDLE_STYLE, right: -12, top: '50%'}} />
+            <Handle type="source" position={Position.Right} id="main" style={ACTIVE_HANDLE_STYLE} className="-right-3" />
         )}
     </div>
   );
@@ -271,13 +399,14 @@ export const BotBuilder: React.FC<BotBuilderProps> = ({ isLiveMode = false }) =>
 };
 
 const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
-  // Use Global Store
   const { 
       nodes, edges, onNodesChange, onEdgesChange, onConnect, 
       setNodes, setEdges, addNode, updateNodeData 
   } = useFlowStore();
   
   const [isSaving, setIsSaving] = useState(false);
+  const [isAuditing, setIsAuditing] = useState(false);
+  const [auditReport, setAuditReport] = useState<any>(null);
   const reactFlowInstance = useReactFlow();
 
   // Load Data
@@ -291,16 +420,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         }
 
         if (settings.flowData && settings.flowData.nodes.length > 0) {
-            
-            // --- AUTO-CLEAN OLD DATA ---
-            // If we find placeholders in loaded data, we wipe them so the user is forced to fix them.
+            // Auto-clean placeholders on load
             const cleanedNodes = settings.flowData.nodes.map((n: any) => {
                 const newData = { ...n.data };
-                // Using regex for consistent client-side cleaning
                 const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
                 if (newData.message && BLOCKED_REGEX.test(newData.message)) {
-                    console.log(`Auto-cleaned node ${n.id}`);
-                    newData.message = ""; // Empty it out
+                    newData.message = ""; 
                     newData.hasError = true;
                     newData.errorMessage = "Placeholder Removed";
                 }
@@ -340,12 +465,11 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         position,
         data: { 
             label: label,
-            message: '', // STRICTLY EMPTY
+            message: '', 
             inputType: inputType || 'text', 
-            // Dynamic Icon based on label for header
             icon: undefined, 
             options: inputType === 'option' ? ['Yes', 'No'] : undefined,
-            hasError: true, // Default to error state until filled
+            hasError: true,
             errorMessage: 'Required'
         },
       };
@@ -355,7 +479,59 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
     [reactFlowInstance, addNode],
   );
 
-  // --- STRICT SAVE VALIDATION ---
+  const runAIAudit = async () => {
+      setIsAuditing(true);
+      try {
+          const report = await auditBotFlow(nodes);
+          setAuditReport(report);
+          
+          if (report.issues.length > 0) {
+              // Highlight faulty nodes
+              const badNodeIds = report.issues.map((i: any) => i.nodeId);
+              const newNodes = nodes.map(n => {
+                  if (badNodeIds.includes(n.id)) {
+                      return { 
+                          ...n, 
+                          data: { 
+                              ...n.data, 
+                              hasError: true, 
+                              errorMessage: "AI Flagged" 
+                          } 
+                      };
+                  }
+                  return n;
+              });
+              setNodes(newNodes);
+          }
+      } catch (e) {
+          alert("AI Audit Failed");
+      } finally {
+          setIsAuditing(false);
+      }
+  };
+
+  const applyAutoFixes = () => {
+      if (!auditReport) return;
+      
+      const newNodes = nodes.map(n => {
+         const issue = auditReport.issues.find((i: any) => i.nodeId === n.id);
+         if (issue && issue.autoFixValue) {
+             return {
+                 ...n,
+                 data: {
+                     ...n.data,
+                     message: issue.autoFixValue, // Apply AI fix
+                     hasError: false,
+                     errorMessage: undefined
+                 }
+             };
+         }
+         return n;
+      });
+      setNodes(newNodes);
+      setAuditReport(null); // Close modal
+  };
+
   const handleSave = async () => {
       let hasValidationErrors = false;
       
@@ -366,7 +542,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
           let errorMsg = '';
           const { label, message, mediaUrl, inputType, options } = node.data;
           
-          // 1. Placeholder & Empty Check
           if (label === 'Text' || inputType === 'option' || inputType === 'text') {
              const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
              if (!message || !message.trim()) {
@@ -378,13 +553,11 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
              }
           }
 
-          // 2. Media Check
           if ((label === 'Image' || label === 'Video') && (!mediaUrl || !mediaUrl.trim())) {
               error = true;
               errorMsg = 'Missing URL';
           }
 
-          // 3. Option Check
           if (inputType === 'option' && (!options || options.length === 0)) {
               error = true;
               errorMsg = 'No Options';
@@ -396,13 +569,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
       if (hasValidationErrors) {
           setNodes(newNodes);
-          alert("❌ SAVE BLOCKED: Strict Validation Failed.\n\nPlease fix red nodes. Ensure no 'Replace this sample message' text remains.");
+          alert("❌ SAVE BLOCKED: Strict Validation Failed.\n\nPlease fix red nodes.");
           return;
       }
 
       setIsSaving(true);
       
-      // Compiler: Nodes -> BotStep[]
       const compiledSteps: BotStep[] = [];
       nodes.forEach(node => {
           if (node.data.type === 'start') return;
@@ -439,9 +611,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   };
 
   return (
-    <div className="flex h-full bg-gray-50 font-sans">
-        
-        {/* Sidebar (Tools) */}
+    <div className="flex h-full bg-gray-50 font-sans relative">
+        {/* SIDEBAR */}
         <div className="w-72 bg-white border-r border-gray-200 flex flex-col z-10 shadow-lg">
             <div className="p-5 border-b border-gray-100">
                 <div className="flex items-center gap-2 mb-1">
@@ -472,10 +643,17 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             </div>
         </div>
 
-        {/* Canvas Area */}
+        {/* CANVAS */}
         <div className="flex-1 relative flex flex-col h-full overflow-hidden">
-            {/* Toolbar */}
             <div className="absolute top-4 right-4 z-20 flex gap-3">
+                 <button 
+                    onClick={runAIAudit}
+                    disabled={isAuditing}
+                    className="bg-purple-600 text-white px-4 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-purple-700 transition-all flex items-center gap-2"
+                 >
+                    {isAuditing ? <span className="animate-spin"><Stethoscope size={16} /></span> : <Stethoscope size={16} />}
+                    {isAuditing ? 'Diagnosing...' : 'AI Doctor'}
+                 </button>
                  <button 
                     onClick={handleSave}
                     disabled={isSaving}
@@ -508,7 +686,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                         maskColor="rgba(240, 242, 245, 0.7)"
                     />
                     
-                    {/* Floating Helper */}
                     <Panel position="bottom-center" className="mb-8">
                         <div className="bg-white/90 backdrop-blur border border-gray-200 px-4 py-2 rounded-full text-xs text-gray-500 shadow-sm flex items-center gap-2">
                             <span className="w-2 h-2 rounded-full bg-green-500"></span>
@@ -518,6 +695,79 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                  </ReactFlow>
             </div>
         </div>
+
+        {/* AI AUDIT REPORT MODAL */}
+        {auditReport && auditReport.issues.length > 0 && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95">
+                    <div className="bg-purple-600 text-white p-5 flex items-center justify-between">
+                        <h3 className="font-bold flex items-center gap-2 text-lg">
+                            <Stethoscope size={20} /> AI Diagnosis Report
+                        </h3>
+                        <button onClick={() => setAuditReport(null)} className="hover:bg-white/20 p-1 rounded-full"><X size={20} /></button>
+                    </div>
+                    
+                    <div className="p-6 max-h-[60vh] overflow-y-auto space-y-4">
+                        <div className="bg-purple-50 text-purple-800 p-3 rounded-lg text-sm border border-purple-100 flex items-center gap-2">
+                             <AlertTriangle size={16} />
+                             Found {auditReport.issues.length} potential issues in your flow.
+                        </div>
+
+                        {auditReport.issues.map((issue: any, idx: number) => (
+                            <div key={idx} className="border border-gray-200 rounded-xl p-4 bg-gray-50">
+                                <div className="flex items-start justify-between mb-2">
+                                    <span className="text-xs font-bold text-gray-500 uppercase tracking-wide">Node ID: {issue.nodeId}</span>
+                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${issue.severity === 'CRITICAL' ? 'bg-red-100 text-red-600' : 'bg-amber-100 text-amber-600'}`}>
+                                        {issue.severity}
+                                    </span>
+                                </div>
+                                <h4 className="font-bold text-gray-900 text-sm mb-1">{issue.issue}</h4>
+                                <p className="text-sm text-gray-600 mb-3">{issue.suggestion}</p>
+                                
+                                {issue.autoFixValue && (
+                                    <div className="bg-white border border-gray-200 p-2 rounded text-xs font-mono text-gray-500 mb-2">
+                                        Suggested: "{issue.autoFixValue}"
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="p-4 border-t border-gray-100 flex gap-3 bg-gray-50">
+                        <button 
+                           onClick={() => setAuditReport(null)}
+                           className="flex-1 py-3 text-sm font-medium text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors"
+                        >
+                           Dismiss
+                        </button>
+                        <button 
+                           onClick={applyAutoFixes}
+                           className="flex-1 py-3 text-sm font-bold text-white bg-purple-600 rounded-xl hover:bg-purple-700 transition-colors flex items-center justify-center gap-2 shadow-lg shadow-purple-200"
+                        >
+                           <Wand2 size={16} /> Auto-Fix All Issues
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
+        {/* SUCCESS STATE FOR AUDIT */}
+        {auditReport && auditReport.issues.length === 0 && (
+             <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+                <div className="bg-white rounded-2xl shadow-2xl p-8 text-center animate-in fade-in zoom-in-95 max-w-sm">
+                    <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <CheckCircle size={32} />
+                    </div>
+                    <h3 className="text-xl font-bold text-gray-900 mb-2">All Systems Go!</h3>
+                    <p className="text-gray-500 mb-6">Gemini analyzed your flow and found no issues. You are ready to publish.</p>
+                    <button 
+                        onClick={() => setAuditReport(null)}
+                        className="w-full py-3 bg-black text-white rounded-xl font-bold hover:bg-gray-800 transition-colors"
+                    >
+                        Awesome
+                    </button>
+                </div>
+             </div>
+        )}
     </div>
   );
 };
