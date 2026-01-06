@@ -334,6 +334,23 @@ const analyzeWithAI = async (text, systemInstruction) => {
   } catch (e) { return "Thanks for contacting Uber Fleet."; }
 };
 
+// HELPER: Log system messages (Bot/AI) to database so they appear in chat history
+const logSystemMessage = async (driverId, text, type = 'text', options = null) => {
+    try {
+        const msgId = Date.now().toString() + '_' + Math.random().toString(36).substr(2, 5);
+        // Ensure options is an array for Postgres or null
+        const opts = options && options.length > 0 ? options : null;
+        
+        await queryWithRetry(
+            `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, options) VALUES ($1, $2, 'system', $3, $4, $5, $6)`,
+            [msgId, driverId, text, Date.now(), type, opts]
+        );
+        await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text, Date.now(), driverId]);
+    } catch (e) {
+        console.error("Failed to log system message:", e);
+    }
+};
+
 const processIncomingMessage = async (from, name, msgBody, msgType = 'text', timestamp = Date.now()) => {
     try {
         // Use a dedicated client for logic transaction
@@ -467,11 +484,20 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         }
 
         // Post-Transaction Actions
-        if (result.replyTemplate) await sendWhatsAppMessage(from, null, null, result.replyTemplate);
-        else if (result.replyText) await sendWhatsAppMessage(from, result.replyText, result.replyOptions);
+        // UPDATE: Log system messages to DB after sending to WhatsApp so they appear in Chat UI
+        if (result.replyTemplate) {
+            await sendWhatsAppMessage(from, null, null, result.replyTemplate);
+            await logSystemMessage(result.driver.id, `[Template] ${result.replyTemplate}`, 'template');
+        }
+        else if (result.replyText) {
+            await sendWhatsAppMessage(from, result.replyText, result.replyOptions);
+            const type = result.replyOptions && result.replyOptions.length > 0 ? 'options' : 'text';
+            await logSystemMessage(result.driver.id, result.replyText, type, result.replyOptions);
+        }
         else if (result.shouldCallAI) {
             const aiReply = await analyzeWithAI(msgBody, result.botSettings.systemInstruction);
             await sendWhatsAppMessage(from, aiReply);
+            await logSystemMessage(result.driver.id, aiReply, 'text');
         }
 
     } catch (e) {
