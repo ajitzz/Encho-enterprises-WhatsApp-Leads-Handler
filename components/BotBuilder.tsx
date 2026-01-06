@@ -505,8 +505,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               });
               setNodes(newNodes);
           }
-      } catch (e) {
-          alert("AI Audit Failed. Check server logs.");
+      } catch (e: any) {
+          if (e.message.includes('429')) {
+             alert("System Overloaded. Please wait 30 seconds before auditing again.");
+          } else {
+             alert("AI Audit Failed. Check server logs.");
+          }
       } finally {
           setIsAuditing(false);
       }
@@ -560,9 +564,13 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
           if (res.changes && res.changes.length > 0) {
               setSelectedFile(res.changes[0].filePath);
           }
-      } catch(e) {
+      } catch(e: any) {
           console.error(e);
-          alert("Analysis Failed. Check server console.");
+          if (e.message.includes('429')) {
+              alert("System Overloaded (429). Please wait 30s before trying again.");
+          } else {
+              alert("Analysis Failed. Check server console.");
+          }
       } finally {
           setIsAnalyzingCode(false);
       }
