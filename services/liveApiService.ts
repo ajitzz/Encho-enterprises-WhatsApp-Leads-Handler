@@ -11,7 +11,18 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
         const response = await fetch(url, options);
         if (!response.ok) {
              // If server error (500-599), retry
-             if (response.status >= 500 && retries > 0) throw new Error('Server Error');
+             if (response.status >= 500) {
+                 // Clone response to read error body without consuming main response stream
+                 const clone = response.clone();
+                 try {
+                    const errorBody = await clone.json();
+                    console.error("SERVER ERROR DETAILS:", errorBody);
+                 } catch(e) {
+                    console.error("SERVER ERROR (Text):", await clone.text());
+                 }
+                 
+                 if (retries > 0) throw new Error('Server Error');
+             }
              return response;
         }
         return response;
