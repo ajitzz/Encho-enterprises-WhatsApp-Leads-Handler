@@ -587,25 +587,36 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                }));
           }
       } else if (issue.autoFixValue) {
-          const newNodes = nodes.map(n => {
-              if (n.id === issue.nodeId) {
-                  return {
-                      ...n,
-                      data: {
-                          ...n.data,
-                          message: issue.autoFixValue,
-                          hasError: false,
-                          errorMessage: undefined
+          const targetNode = nodes.find(n => n.id === issue.nodeId);
+          if (targetNode) {
+              const newNodes = nodes.map(n => {
+                  if (n.id === issue.nodeId) {
+                      // INTELLIGENT PATCHING based on value type or node type
+                      let newData = { ...n.data, hasError: false, errorMessage: undefined };
+                      
+                      if (Array.isArray(issue.autoFixValue)) {
+                          // It's options
+                          newData.options = issue.autoFixValue;
+                          // Ensure we have a message if it was empty
+                          if (!newData.message) newData.message = "Please select an option:";
+                      } else if (newData.label === 'Image' || newData.label === 'Video') {
+                          // It's media
+                          newData.mediaUrl = issue.autoFixValue;
+                      } else {
+                          // It's standard text
+                          newData.message = issue.autoFixValue;
                       }
-                  };
-              }
-              return n;
-          });
-          setNodes(newNodes);
-          setAuditReport((prev: any) => ({
-            ...prev,
-            issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
-        }));
+
+                      return { ...n, data: newData };
+                  }
+                  return n;
+              });
+              setNodes(newNodes);
+              setAuditReport((prev: any) => ({
+                  ...prev,
+                  issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
+              }));
+          }
       }
   };
 
@@ -998,7 +1009,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                                             onClick={() => applyFix(issue)}
                                             className="px-3 py-1.5 bg-blue-600 text-white text-xs font-bold rounded hover:bg-blue-700 flex items-center gap-1"
                                         >
-                                            <Wand2 size={12} /> Apply Fix: "{issue.autoFixValue}"
+                                            <Wand2 size={12} /> Apply Fix: "{Array.isArray(issue.autoFixValue) ? "Update Options" : (issue.autoFixValue.startsWith('http') ? 'Update Link' : issue.autoFixValue.substring(0, 15) + '...')}"
                                         </button>
                                     ) : null}
                                 </div>
