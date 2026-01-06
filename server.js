@@ -565,9 +565,24 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
     payload.type = 'template';
     payload.template = { name: templateName, language: { code: language } };
   } else if (mediaUrl) {
-    payload.type = mediaType;
-    payload[mediaType] = { link: mediaUrl };
-    if (body && body.trim().length > 0) payload[mediaType].caption = body; 
+    // Detect YouTube URL
+    const isYouTube = mediaUrl.includes('youtube.com') || mediaUrl.includes('youtu.be');
+    
+    if (isYouTube) {
+        // WhatsApp standard for YouTube: Send as Text with Preview enabled
+        // The URL is appended to the body
+        payload.type = 'text';
+        payload.text = { 
+            body: body ? `${body} ${mediaUrl}` : mediaUrl, 
+            preview_url: true 
+        };
+    } else {
+        // Native Media (Image/Video/Document)
+        // If type is 'video' but we are calling with 'video', we assume it's a direct file link (mp4)
+        payload.type = mediaType;
+        payload[mediaType] = { link: mediaUrl };
+        if (body && body.trim().length > 0) payload[mediaType].caption = body; 
+    }
   } else if (options && options.length > 0) {
     const validOptions = options.filter(o => o && o.trim().length > 0);
     if (validOptions.length === 0) {

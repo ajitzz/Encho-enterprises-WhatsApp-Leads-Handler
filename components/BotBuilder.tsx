@@ -21,7 +21,7 @@ import {
   List, Type, Hash, Mail, Globe, Calendar, Clock, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Play, AlertTriangle, ShieldAlert, GripVertical, Settings,
   MousePointerClick, Bold, Italic, Link, MoreHorizontal, Upload, Cloud, Stethoscope, Wand2, Terminal, Code,
-  FileCode, Layers
+  FileCode, Layers, Youtube
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
@@ -45,6 +45,10 @@ const CustomNode = ({ data, id, selected }: any) => {
   }, [data.options, data.saveToField]);
 
   const handleChange = (field: string, value: any) => {
+    // Auto-fix URL inputs
+    if (field === 'mediaUrl' && typeof value === 'string') {
+        value = value.replace(/(https?:\/\/){2,}/g, '$1'); // Replace double protocols
+    }
     updateNodeData(id, { [field]: value });
   };
 
@@ -72,6 +76,7 @@ const CustomNode = ({ data, id, selected }: any) => {
   const isMediaType = ['Image', 'Video', 'File', 'Audio'].includes(data.label);
   const isOptionType = ['Quick Reply', 'List'].includes(data.label);
   const hasError = data.hasError;
+  const isYouTube = data.mediaUrl && (data.mediaUrl.includes('youtube.com') || data.mediaUrl.includes('youtu.be'));
 
   // --- START NODE (Always Simple) ---
   if (data.type === 'start') {
@@ -114,18 +119,25 @@ const CustomNode = ({ data, id, selected }: any) => {
                     {data.mediaUrl ? (
                         data.label === 'Image' ? (
                             <img src={data.mediaUrl} alt="Preview" className="w-full h-full object-cover" />
-                        ) : data.label === 'Video' ? (
-                            <>
-                                <div className="absolute inset-0 bg-black/10" />
-                                <div className="h-10 w-10 bg-white/90 rounded-full flex items-center justify-center shadow-lg z-10">
-                                    <Play size={16} className="text-gray-900 ml-0.5" />
-                                </div>
-                            </>
                         ) : (
-                            <div className="flex flex-col items-center text-gray-400 gap-1">
-                                <FileText size={24} />
-                                <span className="text-[10px] font-mono">FILE LINK</span>
-                            </div>
+                            isYouTube ? (
+                                <div className="flex flex-col items-center justify-center bg-red-50 w-full h-full text-red-600">
+                                    <Youtube size={24} />
+                                    <span className="text-[10px] font-bold mt-1">YouTube Preview</span>
+                                </div>
+                            ) : data.label === 'Video' ? (
+                                <>
+                                    <div className="absolute inset-0 bg-black/10" />
+                                    <div className="h-10 w-10 bg-white/90 rounded-full flex items-center justify-center shadow-lg z-10">
+                                        <Play size={16} className="text-gray-900 ml-0.5" />
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="flex flex-col items-center text-gray-400 gap-1">
+                                    <FileText size={24} />
+                                    <span className="text-[10px] font-mono">FILE LINK</span>
+                                </div>
+                            )
                         )
                     ) : (
                         <span className="text-[10px] text-gray-400 font-medium">No Media Set</span>
@@ -255,6 +267,12 @@ const CustomNode = ({ data, id, selected }: any) => {
                                 value={data.mediaUrl || ''}
                                 onChange={(e) => handleChange('mediaUrl', e.target.value)}
                             />
+                            {isYouTube && (
+                                <div className="mt-2 text-[10px] text-green-600 bg-green-50 p-2 rounded border border-green-100 flex items-center gap-1">
+                                    <Youtube size={12} />
+                                    YouTube link detected. Will send as text with preview.
+                                </div>
+                            )}
                         </div>
                      ) : (
                         <div className="border-2 border-dashed border-gray-200 rounded-lg p-6 flex flex-col items-center justify-center text-gray-400 bg-gray-50 hover:bg-gray-100 hover:border-gray-300 transition-all cursor-pointer">
