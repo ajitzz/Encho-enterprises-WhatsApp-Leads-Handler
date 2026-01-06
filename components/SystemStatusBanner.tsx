@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { Database, Zap, MessageCircle, AlertTriangle, CheckCircle, Clock, ServerOff, Server, Activity, ShieldCheck, Flame } from 'lucide-react';
+import { Database, Zap, MessageCircle, AlertTriangle, CheckCircle, Clock, ServerOff, Server, Activity, ShieldCheck, Flame, Gauge } from 'lucide-react';
 import { SystemHealth } from '../types';
 
 interface SystemStatusBannerProps {
@@ -51,9 +51,13 @@ export const SystemStatusBanner: React.FC<SystemStatusBannerProps> = ({ health, 
                                 </div>
                             </div>
                         </div>
-                        {isDegraded && (
-                            <span className="bg-amber-100 text-amber-700 text-[10px] font-bold px-2 py-1 rounded-full border border-amber-200">
-                                FALLBACK ACTIVE
+                        {isDegraded ? (
+                            <span className="bg-amber-100 text-amber-700 text-[10px] font-bold px-2 py-1 rounded-full border border-amber-200 flex items-center gap-1">
+                                <Gauge size={10} /> FALLBACK ACTIVE
+                            </span>
+                        ) : (
+                            <span className="bg-purple-50 text-purple-700 text-[10px] font-bold px-2 py-1 rounded-full border border-purple-100 flex items-center gap-1">
+                                <Zap size={10} /> SMART SCALE
                             </span>
                         )}
                     </div>
@@ -63,9 +67,15 @@ export const SystemStatusBanner: React.FC<SystemStatusBannerProps> = ({ health, 
                             {health.ai.message || "Operational"}
                         </p>
                         {isDegraded && (
-                           <div className="mt-2 text-xs text-amber-600 flex items-center gap-1">
+                           <div className="mt-2 text-xs text-amber-600 flex items-center gap-1 bg-amber-100/50 p-1.5 rounded-lg border border-amber-200/50">
                                <Clock size={12} />
-                               <span>Auto-recovery in ~60s</span>
+                               <span>Auto-recovering to PRO in ~60s</span>
+                           </div>
+                        )}
+                        {!isDegraded && isPro && (
+                           <div className="mt-2 text-xs text-purple-600 flex items-center gap-1 opacity-70">
+                               <CheckCircle size={12} />
+                               <span>Running on High Performance Model</span>
                            </div>
                         )}
                     </div>

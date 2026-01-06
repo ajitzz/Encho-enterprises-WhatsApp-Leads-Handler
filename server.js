@@ -215,6 +215,7 @@ const ensureDatabaseInitialized = async (client) => {
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // **SMART GENERATE: AUTO-SCALING LOGIC**
+// This function applies global model selection logic to ANY request
 const generateContentSmart = async (contents, config = {}, systemInstruction = undefined) => {
     const targetModel = getActiveModel();
     
@@ -240,7 +241,7 @@ const generateContentSmart = async (contents, config = {}, systemInstruction = u
 
     } catch (e) {
         // RATE LIMIT HANDLING
-        if (e.status === 429 || e.message.includes('429') || e.message.includes('Quota')) {
+        if (e.status === 429 || e.message?.includes('429') || e.message?.includes('Quota')) {
             if (targetModel === MODEL_PRO) {
                 console.warn("⚠️ Pro Quota Exceeded. Downgrading to Flash...");
                 lastDowngradeTime = Date.now();
@@ -259,7 +260,7 @@ const generateContentSmart = async (contents, config = {}, systemInstruction = u
             } else {
                 // Even Flash is failing!
                 aiStatusCache = { status: 'error', message: 'All AI Models Overloaded', lastCheck: Date.now(), activeModel: 'NONE' };
-                throw new Error("System Overloaded. Please try again later.");
+                throw new Error("System Overloaded. AI Quota Exceeded.");
             }
         }
         throw e;
@@ -381,7 +382,7 @@ app.post('/api/admin/write-files', async (req, res) => {
     }
 });
 
-// --- UPDATED ANALYZE SYSTEM (Using Smart Model) ---
+// --- UPDATED ANALYZE SYSTEM (Uses Global Auto-Scaling Strategy) ---
 app.post('/api/admin/analyze-system', async (req, res) => {
     try {
         const { issueDescription } = req.body;
@@ -399,18 +400,21 @@ app.post('/api/admin/analyze-system', async (req, res) => {
         OUTPUT JSON: { "diagnosis": "...", "changes": [{ "filePath": "server.js", "content": "FULL NEW CONTENT", "explanation": "..." }] }
         `;
 
+        // Use smart engine: Tries PRO -> Falls back to Flash -> Recovers automatically
         const response = await generateContentSmart(prompt, { responseMimeType: "application/json" });
+
         const text = response.text;
         const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
         res.json(JSON.parse(jsonStr));
 
     } catch (e) {
-        if (e.message.includes('System Overloaded')) return res.status(429).json({ error: e.message });
+        console.error("Analyze System Error:", e);
+        if (e.status === 429 || e.message?.includes('429')) return res.status(429).json({ error: "AI Overloaded (429). System recovering..." });
         res.status(500).json({ error: e.message });
     }
 });
 
-// --- UPDATED AUDIT FLOW (Using Smart Model) ---
+// --- UPDATED AUDIT FLOW (Uses Global Auto-Scaling Strategy) ---
 app.post('/api/admin/audit-flow', async (req, res) => {
     try {
         const { nodes } = req.body;
@@ -420,11 +424,18 @@ app.post('/api/admin/audit-flow', async (req, res) => {
         INPUT DATA: ${JSON.stringify(nodes.map(n => ({ id: n.id, type: n.data.label, message: n.data.message })))}
         OUTPUT JSON: { "isValid": boolean, "issues": [{ "nodeId": "...", "severity": "CRITICAL|WARNING", "issue": "...", "suggestion": "...", "autoFixValue": "..." }] }
         `;
+        
+        // Use smart engine: Tries PRO -> Falls back to Flash -> Recovers automatically
         const response = await generateContentSmart(prompt, { responseMimeType: "application/json" });
+
         const text = response.text;
         const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
         res.json(JSON.parse(jsonStr));
     } catch (e) {
+        console.error("Audit Flow Error:", e);
+        if (e.status === 429 || e.message?.includes('429')) {
+             return res.status(429).json({ error: "AI Overloaded. Please wait 30s." });
+        }
         res.status(500).json({ error: e.message });
     }
 });
@@ -434,7 +445,7 @@ app.post('/api/assistant/chat', async (req, res) => {
     const { message, history } = req.body;
     
     try {
-        // Start Chat with current Active Model
+        // Start Chat with current Active Model (Global State)
         const model = getActiveModel();
         
         const chat = ai.chats.create({
@@ -445,12 +456,6 @@ app.post('/api/assistant/chat', async (req, res) => {
                 systemInstruction: `You are 'Fleet Commander', an advanced AI Operations Manager.`,
             }
         });
-
-        // We wrap sendMessage with our own logic manually, but since chats.create is tied to a model, 
-        // we can't easily swap mid-session without recreating. 
-        // So we rely on the fact that if this fails with 429, the Frontend will get the error and can retry.
-        // OR we wrap the chat creation itself in retry logic if we want to be fancy.
-        // For now, let's trust getActiveModel() picked the right one at start of request.
 
         let result = await chat.sendMessage(message);
         let response = result.response;
@@ -511,15 +516,15 @@ app.post('/api/assistant/chat', async (req, res) => {
             response = result.response;
         }
 
-        // Update status cache on success
+        // Update status cache on success (Only if successful PRO usage)
         if (model === MODEL_PRO) aiStatusCache = { status: 'operational', message: 'Gemini Pro Active', lastCheck: Date.now(), activeModel: MODEL_PRO };
         
         res.json({ text: response.text });
 
     } catch (e) {
-        if (e.status === 429 || e.message.includes('429')) {
+        if (e.status === 429 || e.message?.includes('429')) {
              // Trigger Downgrade for next time
-             console.warn("429 in Chat. Downgrading.");
+             console.warn("429 in Chat. Downgrading Global Model.");
              lastDowngradeTime = Date.now();
              aiStatusCache = { status: 'degraded', message: 'Chat switched to Flash', lastCheck: Date.now(), activeModel: MODEL_FLASH };
              return res.status(429).json({ error: "System Busy. Optimizing model... please retry in 5s." });
