@@ -89,6 +89,28 @@ export const liveApiService = {
     return await response.json();
   },
 
+  // --- ACTIONS ---
+
+  sendMessage: async (driverId: string, text: string) => {
+    const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ driverId, text })
+    });
+    if (!response.ok) throw new Error('Failed to send message');
+    return await response.json();
+  },
+
+  updateDriver: async (driverId: string, updates: Partial<Driver>) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updates)
+      });
+      if (!response.ok) throw new Error('Failed to update driver');
+      return await response.json();
+  },
+
   // --- CONFIG ---
 
   configureWebhook: async (config: any) => {
