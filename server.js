@@ -216,9 +216,10 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // **SMART GENERATE: AUTO-SCALING LOGIC**
 // This function applies global model selection logic to ANY request
-const generateContentSmart = async (contents, config = {}, systemInstruction = undefined) => {
+const generateContentSmart = async (contents, config = {}, systemInstruction = undefined, taskName = 'General Task') => {
     const targetModel = getActiveModel();
-    
+    console.log(`🤖 [AI SMART] Starting '${taskName}' using model: ${targetModel}`);
+
     try {
         const reqConfig = { ...config };
         if (systemInstruction) reqConfig.systemInstruction = systemInstruction;
@@ -236,14 +237,15 @@ const generateContentSmart = async (contents, config = {}, systemInstruction = u
             // We successfully used Flash (because of previous downgrade)
             aiStatusCache = { status: 'degraded', message: 'Using Flash Model (Quota Recovery)', lastCheck: Date.now(), activeModel: MODEL_FLASH };
         }
-
+        
+        console.log(`✅ [AI SMART] '${taskName}' completed successfully with ${targetModel}`);
         return result;
 
     } catch (e) {
         // RATE LIMIT HANDLING
         if (e.status === 429 || e.message?.includes('429') || e.message?.includes('Quota')) {
             if (targetModel === MODEL_PRO) {
-                console.warn("⚠️ Pro Quota Exceeded. Downgrading to Flash...");
+                console.warn(`⚠️ [AI SMART] Pro Quota Hit for '${taskName}'. Downgrading to Flash...`);
                 lastDowngradeTime = Date.now();
                 
                 // Retry with Flash immediately
@@ -251,7 +253,8 @@ const generateContentSmart = async (contents, config = {}, systemInstruction = u
                 
                 const retryConfig = { ...config };
                 if (systemInstruction) retryConfig.systemInstruction = systemInstruction;
-
+                
+                console.log(`🤖 [AI SMART] Retrying '${taskName}' using model: ${MODEL_FLASH}`);
                 return await ai.models.generateContent({
                     model: MODEL_FLASH,
                     contents: contents,
@@ -260,7 +263,7 @@ const generateContentSmart = async (contents, config = {}, systemInstruction = u
             } else {
                 // Even Flash is failing!
                 aiStatusCache = { status: 'error', message: 'All AI Models Overloaded', lastCheck: Date.now(), activeModel: 'NONE' };
-                throw new Error("System Overloaded. AI Quota Exceeded.");
+                throw new Error(`System Overloaded. Model: ${targetModel} Quota Exceeded.`);
             }
         }
         throw e;
@@ -400,8 +403,8 @@ app.post('/api/admin/analyze-system', async (req, res) => {
         OUTPUT JSON: { "diagnosis": "...", "changes": [{ "filePath": "server.js", "content": "FULL NEW CONTENT", "explanation": "..." }] }
         `;
 
-        // Use smart engine: Tries PRO -> Falls back to Flash -> Recovers automatically
-        const response = await generateContentSmart(prompt, { responseMimeType: "application/json" });
+        // Use smart engine with task name for logging
+        const response = await generateContentSmart(prompt, { responseMimeType: "application/json" }, undefined, "System Diagnosis");
 
         const text = response.text;
         const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
@@ -409,7 +412,9 @@ app.post('/api/admin/analyze-system', async (req, res) => {
 
     } catch (e) {
         console.error("Analyze System Error:", e);
-        if (e.status === 429 || e.message?.includes('429')) return res.status(429).json({ error: "AI Overloaded (429). System recovering..." });
+        if (e.status === 429 || e.message?.includes('429') || e.message?.includes('Quota')) {
+             return res.status(429).json({ error: "AI Overloaded (429). System recovering..." });
+        }
         res.status(500).json({ error: e.message });
     }
 });
@@ -425,8 +430,8 @@ app.post('/api/admin/audit-flow', async (req, res) => {
         OUTPUT JSON: { "isValid": boolean, "issues": [{ "nodeId": "...", "severity": "CRITICAL|WARNING", "issue": "...", "suggestion": "...", "autoFixValue": "..." }] }
         `;
         
-        // Use smart engine: Tries PRO -> Falls back to Flash -> Recovers automatically
-        const response = await generateContentSmart(prompt, { responseMimeType: "application/json" });
+        // Use smart engine with task name for logging
+        const response = await generateContentSmart(prompt, { responseMimeType: "application/json" }, undefined, "Audit Flow");
 
         const text = response.text;
         const jsonStr = text.replace(/```json/g, '').replace(/```/g, '').trim();
@@ -447,6 +452,7 @@ app.post('/api/assistant/chat', async (req, res) => {
     try {
         // Start Chat with current Active Model (Global State)
         const model = getActiveModel();
+        console.log(`💬 [Assistant] Starting chat using model: ${model}`);
         
         const chat = ai.chats.create({
             model: model,
@@ -551,7 +557,7 @@ app.get('/api/health', async (req, res) => {
     // Only verify if cache is stale > 1 min
     if (Date.now() - aiStatusCache.lastCheck > 60000) {
         try {
-            await generateContentSmart("ping", { maxOutputTokens: 1 });
+            await generateContentSmart("ping", { maxOutputTokens: 1 }, undefined, "Health Check");
         } catch(e) { /* Status cache updated inside generateContentSmart */ }
     }
 
@@ -647,7 +653,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
 
 const analyzeWithAI = async (text, systemInstruction) => {
   try {
-    const response = await generateContentSmart(text, { maxOutputTokens: 150 }, systemInstruction);
+    const response = await generateContentSmart(text, { maxOutputTokens: 150 }, systemInstruction, "Incoming Message Analysis");
     return response.text;
   } catch (e) { 
       return "Thanks for contacting Uber Fleet."; 
