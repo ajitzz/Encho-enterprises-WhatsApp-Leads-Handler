@@ -7,6 +7,7 @@ import { WebhookConfigModal } from './components/WebhookConfigModal';
 import { NotificationToast } from './components/NotificationToast';
 import { BotBuilder } from './components/BotBuilder';
 import { AITraining } from './components/AITraining';
+import { AssistantChat } from './components/AssistantChat';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
 import { Driver, LeadStatus, Notification, BotSettings, Message } from './types';
@@ -426,6 +427,9 @@ export default function App() {
           onSendMessage={handleSendMessage}
           onUpdateDriver={handleUpdateDriver}
         />
+        
+        {/* NEW: Fleet Commander Assistant (Jarvis) */}
+        {dataSource === 'live' && <AssistantChat />}
         
         <NotificationToast notifications={notifications} onDismiss={removeNotification} />
       </Layout>

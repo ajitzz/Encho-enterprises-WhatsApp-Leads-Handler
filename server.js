@@ -199,6 +199,65 @@ const ensureDatabaseInitialized = async (client) => {
 // --- AI ENGINE ---
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
+// --- ASSISTANT TOOLS DEFINITION ---
+const ASSISTANT_TOOLS = [
+  {
+    functionDeclarations: [
+      {
+        name: "list_leads",
+        description: "List drivers/leads from the database. Can filter by status or source.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            status: { type: "STRING", description: "Filter by status (New, Qualified, Flagged, Rejected, Onboarded)" },
+            source: { type: "STRING", description: "Filter by source (Organic, Meta Ad)" },
+            limit: { type: "INTEGER", description: "Limit number of results (default 50)" }
+          }
+        }
+      },
+      {
+        name: "update_lead_status",
+        description: "Update the status of a specific driver/lead.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            driver_id: { type: "STRING", description: "The ID of the driver" },
+            new_status: { type: "STRING", description: "The new status (New, Qualified, Flagged, Rejected, Onboarded)" }
+          },
+          required: ["driver_id", "new_status"]
+        }
+      },
+      {
+        name: "get_bot_settings",
+        description: "Get the current configuration of the recruitment bot (instructions, steps, etc).",
+        parameters: { type: "OBJECT", properties: {} }
+      },
+      {
+        name: "update_bot_instruction",
+        description: "Update the System Instruction (Persona) of the recruitment bot. Use this when the user wants to change how the bot behaves.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            instruction: { type: "STRING", description: "The new system prompt/persona for the bot." }
+          },
+          required: ["instruction"]
+        }
+      },
+      {
+        name: "run_sql_analytics",
+        description: "Run a read-only SQL query to get analytics (counts, stats). DO NOT use for modifying data.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            query: { type: "STRING", description: "The SQL SELECT query" }
+          },
+          required: ["query"]
+        }
+      }
+    ]
+  }
+];
+
 // --- ROUTES ---
 
 // NEW: Helper for Recursive File Reading
@@ -265,6 +324,122 @@ app.post('/api/admin/write-files', async (req, res) => {
         
     } catch (e) {
         console.error("Patch Failed:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// NEW: AI ASSISTANT CHAT ENDPOINT
+app.post('/api/assistant/chat', async (req, res) => {
+    const { message, history } = req.body; // history is array of {role, parts: [{text}]}
+    
+    try {
+        const model = "gemini-3-pro-preview"; // Use Pro for tool use reasoning
+        
+        // Construct chat session
+        const chatHistory = history || [];
+        const currentMessage = message;
+
+        // Start Chat with Tools
+        const chat = ai.chats.create({
+            model: model,
+            history: chatHistory,
+            config: {
+                tools: ASSISTANT_TOOLS,
+                systemInstruction: `You are 'Fleet Commander', an advanced AI Operations Manager for an Uber Fleet business.
+                Your goal is to help the user manage leads, update system settings, and analyze performance.
+                
+                You have read/write access to the database via tools.
+                - If the user asks to see leads, use 'list_leads'.
+                - If the user wants to change a lead's status, use 'update_lead_status'.
+                - If the user wants to change how the recruitment bot behaves/speaks, use 'update_bot_instruction'.
+                - If the user asks for stats, use 'run_sql_analytics'.
+                
+                Always be professional, concise, and proactive. confirm actions before doing destructive updates if unsure.
+                If you update the bot instruction, confirm to the user that the "Idea has been saved" and the bot will now behave accordingly.`,
+            }
+        });
+
+        // 1. Send User Message
+        let result = await chat.sendMessage(currentMessage);
+        let response = result.response;
+        
+        // 2. Loop for Tool Execution (Handle multi-turn tool use)
+        // Gemini SDK handles function calling via 'functionCalls' in response
+        // We need to execute them and send 'functionResponse' back.
+        
+        let toolSteps = 0;
+        const MAX_TOOL_STEPS = 5; // Prevent infinite loops
+
+        while (response.functionCalls && response.functionCalls.length > 0 && toolSteps < MAX_TOOL_STEPS) {
+            toolSteps++;
+            const functionCalls = response.functionCalls;
+            const functionResponses = [];
+
+            console.log(`🤖 AI wants to execute ${functionCalls.length} tools...`);
+
+            for (const call of functionCalls) {
+                let toolResult = {};
+                try {
+                    if (call.name === 'list_leads') {
+                        const { status, source, limit } = call.args;
+                        let query = `SELECT id, name, phone_number, status, source, last_message FROM drivers WHERE 1=1`;
+                        const params = [];
+                        if (status) { params.push(status); query += ` AND status = $${params.length}`; }
+                        if (source) { params.push(source); query += ` AND source = $${params.length}`; }
+                        query += ` ORDER BY last_message_time DESC LIMIT ${limit || 10}`;
+                        const dbRes = await queryWithRetry(query, params);
+                        toolResult = { count: dbRes.rows.length, leads: dbRes.rows };
+                    }
+                    else if (call.name === 'update_lead_status') {
+                        const { driver_id, new_status } = call.args;
+                        await queryWithRetry(`UPDATE drivers SET status = $1 WHERE id = $2`, [new_status, driver_id]);
+                        toolResult = { success: true, message: `Updated driver ${driver_id} to ${new_status}` };
+                    }
+                    else if (call.name === 'get_bot_settings') {
+                        const dbRes = await queryWithRetry(`SELECT settings FROM bot_settings WHERE id = 1`);
+                        toolResult = dbRes.rows[0]?.settings || {};
+                    }
+                    else if (call.name === 'update_bot_instruction') {
+                        const { instruction } = call.args;
+                        // Fetch current first, update instruction
+                        const dbRes = await queryWithRetry(`SELECT settings FROM bot_settings WHERE id = 1`);
+                        let settings = dbRes.rows[0]?.settings || DEFAULT_BOT_SETTINGS;
+                        settings.systemInstruction = instruction;
+                        await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(settings)]);
+                        toolResult = { success: true, message: "Bot system instruction updated. New persona active." };
+                    }
+                    else if (call.name === 'run_sql_analytics') {
+                        let { query } = call.args;
+                        // Basic Safety: Prevent DROP, DELETE, INSERT directly via raw SQL tool if not managed
+                        if (/DROP|DELETE|INSERT|UPDATE|ALTER/i.test(query)) {
+                            toolResult = { error: "Safety Violation: Only SELECT queries allowed in analytics tool." };
+                        } else {
+                            const dbRes = await queryWithRetry(query);
+                            toolResult = { rows: dbRes.rows };
+                        }
+                    }
+                } catch (e) {
+                    console.error(`Tool Execution Error (${call.name}):`, e);
+                    toolResult = { error: e.message };
+                }
+
+                functionResponses.push({
+                    name: call.name,
+                    response: { result: toolResult },
+                    id: call.id
+                });
+            }
+
+            // Send Tool Results back to Gemini
+            result = await chat.sendMessage(functionResponses); 
+            response = result.response;
+        }
+
+        // 3. Final Text Response
+        res.json({ text: response.text() });
+
+    } catch (e) {
+        console.error("Assistant Chat Error:", e);
         res.status(500).json({ error: e.message });
     }
 });

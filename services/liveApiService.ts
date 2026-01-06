@@ -152,5 +152,16 @@ export const liveApiService = {
       });
       if (!response.ok) throw new Error('Failed to patch system');
       return await response.json();
+  },
+
+  // --- AI ASSISTANT (JARVIS) ---
+  sendAssistantMessage: async (message: string, history: any[]) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/assistant/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, history })
+      });
+      if (!response.ok) throw new Error('Failed to chat with assistant');
+      return await response.json();
   }
 };
