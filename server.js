@@ -343,21 +343,23 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             let shouldCallAI = false;
 
             // STRATEGY: AI ONLY
+            // STRICT RULE: If AI_ONLY, completely ignore bot logic
             if (botSettings.isEnabled && routingStrategy === 'AI_ONLY') {
                 shouldCallAI = true;
             } 
             // STRATEGY: BOT / HYBRID
             else if (botSettings.isEnabled) {
                  
-                 // RESTART LOGIC FOR 'BOT_ONLY': 
-                 // If bot finished (is_bot_active=false), restart flow from beginning.
+                 // STRICT RULE: RESTART LOGIC FOR 'BOT_ONLY'
+                 // If bot finished (is_bot_active=false), the NEXT message restarts the flow.
                  if (routingStrategy === 'BOT_ONLY' && !driver.is_bot_active) {
                      const firstStepId = botSettings.steps?.[0]?.id;
                      if (firstStepId) {
                          await client.query('UPDATE drivers SET is_bot_active = TRUE, current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
                          driver.is_bot_active = true;
                          driver.current_bot_step_id = firstStepId;
-                         isNewDriver = true; // Force restart
+                         // FORCE NEW: Treat this incoming message as the trigger to send the Welcome Message, not as an answer.
+                         isNewDriver = true; 
                      }
                  }
 
@@ -373,14 +375,16 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                              let nextId = currentStep.nextStepId;
                              
                              // End of Flow Handling
-                             if (nextId === 'AI_HANDOFF' || nextId === 'END') {
+                             if (nextId === 'AI_HANDOFF' || nextId === 'END' || !nextId) {
                                  await client.query('UPDATE drivers SET is_bot_active = FALSE, current_bot_step_id = NULL WHERE id = $1', [driver.id]);
-                                 
-                                 if (nextId === 'AI_HANDOFF') {
-                                     // Hybrid: Switch to AI. Bot Only: End.
-                                     if (routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
-                                     else replyText = "Thank you. We will contact you soon.";
+                                 driver.is_bot_active = false; // Local update for subsequent logic
+
+                                 if (nextId === 'AI_HANDOFF' && routingStrategy === 'HYBRID_BOT_FIRST') {
+                                     // Hybrid: Switch to AI.
+                                     shouldCallAI = true;
                                  } else {
+                                     // Bot Only or Plain End: Just acknowledge.
+                                     // If Bot Only, we stop here. Next user msg will trigger restart block above.
                                      replyText = "Thank you! We have received your details.";
                                  }
                              } else {
@@ -390,7 +394,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                  if (nextStep) {
                                      replyText = nextStep.message;
                                      replyTemplate = nextStep.templateName;
-                                     // FIX: Robust check for options regardless of 'inputType' label
                                      if(nextStep.options && nextStep.options.length > 0) replyOptions = nextStep.options;
                                  }
                              }
@@ -398,12 +401,12 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                              // Send Current Step (Start/Restart)
                              replyText = currentStep.message;
                              replyTemplate = currentStep.templateName;
-                             // FIX: Robust check for options regardless of 'inputType' label
                              if(currentStep.options && currentStep.options.length > 0) replyOptions = currentStep.options;
                          }
                      }
                  } 
-                 // If Bot Inactive, check Hybrid Fallback
+                 // STRICT RULE: HYBRID FALLBACK
+                 // Only if Bot is inactive (and didn't just restart) do we call AI in Hybrid mode
                  else if (routingStrategy === 'HYBRID_BOT_FIRST') {
                      shouldCallAI = true;
                  }

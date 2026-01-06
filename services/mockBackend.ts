@@ -232,9 +232,9 @@ class MockBackendService {
     // STRATEGY: BOT FLOW & HYBRID
     if (settings.isEnabled) {
       
-      // AUTO RESTART Logic for BOT_ONLY
+      // STRICT RULE: AUTO RESTART Logic for BOT_ONLY
+      // If flow finished, NEXT message restarts it.
       if (settings.routingStrategy === 'BOT_ONLY' && !driver.isBotActive) {
-         // Reactivate bot if it finished previously
          driver.isBotActive = true;
          driver.currentBotStepId = settings.steps[0]?.id;
          isNew = true; // Trigger "send welcome" logic immediately
@@ -256,7 +256,7 @@ class MockBackendService {
               // Move to next Step
               const nextId = currentStep.nextStepId;
 
-              if (nextId === 'END' || nextId === 'AI_HANDOFF') {
+              if (nextId === 'END' || nextId === 'AI_HANDOFF' || !nextId) {
                   driver.isBotActive = false;
                   driver.currentBotStepId = undefined;
                   this.persist();
@@ -290,7 +290,7 @@ class MockBackendService {
                   sender: 'system',
                   text: nextStep.templateName ? `[Template: ${nextStep.templateName}] ${nextStep.message}` : nextStep.message,
                   timestamp: Date.now() + 500, // Slight delay
-                  type: nextStep.templateName ? 'template' : (nextStep.inputType === 'option' ? 'options' : 'text'),
+                  type: nextStep.templateName ? 'template' : (nextStep.options && nextStep.options.length > 0 ? 'options' : 'text'),
                   options: nextStep.options
               };
               this.addMessage(driver.id, botMsg);
@@ -347,7 +347,7 @@ class MockBackendService {
                     id: Date.now().toString() + '_auto',
                     sender: 'system',
                     text: isTemplate ? `[Template: ${firstStep.templateName}] Hi ${name}!` : `Hi ${name}! ${firstStep.message}`,
-                    type: isTemplate ? 'template' : (firstStep.inputType === 'option' ? 'options' : 'text'),
+                    type: isTemplate ? 'template' : (firstStep.options && firstStep.options.length > 0 ? 'options' : 'text'),
                     options: firstStep.options,
                     timestamp: Date.now()
                 });
