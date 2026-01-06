@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useEffect } from 'react';
 import { 
   ReactFlow, 
@@ -15,7 +16,6 @@ import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
 import { useFlowStore } from '../services/flowStore'; 
-import { auditBotFlow, analyzeSystemCode } from '../services/geminiService';
 import { 
   MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
   List, Type, Hash, Mail, Globe, Calendar, Clock, 
@@ -509,13 +509,17 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   );
 
   const runAIAudit = async () => {
+      if (!isLiveMode) {
+          alert("AI Audit requires Live Mode (node server.js)");
+          return;
+      }
       setIsAuditing(true);
       try {
-          const report = await auditBotFlow(nodes);
+          // FIXED: Use Backend API instead of Client-Side Service
+          const report = await liveApiService.auditBotFlow(nodes);
           setAuditReport(report);
           
           if (report.issues.length > 0) {
-              // Highlight faulty nodes
               const badNodeIds = report.issues.map((i: any) => i.nodeId);
               const newNodes = nodes.map(n => {
                   if (badNodeIds.includes(n.id)) {
@@ -532,8 +536,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               });
               setNodes(newNodes);
           }
-      } catch (e) {
-          alert("AI Audit Failed");
+      } catch (e: any) {
+          if (e.message.includes('429')) {
+             alert("System Overloaded. Please wait 30 seconds before auditing again.");
+          } else {
+             alert("AI Audit Failed. Check server logs.");
+          }
       } finally {
           setIsAuditing(false);
       }
@@ -542,7 +550,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const applyFix = (issue: any) => {
       if (issue.autoFixValue === 'DELETE_NODE') {
           deleteNode(issue.nodeId);
-          // Update report UI by removing the issue
           setAuditReport((prev: any) => ({
               ...prev,
               issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
@@ -563,7 +570,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               return n;
           });
           setNodes(newNodes);
-          // Remove from report
           setAuditReport((prev: any) => ({
             ...prev,
             issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
@@ -577,28 +583,26 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
           return;
       }
       setShowSystemDoctor(true);
-      try {
-          // Fetch complete project structure now
-          const res = await liveApiService.getProjectContext();
-          setFiles(res.files);
-          setDoctorDiagnosis(null);
-      } catch(e) {
-          alert("Could not access project files. Ensure server is running.");
-          setShowSystemDoctor(false);
-      }
+      // Removed file fetching logic since server handles it now
+      setDoctorDiagnosis(null);
   };
 
   const analyzeCode = async () => {
       setIsAnalyzingCode(true);
       try {
-          const res = await analyzeSystemCode(files, issueDescription);
+          // FIXED: Use Backend API
+          const res = await liveApiService.analyzeSystem(issueDescription);
           setDoctorDiagnosis(res);
-          // Select first changed file if any
           if (res.changes && res.changes.length > 0) {
               setSelectedFile(res.changes[0].filePath);
           }
-      } catch(e) {
-          alert("Analysis Failed");
+      } catch(e: any) {
+          console.error(e);
+          if (e.message.includes('429')) {
+              alert("System Overloaded (429). Please wait 30s before trying again.");
+          } else {
+              alert("Analysis Failed. Check server console.");
+          }
       } finally {
           setIsAnalyzingCode(false);
       }
@@ -620,7 +624,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
   const handleSave = async () => {
       let hasValidationErrors = false;
-      
       const newNodes = nodes.map(node => {
           if (node.data.type === 'start') return node;
           
