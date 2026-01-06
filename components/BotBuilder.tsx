@@ -557,17 +557,17 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       nodes.forEach(node => {
           if (node.data.type === 'start') return;
 
+          // FIND NEXT STEP:
+          // We look for ANY edge starting from this node.
+          // Since the backend currently supports a linear flow (single nextStepId),
+          // we take the first outgoing edge we find, regardless of whether it's 
+          // a 'main' handle or an 'option' handle.
           const outgoingEdges = edges.filter(e => e.source === node.id);
           
           let nextStepId = 'END';
-          // Find logic for next step based on connection
-          // Simple logic: Take the first connection from 'main' handle or default handle
-          const mainEdge = outgoingEdges.find(e => e.sourceHandle === 'main' || !e.sourceHandle);
-          if (mainEdge) nextStepId = mainEdge.target;
-          else if (outgoingEdges.length > 0 && node.data.inputType !== 'option') nextStepId = outgoingEdges[0].target; 
-          
-          // For options, nextStepId is complex (one per option), simplified here for demo backend which expects linear or single branch
-          // In a real sophisticated bot, 'nextStepId' might be a map. For now, we save the default flow.
+          if (outgoingEdges.length > 0) {
+              nextStepId = outgoingEdges[0].target;
+          }
 
           compiledSteps.push({
             id: node.id,
@@ -590,7 +590,10 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       if (isLiveMode) {
           try {
              await liveApiService.saveBotSettings(newSettings);
-          } catch(e) { console.error(e); }
+          } catch(e) { 
+             console.error("Save failed", e);
+             alert("Failed to save to live server.");
+          }
       } else {
           mockBackend.updateBotSettings(newSettings);
       }

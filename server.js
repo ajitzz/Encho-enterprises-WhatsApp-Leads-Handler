@@ -228,23 +228,62 @@ app.post('/api/bot-settings', async (req, res) => {
 
 // --- LOGIC ENGINE ---
 
+// FIXED: Enhanced to support LIST MESSAGES for > 3 options
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return;
+  
   let payload = { messaging_product: 'whatsapp', to: to };
+  
   if (templateName) {
     payload.type = 'template';
     payload.template = { name: templateName, language: { code: language } };
   } else if (options && options.length > 0) {
-    payload.type = 'interactive';
-    payload.interactive = {
-      type: 'button',
-      body: { text: body },
-      action: { buttons: options.slice(0, 3).map((opt, i) => ({ type: 'reply', reply: { id: `btn_${i}`, title: opt.substring(0, 20) } })) }
-    };
+    // FILTER: Remove empty options
+    const validOptions = options.filter(o => o && o.trim().length > 0);
+    
+    if (validOptions.length === 0) {
+        payload.type = 'text';
+        payload.text = { body: body };
+    } 
+    // IF > 3 OPTIONS: Use LIST MESSAGE (Menu)
+    else if (validOptions.length > 3) {
+        payload.type = 'interactive';
+        payload.interactive = {
+            type: 'list',
+            body: { text: body },
+            action: {
+                button: "Select Option",
+                sections: [
+                    {
+                        title: "Choices",
+                        rows: validOptions.slice(0, 10).map((opt, i) => ({
+                            id: `opt_${i}`,
+                            title: opt.substring(0, 24) // Title limit 24 chars for list
+                        }))
+                    }
+                ]
+            }
+        };
+    } 
+    // IF 1-3 OPTIONS: Use BUTTONS
+    else {
+        payload.type = 'interactive';
+        payload.interactive = {
+            type: 'button',
+            body: { text: body },
+            action: { 
+                buttons: validOptions.map((opt, i) => ({ 
+                    type: 'reply', 
+                    reply: { id: `btn_${i}`, title: opt.substring(0, 20) } 
+                })) 
+            }
+        };
+    }
   } else {
     payload.type = 'text';
     payload.text = { body: body };
   }
+  
   try {
     await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, payload, { headers: { Authorization: `Bearer ${META_API_TOKEN}` } });
   } catch (error) { console.error('Meta API Error:', error.response ? error.response.data : error.message); }
@@ -351,14 +390,16 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                  if (nextStep) {
                                      replyText = nextStep.message;
                                      replyTemplate = nextStep.templateName;
-                                     if(nextStep.inputType === 'option') replyOptions = nextStep.options;
+                                     // FIX: Robust check for options regardless of 'inputType' label
+                                     if(nextStep.options && nextStep.options.length > 0) replyOptions = nextStep.options;
                                  }
                              }
                          } else {
                              // Send Current Step (Start/Restart)
                              replyText = currentStep.message;
                              replyTemplate = currentStep.templateName;
-                             if(currentStep.inputType === 'option') replyOptions = currentStep.options;
+                             // FIX: Robust check for options regardless of 'inputType' label
+                             if(currentStep.options && currentStep.options.length > 0) replyOptions = currentStep.options;
                          }
                      }
                  } 
@@ -407,7 +448,18 @@ app.post('/webhook', async (req, res) => {
         const name = contact?.profile?.name || 'Unknown';
         let msgBody = msgObj.text?.body || '[Media]';
         let msgType = 'text';
-        if (msgObj.type === 'interactive') { msgBody = msgObj.interactive.button_reply.title; msgType = 'option_reply'; }
+        // Handle Button/List replies
+        if (msgObj.type === 'interactive') { 
+            // LIST REPLY
+            if (msgObj.interactive.type === 'list_reply') {
+                msgBody = msgObj.interactive.list_reply.title;
+            }
+            // BUTTON REPLY
+            else if (msgObj.interactive.type === 'button_reply') {
+                msgBody = msgObj.interactive.button_reply.title; 
+            }
+            msgType = 'option_reply'; 
+        }
         else if (msgObj.type === 'image') { msgBody = '[Image]'; msgType = 'image'; }
         
         await processIncomingMessage(phone, name, msgBody, msgType);
