@@ -576,7 +576,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             inputType: node.data.inputType,
             options: node.data.options,
             saveToField: node.data.saveToField,
-            nextStepId: nextStepId
+            nextStepId: nextStepId,
+            mediaUrl: node.data.mediaUrl // ADDED MEDIA URL
           });
       });
 

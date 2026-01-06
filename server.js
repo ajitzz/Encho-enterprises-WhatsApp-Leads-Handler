@@ -261,8 +261,8 @@ app.post('/api/messages/send', async (req, res) => {
 
 // --- LOGIC ENGINE ---
 
-// FIXED: Enhanced to support LIST MESSAGES for > 3 options
-const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US') => {
+// FIXED: Enhanced to support LIST MESSAGES for > 3 options and rich media (image/video/document)
+const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return;
   
   let payload = { messaging_product: 'whatsapp', to: to };
@@ -270,6 +270,11 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
   if (templateName) {
     payload.type = 'template';
     payload.template = { name: templateName, language: { code: language } };
+  } else if (mediaUrl) {
+    // Media Message (Image, Video, or Document)
+    payload.type = mediaType;
+    payload[mediaType] = { link: mediaUrl };
+    if (body) payload[mediaType].caption = body; // Add caption if provided
   } else if (options && options.length > 0) {
     // FILTER: Remove empty options
     const validOptions = options.filter(o => o && o.trim().length > 0);
@@ -335,15 +340,15 @@ const analyzeWithAI = async (text, systemInstruction) => {
 };
 
 // HELPER: Log system messages (Bot/AI) to database so they appear in chat history
-const logSystemMessage = async (driverId, text, type = 'text', options = null) => {
+const logSystemMessage = async (driverId, text, type = 'text', options = null, imageUrl = null) => {
     try {
         const msgId = Date.now().toString() + '_' + Math.random().toString(36).substr(2, 5);
         // Ensure options is an array for Postgres or null
         const opts = options && options.length > 0 ? options : null;
         
         await queryWithRetry(
-            `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, options) VALUES ($1, $2, 'system', $3, $4, $5, $6)`,
-            [msgId, driverId, text, Date.now(), type, opts]
+            `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, options, image_url) VALUES ($1, $2, 'system', $3, $4, $5, $6, $7)`,
+            [msgId, driverId, text, Date.now(), type, opts, imageUrl]
         );
         await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text, Date.now(), driverId]);
     } catch (e) {
@@ -390,6 +395,8 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             let replyText = null;
             let replyOptions = null;
             let replyTemplate = null;
+            let replyMedia = null;
+            let replyMediaType = null;
             let shouldCallAI = false;
 
             // STRATEGY: AI ONLY
@@ -454,6 +461,10 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                  if (nextStep) {
                                      replyText = nextStep.message;
                                      replyTemplate = nextStep.templateName;
+                                     replyMedia = nextStep.mediaUrl;
+                                     if (nextStep.title === 'Video') replyMediaType = 'video';
+                                     else if (nextStep.title === 'Image') replyMediaType = 'image';
+                                     else if (nextStep.title === 'File') replyMediaType = 'document';
                                      if(nextStep.options && nextStep.options.length > 0) replyOptions = nextStep.options;
                                  }
                              }
@@ -461,6 +472,10 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                              // Send Current Step (Start/Restart)
                              replyText = currentStep.message;
                              replyTemplate = currentStep.templateName;
+                             replyMedia = currentStep.mediaUrl;
+                             if (currentStep.title === 'Video') replyMediaType = 'video';
+                             else if (currentStep.title === 'Image') replyMediaType = 'image';
+                             else if (currentStep.title === 'File') replyMediaType = 'document';
                              if(currentStep.options && currentStep.options.length > 0) replyOptions = currentStep.options;
                          }
                      }
@@ -473,7 +488,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             }
 
             await client.query('COMMIT');
-            result = { replyText, replyOptions, replyTemplate, shouldCallAI, driver, botSettings };
+            result = { replyText, replyOptions, replyTemplate, replyMedia, replyMediaType, shouldCallAI, driver, botSettings };
 
         } catch (err) {
             await client.query('ROLLBACK');
@@ -488,6 +503,10 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         if (result.replyTemplate) {
             await sendWhatsAppMessage(from, null, null, result.replyTemplate);
             await logSystemMessage(result.driver.id, `[Template] ${result.replyTemplate}`, 'template');
+        }
+        else if (result.replyMedia) {
+            await sendWhatsAppMessage(from, result.replyText, null, null, 'en_US', result.replyMedia, result.replyMediaType);
+            await logSystemMessage(result.driver.id, result.replyText || `[${result.replyMediaType}]`, 'image', null, result.replyMedia);
         }
         else if (result.replyText) {
             await sendWhatsAppMessage(from, result.replyText, result.replyOptions);

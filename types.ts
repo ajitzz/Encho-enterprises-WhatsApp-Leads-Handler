@@ -1,3 +1,4 @@
+
 export enum LeadStatus {
   NEW = 'New',
   QUALIFIED = 'Qualified',
@@ -82,6 +83,9 @@ export interface BotStep {
   // Template Integration
   templateName?: string; // The ID/Name of the template in Meta
   templateLanguage?: string; // e.g. en_US, ml_IN
+  
+  // Rich Media
+  mediaUrl?: string;
 }
 
 export interface BotSettings {

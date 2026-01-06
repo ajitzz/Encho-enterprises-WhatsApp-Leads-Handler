@@ -296,8 +296,9 @@ class MockBackendService {
                   sender: 'system',
                   text: nextStep.templateName ? `[Template: ${nextStep.templateName}] ${nextStep.message}` : nextStep.message,
                   timestamp: Date.now() + 500, // Slight delay
-                  type: nextStep.templateName ? 'template' : (nextStep.options && nextStep.options.length > 0 ? 'options' : 'text'),
-                  options: nextStep.options
+                  type: nextStep.templateName ? 'template' : (nextStep.options && nextStep.options.length > 0 ? 'options' : (nextStep.mediaUrl ? 'image' : 'text')),
+                  options: nextStep.options,
+                  imageUrl: nextStep.mediaUrl // Pass media url as imageUrl for simulator display
               };
               this.addMessage(driver.id, botMsg);
               this.persist();
@@ -353,8 +354,9 @@ class MockBackendService {
                     id: Date.now().toString() + '_auto',
                     sender: 'system',
                     text: isTemplate ? `[Template: ${firstStep.templateName}] Hi ${name}!` : `Hi ${name}! ${firstStep.message}`,
-                    type: isTemplate ? 'template' : (firstStep.options && firstStep.options.length > 0 ? 'options' : 'text'),
+                    type: isTemplate ? 'template' : (firstStep.options && firstStep.options.length > 0 ? 'options' : (firstStep.mediaUrl ? 'image' : 'text')),
                     options: firstStep.options,
+                    imageUrl: firstStep.mediaUrl,
                     timestamp: Date.now()
                 });
             }, 500);
