@@ -22,7 +22,7 @@ import { liveApiService } from '../services/liveApiService';
 import { 
   MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
   List, Type, Hash, Mail, Globe, Calendar, Clock, 
-  LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Pencil, Bold, Italic, Link, Play, AlertTriangle
+  LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Pencil, Bold, Italic, Link, Play, AlertTriangle, ShieldAlert
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
@@ -110,7 +110,7 @@ const CustomNode = ({ data, id, selected }: any) => {
              
              {hasError && (
                  <div className="absolute -top-3 left-4 bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 shadow-sm">
-                     <AlertTriangle size={10} /> {data.errorMessage || "Missing Information"}
+                     <AlertTriangle size={10} /> {data.errorMessage || "Validation Error"}
                  </div>
              )}
 
@@ -151,7 +151,7 @@ const CustomNode = ({ data, id, selected }: any) => {
 
                 {/* --- TEXT TYPE --- */}
                 {(data.label === 'Text') && (
-                    <div className={`rounded-xl border ${!data.message && hasError ? 'border-red-500 bg-red-50/10' : 'border-green-500 ring-1 ring-green-100'} transition-all duration-200`}>
+                    <div className={`rounded-xl border ${hasError ? 'border-red-500 bg-red-50/10' : 'border-green-500 ring-1 ring-green-100'} transition-all duration-200`}>
                         <div className="p-4 relative">
                             <textarea 
                                 className="w-full bg-transparent border-none p-0 text-sm text-gray-800 placeholder-gray-300 focus:ring-0 resize-none leading-relaxed font-medium"
@@ -160,7 +160,6 @@ const CustomNode = ({ data, id, selected }: any) => {
                                 value={data.message}
                                 onChange={(e) => handleChange('message', e.target.value)}
                             />
-                            {(!data.message || data.message.includes("Replace this")) && hasError && <span className="text-red-500 text-xs font-bold absolute bottom-2 left-4">Valid message required</span>}
                         </div>
                     </div>
                 )}
@@ -168,7 +167,7 @@ const CustomNode = ({ data, id, selected }: any) => {
                 {/* --- CHOICE TYPES --- */}
                 {isOptionType && (
                     <div className="space-y-3">
-                         <div className={`p-3 rounded-lg border ${!data.message && hasError ? 'border-red-300 bg-red-50' : 'border-gray-200 bg-gray-50'} mb-3`}>
+                         <div className={`p-3 rounded-lg border ${hasError && !data.message ? 'border-red-300 bg-red-50' : 'border-gray-200 bg-gray-50'} mb-3`}>
                             <textarea 
                                 className="w-full bg-transparent border-none p-0 text-sm text-gray-800 placeholder-gray-400 focus:ring-0 resize-none leading-relaxed"
                                 rows={2}
@@ -209,7 +208,7 @@ const CustomNode = ({ data, id, selected }: any) => {
                 {/* --- INPUT TYPES --- */}
                 {isInputType && (
                     <div className="space-y-4">
-                        <div className={`p-3 rounded-lg border ${!data.message && hasError ? 'border-red-300 bg-red-50' : 'border-gray-200 bg-gray-50'}`}>
+                        <div className={`p-3 rounded-lg border ${hasError && !data.message ? 'border-red-300 bg-red-50' : 'border-gray-200 bg-gray-50'}`}>
                              <label className="block text-xs font-bold text-gray-500 mb-1">Question</label>
                             <textarea 
                                 className="w-full bg-transparent border-none p-0 text-sm text-gray-800 placeholder-gray-400 focus:ring-0 resize-none leading-relaxed"
@@ -256,13 +255,14 @@ const CustomNode = ({ data, id, selected }: any) => {
 
   // --- 3. PREVIEW MODE (Unselected) ---
   return (
-    <div className={`w-[280px] bg-white rounded-2xl shadow-md border transition-all hover:shadow-lg group relative cursor-pointer ${hasError ? 'border-red-400' : 'border-gray-200 hover:border-gray-300'}`}>
+    <div className={`w-[280px] bg-white rounded-2xl shadow-md border transition-all hover:shadow-lg group relative cursor-pointer ${hasError ? 'border-red-500 ring-2 ring-red-100' : 'border-gray-200 hover:border-gray-300'}`}>
         <Handle type="target" position={Position.Left} style={HANDLE_STYLE} className="-left-2.5" />
         
         {/* Error Indicator */}
         {hasError && (
-             <div className="absolute -top-2 -right-2 bg-red-500 text-white p-1 rounded-full shadow-md z-10 animate-pulse">
-                <AlertTriangle size={14} />
+             <div className="absolute -top-3 -right-2 bg-red-600 text-white px-2 py-1 rounded-full shadow-md z-10 flex items-center gap-1">
+                <ShieldAlert size={12} />
+                <span className="text-[10px] font-bold">Fix Me</span>
              </div>
         )}
 
@@ -285,8 +285,8 @@ const CustomNode = ({ data, id, selected }: any) => {
         <div className="p-4">
             {/* Text Preview */}
             {(data.label === 'Text') && (
-                <p className="text-sm text-gray-600 line-clamp-3 font-medium">
-                    {data.message || <span className="text-red-400 italic text-xs flex items-center gap-1 font-bold">Message required</span>}
+                <p className={`text-sm line-clamp-3 font-medium ${hasError ? 'text-red-600' : 'text-gray-600'}`}>
+                    {data.message || "Message required"}
                 </p>
             )}
 
@@ -304,18 +304,15 @@ const CustomNode = ({ data, id, selected }: any) => {
                             </div>
                         )}
                      </div>
-                     {data.message ? (
-                        <p className="text-xs text-gray-500 truncate">{data.message}</p>
-                     ) : (
-                        data.label === 'Video' ? null : <span className="text-gray-300 text-[10px] italic">No caption</span>
-                     )}
                 </div>
             )}
 
              {/* Choices Preview */}
              {isOptionType && (
                 <div className="space-y-2">
-                    <p className="text-xs text-gray-600 mb-2">{data.message || <span className="text-red-400 italic text-xs font-bold">Question required</span>}</p>
+                    <p className={`text-xs mb-2 ${hasError ? 'text-red-600 font-bold' : 'text-gray-600'}`}>
+                        {data.message || "Question text required"}
+                    </p>
                     <div className="flex flex-col gap-1.5">
                         {options.map((opt, i) => (
                             <div key={i} className="w-full bg-gray-50 border border-gray-200 text-gray-600 py-1.5 px-3 rounded text-xs font-medium text-center relative">
@@ -325,11 +322,6 @@ const CustomNode = ({ data, id, selected }: any) => {
                         {options.length === 0 && <span className="text-xs text-red-400 italic font-bold">Add at least one option</span>}
                     </div>
                 </div>
-             )}
-             
-             {/* Input Preview */}
-             {isInputType && (
-                 <p className="text-xs text-gray-600 mb-2">{data.message || <span className="text-red-400 italic text-xs font-bold">Question required</span>}</p>
              )}
         </div>
 
@@ -508,27 +500,30 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
           let errorMsg = '';
           const { label, message, mediaUrl, inputType, options } = node.data;
           
-          // 1. Text/Questions must have message, and CANNOT contain the placeholder
+          // 1. TEXT / QUESTION VALIDATION
           if ((label === 'Text' || inputType === 'option' || inputType === 'text')) {
              if (!message || !message.trim()) {
                  error = true;
-                 errorMsg = 'Message required';
-             } else if (message.includes('Replace this sample message')) {
+                 errorMsg = 'Message cannot be empty';
+             } else if (message.toLowerCase().includes('replace this sample message')) {
                  error = true;
-                 errorMsg = 'Remove placeholder text';
+                 errorMsg = 'REMOVE PLACEHOLDER TEXT';
+             } else if (message.toLowerCase().includes('enter your message')) {
+                 error = true;
+                 errorMsg = 'REMOVE PLACEHOLDER TEXT';
              }
           }
 
-          // 2. Media must have URL (message optional)
+          // 2. MEDIA VALIDATION
           if ((label === 'Image' || label === 'Video') && (!mediaUrl || !mediaUrl.trim())) {
               error = true;
               errorMsg = 'Media URL required';
           }
 
-          // 3. Options must have at least 1 option
+          // 3. OPTIONS VALIDATION
           if (inputType === 'option' && (!options || options.length === 0)) {
               error = true;
-              errorMsg = 'Add options';
+              errorMsg = 'Add at least 1 option';
           }
 
           if (error) hasValidationErrors = true;
@@ -541,7 +536,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
       if (hasValidationErrors) {
           setNodes(newNodes);
-          alert("Cannot Save: Validation Failed.\n\nCheck for empty messages or 'Replace this sample message' placeholders in red nodes.");
+          alert("Cannot Save: Validation Failed.\n\nPlease remove all 'Replace this sample message' placeholders and ensure all fields are filled.");
           return;
       }
 

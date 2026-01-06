@@ -35,6 +35,14 @@ let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "982841698238647";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0";
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
+// --- SECURITY: CONTENT FIREWALL ---
+const BLOCKED_PHRASES = [
+    "replace this sample message",
+    "enter your message",
+    "type your message here",
+    "replace this text"
+];
+
 // --- ROBUST DATABASE CONNECTION ---
 
 // 1. Force the Pooled Connection String
@@ -234,7 +242,7 @@ app.post('/api/messages/send', async (req, res) => {
         const sent = await sendWhatsAppMessage(phoneNumber, text);
         
         if (!sent) {
-            return res.status(400).json({ error: 'Message blocked due to validation rules.' });
+            return res.status(400).json({ error: 'Message blocked by firewall: Invalid content or placeholder detected.' });
         }
 
         const msgId = Date.now().toString(); 
@@ -259,24 +267,40 @@ app.post('/api/messages/send', async (req, res) => {
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
   
-  // --- STRICT VALIDATION & BLOCKING ---
-  // The user explicitly wants to STOP empty messages or the "Replace this sample message!" placeholder.
-  // We do NOT replace it. We BLOCK it.
+  // --- STRICT CONTENT FIREWALL ---
+  // Blocks empty messages and known placeholders
   
-  const isInvalidBody = !body || !body.trim() || body.includes("Replace this sample message!") || body.includes("Replace this sample message");
-  
-  // Rule 1: Templates and Media (without caption) are allowed to have empty bodies.
-  // Rule 2: Interactive (Options) and Text messages MUST have a valid body.
-  
-  if (!templateName && !mediaUrl && isInvalidBody) {
-      console.error(`⛔ BLOCKED: Invalid message body to ${to}. Content: "${body}"`);
-      return false; // Return false indicating blocked
+  // 1. Check for Blocked Phrases (Case Insensitive)
+  const lowerBody = body ? body.toLowerCase() : "";
+  const isPlaceholder = BLOCKED_PHRASES.some(phrase => lowerBody.includes(phrase));
+  const isEmpty = !body || !body.trim();
+
+  // 2. Filter logic based on message type
+  let isBlocked = false;
+
+  // Case A: Templates (Safe, body ignored usually)
+  if (templateName) {
+      isBlocked = false;
+  }
+  // Case B: Media (Body is caption, optional, BUT must not be placeholder)
+  else if (mediaUrl) {
+      if (isPlaceholder) {
+          console.error(`⛔ FIREWALL: Blocked Media Caption containing placeholder: "${body}"`);
+          // We clear the caption but still send the media to prevent breaking flow completely? 
+          // NO, user asked for strict blocking.
+          isBlocked = true; 
+      }
+  }
+  // Case C: Text / Interactive
+  else {
+      if (isEmpty || isPlaceholder) {
+           console.error(`⛔ FIREWALL: Blocked Text/Interactive message: "${body}"`);
+           isBlocked = true;
+      }
   }
 
-  // Rule 3: Interactive messages (Lists/Buttons) must have a body text according to Meta API.
-  if (options && options.length > 0 && isInvalidBody) {
-      console.error(`⛔ BLOCKED: Interactive message to ${to} missing body text.`);
-      return false;
+  if (isBlocked) {
+      return false; // ABORT TRANSMISSION
   }
 
   let payload = { messaging_product: 'whatsapp', to: to };
@@ -285,21 +309,18 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
     payload.type = 'template';
     payload.template = { name: templateName, language: { code: language } };
   } else if (mediaUrl) {
-    // Media Message
     payload.type = mediaType;
     payload[mediaType] = { link: mediaUrl };
-    if (!isInvalidBody) {
+    if (body && body.trim().length > 0) {
         payload[mediaType].caption = body; 
     }
   } else if (options && options.length > 0) {
     const validOptions = options.filter(o => o && o.trim().length > 0);
     
     if (validOptions.length === 0) {
-        // Fallback to text if options are empty (unlikely due to validation)
         payload.type = 'text';
         payload.text = { body: body };
     } 
-    // IF > 3 OPTIONS: Use LIST MESSAGE (Menu)
     else if (validOptions.length > 3) {
         payload.type = 'interactive';
         payload.interactive = {
@@ -319,7 +340,6 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
             }
         };
     } 
-    // IF 1-3 OPTIONS: Use BUTTONS
     else {
         payload.type = 'interactive';
         payload.interactive = {
@@ -334,7 +354,6 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
         };
     }
   } else {
-    // Pure Text Message
     payload.type = 'text';
     payload.text = { body: body };
   }
@@ -425,12 +444,9 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             // STRATEGY: BOT / HYBRID
             else if (botSettings.isEnabled) {
                  
-                 // RESTART LOGIC for BOT_ONLY or HYBRID
-                 // If bot finished previously, restart flow on new message
+                 // RESTART LOGIC
                  if (!driver.is_bot_active) {
-                     // Check strategy before restarting or doing AI
                      if (routingStrategy === 'BOT_ONLY') {
-                         // Force restart in BOT_ONLY
                          const firstStepId = botSettings.steps?.[0]?.id;
                          if (firstStepId) {
                              await client.query('UPDATE drivers SET is_bot_active = TRUE, current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
@@ -439,15 +455,12 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                              isNewDriver = true; 
                          }
                      } else if (routingStrategy === 'HYBRID_BOT_FIRST') {
-                         // In Hybrid, if bot inactive, use AI
                          shouldCallAI = true;
                      }
                  }
 
                  if (driver.is_bot_active && driver.current_bot_step_id) {
                      let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
-                     
-                     // Validate step exists
                      if (!currentStep && botSettings.steps.length > 0) {
                          const firstStepId = botSettings.steps[0].id;
                          await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
@@ -457,7 +470,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      }
 
                      if (currentStep) {
-                         // Process Input (If not new/restart)
+                         // Process Input
                          if (!isNewDriver) {
                              if (currentStep.saveToField === 'name') await client.query('UPDATE drivers SET name = $1 WHERE id = $2', [msgBody, driver.id]);
                              if (currentStep.saveToField === 'availability') await client.query('UPDATE drivers SET availability = $1 WHERE id = $2', [msgBody, driver.id]);
@@ -490,7 +503,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                  }
                              }
                          } else {
-                             // Send Current Step (Start/Restart)
+                             // Send Current Step
                              replyText = currentStep.message;
                              replyTemplate = currentStep.templateName;
                              replyMedia = currentStep.mediaUrl;
@@ -503,9 +516,11 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                  } 
             }
             
-            // STRICT SAFETY CHECK: Ensure AI is NOT called if strategy is BOT_ONLY
+            // --- STRICT AI LOCK ---
+            // If strategy is BOT_ONLY, completely disable AI.
+            // This is a HARD OVERRIDE to prevent any leakage.
             if (routingStrategy === 'BOT_ONLY') {
-                shouldCallAI = false;
+                shouldCallAI = false; 
             }
 
             await client.query('COMMIT');
@@ -521,7 +536,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
         // Post-Transaction Actions
         
-        // CHECK: If reply is text/options, sendWhatsAppMessage might return false if body is invalid.
         let sent = false;
         
         if (result.replyTemplate) {
@@ -531,24 +545,21 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         else if (result.replyMedia) {
             sent = await sendWhatsAppMessage(from, result.replyText, null, null, 'en_US', result.replyMedia, result.replyMediaType);
             if (sent) await logSystemMessage(result.driver.id, result.replyText || `[${result.replyMediaType}]`, 'image', null, result.replyMedia);
+            else if (result.driver) await logSystemMessage(result.driver.id, "⚠️ Blocked invalid media caption", "warning");
         }
         else if (result.replyText) {
-            // Attempt to send
             sent = await sendWhatsAppMessage(from, result.replyText, result.replyOptions);
-            
             if (sent) {
                 const type = result.replyOptions && result.replyOptions.length > 0 ? 'options' : 'text';
                 await logSystemMessage(result.driver.id, result.replyText, type, result.replyOptions);
             } else {
-                // If blocked (returns false), log warning
                 if (result.driver && result.driver.is_bot_active) {
-                    await logSystemMessage(result.driver.id, "⚠️ System blocked invalid message (empty/placeholder).", 'warning');
+                    await logSystemMessage(result.driver.id, "⚠️ Blocked: Invalid content or placeholder.", 'warning');
                 }
             }
         }
         else if (result.shouldCallAI) {
             const aiReply = await analyzeWithAI(msgBody, result.botSettings.systemInstruction);
-            // AI responses should be safe, but good to check
             if (aiReply && aiReply.trim()) {
                 sent = await sendWhatsAppMessage(from, aiReply);
                 if (sent) await logSystemMessage(result.driver.id, aiReply, 'text');
