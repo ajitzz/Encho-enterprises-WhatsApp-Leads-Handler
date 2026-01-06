@@ -72,9 +72,11 @@ const CustomNode = ({ data, id, selected }: any) => {
   };
 
   const handleDelete = () => {
+    // Allow deleting Start node if user really wants to (since we added drag-drop support to restore it)
+    // But warn them it breaks the flow until restored.
     if (data.type === 'start') {
-        alert("Cannot delete the Start node. It is the entry point of your flow.");
-        return;
+        const confirm = window.confirm("Deleting the Start node will break the flow entry point. Are you sure?");
+        if (!confirm) return;
     }
     deleteNode(id);
   };
@@ -98,6 +100,12 @@ const CustomNode = ({ data, id, selected }: any) => {
             <p className="text-xs font-medium text-gray-500">Entry Point</p>
         </div>
         <Handle type="source" position={Position.Right} style={ACTIVE_HANDLE_STYLE} className="-right-3" />
+        <button 
+            onClick={handleDelete}
+            className="absolute -top-2 -right-2 bg-gray-200 hover:bg-red-500 hover:text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all shadow-sm"
+        >
+            <X size={12} />
+        </button>
       </div>
     );
   }
@@ -473,14 +481,35 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
     const load = async () => {
         let settings: BotSettings;
         if (isLiveMode) {
-             try { settings = await liveApiService.getBotSettings(); } catch(e) { return; }
+             try { 
+                 settings = await liveApiService.getBotSettings(); 
+                 // PATCH: If Live data is empty or missing flow data, fallback to Mock structure to ensure consistency.
+                 if (!settings.flowData || !settings.flowData.nodes || settings.flowData.nodes.length === 0) {
+                     console.log("Live flow empty, using default template.");
+                     settings.flowData = mockBackend.getBotSettings().flowData;
+                 }
+             } catch(e) { return; }
         } else {
              settings = mockBackend.getBotSettings();
         }
 
-        if (settings.flowData && settings.flowData.nodes && settings.flowData.nodes.length > 0) {
+        let loadedNodes = settings.flowData?.nodes || [];
+        let loadedEdges = settings.flowData?.edges || [];
+
+        // 1. Ensure Start Node Exists (Vital for consistency)
+        const hasStart = loadedNodes.some((n: any) => n.data.type === 'start' || n.type === 'start' || n.id === 'start');
+        if (!hasStart) {
+            loadedNodes.unshift({ 
+                id: 'start', 
+                type: 'custom', 
+                position: { x: 50, y: 300 }, 
+                data: { type: 'start', label: 'Start' } 
+            });
+        }
+
+        if (loadedNodes.length > 0) {
             // Auto-clean placeholders on load
-            const cleanedNodes = settings.flowData.nodes.map((n: any) => {
+            const cleanedNodes = loadedNodes.map((n: any) => {
                 const newData = { ...n.data };
                 const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
                 if (newData.message && BLOCKED_REGEX.test(newData.message)) {
@@ -492,11 +521,9 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             });
 
             setNodes(cleanedNodes);
-            setEdges(settings.flowData.edges);
+            setEdges(loadedEdges);
         } else {
-            // FALLBACK: If flowData is missing (common on new Live connection),
-            // ensure we always have the START node at minimum.
-            // This fixes the "Entry point is not there" issue when switching to Live.
+            // Absolute Fallback (Should be caught by PATCH above, but double safety)
             const defaultStartNode: Node = { 
                 id: 'start', 
                 type: 'custom', 
@@ -530,6 +557,20 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         y: event.clientY,
       });
 
+      // Handle 'start' node drop
+      if (type === 'start') {
+          const startNode: Node = {
+              id: 'start', // Ensure fixed ID for start
+              type: 'custom',
+              position,
+              data: { type: 'start', label: 'Start' }
+          };
+          // Remove existing start if any to enforce single entry
+          const nodesWithoutStart = nodes.filter(n => n.data.type !== 'start' && n.id !== 'start');
+          setNodes([...nodesWithoutStart, startNode]);
+          return;
+      }
+
       // Handle 'end' node drop separately
       if (type === 'end') {
           const endNode: Node = {
@@ -559,7 +600,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
       addNode(newNode);
     },
-    [reactFlowInstance, addNode],
+    [reactFlowInstance, addNode, nodes, setNodes],
   );
 
   const runAIAudit = async () => {
@@ -886,6 +927,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 <div>
                     <h4 className="text-xs font-bold text-gray-400 uppercase mb-3 tracking-wider">Logic</h4>
                     <div className="space-y-2">
+                        <DraggableSidebarItem type="start" label="Start Point" icon={<Flag size={16} className="text-green-500" />} />
                         <DraggableSidebarItem type="end" label="End Point" icon={<StopCircle size={16} className="text-red-500" />} />
                     </div>
                 </div>
