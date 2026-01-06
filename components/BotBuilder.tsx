@@ -15,12 +15,12 @@ import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
 import { useFlowStore } from '../services/flowStore'; 
-import { auditBotFlow } from '../services/geminiService';
+import { auditBotFlow, analyzeSystemCode } from '../services/geminiService';
 import { 
   MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
   List, Type, Hash, Mail, Globe, Calendar, Clock, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Play, AlertTriangle, ShieldAlert, GripVertical, Settings,
-  MousePointerClick, Bold, Italic, Link, MoreHorizontal, Upload, Cloud, Stethoscope, Wand2
+  MousePointerClick, Bold, Italic, Link, MoreHorizontal, Upload, Cloud, Stethoscope, Wand2, Terminal, Code
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
@@ -407,6 +407,15 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const [isSaving, setIsSaving] = useState(false);
   const [isAuditing, setIsAuditing] = useState(false);
   const [auditReport, setAuditReport] = useState<any>(null);
+  
+  // SYSTEM DOCTOR STATES
+  const [showSystemDoctor, setShowSystemDoctor] = useState(false);
+  const [sourceCode, setSourceCode] = useState('');
+  const [issueDescription, setIssueDescription] = useState('Chat flow errors regarding empty options');
+  const [doctorDiagnosis, setDoctorDiagnosis] = useState<any>(null);
+  const [isAnalyzingCode, setIsAnalyzingCode] = useState(false);
+  const [isPatching, setIsPatching] = useState(false);
+
   const reactFlowInstance = useReactFlow();
 
   // Load Data
@@ -532,6 +541,47 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       setAuditReport(null); // Close modal
   };
 
+  const openSystemDoctor = async () => {
+      if (!isLiveMode) {
+          alert("System Doctor requires Live Mode (node server.js)");
+          return;
+      }
+      setShowSystemDoctor(true);
+      try {
+          const res = await liveApiService.getSourceCode();
+          setSourceCode(res.code);
+      } catch(e) {
+          alert("Could not access server source code.");
+          setShowSystemDoctor(false);
+      }
+  };
+
+  const analyzeCode = async () => {
+      setIsAnalyzingCode(true);
+      try {
+          const res = await analyzeSystemCode(sourceCode, issueDescription);
+          setDoctorDiagnosis(res);
+      } catch(e) {
+          alert("Analysis Failed");
+      } finally {
+          setIsAnalyzingCode(false);
+      }
+  };
+
+  const applySystemPatch = async () => {
+      if (!doctorDiagnosis) return;
+      setIsPatching(true);
+      try {
+          await liveApiService.applySystemPatch(doctorDiagnosis.fixedCode);
+          alert("Patch Applied! Server is restarting...");
+          setShowSystemDoctor(false);
+      } catch(e) {
+          alert("Failed to patch system");
+      } finally {
+          setIsPatching(false);
+      }
+  };
+
   const handleSave = async () => {
       let hasValidationErrors = false;
       
@@ -646,13 +696,23 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         {/* CANVAS */}
         <div className="flex-1 relative flex flex-col h-full overflow-hidden">
             <div className="absolute top-4 right-4 z-20 flex gap-3">
+                 {/* SYSTEM DOCTOR BUTTON */}
+                 {isLiveMode && (
+                     <button
+                        onClick={openSystemDoctor}
+                        className="bg-red-600 text-white px-4 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-red-700 transition-all flex items-center gap-2"
+                     >
+                        <Code size={16} /> System Doctor
+                     </button>
+                 )}
+
                  <button 
                     onClick={runAIAudit}
                     disabled={isAuditing}
                     className="bg-purple-600 text-white px-4 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-purple-700 transition-all flex items-center gap-2"
                  >
                     {isAuditing ? <span className="animate-spin"><Stethoscope size={16} /></span> : <Stethoscope size={16} />}
-                    {isAuditing ? 'Diagnosing...' : 'AI Doctor'}
+                    {isAuditing ? 'Diagnosing...' : 'AI Flow Audit'}
                  </button>
                  <button 
                     onClick={handleSave}
@@ -696,7 +756,100 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             </div>
         </div>
 
-        {/* AI AUDIT REPORT MODAL */}
+        {/* SYSTEM DOCTOR MODAL */}
+        {showSystemDoctor && (
+             <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-6">
+                 <div className="bg-gray-900 w-full max-w-6xl h-[85vh] rounded-2xl shadow-2xl overflow-hidden flex flex-col border border-gray-800">
+                     
+                     {/* Header */}
+                     <div className="bg-black px-6 py-4 flex justify-between items-center border-b border-gray-800">
+                         <div className="flex items-center gap-3">
+                             <div className="bg-red-600 p-2 rounded-lg"><Terminal className="text-white" size={20} /></div>
+                             <div>
+                                 <h2 className="text-white font-mono text-lg font-bold">System Doctor <span className="text-red-500">PRO</span></h2>
+                                 <p className="text-gray-400 text-xs">Self-Healing Backend Diagnostics</p>
+                             </div>
+                         </div>
+                         <button onClick={() => setShowSystemDoctor(false)} className="text-gray-400 hover:text-white"><X size={24} /></button>
+                     </div>
+
+                     <div className="flex-1 flex overflow-hidden">
+                         
+                         {/* Left: Configuration & Prompt */}
+                         <div className="w-1/3 bg-gray-900 p-6 border-r border-gray-800 flex flex-col gap-6 overflow-y-auto">
+                             <div>
+                                 <label className="text-gray-400 text-xs font-bold uppercase mb-2 block">Issue Description</label>
+                                 <textarea 
+                                     value={issueDescription}
+                                     onChange={(e) => setIssueDescription(e.target.value)}
+                                     className="w-full bg-gray-800 text-white border border-gray-700 rounded-lg p-3 text-sm h-32 focus:ring-2 focus:ring-red-500 outline-none"
+                                     placeholder="Describe the bug..."
+                                 />
+                             </div>
+
+                             <button 
+                                onClick={analyzeCode}
+                                disabled={isAnalyzingCode}
+                                className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50"
+                             >
+                                 {isAnalyzingCode ? <span className="animate-spin"><Stethoscope /></span> : <Stethoscope />}
+                                 Analyze Source Code
+                             </button>
+
+                             {doctorDiagnosis && (
+                                 <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
+                                     <h4 className="text-red-400 font-bold mb-2 flex items-center gap-2"><AlertTriangle size={16} /> Diagnosis</h4>
+                                     <p className="text-gray-300 text-sm leading-relaxed">{doctorDiagnosis.diagnosis}</p>
+                                 </div>
+                             )}
+
+                             {doctorDiagnosis && (
+                                 <div className="mt-auto">
+                                     <button 
+                                        onClick={applySystemPatch}
+                                        disabled={isPatching}
+                                        className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50"
+                                     >
+                                         {isPatching ? 'Patching...' : 'APPLY FIX & RESTART SERVER'}
+                                     </button>
+                                     <p className="text-gray-500 text-xs text-center mt-2">Server will restart automatically.</p>
+                                 </div>
+                             )}
+                         </div>
+
+                         {/* Right: Code Diff View */}
+                         <div className="w-2/3 bg-black p-0 flex flex-col">
+                             <div className="bg-gray-800 px-4 py-2 flex items-center justify-between">
+                                 <span className="text-gray-400 text-xs font-mono">server.js</span>
+                                 <div className="flex gap-4 text-xs font-bold">
+                                     <span className="text-red-400">Current</span>
+                                     <span className="text-green-400">Proposed</span>
+                                 </div>
+                             </div>
+                             
+                             <div className="flex-1 flex overflow-hidden font-mono text-xs">
+                                 {/* Current Code */}
+                                 <div className="flex-1 bg-[#1e1e1e] text-gray-400 p-4 overflow-auto border-r border-gray-700">
+                                     <pre>{sourceCode}</pre>
+                                 </div>
+                                 {/* Proposed Code */}
+                                 <div className="flex-1 bg-[#1e1e1e] text-green-100 p-4 overflow-auto relative">
+                                     {doctorDiagnosis ? (
+                                         <pre>{doctorDiagnosis.fixedCode}</pre>
+                                     ) : (
+                                         <div className="absolute inset-0 flex items-center justify-center text-gray-600">
+                                             Waiting for analysis...
+                                         </div>
+                                     )}
+                                 </div>
+                             </div>
+                         </div>
+                     </div>
+                 </div>
+             </div>
+        )}
+
+        {/* AI AUDIT REPORT MODAL (Existing) */}
         {auditReport && auditReport.issues.length > 0 && (
             <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
                 <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95">
@@ -749,24 +902,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     </div>
                 </div>
             </div>
-        )}
-        {/* SUCCESS STATE FOR AUDIT */}
-        {auditReport && auditReport.issues.length === 0 && (
-             <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-                <div className="bg-white rounded-2xl shadow-2xl p-8 text-center animate-in fade-in zoom-in-95 max-w-sm">
-                    <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-4">
-                        <CheckCircle size={32} />
-                    </div>
-                    <h3 className="text-xl font-bold text-gray-900 mb-2">All Systems Go!</h3>
-                    <p className="text-gray-500 mb-6">Gemini analyzed your flow and found no issues. You are ready to publish.</p>
-                    <button 
-                        onClick={() => setAuditReport(null)}
-                        className="w-full py-3 bg-black text-white rounded-xl font-bold hover:bg-gray-800 transition-colors"
-                    >
-                        Awesome
-                    </button>
-                </div>
-             </div>
         )}
     </div>
   );

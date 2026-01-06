@@ -92,7 +92,7 @@ export const analyzeMessage = async (text: string, imageUrl?: string, systemInst
   }
 };
 
-// --- NEW: AI SYSTEM AUDITOR ---
+// --- SYSTEM AUDITOR (JSON CONFIG) ---
 export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
     if (!apiKey) return { isValid: true, issues: [] };
 
@@ -152,3 +152,47 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
         return { isValid: true, issues: [] };
     }
 };
+
+// --- NEW: SYSTEM DOCTOR (SOURCE CODE ANALYSIS) ---
+export const analyzeSystemCode = async (sourceCode: string, issueDescription: string): Promise<{ diagnosis: string, fixedCode: string }> => {
+    if (!apiKey) throw new Error("No API Key");
+
+    const model = "gemini-3-pro-preview"; // Use PRO for complex code analysis
+
+    const prompt = `
+    You are an Expert Node.js Backend Engineer.
+    
+    TASKS:
+    1. Analyze the provided "server.js" source code.
+    2. Identify the root cause of the user's issue: "${issueDescription}".
+    3. Fix the code.
+    4. Return the FULL fixed source code.
+
+    CONSTRAINTS:
+    - Do NOT remove existing endpoints or logic unless they are the bug.
+    - Keep the code structure identical.
+    - Return a JSON object with a diagnosis explanation and the full fixed code string.
+
+    SOURCE CODE:
+    \`\`\`javascript
+    ${sourceCode}
+    \`\`\`
+    `;
+
+    const response = await ai.models.generateContent({
+        model,
+        contents: prompt,
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                    diagnosis: { type: Type.STRING },
+                    fixedCode: { type: Type.STRING }
+                }
+            }
+        }
+    });
+
+    return JSON.parse(response.text || '{}');
+}

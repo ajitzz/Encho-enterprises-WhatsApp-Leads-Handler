@@ -13,6 +13,8 @@ const axios = require('axios');
 const cors = require('cors');
 const { Pool } = require('pg'); 
 const { GoogleGenAI } = require('@google/genai');
+const fs = require('fs'); // Added for System Doctor
+const path = require('path'); // Added for System Doctor
 require('dotenv').config();
 
 const app = express();
@@ -198,6 +200,37 @@ const ensureDatabaseInitialized = async (client) => {
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // --- ROUTES ---
+
+// NEW: System Doctor - Read Source Code
+app.get('/api/admin/source-code', async (req, res) => {
+    try {
+        // SECURITY: ONLY READ THIS FILE
+        const sourceCode = fs.readFileSync(__filename, 'utf8');
+        res.json({ code: sourceCode });
+    } catch (e) {
+        res.status(500).json({ error: "Access Denied to File System" });
+    }
+});
+
+// NEW: System Doctor - Apply Patch
+app.post('/api/admin/apply-patch', async (req, res) => {
+    try {
+        const { code } = req.body;
+        if (!code) return res.status(400).json({ error: "No code provided" });
+        
+        // Write the new code to this file
+        fs.writeFileSync(__filename, code);
+        
+        console.log("🩹 PATCH APPLIED. Restarting Server...");
+        res.json({ success: true, message: "Patch applied. Server restarting." });
+        
+        // Force restart to apply changes (Works with PM2/Nodemon, or container restart)
+        setTimeout(() => process.exit(0), 1000);
+        
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
 
 app.get('/api/health', async (req, res) => {
     try {

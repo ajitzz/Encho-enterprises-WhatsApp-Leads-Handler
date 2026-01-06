@@ -129,5 +129,23 @@ export const liveApiService = {
       body: JSON.stringify(credentials)
     });
     return await response.json();
+  },
+
+  // --- SYSTEM DOCTOR (ADMIN) ---
+  
+  getSourceCode: async (): Promise<{code: string}> => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/source-code`);
+      if (!response.ok) throw new Error('Failed to read source code');
+      return await response.json();
+  },
+
+  applySystemPatch: async (code: string): Promise<{success: boolean, message: string}> => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/apply-patch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code })
+      });
+      if (!response.ok) throw new Error('Failed to patch system');
+      return await response.json();
   }
 };
