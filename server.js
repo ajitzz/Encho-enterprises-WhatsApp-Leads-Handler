@@ -224,7 +224,43 @@ app.get('/api/bot-settings', async (req, res) => {
 
 app.post('/api/bot-settings', async (req, res) => {
     try {
-        await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(req.body)]);
+        const incoming = req.body || {};
+        const steps = Array.isArray(incoming.steps) ? incoming.steps : [];
+
+        // --- STRICT BACKEND VALIDATION ---
+        const invalidSteps = [];
+        const sanitizedSteps = steps.map((step) => {
+            const msg = (step.message || '').trim();
+            const lowerMsg = msg.toLowerCase();
+            const isPlaceholder = BLOCKED_PHRASES.some((p) => lowerMsg.includes(p));
+            const requiresBody = !['image', 'video', 'file', 'audio'].includes((step.title || '').toLowerCase());
+            const filteredOptions = Array.isArray(step.options)
+                ? step.options.map((o) => (o || '').trim()).filter(Boolean)
+                : [];
+
+            let error = null;
+            if (requiresBody && !msg) error = 'Empty message blocked';
+            else if (isPlaceholder) error = 'Placeholder text blocked';
+            else if (step.inputType === 'option' && filteredOptions.length === 0) error = 'Missing options';
+
+            if (error) {
+                invalidSteps.push({ id: step.id, title: step.title, error });
+            }
+
+            return {
+                ...step,
+                message: msg,
+                options: step.inputType === 'option' ? filteredOptions : step.options,
+            };
+        });
+
+        if (invalidSteps.length > 0) {
+            console.warn('⚠️ Bot settings rejected by firewall:', invalidSteps);
+            return res.status(400).json({ error: 'Invalid bot configuration', details: invalidSteps });
+        }
+
+        const sanitizedSettings = { ...incoming, steps: sanitizedSteps };
+        await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(sanitizedSettings)]);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -313,7 +349,9 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
         payload[mediaType].caption = body; 
     }
   } else if (options && options.length > 0) {
-    const validOptions = options.filter(o => o && o.trim().length > 0);
+    const validOptions = options
+        .map((o) => (o || '').trim())
+        .filter((o) => o.length > 0);
     
     if (validOptions.length === 0) {
         payload.type = 'text';
@@ -553,8 +591,16 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         }
 
         // Post-Transaction Actions
-        
+
         let sent = false;
+
+        if (result.replyText && !result.replyText.trim()) {
+            // Prevent silently sending empty responses
+            if (result.driver) {
+                await logSystemMessage(result.driver.id, '⚠️ Blocked empty message', 'warning');
+            }
+            result.replyText = null;
+        }
         
         if (result.replyTemplate) {
             sent = await sendWhatsAppMessage(from, null, null, result.replyTemplate);
