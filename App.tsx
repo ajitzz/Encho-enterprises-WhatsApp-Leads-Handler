@@ -57,11 +57,6 @@ export default function App() {
                try {
                    const updated = await liveApiService.getDrivers();
                    setDrivers(updated);
-                   // Update selected driver if open
-                   if (selectedDriver) {
-                       const current = updated.find(d => d.id === selectedDriver.id);
-                       if (current) setSelectedDriver(current);
-                   }
                } catch (e) {
                    // Silent fail on poll error to avoid spamming console
                }
@@ -85,6 +80,18 @@ export default function App() {
     fetchData();
     return () => unsubscribe();
   }, [dataSource, activeTab]); 
+
+  // Auto-sync Chat Drawer when polling updates the drivers list
+  useEffect(() => {
+    if (selectedDriver && dataSource === 'live') {
+      const updated = drivers.find(d => d.id === selectedDriver.id);
+      // If we found the driver in the new list, update the selectedDriver state
+      // to reflect new messages/status
+      if (updated && updated !== selectedDriver) {
+        setSelectedDriver(updated);
+      }
+    }
+  }, [drivers, selectedDriver, dataSource]);
 
   // Notification Handler
   const addNotification = (notif: Omit<Notification, 'id'>) => {
