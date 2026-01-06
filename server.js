@@ -522,6 +522,12 @@ app.post('/api/messages/send', async (req, res) => {
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
   
+  // --- SANITIZE MEDIA URL ---
+  if (mediaUrl) {
+      // Remove double protocol if present (e.g. https://https:// -> https://)
+      mediaUrl = mediaUrl.replace(/^(https?:\/\/)+/g, 'https://');
+  }
+
   // --- FIREWALL ---
   const lowerBody = body ? body.toLowerCase() : "";
   const isPlaceholder = BLOCKED_REGEX.test(lowerBody);
@@ -799,8 +805,24 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             if (sent) await logSystemMessage(result.driver.id, `[Template] ${result.replyTemplate}`, 'template');
         }
         else if (result.replyMedia) {
-            sent = await sendWhatsAppMessage(from, result.replyText, null, null, 'en_US', result.replyMedia, result.replyMediaType);
-            if (sent) await logSystemMessage(result.driver.id, result.replyText || `[${result.replyMediaType}]`, 'image', null, result.replyMedia);
+            // Sanitize and detect YouTube
+            let cleanUrl = result.replyMedia.replace(/^(https?:\/\/)+/g, 'https://');
+            const isYouTube = cleanUrl.includes('youtube.com') || cleanUrl.includes('youtu.be');
+
+            // Send to WhatsApp (sendWhatsAppMessage logic handles text/preview vs image)
+            sent = await sendWhatsAppMessage(from, result.replyText, null, null, 'en_US', cleanUrl, result.replyMediaType);
+            
+            if (sent) {
+                if (isYouTube) {
+                    // Log as Text for Dashboard Preview
+                    const logText = (result.replyText ? result.replyText + " " : "") + cleanUrl;
+                    await logSystemMessage(result.driver.id, logText.trim(), 'text');
+                } else {
+                    // Log as Media (Image/Video) for Dashboard
+                    const dbType = result.replyMediaType === 'video' ? 'video' : 'image';
+                    await logSystemMessage(result.driver.id, result.replyText || `[${result.replyMediaType}]`, dbType, null, cleanUrl);
+                }
+            }
         }
         else if (result.replyText || (result.replyOptions && result.replyOptions.length > 0)) {
             // NOTE: We allow sending if text is present OR if options are present (in which case sendWhatsAppMessage handles fallback text)

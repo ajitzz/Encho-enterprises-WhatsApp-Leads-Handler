@@ -45,9 +45,9 @@ const CustomNode = ({ data, id, selected }: any) => {
   }, [data.options, data.saveToField]);
 
   const handleChange = (field: string, value: any) => {
-    // Auto-fix URL inputs
+    // Auto-fix URL inputs: Aggressive replacement of double https://
     if (field === 'mediaUrl' && typeof value === 'string') {
-        value = value.replace(/(https?:\/\/){2,}/g, '$1'); // Replace double protocols
+        value = value.replace(/^(https?:\/\/)+/g, 'https://');
     }
     updateNodeData(id, { [field]: value });
   };
@@ -286,7 +286,7 @@ const CustomNode = ({ data, id, selected }: any) => {
             {/* 3. MESSAGE INPUT */}
             <div>
                  <label className="text-[10px] font-bold text-gray-500 uppercase mb-1.5 block">
-                    {isInputType ? "Question / Prompt" : "Message Text"} <span className="text-red-500">*</span>
+                    {isInputType ? "Question / Prompt" : "Message Text / Caption"} <span className="text-red-500">*</span>
                  </label>
                  <textarea 
                     className={`w-full bg-gray-50 border rounded-lg p-3 text-sm text-gray-800 outline-none resize-none transition-all min-h-[100px]
@@ -294,12 +294,15 @@ const CustomNode = ({ data, id, selected }: any) => {
                             ? 'border-red-300 bg-red-50 focus:border-red-500' 
                             : 'border-gray-200 focus:border-blue-500 focus:bg-white focus:shadow-sm'}
                     `}
-                    placeholder="Type the message sent to the user..."
+                    placeholder={isMediaType ? "Enter a caption for the media..." : "Type the message sent to the user..."}
                     value={data.message}
                     onChange={(e) => handleChange('message', e.target.value)}
                  />
                  {hasError && data.message && PLACEHOLDER_TEXTS.some(t => data.message.toLowerCase().includes(t)) && (
                      <p className="text-[10px] text-red-500 mt-1.5 font-bold flex items-center gap-1"><AlertTriangle size={10} /> Placeholder text detected</p>
+                 )}
+                 {hasError && !data.message && isMediaType && (
+                     <p className="text-[10px] text-red-500 mt-1.5 font-bold flex items-center gap-1"><AlertTriangle size={10} /> Caption is required for images</p>
                  )}
             </div>
 
@@ -643,6 +646,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               error = true;
               errorMsg = 'Missing URL';
           }
+          
+          // Strict Caption Check for Media
+          if ((label === 'Image' || label === 'Video') && (!message || !message.trim())) {
+              error = true;
+              errorMsg = 'Missing Caption';
+          }
 
           if (inputType === 'option') {
               if (!options || options.length === 0) {
@@ -660,7 +669,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
       if (hasValidationErrors) {
           setNodes(newNodes);
-          alert("❌ SAVE BLOCKED: Strict Validation Failed.\n\nPlease fix red nodes (Empty Text or Options).");
+          alert("❌ SAVE BLOCKED: Strict Validation Failed.\n\nPlease fix red nodes (Empty Text, Captions, or Options).");
           return;
       }
 
