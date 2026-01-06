@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, LeadStatus, OnboardingStep } from '../types';
-import { X, Send, Image as ImageIcon, Video, CheckCircle, AlertTriangle, UserX, Car, Clock, ShieldCheck, ChevronRight, Facebook, Globe, PlayCircle } from 'lucide-react';
+import { X, Send, Image as ImageIcon, Video, CheckCircle, AlertTriangle, UserX, Car, Clock, ShieldCheck, ChevronRight, Facebook, Globe } from 'lucide-react';
 
 interface ChatDrawerProps {
   driver: Driver | null;
@@ -37,78 +37,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   // Helper to update specific driver fields
   const handleUpdateDetails = (updates: Partial<Driver>) => {
     onUpdateDriver(driver.id, updates);
-  };
-
-  // Helper to extract YouTube ID
-  const getYouTubeId = (url: string) => {
-    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
-    const match = url ? url.match(regExp) : null;
-    return (match && match[2].length === 11) ? match[2] : null;
-  };
-
-  const renderMessageContent = (msg: Message) => {
-    const youtubeId = msg.text ? getYouTubeId(msg.text) : null;
-    
-    return (
-        <div className={`max-w-[80%] rounded-2xl px-4 py-3 shadow-sm ${
-            msg.sender === 'driver' 
-              ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' 
-              : 'bg-blue-600 text-white rounded-tr-none'
-          }`}>
-            
-            {/* Video File Attachment (MP4) */}
-            {(msg.type === 'video' || (msg.imageUrl && msg.imageUrl.endsWith('.mp4'))) && msg.imageUrl && (
-                <div className="mb-2 rounded-lg overflow-hidden bg-black border border-gray-200/20">
-                    <video src={msg.imageUrl} controls className="w-full max-h-60" />
-                </div>
-            )}
-
-            {/* Image Attachment (Exclude if it's a video file or YouTube) */}
-            {msg.type === 'image' && msg.imageUrl && !msg.imageUrl.endsWith('.mp4') && !getYouTubeId(msg.imageUrl) && (
-                <div className="mb-2 rounded-lg overflow-hidden border border-gray-200/20 bg-black/5">
-                    <img src={msg.imageUrl} alt="Attachment" className="w-full h-full object-cover max-h-60" />
-                </div>
-            )}
-
-            {/* YouTube Embed */}
-            {youtubeId && (
-                <div className="mb-2 rounded-lg overflow-hidden border border-gray-200/20 bg-black">
-                    <iframe 
-                        width="100%" 
-                        height="200" 
-                        src={`https://www.youtube.com/embed/${youtubeId}`} 
-                        title="YouTube video player" 
-                        frameBorder="0" 
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
-                        allowFullScreen
-                        className="w-full aspect-video"
-                    ></iframe>
-                </div>
-            )}
-
-            {/* Text Content */}
-            {msg.text && (
-                <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
-                    {msg.text}
-                </p>
-            )}
-
-            {/* Options (Buttons) */}
-            {msg.options && msg.options.length > 0 && (
-                <div className="mt-3 space-y-1">
-                    {msg.options.map((opt, i) => (
-                        <div key={i} className={`text-xs px-3 py-2 rounded-lg border text-center font-medium ${msg.sender === 'driver' ? 'bg-gray-50 border-gray-200 text-gray-600' : 'bg-blue-500 border-blue-400 text-white'}`}>
-                            {opt}
-                        </div>
-                    ))}
-                </div>
-            )}
-
-            <div className={`text-[10px] mt-1 text-right ${msg.sender === 'driver' ? 'text-gray-400' : 'text-blue-200'}`}>
-                {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-            </div>
-        </div>
-    );
   };
 
   const steps = [
@@ -176,7 +104,23 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     key={msg.id} 
                     className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}
                   >
-                    {renderMessageContent(msg)}
+                    <div 
+                      className={`max-w-[80%] rounded-2xl px-4 py-3 shadow-sm ${
+                        msg.sender === 'driver' 
+                          ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' 
+                          : 'bg-blue-600 text-white rounded-tr-none'
+                      }`}
+                    >
+                      {msg.type === 'image' && msg.imageUrl && (
+                         <div className="mb-2 rounded-lg overflow-hidden border border-gray-200/20">
+                           <img src={msg.imageUrl} alt="Attachment" className="w-full h-full object-cover max-h-60" />
+                         </div>
+                      )}
+                      {msg.text && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
+                      <div className={`text-[10px] mt-1 text-right ${msg.sender === 'driver' ? 'text-gray-400' : 'text-blue-200'}`}>
+                        {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                      </div>
+                    </div>
                   </div>
                 ))}
                 <div ref={messagesEndRef} />

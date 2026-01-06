@@ -1,5 +1,4 @@
 
-
 export enum LeadStatus {
   NEW = 'New',
   QUALIFIED = 'Qualified',
@@ -24,7 +23,7 @@ export interface Message {
   text?: string;
   imageUrl?: string;
   timestamp: number;
-  type: 'text' | 'image' | 'video' | 'video_link' | 'template' | 'options';
+  type: 'text' | 'image' | 'video_link' | 'template' | 'options';
   options?: string[]; // For buttons
 }
 

@@ -15,36 +15,36 @@ import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
 import { useFlowStore } from '../services/flowStore'; 
-import { auditBotFlow } from '../services/geminiService';
+import { auditBotFlow, analyzeSystemCode } from '../services/geminiService';
 import { 
   MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
   List, Type, Hash, Mail, Globe, Calendar, Clock, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Play, AlertTriangle, ShieldAlert, GripVertical, Settings,
   MousePointerClick, Bold, Italic, Link, MoreHorizontal, Upload, Cloud, Stethoscope, Wand2, Terminal, Code,
-  FileCode, Layers, Youtube, RotateCcw
+  FileCode, Layers
 } from 'lucide-react';
 
+// --- STYLES & CONSTANTS ---
 const HANDLE_STYLE = { width: 10, height: 10, background: '#64748b', border: '2px solid white', zIndex: 50 };
 const ACTIVE_HANDLE_STYLE = { width: 12, height: 12, background: '#3b82f6', border: '2px solid white', zIndex: 50 };
 const PLACEHOLDER_TEXTS = ['replace this sample message', 'enter your message', 'type your message here'];
 
+// --- CUSTOM NODE COMPONENT ---
 const CustomNode = ({ data, id, selected }: any) => {
   const updateNodeData = useFlowStore((state) => state.updateNodeData);
   const deleteNode = useFlowStore((state) => state.deleteNode);
 
   const [options, setOptions] = useState<string[]>(data.options || []);
   const [variableName, setVariableName] = useState(data.saveToField || '');
-  const [activeTab, setActiveTab] = useState<'link' | 'upload'>('link');
+  const [activeTab, setActiveTab] = useState<'link' | 'upload'>('link'); // For Media Nodes
 
+  // Sync internal state with props
   useEffect(() => {
     setOptions(data.options || []);
     setVariableName(data.saveToField || '');
   }, [data.options, data.saveToField]);
 
   const handleChange = (field: string, value: any) => {
-    if (field === 'mediaUrl' && typeof value === 'string') {
-        value = value.replace(/^(https?:\/\/)+/g, 'https://');
-    }
     updateNodeData(id, { [field]: value });
   };
 
@@ -67,12 +67,13 @@ const CustomNode = ({ data, id, selected }: any) => {
     handleChange('options', newOpts);
   };
 
+  // --- NODE TYPES IDENTIFICATION ---
   const isInputType = ['Text', 'Number', 'Email', 'Website', 'Date', 'Time'].includes(data.label);
   const isMediaType = ['Image', 'Video', 'File', 'Audio'].includes(data.label);
   const isOptionType = ['Quick Reply', 'List'].includes(data.label);
   const hasError = data.hasError;
-  const isYouTube = data.mediaUrl && (data.mediaUrl.includes('youtube.com') || data.mediaUrl.includes('youtu.be'));
 
+  // --- START NODE (Always Simple) ---
   if (data.type === 'start') {
     return (
       <div className={`group relative shadow-md rounded-xl bg-white border-2 transition-all ${selected ? 'border-green-500 ring-4 ring-green-50' : 'border-gray-100'}`}>
@@ -88,12 +89,15 @@ const CustomNode = ({ data, id, selected }: any) => {
     );
   }
 
+  // --- 1. PREVIEW CARD (UNSELECTED) ---
   if (!selected) {
     return (
       <div className={`w-[280px] bg-white rounded-xl shadow-sm border transition-all hover:shadow-md
           ${hasError ? 'border-red-300 bg-red-50/10' : 'border-gray-200'}
       `}>
           <Handle type="target" position={Position.Left} style={HANDLE_STYLE} className="-left-2.5" />
+          
+          {/* Header */}
           <div className="px-4 py-3 flex items-center gap-2 border-b border-gray-100 bg-gray-50/50 rounded-t-xl">
              <div className={`p-1.5 rounded-md ${isMediaType ? 'bg-amber-100 text-amber-600' : isInputType ? 'bg-purple-100 text-purple-600' : 'bg-blue-100 text-blue-600'}`}>
                 {data.icon || <MessageSquare size={14} />}
@@ -102,31 +106,26 @@ const CustomNode = ({ data, id, selected }: any) => {
              {hasError && <ShieldAlert size={14} className="ml-auto text-red-500" />}
           </div>
 
+          {/* Preview Body */}
           <div className="p-4">
+             {/* Media Preview */}
              {isMediaType && (
                 <div className="mb-3 relative group overflow-hidden rounded-lg bg-gray-100 border border-gray-200 aspect-video flex items-center justify-center">
                     {data.mediaUrl ? (
                         data.label === 'Image' ? (
                             <img src={data.mediaUrl} alt="Preview" className="w-full h-full object-cover" />
+                        ) : data.label === 'Video' ? (
+                            <>
+                                <div className="absolute inset-0 bg-black/10" />
+                                <div className="h-10 w-10 bg-white/90 rounded-full flex items-center justify-center shadow-lg z-10">
+                                    <Play size={16} className="text-gray-900 ml-0.5" />
+                                </div>
+                            </>
                         ) : (
-                            isYouTube ? (
-                                <div className="flex flex-col items-center justify-center bg-red-50 w-full h-full text-red-600">
-                                    <Youtube size={24} />
-                                    <span className="text-[10px] font-bold mt-1">YouTube Preview</span>
-                                </div>
-                            ) : data.label === 'Video' ? (
-                                <>
-                                    <div className="absolute inset-0 bg-black/10" />
-                                    <div className="h-10 w-10 bg-white/90 rounded-full flex items-center justify-center shadow-lg z-10">
-                                        <Play size={16} className="text-gray-900 ml-0.5" />
-                                    </div>
-                                </>
-                            ) : (
-                                <div className="flex flex-col items-center text-gray-400 gap-1">
-                                    <FileText size={24} />
-                                    <span className="text-[10px] font-mono">FILE LINK</span>
-                                </div>
-                            )
+                            <div className="flex flex-col items-center text-gray-400 gap-1">
+                                <FileText size={24} />
+                                <span className="text-[10px] font-mono">FILE LINK</span>
+                            </div>
                         )
                     ) : (
                         <span className="text-[10px] text-gray-400 font-medium">No Media Set</span>
@@ -134,10 +133,12 @@ const CustomNode = ({ data, id, selected }: any) => {
                 </div>
              )}
 
+             {/* Text Preview */}
              <p className={`text-xs text-gray-600 line-clamp-3 ${!data.message && 'italic text-gray-400'}`}>
                 {data.message || 'No message text...'}
              </p>
 
+             {/* Options Preview */}
              {isOptionType && options.length > 0 && (
                 <div className="mt-3 flex flex-wrap gap-1.5">
                     {options.slice(0, 3).map((opt, i) => (
@@ -149,6 +150,7 @@ const CustomNode = ({ data, id, selected }: any) => {
                 </div>
              )}
              
+             {/* Input Variable Preview */}
              {isInputType && variableName && (
                  <div className="mt-3 flex items-center gap-1.5 text-[10px] text-purple-600 bg-purple-50 px-2 py-1 rounded border border-purple-100 w-fit">
                     <Hash size={10} />
@@ -157,14 +159,17 @@ const CustomNode = ({ data, id, selected }: any) => {
              )}
           </div>
 
+          {/* Outlets */}
           {isOptionType ? (
                <div className="absolute -right-2 top-1/2 -translate-y-1/2 flex flex-col gap-1">
                    {options.map((_, i) => <div key={i} className="w-1 h-1" />)} 
+                   {/* Ghost spacers for handles alignment logic if needed, simplified here */}
                </div> 
           ) : (
               <Handle type="source" position={Position.Right} id="main" style={HANDLE_STYLE} className="-right-2.5" />
           )}
           
+          {/* Specific Handles for Options in Preview Mode (To keep connections visible) */}
           {isOptionType && options.map((_, idx) => (
              <Handle 
                 key={idx} 
@@ -172,22 +177,27 @@ const CustomNode = ({ data, id, selected }: any) => {
                 position={Position.Right} 
                 id={`opt_${idx}`} 
                 style={{ ...HANDLE_STYLE, top: 'auto', bottom: 'auto', right: -6, marginTop: (idx * 10) }} 
-                className="opacity-0"
+                className="opacity-0" // Hidden but functional
              />
           ))}
       </div>
     );
   }
 
+  // --- 2. EDITOR POPUP (SELECTED) ---
   return (
     <div className={`w-[400px] bg-white rounded-xl shadow-2xl ring-4 ring-blue-500/20 transition-all duration-200 animate-in fade-in zoom-in-95 z-50`}>
         <Handle type="target" position={Position.Left} style={ACTIVE_HANDLE_STYLE} className="-left-3" />
+        
+        {/* Error Flag */}
         {hasError && (
              <div className="absolute -top-3 right-4 bg-red-600 text-white px-3 py-1 rounded-full shadow-md z-50 flex items-center gap-1.5">
                 <ShieldAlert size={12} />
                 <span className="text-[10px] font-bold uppercase tracking-wider">{data.errorMessage || "Validation Error"}</span>
              </div>
         )}
+
+        {/* Header */}
         <div className={`px-5 py-4 rounded-t-xl border-b flex items-center justify-between bg-white`}>
             <div className="flex items-center gap-3">
                 <div className={`p-2 rounded-lg ${isMediaType ? 'bg-amber-100 text-amber-600' : isInputType ? 'bg-purple-100 text-purple-600' : 'bg-blue-100 text-blue-600'}`}>
@@ -203,7 +213,10 @@ const CustomNode = ({ data, id, selected }: any) => {
             </button>
         </div>
 
+        {/* Body */}
         <div className="p-5 space-y-5 max-h-[400px] overflow-y-auto custom-scrollbar">
+            
+            {/* 1. TEXT TOOLBAR (Text Nodes) */}
             {(data.label === 'Text' || isInputType) && (
                 <div className="flex items-center gap-1 pb-2 border-b border-gray-100 mb-2">
                     <button className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded"><Bold size={14} /></button>
@@ -214,6 +227,7 @@ const CustomNode = ({ data, id, selected }: any) => {
                 </div>
             )}
 
+            {/* 2. MEDIA TABS (Image/Video) */}
             {isMediaType && (
                 <div>
                      <div className="flex p-1 bg-gray-100 rounded-lg mb-3">
@@ -241,12 +255,6 @@ const CustomNode = ({ data, id, selected }: any) => {
                                 value={data.mediaUrl || ''}
                                 onChange={(e) => handleChange('mediaUrl', e.target.value)}
                             />
-                            {isYouTube && (
-                                <div className="mt-2 text-[10px] text-green-600 bg-green-50 p-2 rounded border border-green-100 flex items-center gap-1">
-                                    <Youtube size={12} />
-                                    YouTube link detected. Will send as text with preview.
-                                </div>
-                            )}
                         </div>
                      ) : (
                         <div className="border-2 border-dashed border-gray-200 rounded-lg p-6 flex flex-col items-center justify-center text-gray-400 bg-gray-50 hover:bg-gray-100 hover:border-gray-300 transition-all cursor-pointer">
@@ -257,9 +265,10 @@ const CustomNode = ({ data, id, selected }: any) => {
                 </div>
             )}
 
+            {/* 3. MESSAGE INPUT */}
             <div>
                  <label className="text-[10px] font-bold text-gray-500 uppercase mb-1.5 block">
-                    {isInputType ? "Question / Prompt" : "Message Text / Caption"} <span className="text-red-500">*</span>
+                    {isInputType ? "Question / Prompt" : "Message Text"} <span className="text-red-500">*</span>
                  </label>
                  <textarea 
                     className={`w-full bg-gray-50 border rounded-lg p-3 text-sm text-gray-800 outline-none resize-none transition-all min-h-[100px]
@@ -267,18 +276,16 @@ const CustomNode = ({ data, id, selected }: any) => {
                             ? 'border-red-300 bg-red-50 focus:border-red-500' 
                             : 'border-gray-200 focus:border-blue-500 focus:bg-white focus:shadow-sm'}
                     `}
-                    placeholder={isMediaType ? "Enter a caption for the media..." : "Type the message sent to the user..."}
+                    placeholder="Type the message sent to the user..."
                     value={data.message}
                     onChange={(e) => handleChange('message', e.target.value)}
                  />
                  {hasError && data.message && PLACEHOLDER_TEXTS.some(t => data.message.toLowerCase().includes(t)) && (
                      <p className="text-[10px] text-red-500 mt-1.5 font-bold flex items-center gap-1"><AlertTriangle size={10} /> Placeholder text detected</p>
                  )}
-                 {hasError && !data.message && isMediaType && (
-                     <p className="text-[10px] text-red-500 mt-1.5 font-bold flex items-center gap-1"><AlertTriangle size={10} /> Caption is required for images</p>
-                 )}
             </div>
 
+            {/* 4. OPTIONS (Buttons/List) */}
             {isOptionType && (
                 <div>
                     <label className="text-[10px] font-bold text-gray-500 uppercase mb-2 block flex items-center justify-between">
@@ -316,6 +323,7 @@ const CustomNode = ({ data, id, selected }: any) => {
                 </div>
             )}
 
+            {/* 5. VARIABLE SAVE (Input) */}
             {isInputType && (
                  <div className="bg-purple-50 rounded-lg p-3 border border-purple-100">
                     <label className="text-[10px] font-bold text-purple-700 uppercase mb-1.5 flex items-center gap-1.5">
@@ -340,6 +348,8 @@ const CustomNode = ({ data, id, selected }: any) => {
                 </div>
             )}
         </div>
+        
+        {/* Main Outlet for non-branching nodes */}
         {!isOptionType && (
             <Handle type="source" position={Position.Right} id="main" style={ACTIVE_HANDLE_STYLE} className="-right-3" />
         )}
@@ -347,8 +357,11 @@ const CustomNode = ({ data, id, selected }: any) => {
   );
 };
 
-const nodeTypes = { custom: CustomNode };
+const nodeTypes = {
+  custom: CustomNode,
+};
 
+// --- DRAGGABLE COMPONENT ---
 const DraggableSidebarItem = ({ type, inputType, label, icon }: any) => {
     const onDragStart = (event: React.DragEvent) => {
       event.dataTransfer.setData('application/reactflow/type', type);
@@ -372,7 +385,11 @@ const DraggableSidebarItem = ({ type, inputType, label, icon }: any) => {
     );
 };
 
-interface BotBuilderProps { isLiveMode?: boolean; }
+// --- MAIN BUILDER ---
+
+interface BotBuilderProps {
+    isLiveMode?: boolean; 
+}
 
 export const BotBuilder: React.FC<BotBuilderProps> = ({ isLiveMode = false }) => {
   return (
@@ -394,15 +411,16 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   
   // SYSTEM DOCTOR STATES
   const [showSystemDoctor, setShowSystemDoctor] = useState(false);
+  const [files, setFiles] = useState<Array<{path: string, content: string}>>([]);
   const [issueDescription, setIssueDescription] = useState('Chat flow errors regarding empty options');
   const [doctorDiagnosis, setDoctorDiagnosis] = useState<any>(null);
   const [isAnalyzingCode, setIsAnalyzingCode] = useState(false);
   const [isPatching, setIsPatching] = useState(false);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [canUndo, setCanUndo] = useState(false);
 
   const reactFlowInstance = useReactFlow();
 
+  // Load Data
   useEffect(() => {
     const load = async () => {
         let settings: BotSettings;
@@ -411,14 +429,28 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         } else {
              settings = mockBackend.getBotSettings();
         }
+
         if (settings.flowData && settings.flowData.nodes.length > 0) {
-            setNodes(settings.flowData.nodes);
+            // Auto-clean placeholders on load
+            const cleanedNodes = settings.flowData.nodes.map((n: any) => {
+                const newData = { ...n.data };
+                const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
+                if (newData.message && BLOCKED_REGEX.test(newData.message)) {
+                    newData.message = ""; 
+                    newData.hasError = true;
+                    newData.errorMessage = "Placeholder Removed";
+                }
+                return { ...n, data: newData };
+            });
+
+            setNodes(cleanedNodes);
             setEdges(settings.flowData.edges);
         }
     };
     load();
   }, [isLiveMode, setNodes, setEdges]);
 
+  // Drag & Drop
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
@@ -430,8 +462,14 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       const type = event.dataTransfer.getData('application/reactflow/type');
       const inputType = event.dataTransfer.getData('application/reactflow/inputType');
       const label = event.dataTransfer.getData('application/reactflow/label');
+
       if (!type) return;
-      const position = reactFlowInstance.screenToFlowPosition({ x: event.clientX, y: event.clientY });
+
+      const position = reactFlowInstance.screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      });
+
       const newNode: Node = {
         id: `node_${Date.now()}`,
         type: 'custom',
@@ -440,11 +478,13 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             label: label,
             message: '', 
             inputType: inputType || 'text', 
+            icon: undefined, 
             options: inputType === 'option' ? ['Yes', 'No'] : undefined,
             hasError: true,
             errorMessage: 'Required'
         },
       };
+
       addNode(newNode);
     },
     [reactFlowInstance, addNode],
@@ -455,33 +495,92 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       try {
           const report = await auditBotFlow(nodes);
           setAuditReport(report);
+          
           if (report.issues.length > 0) {
+              // Highlight faulty nodes
               const badNodeIds = report.issues.map((i: any) => i.nodeId);
               const newNodes = nodes.map(n => {
                   if (badNodeIds.includes(n.id)) {
-                      return { ...n, data: { ...n.data, hasError: true, errorMessage: "AI Flagged" } };
+                      return { 
+                          ...n, 
+                          data: { 
+                              ...n.data, 
+                              hasError: true, 
+                              errorMessage: "AI Flagged" 
+                          } 
+                      };
                   }
                   return n;
               });
               setNodes(newNodes);
           }
-      } catch (e) { alert("AI Audit Failed"); } finally { setIsAuditing(false); }
+      } catch (e) {
+          alert("AI Audit Failed");
+      } finally {
+          setIsAuditing(false);
+      }
   };
 
-  const openSystemDoctor = () => {
-      if (!isLiveMode) { alert("System Doctor requires Live Mode (node server.js)"); return; }
+  const applyFix = (issue: any) => {
+      if (issue.autoFixValue === 'DELETE_NODE') {
+          deleteNode(issue.nodeId);
+          // Update report UI by removing the issue
+          setAuditReport((prev: any) => ({
+              ...prev,
+              issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
+          }));
+      } else if (issue.autoFixValue) {
+          const newNodes = nodes.map(n => {
+              if (n.id === issue.nodeId) {
+                  return {
+                      ...n,
+                      data: {
+                          ...n.data,
+                          message: issue.autoFixValue,
+                          hasError: false,
+                          errorMessage: undefined
+                      }
+                  };
+              }
+              return n;
+          });
+          setNodes(newNodes);
+          // Remove from report
+          setAuditReport((prev: any) => ({
+            ...prev,
+            issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
+        }));
+      }
+  };
+
+  const openSystemDoctor = async () => {
+      if (!isLiveMode) {
+          alert("System Doctor requires Live Mode (node server.js)");
+          return;
+      }
       setShowSystemDoctor(true);
-      setDoctorDiagnosis(null);
+      try {
+          // Fetch complete project structure now
+          const res = await liveApiService.getProjectContext();
+          setFiles(res.files);
+          setDoctorDiagnosis(null);
+      } catch(e) {
+          alert("Could not access project files. Ensure server is running.");
+          setShowSystemDoctor(false);
+      }
   };
 
   const analyzeCode = async () => {
       setIsAnalyzingCode(true);
       try {
-          const res = await liveApiService.analyzeSystem(issueDescription);
+          const res = await analyzeSystemCode(files, issueDescription);
           setDoctorDiagnosis(res);
-          if (res.changes && res.changes.length > 0) setSelectedFile(res.changes[0].filePath);
+          // Select first changed file if any
+          if (res.changes && res.changes.length > 0) {
+              setSelectedFile(res.changes[0].filePath);
+          }
       } catch(e) {
-          alert("Analysis Failed: Ensure server is running and configured.");
+          alert("Analysis Failed");
       } finally {
           setIsAnalyzingCode(false);
       }
@@ -492,25 +591,10 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       setIsPatching(true);
       try {
           await liveApiService.applySystemPatch(doctorDiagnosis.changes);
-          alert("✅ Patches Applied! Backup Created. Server is restarting...");
-          setCanUndo(true);
-      } catch(e) {
-          alert("Failed to patch system");
-      } finally {
-          setIsPatching(false);
-      }
-  };
-  
-  const handleUndo = async () => {
-      if(!confirm("Are you sure? This will revert the last system patch.")) return;
-      setIsPatching(true);
-      try {
-          await liveApiService.undoLastPatch();
-          alert("✅ System Restored!");
-          setCanUndo(false);
+          alert("✅ Patches Applied! Server is restarting...");
           setShowSystemDoctor(false);
       } catch(e) {
-          alert("Undo Failed");
+          alert("Failed to patch system");
       } finally {
           setIsPatching(false);
       }
@@ -518,36 +602,59 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
   const handleSave = async () => {
       let hasValidationErrors = false;
+      
       const newNodes = nodes.map(node => {
           if (node.data.type === 'start') return node;
+          
           let error = false;
           let errorMsg = '';
           const { label, message, mediaUrl, inputType, options } = node.data;
           
           if (label === 'Text' || inputType === 'option' || inputType === 'text') {
              const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
-             if (!message || !message.trim()) { error = true; errorMsg = 'Empty Message'; }
-             else if (BLOCKED_REGEX.test(message)) { error = true; errorMsg = 'Placeholder Detected'; }
+             if (!message || !message.trim()) {
+                 error = true;
+                 errorMsg = 'Empty Message';
+             } else if (BLOCKED_REGEX.test(message)) {
+                 error = true;
+                 errorMsg = 'Placeholder Detected';
+             }
           }
-          if ((label === 'Image' || label === 'Video') && (!mediaUrl || !mediaUrl.trim())) { error = true; errorMsg = 'Missing URL'; }
-          if ((label === 'Image' || label === 'Video') && (!message || !message.trim())) { error = true; errorMsg = 'Missing Caption'; }
+
+          if ((label === 'Image' || label === 'Video') && (!mediaUrl || !mediaUrl.trim())) {
+              error = true;
+              errorMsg = 'Missing URL';
+          }
+
           if (inputType === 'option') {
-              if (!options || options.length === 0) { error = true; errorMsg = 'No Options'; }
-              else if (options.some((o: string) => !o || !o.trim())) { error = true; errorMsg = 'Empty Option Found'; }
+              if (!options || options.length === 0) {
+                  error = true;
+                  errorMsg = 'No Options';
+              } else if (options.some((o: string) => !o || !o.trim())) {
+                  error = true;
+                  errorMsg = 'Empty Option Found';
+              }
           }
+
           if (error) hasValidationErrors = true;
           return { ...node, data: { ...node.data, hasError: error, errorMessage: errorMsg } };
       });
 
-      if (hasValidationErrors) { setNodes(newNodes); alert("❌ SAVE BLOCKED: Strict Validation Failed."); return; }
+      if (hasValidationErrors) {
+          setNodes(newNodes);
+          alert("❌ SAVE BLOCKED: Strict Validation Failed.\n\nPlease fix red nodes (Empty Text or Options).");
+          return;
+      }
 
       setIsSaving(true);
+      
       const compiledSteps: BotStep[] = [];
       nodes.forEach(node => {
           if (node.data.type === 'start') return;
           const outgoingEdges = edges.filter(e => e.source === node.id);
           let nextStepId = 'END';
           if (outgoingEdges.length > 0) nextStepId = outgoingEdges[0].target;
+
           compiledSteps.push({
             id: node.id,
             title: node.data.label,
@@ -560,16 +667,25 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
           });
       });
 
-      const newSettings: BotSettings = { ...mockBackend.getBotSettings(), steps: compiledSteps, flowData: { nodes, edges } };
+      const newSettings: BotSettings = {
+          ...mockBackend.getBotSettings(),
+          steps: compiledSteps,
+          flowData: { nodes, edges } 
+      };
+
       try {
           if (isLiveMode) await liveApiService.saveBotSettings(newSettings);
           else mockBackend.updateBotSettings(newSettings);
-      } catch(e) { alert("Save Failed"); }
+      } catch(e) {
+          alert("Save Failed");
+      }
+      
       setTimeout(() => setIsSaving(false), 500);
   };
 
   return (
     <div className="flex h-full bg-gray-50 font-sans relative">
+        {/* SIDEBAR */}
         <div className="w-72 bg-white border-r border-gray-200 flex flex-col z-10 shadow-lg">
             <div className="p-5 border-b border-gray-100">
                 <div className="flex items-center gap-2 mb-1">
@@ -578,6 +694,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 </div>
                 <p className="text-xs text-gray-500">Drag nodes to canvas</p>
             </div>
+            
             <div className="flex-1 overflow-y-auto p-4 space-y-6">
                 <div>
                     <h4 className="text-xs font-bold text-gray-400 uppercase mb-3 tracking-wider">Messaging</h4>
@@ -587,6 +704,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                         <DraggableSidebarItem type="video" label="Video" icon={<Video size={16} />} />
                     </div>
                 </div>
+
                 <div>
                     <h4 className="text-xs font-bold text-gray-400 uppercase mb-3 tracking-wider">Questions</h4>
                     <div className="space-y-2">
@@ -598,8 +716,10 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             </div>
         </div>
 
+        {/* CANVAS */}
         <div className="flex-1 relative flex flex-col h-full overflow-hidden">
             <div className="absolute top-4 right-4 z-20 flex gap-3">
+                 {/* SYSTEM DOCTOR BUTTON */}
                  {isLiveMode && (
                      <button
                         onClick={openSystemDoctor}
@@ -608,11 +728,20 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                         <Code size={16} /> System Doctor
                      </button>
                  )}
-                 <button onClick={runAIAudit} disabled={isAuditing} className="bg-purple-600 text-white px-4 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-purple-700 transition-all flex items-center gap-2">
+
+                 <button 
+                    onClick={runAIAudit}
+                    disabled={isAuditing}
+                    className="bg-purple-600 text-white px-4 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-purple-700 transition-all flex items-center gap-2"
+                 >
                     {isAuditing ? <span className="animate-spin"><Stethoscope size={16} /></span> : <Stethoscope size={16} />}
                     {isAuditing ? 'Diagnosing...' : 'AI Flow Audit'}
                  </button>
-                 <button onClick={handleSave} disabled={isSaving} className="bg-black text-white px-5 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-gray-800 transition-all flex items-center gap-2">
+                 <button 
+                    onClick={handleSave}
+                    disabled={isSaving}
+                    className="bg-black text-white px-5 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-gray-800 transition-all flex items-center gap-2"
+                 >
                     {isSaving ? <span className="animate-spin"><Zap size={16} /></span> : <CheckCircle size={16} />}
                     {isSaving ? 'Validating...' : 'Publish Flow'}
                  </button>
@@ -620,24 +749,42 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
             <div className="flex-1 h-full bg-slate-50" onDragOver={onDragOver} onDrop={onDrop}>
                  <ReactFlow
-                    nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} nodeTypes={nodeTypes}
-                    defaultViewport={{ x: 0, y: 0, zoom: 0.8 }} minZoom={0.2} maxZoom={1.5} attributionPosition="bottom-right" proOptions={{ hideAttribution: true }}
+                    nodes={nodes}
+                    edges={edges}
+                    onNodesChange={onNodesChange}
+                    onEdgesChange={onEdgesChange}
+                    onConnect={onConnect}
+                    nodeTypes={nodeTypes}
+                    defaultViewport={{ x: 0, y: 0, zoom: 0.8 }}
+                    minZoom={0.2}
+                    maxZoom={1.5}
+                    attributionPosition="bottom-right"
+                    proOptions={{ hideAttribution: true }}
                  >
                     <Background color="#cbd5e1" gap={20} size={1} variant="dots" />
                     <Controls className="bg-white border border-gray-200 shadow-xl rounded-lg p-1" />
-                    <MiniMap className="border border-gray-200 rounded-lg shadow-xl" nodeColor={(n) => n.type === 'start' ? '#10b981' : '#3b82f6'} maskColor="rgba(240, 242, 245, 0.7)" />
+                    <MiniMap 
+                        className="border border-gray-200 rounded-lg shadow-xl" 
+                        nodeColor={(n) => n.type === 'start' ? '#10b981' : '#3b82f6'} 
+                        maskColor="rgba(240, 242, 245, 0.7)"
+                    />
+                    
                     <Panel position="bottom-center" className="mb-8">
                         <div className="bg-white/90 backdrop-blur border border-gray-200 px-4 py-2 rounded-full text-xs text-gray-500 shadow-sm flex items-center gap-2">
-                            <span className="w-2 h-2 rounded-full bg-green-500"></span> Strict Mode Active
+                            <span className="w-2 h-2 rounded-full bg-green-500"></span>
+                            Strict Mode Active: Placeholders Blocked
                         </div>
                     </Panel>
                  </ReactFlow>
             </div>
         </div>
 
+        {/* SYSTEM DOCTOR MODAL (Full Project) */}
         {showSystemDoctor && (
              <div className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-md flex items-center justify-center p-6">
                  <div className="bg-gray-900 w-full max-w-[90vw] h-[90vh] rounded-2xl shadow-2xl overflow-hidden flex flex-col border border-gray-800">
+                     
+                     {/* Header */}
                      <div className="bg-black px-6 py-4 flex justify-between items-center border-b border-gray-800">
                          <div className="flex items-center gap-3">
                              <div className="bg-red-600 p-2 rounded-lg"><Terminal className="text-white" size={20} /></div>
@@ -650,6 +797,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                      </div>
 
                      <div className="flex-1 flex overflow-hidden">
+                         
+                         {/* 1. Left: Config & Diagnosis */}
                          <div className="w-1/4 bg-gray-950 border-r border-gray-800 flex flex-col">
                              <div className="p-6 flex-1 overflow-y-auto space-y-6">
                                  <div>
@@ -658,13 +807,19 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                                          value={issueDescription}
                                          onChange={(e) => setIssueDescription(e.target.value)}
                                          className="w-full bg-gray-900 text-white border border-gray-700 rounded-lg p-3 text-sm h-32 focus:ring-2 focus:ring-red-500 outline-none resize-none"
-                                         placeholder="Describe the bug..."
+                                         placeholder="Describe the bug (e.g., 'The chat drawer is not scrolling to bottom')..."
                                      />
                                  </div>
-                                 <button onClick={analyzeCode} disabled={isAnalyzingCode} className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50">
+
+                                 <button 
+                                    onClick={analyzeCode}
+                                    disabled={isAnalyzingCode}
+                                    className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50"
+                                 >
                                      {isAnalyzingCode ? <span className="animate-spin"><Stethoscope /></span> : <Stethoscope />}
                                      {isAnalyzingCode ? 'Scanning Project...' : 'Analyze Full Project'}
                                  </button>
+
                                  {doctorDiagnosis && (
                                      <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
                                          <h4 className="text-red-400 font-bold mb-2 flex items-center gap-2 text-sm"><AlertTriangle size={14} /> AI Diagnosis</h4>
@@ -672,23 +827,22 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                                      </div>
                                  )}
                              </div>
-                             {(doctorDiagnosis?.changes || canUndo) && (
-                                 <div className="p-4 border-t border-gray-800 bg-gray-900 space-y-2">
-                                     {doctorDiagnosis?.changes && (
-                                        <button onClick={applySystemPatch} disabled={isPatching} className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50">
-                                            {isPatching ? 'Patching...' : `APPLY ${doctorDiagnosis.changes.length} FIXES`}
-                                        </button>
-                                     )}
-                                     {canUndo && (
-                                        <button onClick={handleUndo} disabled={isPatching} className="w-full bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50">
-                                            <RotateCcw size={16} /> Undo Last Patch
-                                        </button>
-                                     )}
+
+                             {doctorDiagnosis?.changes && (
+                                 <div className="p-4 border-t border-gray-800 bg-gray-900">
+                                     <button 
+                                        onClick={applySystemPatch}
+                                        disabled={isPatching}
+                                        className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50"
+                                     >
+                                         {isPatching ? 'Patching...' : `APPLY ${doctorDiagnosis.changes.length} FIXES`}
+                                     </button>
+                                     <p className="text-gray-600 text-[10px] text-center mt-2">Server will restart automatically.</p>
                                  </div>
                              )}
                          </div>
-                         
-                         {/* Changed Files List */}
+
+                         {/* 2. Middle: Changed Files List */}
                          <div className="w-1/5 bg-gray-900 border-r border-gray-800 flex flex-col">
                              <div className="p-3 bg-gray-950 border-b border-gray-800 font-bold text-gray-500 text-xs uppercase flex items-center gap-2">
                                 <Layers size={14} /> Affected Files
@@ -697,27 +851,34 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                                  {doctorDiagnosis?.changes ? (
                                      doctorDiagnosis.changes.map((change: any, idx: number) => (
                                          <button 
-                                            key={idx} onClick={() => setSelectedFile(change.filePath)}
+                                            key={idx}
+                                            onClick={() => setSelectedFile(change.filePath)}
                                             className={`w-full text-left px-4 py-3 border-b border-gray-800 hover:bg-gray-800 transition-colors ${selectedFile === change.filePath ? 'bg-gray-800 border-l-2 border-l-red-500' : ''}`}
                                          >
                                              <div className="flex items-center gap-2 text-sm font-mono text-gray-300">
                                                  <FileCode size={14} className="text-blue-500" />
                                                  <span className="truncate">{change.filePath}</span>
                                              </div>
+                                             <div className="text-[10px] text-gray-500 mt-1 truncate pl-6">
+                                                 {change.explanation.substring(0, 40)}...
+                                             </div>
                                          </button>
                                      ))
                                  ) : (
-                                     <div className="p-8 text-center text-gray-600 text-xs">No changes proposed yet.</div>
+                                     <div className="p-8 text-center text-gray-600 text-xs">
+                                         No changes proposed yet.
+                                     </div>
                                  )}
                              </div>
                          </div>
 
-                         {/* Code Editor View */}
+                         {/* 3. Right: Code Editor View */}
                          <div className="flex-1 bg-black flex flex-col">
                              <div className="bg-gray-900 px-4 py-2 flex items-center justify-between border-b border-gray-800">
                                  <span className="text-gray-400 text-xs font-mono">{selectedFile || 'No file selected'}</span>
                                  {selectedFile && <span className="text-xs font-bold text-green-500">PROPOSED NEW CONTENT</span>}
                              </div>
+                             
                              <div className="flex-1 overflow-auto p-0">
                                  {selectedFile ? (
                                      <pre className="text-xs font-mono text-green-50 p-6 leading-relaxed">
@@ -734,6 +895,67 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                      </div>
                  </div>
              </div>
+        )}
+
+        {/* AI AUDIT REPORT MODAL (Bot Flow Only) */}
+        {auditReport && auditReport.issues.length > 0 && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95">
+                    <div className="bg-purple-600 text-white p-5 flex items-center justify-between">
+                        <h3 className="font-bold flex items-center gap-2 text-lg">
+                            <Stethoscope size={20} /> AI Diagnosis Report
+                        </h3>
+                        <button onClick={() => setAuditReport(null)} className="hover:bg-white/20 p-1 rounded-full"><X size={20} /></button>
+                    </div>
+                    
+                    <div className="p-6 max-h-[60vh] overflow-y-auto space-y-4">
+                        <div className="bg-purple-50 text-purple-800 p-3 rounded-lg text-sm border border-purple-100 flex items-center gap-2">
+                             <AlertTriangle size={16} />
+                             Found {auditReport.issues.length} potential issues.
+                        </div>
+
+                        {auditReport.issues.map((issue: any, idx: number) => (
+                            <div key={idx} className="border border-gray-200 rounded-xl p-4 bg-gray-50">
+                                <div className="flex items-start justify-between mb-2">
+                                    <span className="text-xs font-bold text-gray-500 uppercase tracking-wide">Node ID: {issue.nodeId}</span>
+                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${issue.severity === 'CRITICAL' ? 'bg-red-100 text-red-600' : 'bg-amber-100 text-amber-600'}`}>
+                                        {issue.severity}
+                                    </span>
+                                </div>
+                                <h4 className="font-bold text-gray-900 text-sm mb-1">{issue.issue}</h4>
+                                <p className="text-sm text-gray-600 mb-3">{issue.suggestion}</p>
+                                
+                                <div className="flex items-center gap-2">
+                                    {issue.autoFixValue === 'DELETE_NODE' ? (
+                                        <button 
+                                            onClick={() => applyFix(issue)}
+                                            className="px-3 py-1.5 bg-red-600 text-white text-xs font-bold rounded hover:bg-red-700 flex items-center gap-1"
+                                        >
+                                            <Trash2 size={12} /> Delete Node
+                                        </button>
+                                    ) : issue.autoFixValue ? (
+                                        <button 
+                                            onClick={() => applyFix(issue)}
+                                            className="px-3 py-1.5 bg-blue-600 text-white text-xs font-bold rounded hover:bg-blue-700 flex items-center gap-1"
+                                        >
+                                            <Wand2 size={12} /> Apply Fix: "{issue.autoFixValue}"
+                                        </button>
+                                    ) : null}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="p-4 border-t border-gray-100 flex gap-3 bg-gray-50">
+                        <button 
+                           onClick={() => setAuditReport(null)}
+                           className="flex-1 py-3 text-sm font-medium text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors"
+                        >
+                           Dismiss
+                        </button>
+                    </div>
+                </div>
+            </div>
         )}
     </div>
   );
