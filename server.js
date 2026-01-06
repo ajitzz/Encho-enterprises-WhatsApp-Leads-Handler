@@ -172,7 +172,13 @@ const sanitizeDatabaseOnStartup = async (client) => {
             let dirty = false;
 
             if (settings.steps && Array.isArray(settings.steps)) {
-                settings.steps = settings.steps.map(step => {
+                settings.steps = settings.steps.filter(step => {
+                    // FILTER: Remove steps that are completely empty
+                    const hasText = step.message && step.message.trim().length > 0;
+                    const hasMedia = step.mediaUrl && step.mediaUrl.trim().length > 0;
+                    const hasOptions = step.options && step.options.length > 0;
+                    return hasText || hasMedia || hasOptions;
+                }).map(step => {
                     if (step.message && BLOCKED_REGEX.test(step.message)) {
                         console.warn(`   ⚠️  Purging prohibited text from Step ${step.id}`);
                         if (step.options && step.options.length > 0) {
@@ -747,6 +753,13 @@ app.post('/api/messages/send', async (req, res) => {
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
   
+  // STRICT FIREWALL: Prevent empty messages
+  // Returns FALSE if the message body is empty AND no media/template is attached
+  if (!body && !mediaUrl && !templateName && (!options || options.length === 0)) {
+      console.warn("⚠️ Blocked empty message attempt to", to);
+      return false;
+  }
+
   let payload = { messaging_product: 'whatsapp', to: to };
   
   // Logic simplified for brevity (same as previous patches)
@@ -832,6 +845,12 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                 if (aiReply) {
                     await sendWhatsAppMessage(from, aiReply);
                     await logSystemMessage(driver.id, aiReply);
+                }
+            } else if (botSettings.isEnabled && botSettings.routingStrategy === 'BOT_ONLY') {
+                // If it's a new user or explicitly resetting bot flow
+                if (!driver.is_bot_active) {
+                    // Activate bot logic here if needed (e.g. check for keywords to restart)
+                    // Currently simplified to handle manual triggers
                 }
             }
             await client.query('COMMIT');

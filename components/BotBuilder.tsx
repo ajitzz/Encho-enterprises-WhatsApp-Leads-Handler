@@ -1,5 +1,4 @@
 
-
 import React, { useState, useCallback, useEffect } from 'react';
 import { 
   ReactFlow, 
@@ -72,6 +71,14 @@ const CustomNode = ({ data, id, selected }: any) => {
     handleChange('options', newOpts);
   };
 
+  const handleDelete = () => {
+    if (data.type === 'start') {
+        alert("Cannot delete the Start node. It is the entry point of your flow.");
+        return;
+    }
+    deleteNode(id);
+  };
+
   // --- NODE TYPES IDENTIFICATION ---
   const isInputType = ['Text', 'Number', 'Email', 'Website', 'Date', 'Time'].includes(data.label);
   const isMediaType = ['Image', 'Video', 'File', 'Audio'].includes(data.label);
@@ -107,6 +114,12 @@ const CustomNode = ({ data, id, selected }: any) => {
         <div className="p-4 flex items-center justify-center">
             <p className="text-xs font-medium text-gray-500">Flow Terminates</p>
         </div>
+        <button 
+            onClick={handleDelete}
+            className="absolute -top-2 -right-2 bg-gray-200 hover:bg-red-500 hover:text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all shadow-sm"
+        >
+            <X size={12} />
+        </button>
       </div>
     );
   }
@@ -237,7 +250,7 @@ const CustomNode = ({ data, id, selected }: any) => {
                     <p className="text-[10px] text-gray-500 font-medium">Configure this interaction</p>
                 </div>
             </div>
-            <button onClick={() => deleteNode(id)} className="text-gray-400 hover:text-red-500 hover:bg-red-50 p-2 rounded-lg transition-colors" title="Delete Step">
+            <button onClick={handleDelete} className="text-gray-400 hover:text-red-500 hover:bg-red-50 p-2 rounded-lg transition-colors" title="Delete Step">
                 <Trash2 size={16} />
             </button>
         </div>
@@ -441,6 +454,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   } = useFlowStore();
   
   const [isSaving, setIsSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [isAuditing, setIsAuditing] = useState(false);
   const [auditReport, setAuditReport] = useState<any>(null);
   
@@ -739,14 +753,28 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       }
 
       setIsSaving(true);
+      setSaveStatus('idle');
       
       // --- INTELLIGENT FLOW COMPILATION ---
       const compiledSteps: BotStep[] = [];
       
       // 1. Identify Entry Point (Node connected to Start)
       const startNode = nodes.find(n => n.data.type === 'start' || n.type === 'start');
+      
+      if (!startNode) {
+          setIsSaving(false);
+          alert("❌ CRITICAL: No 'Start' node found! You must have an entry point.");
+          return;
+      }
+
       const startEdge = edges.find(e => e.source === startNode?.id);
       const firstStepId = startEdge?.target;
+
+      if (!firstStepId) {
+          setIsSaving(false);
+          alert("❌ START DISCONNECTED: Please connect the 'Start' node to your first message.");
+          return;
+      }
 
       // 2. Filter out structural nodes (start/end) so they are NEVER saved as messages
       const contentNodes = nodes.filter(n => n.data.type !== 'start' && n.data.type !== 'end');
@@ -765,10 +793,16 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               }
           }
 
+          // Strict Empty Check to be safe - FIREWALL AGAINST GHOST BUBBLES
+          if (!node.data.message && !node.data.mediaUrl && (!node.data.options || node.data.options.length === 0)) {
+              console.warn("Skipping empty node during compile:", node.id);
+              return;
+          }
+
           compiledSteps.push({
             id: node.id,
             title: node.data.label,
-            message: node.data.message,
+            message: node.data.message || '',
             inputType: node.data.inputType,
             options: node.data.options,
             saveToField: node.data.saveToField,
@@ -795,11 +829,15 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       try {
           if (isLiveMode) await liveApiService.saveBotSettings(newSettings);
           else mockBackend.updateBotSettings(newSettings);
+          
+          setSaveStatus('success');
+          setTimeout(() => setSaveStatus('idle'), 3000); // Revert after 3s
       } catch(e) {
+          setSaveStatus('error');
           alert("Save Failed");
       }
       
-      setTimeout(() => setIsSaving(false), 500);
+      setIsSaving(false);
   };
 
   return (
@@ -865,11 +903,30 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                  </button>
                  <button 
                     onClick={handleSave}
-                    disabled={isSaving}
-                    className="bg-black text-white px-5 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-gray-800 transition-all flex items-center gap-2"
+                    disabled={isSaving || saveStatus === 'success'}
+                    className={`px-5 py-2.5 rounded-full text-sm font-bold shadow-lg transition-all flex items-center gap-2
+                        ${saveStatus === 'success' 
+                            ? 'bg-green-600 text-white cursor-default' 
+                            : 'bg-black text-white hover:bg-gray-800'
+                        }
+                    `}
                  >
-                    {isSaving ? <span className="animate-spin"><Zap size={16} /></span> : <CheckCircle size={16} />}
-                    {isSaving ? 'Validating...' : 'Publish Flow'}
+                    {isSaving ? (
+                        <>
+                            <span className="animate-spin"><Zap size={16} /></span>
+                            Saving...
+                        </>
+                    ) : saveStatus === 'success' ? (
+                        <>
+                            <CheckCircle size={16} />
+                            Saved Successfully!
+                        </>
+                    ) : (
+                        <>
+                            <CheckCircle size={16} />
+                            Publish Flow
+                        </>
+                    )}
                  </button>
             </div>
 
