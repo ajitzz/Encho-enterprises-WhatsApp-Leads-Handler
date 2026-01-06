@@ -12,7 +12,6 @@ import {
   Node,
   Edge,
   Connection,
-  Panel,
   ReactFlowProvider,
   useReactFlow,
   MarkerType
@@ -21,23 +20,14 @@ import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
 import { 
-  Save, MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
-  List, Type, Hash, Mail, Globe, Calendar, Clock, Phone, 
-  CreditCard, ShoppingBag, LayoutGrid, MoreHorizontal, X, Trash2,
-  Zap, CheckCircle, Flag, Pencil, Bold, Italic, Link, Play, Music, Upload, AlertTriangle
+  MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
+  List, Type, Hash, Mail, Globe, Calendar, Clock, 
+  LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Pencil, Bold, Italic, Link, Play, AlertTriangle
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
 const HANDLE_STYLE = { width: 8, height: 8, background: '#9ca3af', border: '2px solid white' };
 const ACTIVE_HANDLE_STYLE = { width: 10, height: 10, background: '#3b82f6', border: '2px solid white' };
-
-// --- HELPER: YouTube Thumbnail ---
-const getYoutubeId = (url: string) => {
-  if (!url) return null;
-  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
-  const match = url.match(regExp);
-  return (match && match[2].length === 11) ? match[2] : null;
-};
 
 // --- HELPER: Get Icon dynamically ---
 const getNodeIcon = (label: string, inputType?: string) => {
@@ -47,13 +37,11 @@ const getNodeIcon = (label: string, inputType?: string) => {
     if (label === 'Location') return <MapPin size={14} />;
     if (inputType === 'option' || label === 'List' || label === 'Quick Reply') return <List size={14} />;
     if (label === 'Link') return <Link size={14} />;
-    // Input types
     if (label === 'Email') return <Mail size={14} />;
     if (label === 'Number') return <Hash size={14} />;
     if (label === 'Website') return <Globe size={14} />;
     if (label === 'Date') return <Calendar size={14} />;
     if (label === 'Time') return <Clock size={14} />;
-    
     return <MessageSquare size={14} />;
 };
 
@@ -110,53 +98,52 @@ const CustomNode = ({ data, id, selected }: any) => {
   const isInputType = ['Text', 'Number', 'Email', 'Website', 'Date', 'Time'].includes(data.label);
   const isMediaType = ['Image', 'Video', 'File', 'Audio'].includes(data.label);
   const isOptionType = ['Quick Reply', 'List'].includes(data.label);
+  
+  // Error State Detection
+  const hasError = data.hasError;
 
   // --- 2. EDIT MODE (Selected) ---
   if (selected) {
     return (
-        <div className="w-[400px] bg-white rounded-xl shadow-2xl border-2 border-blue-500 ring-4 ring-blue-50 transition-all duration-200 z-50 relative animate-in zoom-in-95 duration-200">
+        <div className={`w-[400px] bg-white rounded-xl shadow-2xl border-2 ${hasError ? 'border-red-500 ring-4 ring-red-50' : 'border-blue-500 ring-4 ring-blue-50'} transition-all duration-200 z-50 relative animate-in zoom-in-95 duration-200`}>
              <Handle type="target" position={Position.Left} style={HANDLE_STYLE} className="-left-2.5" />
              
+             {hasError && (
+                 <div className="absolute -top-3 left-4 bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 shadow-sm">
+                     <AlertTriangle size={10} /> Missing Information
+                 </div>
+             )}
+
              <div className="p-4">
                 {/* --- MEDIA TYPES (Image, Video, File) --- */}
                 {isMediaType && (
                     <>
-                        {/* Tabs */}
                         <div className="flex items-center gap-4 mb-4">
-                            <span className="text-sm font-medium text-gray-400 cursor-pointer hover:text-gray-600">Upload</span>
                             <span className="text-sm font-bold text-gray-800 bg-gray-100 px-3 py-1.5 rounded-md flex items-center gap-1">
-                                Embed link <span className="text-red-500">*</span>
+                                {data.label} URL <span className="text-red-500">*</span>
                             </span>
                         </div>
 
-                        {/* URL Input */}
-                        <label className="block text-sm font-medium text-gray-900 mb-2">{data.label} URL <span className="text-red-500">*</span></label>
                         <div className="relative mb-4 group/input">
                             <input 
                                 type="text" 
-                                className="w-full border border-gray-200 rounded-lg py-2.5 pl-3 pr-9 text-sm text-gray-700 placeholder-gray-400 outline-none focus:border-green-500 transition-colors"
-                                placeholder={`Paste ${data.label.toLowerCase()} link...`}
+                                className={`w-full border rounded-lg py-2.5 pl-3 pr-9 text-sm text-gray-700 outline-none transition-colors ${!data.mediaUrl && hasError ? 'border-red-300 bg-red-50 placeholder-red-300' : 'border-gray-200 focus:border-green-500'}`}
+                                placeholder={`Paste ${data.label.toLowerCase()} link here...`}
                                 value={data.mediaUrl || ''}
                                 onChange={(e) => handleChange('mediaUrl', e.target.value)}
                             />
-                            <div className="absolute right-3 top-3 text-gray-400 group-focus-within/input:text-green-500 pointer-events-none">
-                                <Pencil size={14} />
-                            </div>
                         </div>
 
-                        {/* Caption (Image/Video only) */}
                         {(data.label === 'Image' || data.label === 'Video') && (
                             <div className="relative group/caption">
-                                <label className="block text-sm font-medium text-gray-900 mb-2">Caption:</label>
+                                <label className="block text-sm font-medium text-gray-900 mb-2">Caption (Optional):</label>
                                 <textarea 
                                     className="w-full border border-gray-200 rounded-lg py-2.5 pl-3 pr-9 text-sm text-gray-700 outline-none focus:border-green-500 transition-colors resize-none bg-white"
                                     rows={2}
+                                    placeholder="Add a caption..."
                                     value={data.message || ''}
                                     onChange={(e) => handleChange('message', e.target.value)}
                                 />
-                                <div className="absolute right-3 bottom-2 text-[10px] text-gray-400 font-medium bg-white px-1">
-                                    {data.message?.length || 0}/1024
-                                </div>
                             </div>
                         )}
                     </>
@@ -164,23 +151,16 @@ const CustomNode = ({ data, id, selected }: any) => {
 
                 {/* --- TEXT TYPE --- */}
                 {(data.label === 'Text') && (
-                    <div className="rounded-xl border border-green-500 ring-1 ring-green-100 transition-all duration-200">
-                        <div className="flex items-center gap-4 px-4 py-3 border-b border-gray-100/50">
-                            <button className="text-gray-400 hover:text-gray-600 transition-colors"><Pencil size={14} /></button>
-                            <button className="text-gray-400 hover:text-gray-600 transition-colors"><Bold size={14} /></button>
-                            <button className="text-gray-400 hover:text-gray-600 transition-colors"><Italic size={14} /></button>
-                        </div>
+                    <div className={`rounded-xl border ${!data.message && hasError ? 'border-red-500 bg-red-50/10' : 'border-green-500 ring-1 ring-green-100'} transition-all duration-200`}>
                         <div className="p-4 relative">
                             <textarea 
                                 className="w-full bg-transparent border-none p-0 text-sm text-gray-800 placeholder-gray-300 focus:ring-0 resize-none leading-relaxed font-medium"
                                 rows={4}
-                                placeholder="Enter your message..."
+                                placeholder="Enter your message here..."
                                 value={data.message}
                                 onChange={(e) => handleChange('message', e.target.value)}
                             />
-                            <div className="text-[10px] text-gray-400 text-right mt-2 font-medium">
-                                {data.message?.length || 0}/1024
-                            </div>
+                            {!data.message && hasError && <span className="text-red-500 text-xs font-bold absolute bottom-2 left-4">Message is required</span>}
                         </div>
                     </div>
                 )}
@@ -188,7 +168,7 @@ const CustomNode = ({ data, id, selected }: any) => {
                 {/* --- CHOICE TYPES --- */}
                 {isOptionType && (
                     <div className="space-y-3">
-                         <div className="bg-gray-50 p-3 rounded-lg border border-gray-200 mb-3">
+                         <div className={`p-3 rounded-lg border ${!data.message && hasError ? 'border-red-300 bg-red-50' : 'border-gray-200 bg-gray-50'} mb-3`}>
                             <textarea 
                                 className="w-full bg-transparent border-none p-0 text-sm text-gray-800 placeholder-gray-400 focus:ring-0 resize-none leading-relaxed"
                                 rows={2}
@@ -229,7 +209,7 @@ const CustomNode = ({ data, id, selected }: any) => {
                 {/* --- INPUT TYPES --- */}
                 {isInputType && (
                     <div className="space-y-4">
-                        <div className="bg-gray-50 p-3 rounded-lg border border-gray-200">
+                        <div className={`p-3 rounded-lg border ${!data.message && hasError ? 'border-red-300 bg-red-50' : 'border-gray-200 bg-gray-50'}`}>
                              <label className="block text-xs font-bold text-gray-500 mb-1">Question</label>
                             <textarea 
                                 className="w-full bg-transparent border-none p-0 text-sm text-gray-800 placeholder-gray-400 focus:ring-0 resize-none leading-relaxed"
@@ -267,7 +247,6 @@ const CustomNode = ({ data, id, selected }: any) => {
                 )}
              </div>
 
-             {/* Single Main Output Handle for non-option types */}
              {!isOptionType && (
                  <Handle type="source" position={Position.Right} id="main" style={{...ACTIVE_HANDLE_STYLE, right: -12, top: '50%'}} />
              )}
@@ -277,17 +256,23 @@ const CustomNode = ({ data, id, selected }: any) => {
 
   // --- 3. PREVIEW MODE (Unselected) ---
   return (
-    <div className="w-[280px] bg-white rounded-2xl shadow-md border border-gray-200 transition-all hover:border-gray-300 hover:shadow-lg group relative cursor-pointer">
+    <div className={`w-[280px] bg-white rounded-2xl shadow-md border transition-all hover:shadow-lg group relative cursor-pointer ${hasError ? 'border-red-400' : 'border-gray-200 hover:border-gray-300'}`}>
         <Handle type="target" position={Position.Left} style={HANDLE_STYLE} className="-left-2.5" />
         
+        {/* Error Indicator */}
+        {hasError && (
+             <div className="absolute -top-2 -right-2 bg-red-500 text-white p-1 rounded-full shadow-md z-10 animate-pulse">
+                <AlertTriangle size={14} />
+             </div>
+        )}
+
         {/* Header */}
-        <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+        <div className={`px-4 py-3 border-b flex items-center justify-between ${hasError ? 'bg-red-50 border-red-100' : 'border-gray-100'}`}>
             <div className="flex items-center gap-2">
-                <span className="text-gray-500">
-                    {/* DYNAMICALLY RENDER ICON TO FIX SERIALIZATION ERROR */}
+                <span className={`${hasError ? 'text-red-500' : 'text-gray-500'}`}>
                     {getNodeIcon(data.label, data.inputType)}
                 </span>
-                <span className="text-xs font-bold text-gray-900">Group #{id.split('_')[1] || id.slice(-4)}</span>
+                <span className={`text-xs font-bold ${hasError ? 'text-red-800' : 'text-gray-900'}`}>{data.label}</span>
             </div>
             <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
                 <button onClick={(e) => { e.stopPropagation(); data.onDelete?.(id); }} className="text-gray-400 hover:text-red-500 p-1">
@@ -298,95 +283,56 @@ const CustomNode = ({ data, id, selected }: any) => {
 
         {/* Preview Content */}
         <div className="p-4">
-            
             {/* Text Preview */}
             {(data.label === 'Text') && (
                 <p className="text-sm text-gray-600 line-clamp-3 font-medium">
-                    {data.message || <span className="text-red-400 italic text-xs flex items-center gap-1"><AlertTriangle size={10} /> Message required</span>}
+                    {data.message || <span className="text-red-400 italic text-xs flex items-center gap-1 font-bold">Message required</span>}
                 </p>
             )}
 
-            {/* Image Preview */}
-            {data.label === 'Image' && (
+            {/* Media Preview */}
+            {(data.label === 'Image' || data.label === 'Video') && (
                 <div className="space-y-2">
-                     <div className="relative aspect-video bg-gray-100 rounded-lg overflow-hidden border border-gray-100">
+                     <div className={`relative aspect-video rounded-lg overflow-hidden border ${!data.mediaUrl && hasError ? 'border-red-300 bg-red-50' : 'bg-gray-100 border-gray-100'}`}>
                         {data.mediaUrl ? (
-                            <img src={data.mediaUrl} alt="Preview" className="w-full h-full object-cover" />
+                            <div className="w-full h-full flex items-center justify-center bg-black text-white text-xs">
+                                {data.label === 'Video' ? <Play size={20} /> : <ImageIcon size={20} />}
+                            </div>
                         ) : (
-                            <div className="flex items-center justify-center h-full text-red-300 bg-red-50">
+                            <div className="flex items-center justify-center h-full text-red-300">
                                 <AlertTriangle size={24} />
                             </div>
                         )}
                      </div>
-                     {data.message && <p className="text-xs text-gray-500 truncate">{data.message}</p>}
-                </div>
-            )}
-
-            {/* Video Preview */}
-            {data.label === 'Video' && (
-                <div className="relative w-full aspect-video bg-gray-100 rounded-lg overflow-hidden group/video">
-                    {data.mediaUrl && getYoutubeId(data.mediaUrl) ? (
-                        <img src={`https://img.youtube.com/vi/${getYoutubeId(data.mediaUrl)}/mqdefault.jpg`} alt="Video" className="w-full h-full object-cover" />
-                    ) : (
-                         data.mediaUrl ? (
-                            <div className="w-full h-full flex items-center justify-center bg-black text-white text-xs">Video Link</div>
-                         ) : (
-                            <div className="w-full h-full flex items-center justify-center bg-red-50 text-red-300">
-                                <AlertTriangle size={32} />
-                            </div>
-                         )
-                    )}
-                    {data.mediaUrl && <div className="absolute inset-0 flex items-center justify-center bg-black/10">
-                        <div className="w-8 h-8 bg-red-600 rounded-full flex items-center justify-center shadow-md">
-                             <Play size={12} fill="white" className="text-white ml-0.5" />
-                        </div>
-                    </div>}
-                </div>
-            )}
-
-            {/* File Preview */}
-            {data.label === 'File' && (
-                <div className="flex items-center gap-3 p-3 bg-blue-50 rounded-lg border border-blue-100">
-                    <div className="bg-white p-2 rounded-md shadow-sm text-blue-600">
-                        <FileText size={16} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                        <p className="text-xs font-bold text-gray-700 truncate">Document</p>
-                        <p className="text-[10px] text-gray-500 truncate">{data.mediaUrl || 'No file selected'}</p>
-                    </div>
+                     {data.message ? (
+                        <p className="text-xs text-gray-500 truncate">{data.message}</p>
+                     ) : (
+                        data.label === 'Video' ? null : <span className="text-gray-300 text-[10px] italic">No caption</span>
+                     )}
                 </div>
             )}
 
              {/* Choices Preview */}
              {isOptionType && (
                 <div className="space-y-2">
-                    <p className="text-xs text-gray-600 mb-2">{data.message || <span className="text-red-400 italic text-xs">Question text required</span>}</p>
+                    <p className="text-xs text-gray-600 mb-2">{data.message || <span className="text-red-400 italic text-xs font-bold">Question required</span>}</p>
                     <div className="flex flex-col gap-1.5">
                         {options.map((opt, i) => (
                             <div key={i} className="w-full bg-gray-50 border border-gray-200 text-gray-600 py-1.5 px-3 rounded text-xs font-medium text-center relative">
                                 {opt}
-                                <Handle type="source" position={Position.Right} id={`opt_${i}`} style={{...HANDLE_STYLE, right: -21}} />
                             </div>
                         ))}
-                        {options.length === 0 && <span className="text-xs text-red-400 italic">No options added</span>}
+                        {options.length === 0 && <span className="text-xs text-red-400 italic font-bold">Add at least one option</span>}
                     </div>
                 </div>
              )}
-
+             
              {/* Input Preview */}
              {isInputType && (
-                <div className="space-y-2">
-                    <p className="text-xs text-gray-600 mb-2">{data.message || `Please enter ${data.label.toLowerCase()}...`}</p>
-                    <div className="bg-gray-50 border border-gray-200 rounded px-3 py-2 text-xs text-gray-400 flex items-center justify-between">
-                        <span>User types {data.label}...</span>
-                        {data.saveToField && <span className="text-[9px] bg-purple-100 text-purple-600 px-1 rounded">{data.saveToField}</span>}
-                    </div>
-                </div>
+                 <p className="text-xs text-gray-600 mb-2">{data.message || <span className="text-red-400 italic text-xs font-bold">Question required</span>}</p>
              )}
-
         </div>
 
-        {/* Main Source Handle (if not option type) */}
         {!isOptionType && (
             <Handle type="source" position={Position.Right} id="main" style={{...HANDLE_STYLE, right: -12, top: '50%'}} />
         )}
@@ -460,7 +406,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const [isSaving, setIsSaving] = useState(false);
   const reactFlowInstance = useReactFlow();
 
-  // Load Data
   useEffect(() => {
     const load = async () => {
         let settings: BotSettings;
@@ -473,15 +418,14 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         }
 
         if (settings.flowData && settings.flowData.nodes.length > 0) {
-            // Restore visual state
             const restoredNodes = settings.flowData.nodes.map((n: any) => ({
                 ...n,
                 data: {
                     ...n.data,
-                    // Remove existing icon property if it exists to prevent Error #31
                     icon: undefined, 
                     onChange: updateNodeData,
-                    onDelete: deleteNode
+                    onDelete: deleteNode,
+                    hasError: false // Reset visual errors on load
                 }
             }));
             setNodes(restoredNodes);
@@ -537,13 +481,13 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         position,
         data: { 
             label: label,
-            // Removed icon property to ensure serializability
             message: '', 
             inputType: inputType || 'text', 
             hasMedia: type === 'image' || type === 'video' || type === 'file',
             onChange: updateNodeData, 
             onDelete: deleteNode,
-            options: inputType === 'option' ? ['Yes', 'No'] : undefined
+            options: inputType === 'option' ? ['Yes', 'No'] : undefined,
+            hasError: false
         },
       };
 
@@ -552,53 +496,46 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
     [reactFlowInstance],
   );
 
-  // --- VALIDATION HELPER ---
-  const validateFlow = () => {
-    const errors: string[] = [];
-    nodes.forEach(node => {
-      if (node.data.type === 'start') return;
-      const label = node.data.label;
-      const id = node.id.split('_')[1] || node.id;
-      
-      const isOptionType = node.data.inputType === 'option';
-      
-      // 1. Options/Buttons/List
-      if (isOptionType) {
-         if (!node.data.message || !node.data.message.trim()) {
-             errors.push(`Group #${id} (${label}): Question/Message text is required.`);
-         }
-         if (!node.data.options || node.data.options.length === 0) {
-             errors.push(`Group #${id} (${label}): At least one option is required.`);
-         }
-      }
-      
-      // 2. Pure Text
-      if (label === 'Text') {
-          if (!node.data.message || !node.data.message.trim()) {
-              errors.push(`Group #${id} (Text): Message cannot be empty.`);
-          }
-      }
-      
-      // 3. Media (Image/Video)
-      if (['Image', 'Video'].includes(label)) {
-          if (!node.data.mediaUrl || !node.data.mediaUrl.trim()) {
-              errors.push(`Group #${id} (${label}): Media URL is required.`);
-          }
-      }
-    });
-    return errors;
-  };
-
-  // --- SAVE & COMPILE ---
+  // --- STRICT VALIDATION ---
   const handleSave = async () => {
-      const errors = validateFlow();
-      if (errors.length > 0) {
-          alert("Cannot Save - Please Fix Errors:\n\n" + errors.map(e => "• " + e).join("\n"));
+      let hasValidationErrors = false;
+      
+      // Update nodes to show error state if invalid
+      const newNodes = nodes.map(node => {
+          if (node.data.type === 'start') return node;
+          
+          let error = false;
+          const { label, message, mediaUrl, inputType, options } = node.data;
+          
+          // 1. Text/Questions must have message
+          if ((label === 'Text' || inputType === 'option' || inputType === 'text') && (!message || !message.trim())) {
+              error = true;
+          }
+          // 2. Media must have URL (message optional)
+          if ((label === 'Image' || label === 'Video') && (!mediaUrl || !mediaUrl.trim())) {
+              error = true;
+          }
+          // 3. Options must have at least 1 option
+          if (inputType === 'option' && (!options || options.length === 0)) {
+              error = true;
+          }
+
+          if (error) hasValidationErrors = true;
+          
+          return {
+              ...node,
+              data: { ...node.data, hasError: error }
+          };
+      });
+
+      if (hasValidationErrors) {
+          setNodes(newNodes);
+          alert("Cannot Save: Please fix the errors highlighted in red.\n\n- Text nodes must have a message.\n- Media nodes must have a URL.\n- Option nodes must have a question and choices.");
           return;
       }
-      
+
+      // Proceed with Save
       setIsSaving(true);
-      
       const compiledSteps: BotStep[] = [];
       
       nodes.forEach(node => {
@@ -644,8 +581,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
   return (
     <div className="flex flex-col h-full bg-gray-50 font-sans">
-        
-        {/* TOP BAR */}
         <div className="bg-white border-b border-gray-200 px-6 h-16 flex items-center justify-between shrink-0 z-20">
             <div className="flex items-center gap-6">
                 <div className="flex items-center gap-2">
@@ -654,37 +589,20 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     </div>
                     <span className="font-bold text-gray-900">My Chatbot</span>
                 </div>
-                
-                {/* Toggles */}
-                <div className="flex items-center gap-4">
-                    <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-gray-600">Static Variables</span>
-                        <div className="w-9 h-5 bg-gray-200 rounded-full relative cursor-pointer">
-                            <div className="absolute left-1 top-1 w-3 h-3 bg-white rounded-full shadow-sm"></div>
-                        </div>
-                    </div>
-                </div>
             </div>
 
             <div className="flex items-center gap-4">
-                 <button className="flex items-center gap-2 px-4 py-1.5 border border-green-500 text-green-600 rounded-full text-sm font-medium hover:bg-green-50 transition-colors">
-                    <Play size={14} fill="currentColor" /> Test Bot
-                 </button>
-                 <div className="h-6 w-px bg-gray-200"></div>
                  <button 
                     onClick={handleSave}
                     disabled={isSaving}
                     className="bg-green-500 hover:bg-green-600 text-white px-6 py-2 rounded-full text-sm font-bold shadow-md hover:shadow-lg transition-all flex items-center gap-2"
                  >
-                    {isSaving ? <span className="animate-pulse">Saving...</span> : <><CheckCircle size={16} /> Save</>}
+                    {isSaving ? <span className="animate-pulse">Saving...</span> : <><CheckCircle size={16} /> Save Changes</>}
                  </button>
             </div>
         </div>
 
-        {/* WORKSPACE */}
         <div className="flex-1 flex overflow-hidden relative">
-            
-            {/* CANVAS */}
             <div className="flex-1 h-full bg-[#f8f9fa] relative" onDragOver={onDragOver} onDrop={onDrop}>
                  <ReactFlow
                     nodes={nodes}
@@ -703,8 +621,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     <MiniMap className="border border-gray-200 rounded-lg shadow-sm m-4" zoomable pannable />
                  </ReactFlow>
             </div>
-
-            {/* RIGHT SIDEBAR */}
             <div className="w-[280px] bg-white border-l border-gray-200 flex flex-col shadow-xl z-10 overflow-hidden">
                 <div className="flex-1 overflow-y-auto custom-scrollbar">
                     <div className="p-5 space-y-8">
@@ -721,7 +637,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     </div>
                 </div>
             </div>
-
         </div>
     </div>
   );
@@ -737,15 +652,9 @@ const DraggableSidebarItem = ({ type, inputType, label, icon }: any) => {
     };
   
     return (
-      <div 
-        className="flex flex-col gap-2 cursor-grab group"
-        onDragStart={onDragStart} 
-        draggable
-      >
+      <div className="flex flex-col gap-2 cursor-grab group" onDragStart={onDragStart} draggable>
         <div className="bg-white border border-dashed border-gray-200 rounded-xl px-3 py-3 flex items-center gap-3 transition-all hover:border-green-400 hover:bg-green-50/30 hover:shadow-sm">
-            <div className="text-green-600">
-                {icon}
-            </div>
+            <div className="text-green-600">{icon}</div>
             <span className="text-sm font-medium text-gray-700">{label}</span>
         </div>
       </div>

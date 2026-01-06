@@ -148,7 +148,6 @@ const ensureDatabaseInitialized = async (client) => {
         await client.query(SCHEMA_SQL);
         
         // --- MIGRATIONS: Force add columns for existing tables ---
-        // This fixes the "column m.options does not exist" (42703) error
         await client.query(`
             ALTER TABLE messages ADD COLUMN IF NOT EXISTS options TEXT[];
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS current_bot_step_id TEXT;
@@ -168,7 +167,6 @@ const ensureDatabaseInitialized = async (client) => {
     } catch (e) {
         await client.query('ROLLBACK');
         console.error("Schema Init Failed:", e);
-        // Don't throw here, let the main query retry handle it
     }
 };
 
@@ -190,7 +188,6 @@ app.get('/api/health', async (req, res) => {
 // Drivers List
 app.get('/api/drivers', async (req, res) => {
     try {
-        // FIXED: Cast '[]' to '[]'::json to prevent type mismatch error in Postgres
         const result = await queryWithRetry(`
             SELECT d.id, d.phone_number as "phoneNumber", d.name, d.source, d.status, d.last_message as "lastMessage", 
             d.last_message_time as "lastMessageTime", COALESCE(d.documents, ARRAY[]::text[]) as documents, 
@@ -230,23 +227,17 @@ app.post('/api/bot-settings', async (req, res) => {
 app.post('/api/messages/send', async (req, res) => {
     try {
         const { driverId, text } = req.body;
-        // 1. Get Phone Number
         const driverRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
         if (driverRes.rows.length === 0) return res.status(404).json({ error: 'Driver not found' });
         
         const phoneNumber = driverRes.rows[0].phone_number;
-
-        // 2. Send to WhatsApp
         await sendWhatsAppMessage(phoneNumber, text);
 
-        // 3. Log to DB
         const msgId = Date.now().toString(); 
         await queryWithRetry(
             `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'agent', $3, $4, 'text')`,
             [msgId, driverId, text, Date.now()]
         );
-        
-        // 4. Update Driver
         await queryWithRetry(
             `UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3`, 
             [text, Date.now(), driverId]
@@ -261,22 +252,16 @@ app.post('/api/messages/send', async (req, res) => {
 
 // --- LOGIC ENGINE ---
 
-// FIXED: Enhanced to support LIST MESSAGES for > 3 options and rich media (image/video/document)
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return;
   
-  // SANITIZATION: Fix "Replace this sample message!" issue (Meta placeholder)
-  // Also handle empty body for interactive messages to prevent API errors
-  let safeBody = body;
-  if (!safeBody || !safeBody.trim() || safeBody.includes("Replace this sample message")) {
-      console.warn(`⚠️ Sanitizing outgoing message. Original: "${body}"`);
-      if (options && options.length > 0) {
-          safeBody = "Please select an option below:";
-      } else if (mediaUrl) {
-           // Media caption is optional, so undefined is fine, but "Replace..." is bad.
-           safeBody = ""; 
-      } else if (!templateName) {
-           safeBody = "Hello! How can I help you today?"; // Fallback for pure text
+  // --- ABORT LOGIC: Block Empty/Placeholder Messages ---
+  // If user didn't fix the bot step, we STOP here to avoid sending garbage.
+  // Note: Media messages (Image/Video) allow empty bodies (captions), so we skip this check for them.
+  if (!mediaUrl && !templateName) {
+      if (!body || !body.trim() || body.includes("Replace this sample message")) {
+          console.error(`⛔ BLOCKING MESSAGE: Attempted to send invalid text to ${to}. Body: "${body}"`);
+          return; // STOP EXECUTION
       }
   }
 
@@ -287,23 +272,25 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
     payload.template = { name: templateName, language: { code: language } };
   } else if (mediaUrl) {
     // Media Message (Image, Video, or Document)
+    // NOTE: Body here is treated as the caption.
     payload.type = mediaType;
     payload[mediaType] = { link: mediaUrl };
-    if (safeBody && safeBody.length > 0) payload[mediaType].caption = safeBody; // Add caption if provided
+    if (body && body.trim().length > 0 && !body.includes("Replace this sample message")) {
+        payload[mediaType].caption = body; 
+    }
   } else if (options && options.length > 0) {
-    // FILTER: Remove empty options
     const validOptions = options.filter(o => o && o.trim().length > 0);
     
     if (validOptions.length === 0) {
         payload.type = 'text';
-        payload.text = { body: safeBody };
+        payload.text = { body: body };
     } 
     // IF > 3 OPTIONS: Use LIST MESSAGE (Menu)
     else if (validOptions.length > 3) {
         payload.type = 'interactive';
         payload.interactive = {
             type: 'list',
-            body: { text: safeBody },
+            body: { text: body },
             action: {
                 button: "Select Option",
                 sections: [
@@ -311,7 +298,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
                         title: "Choices",
                         rows: validOptions.slice(0, 10).map((opt, i) => ({
                             id: `opt_${i}`,
-                            title: opt.substring(0, 24) // Title limit 24 chars for list
+                            title: opt.substring(0, 24) 
                         }))
                     }
                 ]
@@ -323,7 +310,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
         payload.type = 'interactive';
         payload.interactive = {
             type: 'button',
-            body: { text: safeBody },
+            body: { text: body },
             action: { 
                 buttons: validOptions.map((opt, i) => ({ 
                     type: 'reply', 
@@ -334,7 +321,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
     }
   } else {
     payload.type = 'text';
-    payload.text = { body: safeBody };
+    payload.text = { body: body };
   }
   
   try {
@@ -354,11 +341,10 @@ const analyzeWithAI = async (text, systemInstruction) => {
   } catch (e) { return "Thanks for contacting Uber Fleet."; }
 };
 
-// HELPER: Log system messages (Bot/AI) to database so they appear in chat history
+// HELPER: Log system messages
 const logSystemMessage = async (driverId, text, type = 'text', options = null, imageUrl = null) => {
     try {
         const msgId = Date.now().toString() + '_' + Math.random().toString(36).substr(2, 5);
-        // Ensure options is an array for Postgres or null
         const opts = options && options.length > 0 ? options : null;
         
         await queryWithRetry(
@@ -373,7 +359,6 @@ const logSystemMessage = async (driverId, text, type = 'text', options = null, i
 
 const processIncomingMessage = async (from, name, msgBody, msgType = 'text', timestamp = Date.now()) => {
     try {
-        // Use a dedicated client for logic transaction
         const client = await pool.connect();
         let result = {};
         
@@ -399,7 +384,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                 driver = insertRes.rows[0];
             }
 
-            // Log
+            // Log Driver Message
             await client.query(
                 `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'driver', $3, $4, $5)`,
                 [`${timestamp}_${Math.random().toString(36).substr(2, 5)}`, driver.id, msgBody, timestamp, msgType]
@@ -414,41 +399,32 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             let replyMediaType = null;
             let shouldCallAI = false;
 
-            // STRATEGY: AI ONLY
-            // STRICT RULE: If AI_ONLY, completely ignore bot logic
             if (botSettings.isEnabled && routingStrategy === 'AI_ONLY') {
                 shouldCallAI = true;
             } 
-            // STRATEGY: BOT / HYBRID
             else if (botSettings.isEnabled) {
-                 
-                 // STRICT RULE: RESTART LOGIC FOR 'BOT_ONLY'
-                 // If bot finished (is_bot_active=false), the NEXT message restarts the flow.
                  if (routingStrategy === 'BOT_ONLY' && !driver.is_bot_active) {
                      const firstStepId = botSettings.steps?.[0]?.id;
                      if (firstStepId) {
                          await client.query('UPDATE drivers SET is_bot_active = TRUE, current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
                          driver.is_bot_active = true;
                          driver.current_bot_step_id = firstStepId;
-                         // FORCE NEW: Treat this incoming message as the trigger to send the Welcome Message, not as an answer.
                          isNewDriver = true; 
                      }
                  }
 
                  if (driver.is_bot_active && driver.current_bot_step_id) {
-                     // ORPHAN STEP CHECK: If current step does not exist in new settings, reset to start.
                      let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
                      if (!currentStep && botSettings.steps.length > 0) {
-                         console.log(`Orphaned step detected: ${driver.current_bot_step_id}. Resetting flow.`);
                          const firstStepId = botSettings.steps[0].id;
                          await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
                          driver.current_bot_step_id = firstStepId;
                          currentStep = botSettings.steps[0];
-                         isNewDriver = true; // Treat as restart
+                         isNewDriver = true; 
                      }
 
                      if (currentStep) {
-                         // Process Input (Only if not restarting/new)
+                         // Process Input
                          if (!isNewDriver) {
                              if (currentStep.saveToField === 'name') await client.query('UPDATE drivers SET name = $1 WHERE id = $2', [msgBody, driver.id]);
                              if (currentStep.saveToField === 'availability') await client.query('UPDATE drivers SET availability = $1 WHERE id = $2', [msgBody, driver.id]);
@@ -456,23 +432,20 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
                              let nextId = currentStep.nextStepId;
                              
-                             // End of Flow Handling
                              if (nextId === 'AI_HANDOFF' || nextId === 'END' || !nextId) {
                                  await client.query('UPDATE drivers SET is_bot_active = FALSE, current_bot_step_id = NULL WHERE id = $1', [driver.id]);
-                                 driver.is_bot_active = false; // Local update for subsequent logic
+                                 driver.is_bot_active = false; 
 
                                  if (nextId === 'AI_HANDOFF' && routingStrategy === 'HYBRID_BOT_FIRST') {
-                                     // Hybrid: Switch to AI.
                                      shouldCallAI = true;
                                  } else {
-                                     // Bot Only or Plain End: Just acknowledge.
-                                     // If Bot Only, we stop here. Next user msg will trigger restart block above.
                                      replyText = "Thank you! We have received your details.";
                                  }
                              } else {
-                                 // Next Step
                                  await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [nextId, driver.id]);
                                  const nextStep = botSettings.steps.find(s => s.id === nextId);
+                                 
+                                 // IMPORTANT: Prepare Next Step, but check validity
                                  if (nextStep) {
                                      replyText = nextStep.message;
                                      replyTemplate = nextStep.templateName;
@@ -484,7 +457,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                  }
                              }
                          } else {
-                             // Send Current Step (Start/Restart)
+                             // Send Current Step
                              replyText = currentStep.message;
                              replyTemplate = currentStep.templateName;
                              replyMedia = currentStep.mediaUrl;
@@ -495,8 +468,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                          }
                      }
                  } 
-                 // STRICT RULE: HYBRID FALLBACK
-                 // Only if Bot is inactive (and didn't just restart) do we call AI in Hybrid mode
                  else if (routingStrategy === 'HYBRID_BOT_FIRST') {
                      shouldCallAI = true;
                  }
@@ -514,7 +485,16 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         }
 
         // Post-Transaction Actions
-        // UPDATE: Log system messages to DB after sending to WhatsApp so they appear in Chat UI
+        
+        // CHECK: If reply is invalid (empty body for text/interactive), ABORT and Log System Warning
+        if (!result.replyMedia && !result.replyTemplate && !result.shouldCallAI && (!result.replyText || !result.replyText.trim() || result.replyText.includes("Replace this sample message"))) {
+            if (result.driver && result.driver.is_bot_active) {
+                console.log(`Skipping invalid bot message for ${from}`);
+                await logSystemMessage(result.driver.id, "⚠️ Bot Error: Step has no valid text. Message skipped.", 'warning');
+            }
+            return; // EXIT
+        }
+
         if (result.replyTemplate) {
             await sendWhatsAppMessage(from, null, null, result.replyTemplate);
             await logSystemMessage(result.driver.id, `[Template] ${result.replyTemplate}`, 'template');
@@ -554,16 +534,9 @@ app.post('/webhook', async (req, res) => {
         const name = contact?.profile?.name || 'Unknown';
         let msgBody = msgObj.text?.body || '[Media]';
         let msgType = 'text';
-        // Handle Button/List replies
         if (msgObj.type === 'interactive') { 
-            // LIST REPLY
-            if (msgObj.interactive.type === 'list_reply') {
-                msgBody = msgObj.interactive.list_reply.title;
-            }
-            // BUTTON REPLY
-            else if (msgObj.interactive.type === 'button_reply') {
-                msgBody = msgObj.interactive.button_reply.title; 
-            }
+            if (msgObj.interactive.type === 'list_reply') msgBody = msgObj.interactive.list_reply.title;
+            else if (msgObj.interactive.type === 'button_reply') msgBody = msgObj.interactive.button_reply.title; 
             msgType = 'option_reply'; 
         }
         else if (msgObj.type === 'image') { msgBody = '[Image]'; msgType = 'image'; }
