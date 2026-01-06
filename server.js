@@ -38,6 +38,7 @@ let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 // --- ROBUST DATABASE CONNECTION ---
 
 // 1. Force the Pooled Connection String (Port 5432/6543 with PgBouncer)
+// Using the POOLED url provided by the user to prevent connection limit errors
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL;
 
@@ -49,7 +50,7 @@ const pool = new Pool({
     requestCert: true,
   },
   // Serverless Optimization
-  max: 1, // Max 1 connection per Lambda container
+  max: 1, // Max 1 connection per Lambda container to prevent exhaustion
   idleTimeoutMillis: 0, // Never close idle connections (Keep-Alive)
   connectionTimeoutMillis: 10000, // Fail fast if Neon is down
   keepAlive: true, // TCP Keep-Alive to prevent network dropouts
@@ -70,9 +71,12 @@ const queryWithRetry = async (text, params, retries = 2) => {
         return res;
     } catch (err) {
         // If it's a connection error or undefined table (cold start), retry
+        // 57P01: Admin shutdown, EPIPE: Broken pipe, ECONNRESET: Connection reset
         if ((err.code === '57P01' || err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === '42P01') && retries > 0) {
             console.warn(`⚠️ DB Glitch (${err.code}). Retrying... (${retries} left)`);
-            if (client) client.release(true); // Destroy bad client
+            
+            // If we have a client reference, try to release it with error to discard it
+            try { if (client) client.release(true); } catch(e) {}
             
             // If table missing, auto-heal first
             if (err.code === '42P01') {
@@ -81,13 +85,15 @@ const queryWithRetry = async (text, params, retries = 2) => {
                 healClient.release();
             }
             
-            // Wait 200ms before retry
+            // Wait 200ms before retry to let connection stabilize
             await new Promise(res => setTimeout(res, 200));
             return queryWithRetry(text, params, retries - 1);
         }
         throw err;
     } finally {
-        if (client) client.release();
+        if (client) {
+            try { client.release(); } catch(e) {}
+        }
     }
 };
 
