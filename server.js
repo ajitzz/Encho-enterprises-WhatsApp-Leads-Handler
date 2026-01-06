@@ -250,6 +250,9 @@ const generateContentSmart = async (contents, config = {}, systemInstruction = u
             console.warn(`⚠️ [AI SMART] Quota Hit on ${targetModel}. Initiating Fallback sequence...`);
             lastDowngradeTime = Date.now();
 
+            // BACKOFF: Wait 2 seconds to allow rate limit bucket to refill slightly
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
             // ATTEMPT 2: Fallback to FLASH (if we weren't already using Lite)
             if (targetModel !== MODEL_FLASH && targetModel !== MODEL_LITE) {
                 try {
@@ -259,7 +262,8 @@ const generateContentSmart = async (contents, config = {}, systemInstruction = u
                     return result;
                 } catch (e2) {
                      if (!e2.message?.includes('429')) throw e2;
-                     console.warn(`⚠️ [AI SMART] Flash also overloaded.`);
+                     console.warn(`⚠️ [AI SMART] Flash also overloaded. Trying Lite...`);
+                     await new Promise(resolve => setTimeout(resolve, 1000)); // Additional 1s wait
                 }
             }
 
