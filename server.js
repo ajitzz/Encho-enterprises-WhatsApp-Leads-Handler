@@ -226,6 +226,39 @@ app.post('/api/bot-settings', async (req, res) => {
     }
 });
 
+// Send Manual Message
+app.post('/api/messages/send', async (req, res) => {
+    try {
+        const { driverId, text } = req.body;
+        // 1. Get Phone Number
+        const driverRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
+        if (driverRes.rows.length === 0) return res.status(404).json({ error: 'Driver not found' });
+        
+        const phoneNumber = driverRes.rows[0].phone_number;
+
+        // 2. Send to WhatsApp
+        await sendWhatsAppMessage(phoneNumber, text);
+
+        // 3. Log to DB
+        const msgId = Date.now().toString(); 
+        await queryWithRetry(
+            `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'agent', $3, $4, 'text')`,
+            [msgId, driverId, text, Date.now()]
+        );
+        
+        // 4. Update Driver
+        await queryWithRetry(
+            `UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3`, 
+            [text, Date.now(), driverId]
+        );
+
+        res.json({ success: true, messageId: msgId });
+    } catch (e) {
+        console.error("Send Message Error:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // --- LOGIC ENGINE ---
 
 // FIXED: Enhanced to support LIST MESSAGES for > 3 options
@@ -364,7 +397,17 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                  }
 
                  if (driver.is_bot_active && driver.current_bot_step_id) {
-                     const currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
+                     // ORPHAN STEP CHECK: If current step does not exist in new settings, reset to start.
+                     let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
+                     if (!currentStep && botSettings.steps.length > 0) {
+                         console.log(`Orphaned step detected: ${driver.current_bot_step_id}. Resetting flow.`);
+                         const firstStepId = botSettings.steps[0].id;
+                         await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
+                         driver.current_bot_step_id = firstStepId;
+                         currentStep = botSettings.steps[0];
+                         isNewDriver = true; // Treat as restart
+                     }
+
                      if (currentStep) {
                          // Process Input (Only if not restarting/new)
                          if (!isNewDriver) {
