@@ -306,36 +306,30 @@ const getDatabaseSchema = async () => {
     }
 };
 
-// --- SYSTEM DOCTOR ENDPOINTS ---
+// --- SYSTEM DOCTOR & AUDITOR ENDPOINTS ---
 
 // 1. ANALYZE SYSTEM (READ-ONLY)
 app.post('/api/admin/analyze-system', async (req, res) => {
     try {
         const { issueDescription } = req.body;
-        console.log(`🔍 System Doctor Analysis: ${issueDescription} [Mode: ${IS_VERCEL ? 'Vercel+GitHub' : 'Local'}]`);
+        console.log(`🔍 System Doctor Analysis: ${issueDescription}`);
 
         const files = await getProjectFiles();
         const dbSchema = await getDatabaseSchema();
         const fileContext = files.map(f => `--- FILE: ${f.path} ---\n${f.content}\n`).join("\n");
 
         const prompt = `
-        You are "System Doctor Ultimate", a Principal Engineer with full access to the repo.
-        USER REPORTED ISSUE: "${issueDescription}"
+        You are "System Doctor Ultimate".
+        ISSUE: "${issueDescription}"
         ENV: ${IS_VERCEL ? "Production (Vercel)" : "Development (Local)"}
 
         CONTEXT:
-        1. DATABASE SCHEMA: ${dbSchema}
-        2. SOURCE CODE (Snapshot): ${fileContext}
+        1. DB SCHEMA: ${dbSchema}
+        2. CODE: ${fileContext}
 
-        YOUR MISSION:
-        1. Diagnose the root cause.
-        2. Provide concrete code fixes.
+        MISSION: Diagnose & Fix.
         
-        IMPORTANT: 
-        - Return the COMPLETE content of any file you modify.
-        - Do not strip existing logic unless necessary.
-
-        OUTPUT JSON: { "diagnosis": "Detailed explanation...", "changes": [{ "filePath": "server.js", "content": "FULL NEW CONTENT", "explanation": "Why this change?" }] }
+        OUTPUT JSON: { "diagnosis": "...", "changes": [{ "filePath": "server.js", "content": "FULL NEW CONTENT", "explanation": "..." }] }
         `;
 
         const response = await ai.models.generateContent({
@@ -352,7 +346,44 @@ app.post('/api/admin/analyze-system', async (req, res) => {
     }
 });
 
-// 2. APPLY PATCH (WRITE)
+// 2. AUDIT BOT FLOW (SERVER-SIDE)
+app.post('/api/admin/audit-flow', async (req, res) => {
+    try {
+        const { nodes } = req.body;
+        console.log(`🧠 Auditing Bot Flow (${nodes.length} nodes)`);
+
+        const prompt = `
+        You are a QA AI for a Chatbot Flow.
+        Analyze this JSON flow configuration for logical errors and empty spaces.
+        
+        RULES:
+        1. "Placeholder Text": Any message containing "replace this", "sample message".
+        2. "Empty Options": Options node with empty array or empty strings.
+        3. "Empty Text": Text node with empty message.
+        4. "Missing Media": Media node with no URL.
+
+        INPUT DATA:
+        ${JSON.stringify(nodes.map(n => ({ id: n.id, type: n.data.label, message: n.data.message, options: n.data.options, mediaUrl: n.data.mediaUrl })))}
+
+        OUTPUT JSON:
+        { "isValid": boolean, "issues": [{ "nodeId": "...", "severity": "CRITICAL|WARNING", "issue": "...", "suggestion": "...", "autoFixValue": "..." }] }
+        `;
+
+        const response = await ai.models.generateContent({
+            model: "gemini-3-flash-preview",
+            contents: prompt,
+            config: { responseMimeType: "application/json" }
+        });
+
+        const jsonStr = response.text().replace(/```json/g, '').replace(/```/g, '').trim();
+        res.json(JSON.parse(jsonStr));
+    } catch (e) {
+        console.error("Audit Failed:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 3. APPLY PATCH (WRITE)
 app.post('/api/admin/write-files', async (req, res) => {
     try {
         const { changes } = req.body;
@@ -397,7 +428,7 @@ app.post('/api/admin/write-files', async (req, res) => {
     }
 });
 
-// 3. UNDO PATCH
+// 4. UNDO PATCH
 app.post('/api/admin/undo-patch', async (req, res) => {
     if (IS_VERCEL) {
         // Vercel is stateless, so we guide the user to GitHub
@@ -426,7 +457,6 @@ app.post('/api/admin/undo-patch', async (req, res) => {
             files.forEach(file => {
                 const srcPath = path.join(source, file);
                 const stat = fs.statSync(srcPath);
-                
                 if (file === 'meta.json') return;
                 
                 if (stat.isDirectory()) {
@@ -442,10 +472,6 @@ app.post('/api/admin/undo-patch', async (req, res) => {
         };
         
         restoreFiles(latestBackupDir, __dirname);
-        
-        // Rename backup to indicate it was used/restored? Or just leave it.
-        // fs.renameSync(latestBackupDir, latestBackupDir + "_RESTORED");
-
         res.json({ success: true, message: "System restored to state before last patch." });
         setTimeout(() => process.exit(0), 1000);
 
@@ -455,7 +481,7 @@ app.post('/api/admin/undo-patch', async (req, res) => {
 });
 
 
-// 4. ASSISTANT CHAT (Updated for Full Access)
+// 5. ASSISTANT CHAT (Updated for Full Access)
 const ASSISTANT_TOOLS = [{
     functionDeclarations: [
       {
@@ -526,14 +552,15 @@ app.post('/api/assistant/chat', async (req, res) => {
                         if (IS_VERCEL) {
                             const treeUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/git/trees/${GITHUB_BRANCH}?recursive=1`;
                             const treeRes = await axios.get(treeUrl, { headers: { Authorization: `token ${GITHUB_TOKEN}` } });
-                            const paths = treeRes.data.tree.map(f => f.path);
-                            toolResult = { files: paths };
+                            // Optimize: Limit paths to avoid token overflow
+                            const paths = treeRes.data.tree.map(f => f.path).slice(0, 100); 
+                            toolResult = { files: paths, note: "Showing first 100 files." };
                         } else {
                             const getFiles = (dir) => {
                                 let results = [];
                                 const list = fs.readdirSync(dir);
                                 list.forEach(file => {
-                                    if(['node_modules', '.git', '.next', 'dist'].includes(file)) return;
+                                    if(['node_modules', '.git', '.next', 'dist', '.backups'].includes(file)) return;
                                     file = path.join(dir, file);
                                     const stat = fs.statSync(file);
                                     if (stat && stat.isDirectory()) results = results.concat(getFiles(file));
@@ -541,7 +568,8 @@ app.post('/api/assistant/chat', async (req, res) => {
                                 });
                                 return results;
                             }
-                            toolResult = { files: getFiles(__dirname) };
+                            const allFiles = getFiles(__dirname);
+                            toolResult = { files: allFiles.slice(0, 100), note: "Showing first 100 files." };
                         }
                     }
                     else if (call.name === 'read_file_content') {

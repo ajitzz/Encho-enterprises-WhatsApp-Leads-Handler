@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useEffect } from 'react';
 import { 
   ReactFlow, 
@@ -15,13 +16,12 @@ import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
 import { useFlowStore } from '../services/flowStore'; 
-import { auditBotFlow, analyzeSystemCode } from '../services/geminiService';
 import { 
   MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
   List, Type, Hash, Mail, Globe, Calendar, Clock, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Play, AlertTriangle, ShieldAlert, GripVertical, Settings,
   MousePointerClick, Bold, Italic, Link, MoreHorizontal, Upload, Cloud, Stethoscope, Wand2, Terminal, Code,
-  FileCode, Layers
+  FileCode, Layers, RotateCcw
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
@@ -411,12 +411,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   
   // SYSTEM DOCTOR STATES
   const [showSystemDoctor, setShowSystemDoctor] = useState(false);
-  const [files, setFiles] = useState<Array<{path: string, content: string}>>([]);
   const [issueDescription, setIssueDescription] = useState('Chat flow errors regarding empty options');
   const [doctorDiagnosis, setDoctorDiagnosis] = useState<any>(null);
   const [isAnalyzingCode, setIsAnalyzingCode] = useState(false);
   const [isPatching, setIsPatching] = useState(false);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [undoStatus, setUndoStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
   const reactFlowInstance = useReactFlow();
 
@@ -431,19 +431,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         }
 
         if (settings.flowData && settings.flowData.nodes.length > 0) {
-            // Auto-clean placeholders on load
-            const cleanedNodes = settings.flowData.nodes.map((n: any) => {
-                const newData = { ...n.data };
-                const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
-                if (newData.message && BLOCKED_REGEX.test(newData.message)) {
-                    newData.message = ""; 
-                    newData.hasError = true;
-                    newData.errorMessage = "Placeholder Removed";
-                }
-                return { ...n, data: newData };
-            });
-
-            setNodes(cleanedNodes);
+            setNodes(settings.flowData.nodes);
             setEdges(settings.flowData.edges);
         }
     };
@@ -491,13 +479,16 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   );
 
   const runAIAudit = async () => {
+      if (!isLiveMode) {
+          alert("AI Audit requires Live Mode (node server.js)");
+          return;
+      }
       setIsAuditing(true);
       try {
-          const report = await auditBotFlow(nodes);
+          const report = await liveApiService.auditBotFlow(nodes);
           setAuditReport(report);
           
           if (report.issues.length > 0) {
-              // Highlight faulty nodes
               const badNodeIds = report.issues.map((i: any) => i.nodeId);
               const newNodes = nodes.map(n => {
                   if (badNodeIds.includes(n.id)) {
@@ -515,7 +506,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               setNodes(newNodes);
           }
       } catch (e) {
-          alert("AI Audit Failed");
+          alert("AI Audit Failed. Check server logs.");
       } finally {
           setIsAuditing(false);
       }
@@ -524,7 +515,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const applyFix = (issue: any) => {
       if (issue.autoFixValue === 'DELETE_NODE') {
           deleteNode(issue.nodeId);
-          // Update report UI by removing the issue
           setAuditReport((prev: any) => ({
               ...prev,
               issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
@@ -545,7 +535,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               return n;
           });
           setNodes(newNodes);
-          // Remove from report
           setAuditReport((prev: any) => ({
             ...prev,
             issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
@@ -553,34 +542,27 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       }
   };
 
-  const openSystemDoctor = async () => {
+  const openSystemDoctor = () => {
       if (!isLiveMode) {
           alert("System Doctor requires Live Mode (node server.js)");
           return;
       }
       setShowSystemDoctor(true);
-      try {
-          // Fetch complete project structure now
-          const res = await liveApiService.getProjectContext();
-          setFiles(res.files);
-          setDoctorDiagnosis(null);
-      } catch(e) {
-          alert("Could not access project files. Ensure server is running.");
-          setShowSystemDoctor(false);
-      }
+      setDoctorDiagnosis(null);
   };
 
   const analyzeCode = async () => {
       setIsAnalyzingCode(true);
       try {
-          const res = await analyzeSystemCode(files, issueDescription);
+          // CRITICAL FIX: Call the server to analyze, do NOT do it in browser
+          const res = await liveApiService.analyzeSystem(issueDescription);
           setDoctorDiagnosis(res);
-          // Select first changed file if any
           if (res.changes && res.changes.length > 0) {
               setSelectedFile(res.changes[0].filePath);
           }
       } catch(e) {
-          alert("Analysis Failed");
+          console.error(e);
+          alert("Analysis Failed. Check server console.");
       } finally {
           setIsAnalyzingCode(false);
       }
@@ -600,12 +582,26 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       }
   };
 
+  const handleUndoPatch = async () => {
+    if (!window.confirm("Undo the last update? This will revert code changes.")) return;
+    setUndoStatus('loading');
+    try {
+        const res = await liveApiService.undoLastPatch();
+        alert(res.message || "System restored.");
+        setUndoStatus('success');
+    } catch (e: any) {
+        alert(e.message);
+        setUndoStatus('error');
+    } finally {
+        setTimeout(() => setUndoStatus('idle'), 2000);
+    }
+  };
+
   const handleSave = async () => {
+      // ... (Validation logic unchanged) ...
       let hasValidationErrors = false;
-      
       const newNodes = nodes.map(node => {
           if (node.data.type === 'start') return node;
-          
           let error = false;
           let errorMsg = '';
           const { label, message, mediaUrl, inputType, options } = node.data;
@@ -793,7 +789,19 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                                  <p className="text-gray-400 text-xs">Full Project Analysis & Patching</p>
                              </div>
                          </div>
-                         <button onClick={() => setShowSystemDoctor(false)} className="text-gray-400 hover:text-white"><X size={24} /></button>
+                         <div className="flex gap-3">
+                             {/* UNDO BUTTON */}
+                             <button 
+                                onClick={handleUndoPatch}
+                                disabled={undoStatus === 'loading'}
+                                className="px-4 py-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 text-xs font-bold flex items-center gap-2 transition-colors border border-gray-700"
+                             >
+                                {undoStatus === 'loading' ? <span className="animate-spin"><RotateCcw size={14} /></span> : <RotateCcw size={14} />}
+                                {undoStatus === 'loading' ? 'Reverting...' : 'Undo Last Patch'}
+                             </button>
+
+                             <button onClick={() => setShowSystemDoctor(false)} className="text-gray-400 hover:text-white"><X size={24} /></button>
+                         </div>
                      </div>
 
                      <div className="flex-1 flex overflow-hidden">
@@ -817,7 +825,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                                     className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50"
                                  >
                                      {isAnalyzingCode ? <span className="animate-spin"><Stethoscope /></span> : <Stethoscope />}
-                                     {isAnalyzingCode ? 'Scanning Project...' : 'Analyze Full Project'}
+                                     {isAnalyzingCode ? 'Scanning Project (Server)...' : 'Analyze on Server'}
                                  </button>
 
                                  {doctorDiagnosis && (

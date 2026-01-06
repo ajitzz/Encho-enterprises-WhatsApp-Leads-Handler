@@ -104,14 +104,13 @@ export const liveApiService = {
   },
 
   getProjectContext: async (): Promise<{files: Array<{path: string, content: string}>}> => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/project-context`, undefined, 3, 500, 30000); // 30s timeout
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/project-context`, undefined, 3, 500, 30000); 
       if (!response.ok) throw new Error('Failed to read project context');
       return await response.json();
   },
 
   // --- SYSTEM DOCTOR NEW API ---
   analyzeSystem: async (issueDescription: string): Promise<{ diagnosis: string, changes: any[] }> => {
-      // 90s timeout for heavy AI analysis + GitHub Fetching
       const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/analyze-system`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -122,9 +121,19 @@ export const liveApiService = {
       return await response.json();
   },
 
+  // --- NEW SERVER-SIDE AUDIT ---
+  auditBotFlow: async (nodes: any[]): Promise<any> => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/audit-flow`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ nodes })
+      }, 0, 0, 30000);
+      if (!response.ok) throw new Error('Audit Failed');
+      return await response.json();
+  },
+
   undoLastPatch: async (): Promise<{ success: boolean, message: string }> => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/undo-patch`, { method: 'POST' });
-      // If 400, it might be Vercel message instruction, which we handle in frontend
       if (response.status === 400 || response.status === 404) {
           const err = await response.json();
           throw new Error(err.error || "Undo failed");
@@ -144,7 +153,6 @@ export const liveApiService = {
   },
 
   sendAssistantMessage: async (message: string, history: any[]) => {
-      // 90s timeout for chat with tool use (GitHub calls can be slow)
       const response = await fetchWithRetry(`${API_BASE_URL}/api/assistant/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
