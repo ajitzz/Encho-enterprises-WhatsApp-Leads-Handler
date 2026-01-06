@@ -165,30 +165,37 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
     }
 };
 
-// --- NEW: SYSTEM DOCTOR (SOURCE CODE ANALYSIS) ---
-export const analyzeSystemCode = async (sourceCode: string, issueDescription: string): Promise<{ diagnosis: string, fixedCode: string }> => {
+// --- SYSTEM DOCTOR (FULL PROJECT ANALYSIS) ---
+export const analyzeSystemCode = async (files: Array<{path: string, content: string}>, issueDescription: string): Promise<{ diagnosis: string, changes: Array<{filePath: string, content: string, explanation: string}> }> => {
     if (!apiKey) throw new Error("No API Key");
 
     const model = "gemini-3-pro-preview"; // Use PRO for complex code analysis
 
+    // Create a compact representation of the files
+    const fileContext = files.map(f => `
+    --- START OF FILE ${f.path} ---
+    ${f.content}
+    --- END OF FILE ${f.path} ---
+    `).join("\n");
+
     const prompt = `
-    You are an Expert Node.js Backend Engineer.
+    You are a Principal Full-Stack Engineer with read/write access to this entire project.
     
-    TASKS:
-    1. Analyze the provided "server.js" source code.
-    2. Identify the root cause of the user's issue: "${issueDescription}".
-    3. Fix the code.
-    4. Return the FULL fixed source code.
+    USER ISSUE: "${issueDescription}"
+
+    YOUR TASKS:
+    1. Analyze the provided project files to understand the root cause.
+    2. Check dependencies, imports, API logic, and Frontend components.
+    3. Determine which files need to be modified to fix the issue.
+    4. Provide the FULL content of the fixed files.
 
     CONSTRAINTS:
-    - Do NOT remove existing endpoints or logic unless they are the bug.
-    - Keep the code structure identical.
-    - Return a JSON object with a diagnosis explanation and the full fixed code string.
+    - Do NOT remove existing valid logic. Only fix what is broken.
+    - If you need to fix multiple files (e.g., update an Interface in types.ts AND the Component usage in App.tsx), return changes for ALL of them.
+    - Return a valid JSON object.
 
-    SOURCE CODE:
-    \`\`\`javascript
-    ${sourceCode}
-    \`\`\`
+    PROJECT CONTEXT:
+    ${fileContext}
     `;
 
     const response = await ai.models.generateContent({
@@ -200,7 +207,17 @@ export const analyzeSystemCode = async (sourceCode: string, issueDescription: st
                 type: Type.OBJECT,
                 properties: {
                     diagnosis: { type: Type.STRING },
-                    fixedCode: { type: Type.STRING }
+                    changes: {
+                        type: Type.ARRAY,
+                        items: {
+                            type: Type.OBJECT,
+                            properties: {
+                                filePath: { type: Type.STRING },
+                                content: { type: Type.STRING },
+                                explanation: { type: Type.STRING }
+                            }
+                        }
+                    }
                 }
             }
         }

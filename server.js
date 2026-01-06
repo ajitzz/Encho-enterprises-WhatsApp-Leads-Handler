@@ -13,8 +13,8 @@ const axios = require('axios');
 const cors = require('cors');
 const { Pool } = require('pg'); 
 const { GoogleGenAI } = require('@google/genai');
-const fs = require('fs'); // Added for System Doctor
-const path = require('path'); // Added for System Doctor
+const fs = require('fs'); 
+const path = require('path'); 
 require('dotenv').config();
 
 const app = express();
@@ -201,33 +201,70 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // --- ROUTES ---
 
-// NEW: System Doctor - Read Source Code
-app.get('/api/admin/source-code', async (req, res) => {
+// NEW: Helper for Recursive File Reading
+function getProjectFiles(dir, fileList = [], rootDir = dir) {
+    const files = fs.readdirSync(dir);
+    fileList = fileList || [];
+    files.forEach((file) => {
+        const filePath = path.join(dir, file);
+        const stat = fs.statSync(filePath);
+        if (stat.isDirectory()) {
+            if (file !== 'node_modules' && file !== '.git' && file !== 'dist' && file !== '.next' && file !== 'build') {
+                getProjectFiles(filePath, fileList, rootDir);
+            }
+        } else {
+             const ext = path.extname(file);
+             if (['.js', '.ts', '.tsx', '.json', '.html', '.css', '.md'].includes(ext)) {
+                 // Store relative path for cleaner AI context
+                 fileList.push({
+                     path: path.relative(rootDir, filePath).replace(/\\/g, '/'), // Normalize path
+                     content: fs.readFileSync(filePath, 'utf8')
+                 });
+             }
+        }
+    });
+    return fileList;
+}
+
+// NEW: Get Complete Project Context
+app.get('/api/admin/project-context', async (req, res) => {
     try {
-        // SECURITY: ONLY READ THIS FILE
-        const sourceCode = fs.readFileSync(__filename, 'utf8');
-        res.json({ code: sourceCode });
+        const files = getProjectFiles(__dirname);
+        // Limit total size slightly if needed, but for small projects this is fine
+        res.json({ files });
     } catch (e) {
+        console.error("Context Fetch Failed:", e);
         res.status(500).json({ error: "Access Denied to File System" });
     }
 });
 
-// NEW: System Doctor - Apply Patch
-app.post('/api/admin/apply-patch', async (req, res) => {
+// NEW: Batch Write Files (Multi-File Patch)
+app.post('/api/admin/write-files', async (req, res) => {
     try {
-        const { code } = req.body;
-        if (!code) return res.status(400).json({ error: "No code provided" });
+        const { changes } = req.body; // Expects array of { filePath, content }
+        if (!changes || !Array.isArray(changes)) return res.status(400).json({ error: "Invalid changes format" });
         
-        // Write the new code to this file
-        fs.writeFileSync(__filename, code);
+        console.log(`🩹 Applying patches to ${changes.length} files...`);
+
+        changes.forEach(change => {
+            const fullPath = path.join(__dirname, change.filePath);
+            // Ensure dir exists
+            const dir = path.dirname(fullPath);
+            if (!fs.existsSync(dir)){
+                fs.mkdirSync(dir, { recursive: true });
+            }
+            fs.writeFileSync(fullPath, change.content);
+            console.log(`   - Updated: ${change.filePath}`);
+        });
         
-        console.log("🩹 PATCH APPLIED. Restarting Server...");
-        res.json({ success: true, message: "Patch applied. Server restarting." });
+        console.log("✅ All patches applied. Restarting Server...");
+        res.json({ success: true, message: "Patches applied. Server restarting." });
         
-        // Force restart to apply changes (Works with PM2/Nodemon, or container restart)
+        // Force restart to apply changes
         setTimeout(() => process.exit(0), 1000);
         
     } catch (e) {
+        console.error("Patch Failed:", e);
         res.status(500).json({ error: e.message });
     }
 });

@@ -20,7 +20,8 @@ import {
   MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
   List, Type, Hash, Mail, Globe, Calendar, Clock, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Play, AlertTriangle, ShieldAlert, GripVertical, Settings,
-  MousePointerClick, Bold, Italic, Link, MoreHorizontal, Upload, Cloud, Stethoscope, Wand2, Terminal, Code
+  MousePointerClick, Bold, Italic, Link, MoreHorizontal, Upload, Cloud, Stethoscope, Wand2, Terminal, Code,
+  FileCode, Layers
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
@@ -410,11 +411,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   
   // SYSTEM DOCTOR STATES
   const [showSystemDoctor, setShowSystemDoctor] = useState(false);
-  const [sourceCode, setSourceCode] = useState('');
+  const [files, setFiles] = useState<Array<{path: string, content: string}>>([]);
   const [issueDescription, setIssueDescription] = useState('Chat flow errors regarding empty options');
   const [doctorDiagnosis, setDoctorDiagnosis] = useState<any>(null);
   const [isAnalyzingCode, setIsAnalyzingCode] = useState(false);
   const [isPatching, setIsPatching] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
   const reactFlowInstance = useReactFlow();
 
@@ -558,10 +560,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       }
       setShowSystemDoctor(true);
       try {
-          const res = await liveApiService.getSourceCode();
-          setSourceCode(res.code);
+          // Fetch complete project structure now
+          const res = await liveApiService.getProjectContext();
+          setFiles(res.files);
+          setDoctorDiagnosis(null);
       } catch(e) {
-          alert("Could not access server source code.");
+          alert("Could not access project files. Ensure server is running.");
           setShowSystemDoctor(false);
       }
   };
@@ -569,8 +573,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const analyzeCode = async () => {
       setIsAnalyzingCode(true);
       try {
-          const res = await analyzeSystemCode(sourceCode, issueDescription);
+          const res = await analyzeSystemCode(files, issueDescription);
           setDoctorDiagnosis(res);
+          // Select first changed file if any
+          if (res.changes && res.changes.length > 0) {
+              setSelectedFile(res.changes[0].filePath);
+          }
       } catch(e) {
           alert("Analysis Failed");
       } finally {
@@ -579,11 +587,11 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   };
 
   const applySystemPatch = async () => {
-      if (!doctorDiagnosis) return;
+      if (!doctorDiagnosis || !doctorDiagnosis.changes) return;
       setIsPatching(true);
       try {
-          await liveApiService.applySystemPatch(doctorDiagnosis.fixedCode);
-          alert("Patch Applied! Server is restarting...");
+          await liveApiService.applySystemPatch(doctorDiagnosis.changes);
+          alert("✅ Patches Applied! Server is restarting...");
           setShowSystemDoctor(false);
       } catch(e) {
           alert("Failed to patch system");
@@ -771,18 +779,18 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             </div>
         </div>
 
-        {/* SYSTEM DOCTOR MODAL (Same as before but uses fixed parsing) */}
+        {/* SYSTEM DOCTOR MODAL (Full Project) */}
         {showSystemDoctor && (
-             <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-6">
-                 <div className="bg-gray-900 w-full max-w-6xl h-[85vh] rounded-2xl shadow-2xl overflow-hidden flex flex-col border border-gray-800">
+             <div className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-md flex items-center justify-center p-6">
+                 <div className="bg-gray-900 w-full max-w-[90vw] h-[90vh] rounded-2xl shadow-2xl overflow-hidden flex flex-col border border-gray-800">
                      
                      {/* Header */}
                      <div className="bg-black px-6 py-4 flex justify-between items-center border-b border-gray-800">
                          <div className="flex items-center gap-3">
                              <div className="bg-red-600 p-2 rounded-lg"><Terminal className="text-white" size={20} /></div>
                              <div>
-                                 <h2 className="text-white font-mono text-lg font-bold">System Doctor <span className="text-red-500">PRO</span></h2>
-                                 <p className="text-gray-400 text-xs">Self-Healing Backend Diagnostics</p>
+                                 <h2 className="text-white font-mono text-lg font-bold">System Doctor <span className="text-red-500">ULTIMATE</span></h2>
+                                 <p className="text-gray-400 text-xs">Full Project Analysis & Patching</p>
                              </div>
                          </div>
                          <button onClick={() => setShowSystemDoctor(false)} className="text-gray-400 hover:text-white"><X size={24} /></button>
@@ -790,73 +798,98 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
                      <div className="flex-1 flex overflow-hidden">
                          
-                         {/* Left: Configuration & Prompt */}
-                         <div className="w-1/3 bg-gray-900 p-6 border-r border-gray-800 flex flex-col gap-6 overflow-y-auto">
-                             <div>
-                                 <label className="text-gray-400 text-xs font-bold uppercase mb-2 block">Issue Description</label>
-                                 <textarea 
-                                     value={issueDescription}
-                                     onChange={(e) => setIssueDescription(e.target.value)}
-                                     className="w-full bg-gray-800 text-white border border-gray-700 rounded-lg p-3 text-sm h-32 focus:ring-2 focus:ring-red-500 outline-none"
-                                     placeholder="Describe the bug..."
-                                 />
+                         {/* 1. Left: Config & Diagnosis */}
+                         <div className="w-1/4 bg-gray-950 border-r border-gray-800 flex flex-col">
+                             <div className="p-6 flex-1 overflow-y-auto space-y-6">
+                                 <div>
+                                     <label className="text-gray-400 text-xs font-bold uppercase mb-2 block">Issue Description</label>
+                                     <textarea 
+                                         value={issueDescription}
+                                         onChange={(e) => setIssueDescription(e.target.value)}
+                                         className="w-full bg-gray-900 text-white border border-gray-700 rounded-lg p-3 text-sm h-32 focus:ring-2 focus:ring-red-500 outline-none resize-none"
+                                         placeholder="Describe the bug (e.g., 'The chat drawer is not scrolling to bottom')..."
+                                     />
+                                 </div>
+
+                                 <button 
+                                    onClick={analyzeCode}
+                                    disabled={isAnalyzingCode}
+                                    className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50"
+                                 >
+                                     {isAnalyzingCode ? <span className="animate-spin"><Stethoscope /></span> : <Stethoscope />}
+                                     {isAnalyzingCode ? 'Scanning Project...' : 'Analyze Full Project'}
+                                 </button>
+
+                                 {doctorDiagnosis && (
+                                     <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
+                                         <h4 className="text-red-400 font-bold mb-2 flex items-center gap-2 text-sm"><AlertTriangle size={14} /> AI Diagnosis</h4>
+                                         <p className="text-gray-300 text-xs leading-relaxed whitespace-pre-wrap">{doctorDiagnosis.diagnosis}</p>
+                                     </div>
+                                 )}
                              </div>
 
-                             <button 
-                                onClick={analyzeCode}
-                                disabled={isAnalyzingCode}
-                                className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50"
-                             >
-                                 {isAnalyzingCode ? <span className="animate-spin"><Stethoscope /></span> : <Stethoscope />}
-                                 Analyze Source Code
-                             </button>
-
-                             {doctorDiagnosis && (
-                                 <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
-                                     <h4 className="text-red-400 font-bold mb-2 flex items-center gap-2"><AlertTriangle size={16} /> Diagnosis</h4>
-                                     <p className="text-gray-300 text-sm leading-relaxed">{doctorDiagnosis.diagnosis}</p>
-                                 </div>
-                             )}
-
-                             {doctorDiagnosis && (
-                                 <div className="mt-auto">
+                             {doctorDiagnosis?.changes && (
+                                 <div className="p-4 border-t border-gray-800 bg-gray-900">
                                      <button 
                                         onClick={applySystemPatch}
                                         disabled={isPatching}
                                         className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 disabled:opacity-50"
                                      >
-                                         {isPatching ? 'Patching...' : 'APPLY FIX & RESTART SERVER'}
+                                         {isPatching ? 'Patching...' : `APPLY ${doctorDiagnosis.changes.length} FIXES`}
                                      </button>
-                                     <p className="text-gray-500 text-xs text-center mt-2">Server will restart automatically.</p>
+                                     <p className="text-gray-600 text-[10px] text-center mt-2">Server will restart automatically.</p>
                                  </div>
                              )}
                          </div>
 
-                         {/* Right: Code Diff View */}
-                         <div className="w-2/3 bg-black p-0 flex flex-col">
-                             <div className="bg-gray-800 px-4 py-2 flex items-center justify-between">
-                                 <span className="text-gray-400 text-xs font-mono">server.js</span>
-                                 <div className="flex gap-4 text-xs font-bold">
-                                     <span className="text-red-400">Current</span>
-                                     <span className="text-green-400">Proposed</span>
-                                 </div>
+                         {/* 2. Middle: Changed Files List */}
+                         <div className="w-1/5 bg-gray-900 border-r border-gray-800 flex flex-col">
+                             <div className="p-3 bg-gray-950 border-b border-gray-800 font-bold text-gray-500 text-xs uppercase flex items-center gap-2">
+                                <Layers size={14} /> Affected Files
+                             </div>
+                             <div className="flex-1 overflow-y-auto">
+                                 {doctorDiagnosis?.changes ? (
+                                     doctorDiagnosis.changes.map((change: any, idx: number) => (
+                                         <button 
+                                            key={idx}
+                                            onClick={() => setSelectedFile(change.filePath)}
+                                            className={`w-full text-left px-4 py-3 border-b border-gray-800 hover:bg-gray-800 transition-colors ${selectedFile === change.filePath ? 'bg-gray-800 border-l-2 border-l-red-500' : ''}`}
+                                         >
+                                             <div className="flex items-center gap-2 text-sm font-mono text-gray-300">
+                                                 <FileCode size={14} className="text-blue-500" />
+                                                 <span className="truncate">{change.filePath}</span>
+                                             </div>
+                                             <div className="text-[10px] text-gray-500 mt-1 truncate pl-6">
+                                                 {change.explanation.substring(0, 40)}...
+                                             </div>
+                                         </button>
+                                     ))
+                                 ) : (
+                                     <div className="p-8 text-center text-gray-600 text-xs">
+                                         No changes proposed yet.
+                                     </div>
+                                 )}
+                             </div>
+                         </div>
+
+                         {/* 3. Right: Code Editor View */}
+                         <div className="flex-1 bg-black flex flex-col">
+                             <div className="bg-gray-900 px-4 py-2 flex items-center justify-between border-b border-gray-800">
+                                 <span className="text-gray-400 text-xs font-mono">{selectedFile || 'No file selected'}</span>
+                                 {selectedFile && <span className="text-xs font-bold text-green-500">PROPOSED NEW CONTENT</span>}
                              </div>
                              
-                             <div className="flex-1 flex overflow-hidden font-mono text-xs">
-                                 {/* Current Code */}
-                                 <div className="flex-1 bg-[#1e1e1e] text-gray-400 p-4 overflow-auto border-r border-gray-700">
-                                     <pre>{sourceCode}</pre>
-                                 </div>
-                                 {/* Proposed Code */}
-                                 <div className="flex-1 bg-[#1e1e1e] text-green-100 p-4 overflow-auto relative">
-                                     {doctorDiagnosis ? (
-                                         <pre>{doctorDiagnosis.fixedCode}</pre>
-                                     ) : (
-                                         <div className="absolute inset-0 flex items-center justify-center text-gray-600">
-                                             Waiting for analysis...
-                                         </div>
-                                     )}
-                                 </div>
+                             <div className="flex-1 overflow-auto p-0">
+                                 {selectedFile ? (
+                                     <pre className="text-xs font-mono text-green-50 p-6 leading-relaxed">
+                                         {doctorDiagnosis.changes.find((c: any) => c.filePath === selectedFile)?.content}
+                                     </pre>
+                                 ) : (
+                                     <div className="h-full flex flex-col items-center justify-center text-gray-700">
+                                         <Terminal size={48} className="mb-4 opacity-20" />
+                                         <p>Select a file to view AI proposed code.</p>
+                                     </div>
+                                 )}
                              </div>
                          </div>
                      </div>
@@ -864,7 +897,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
              </div>
         )}
 
-        {/* AI AUDIT REPORT MODAL */}
+        {/* AI AUDIT REPORT MODAL (Bot Flow Only) */}
         {auditReport && auditReport.issues.length > 0 && (
             <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
                 <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95">

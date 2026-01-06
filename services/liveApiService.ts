@@ -4,15 +4,12 @@ const isLocal = window.location.hostname === 'localhost' || window.location.host
 const API_BASE_URL = isLocal ? 'http://localhost:3001' : ''; 
 
 // ENTERPRISE RESILIENCE: Retry wrapper for Fetch
-// This ensures that if the Vercel function is waking up (Cold Start),
-// the frontend doesn't crash but retries quietly.
 const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, delay = 500): Promise<Response> => {
     try {
         const response = await fetch(url, options);
         if (!response.ok) {
              // If server error (500-599), retry
              if (response.status >= 500) {
-                 // Clone response to read error body without consuming main response stream
                  const clone = response.clone();
                  try {
                     const errorBody = await clone.json();
@@ -133,17 +130,25 @@ export const liveApiService = {
 
   // --- SYSTEM DOCTOR (ADMIN) ---
   
+  getProjectContext: async (): Promise<{files: Array<{path: string, content: string}>}> => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/project-context`);
+      if (!response.ok) throw new Error('Failed to read project context');
+      return await response.json();
+  },
+
+  // Fallback for single file if needed
   getSourceCode: async (): Promise<{code: string}> => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/source-code`);
       if (!response.ok) throw new Error('Failed to read source code');
       return await response.json();
   },
 
-  applySystemPatch: async (code: string): Promise<{success: boolean, message: string}> => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/apply-patch`, {
+  // Multi-file patcher
+  applySystemPatch: async (changes: Array<{filePath: string, content: string}>): Promise<{success: boolean, message: string}> => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/write-files`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code })
+          body: JSON.stringify({ changes })
       });
       if (!response.ok) throw new Error('Failed to patch system');
       return await response.json();
