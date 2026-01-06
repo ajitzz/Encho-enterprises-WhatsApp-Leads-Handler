@@ -478,7 +478,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
              settings = mockBackend.getBotSettings();
         }
 
-        if (settings.flowData && settings.flowData.nodes.length > 0) {
+        if (settings.flowData && settings.flowData.nodes && settings.flowData.nodes.length > 0) {
             // Auto-clean placeholders on load
             const cleanedNodes = settings.flowData.nodes.map((n: any) => {
                 const newData = { ...n.data };
@@ -493,6 +493,18 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
             setNodes(cleanedNodes);
             setEdges(settings.flowData.edges);
+        } else {
+            // FALLBACK: If flowData is missing (common on new Live connection),
+            // ensure we always have the START node at minimum.
+            // This fixes the "Entry point is not there" issue when switching to Live.
+            const defaultStartNode: Node = { 
+                id: 'start', 
+                type: 'custom', 
+                position: { x: 50, y: 300 }, 
+                data: { type: 'start', label: 'Start', message: 'START' } 
+            };
+            setNodes([defaultStartNode]);
+            setEdges([]);
         }
     };
     load();

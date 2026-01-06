@@ -158,8 +158,30 @@ const SCHEMA_SQL = `
 const DEFAULT_BOT_SETTINGS = {
   isEnabled: true,
   routingStrategy: 'HYBRID_BOT_FIRST',
-  systemInstruction: "You are a friendly recruiter for Uber Fleet. Answer in Malayalam and English.",
-  steps: []
+  systemInstruction: "You are a friendly and persuasive recruiter for Uber Fleet in Kerala.",
+  steps: [
+    { id: 'step_1', title: 'Welcome & Name', message: 'നമസ്കാരം! Uber Fleet-ലേക്ക് സ്വാഗതം. നിങ്ങളുടെ പേര് പറയാമോ?', inputType: 'text', saveToField: 'name', nextStepId: 'step_2' },
+    { id: 'step_2', title: 'License Check', message: 'നന്ദി! നിങ്ങളുടെ കൈയ്യിൽ valid ആയ Commercial Driving License ഉണ്ടോ?', inputType: 'option', options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'], nextStepId: 'step_3' },
+    { id: 'step_3', title: 'Upload License', message: 'Verification-ന് വേണ്ടി License-ന്റെ ഒരു ഫോട്ടോ അയച്ചുതരൂ.', inputType: 'image', saveToField: 'document', nextStepId: 'step_4' },
+    { id: 'step_4', title: 'Availability', message: 'എപ്പോഴാണ് ഡ്രൈവ് ചെയ്യാൻ താല്പര്യം? (Full-time / Part-time)', inputType: 'option', options: ['Full-time', 'Part-time', 'Weekends'], saveToField: 'availability', nextStepId: 'AI_HANDOFF' }
+  ],
+  flowData: {
+      nodes: [
+          { id: 'start', type: 'custom', position: { x: 50, y: 300 }, data: { type: 'start', label: 'Start' } },
+          { id: 'step_1', type: 'custom', position: { x: 300, y: 300 }, data: { label: 'Text', message: 'നമസ്കാരം! Uber Fleet-ലേക്ക് സ്വാഗതം. നിങ്ങളുടെ പേര് പറയാമോ?', inputType: 'text', saveToField: 'name' } },
+          { id: 'step_2', type: 'custom', position: { x: 600, y: 300 }, data: { label: 'Quick Reply', message: 'നന്ദി! നിങ്ങളുടെ കൈയ്യിൽ valid ആയ Commercial Driving License ഉണ്ടോ?', inputType: 'option', options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'] } },
+          { id: 'step_3', type: 'custom', position: { x: 900, y: 300 }, data: { label: 'Image', message: 'Verification-ന് വേണ്ടി License-ന്റെ ഒരു ഫോട്ടോ അയച്ചുതരൂ.', inputType: 'image', saveToField: 'document' } },
+          { id: 'step_4', type: 'custom', position: { x: 1200, y: 300 }, data: { label: 'Quick Reply', message: 'എപ്പോഴാണ് ഡ്രൈവ് ചെയ്യാൻ താല്പര്യം? (Full-time / Part-time)', inputType: 'option', options: ['Full-time', 'Part-time', 'Weekends'], saveToField: 'availability' } },
+          { id: 'end', type: 'custom', position: { x: 1500, y: 300 }, data: { type: 'end', label: 'End' } }
+      ],
+      edges: [
+          { id: 'e_start-step_1', source: 'start', target: 'step_1', type: 'smoothstep', animated: true },
+          { id: 'e_step_1-step_2', source: 'step_1', target: 'step_2', type: 'smoothstep', animated: true },
+          { id: 'e_step_2-step_3', source: 'step_2', target: 'step_3', sourceHandle: 'opt_0', type: 'smoothstep', animated: true },
+          { id: 'e_step_3-step_4', source: 'step_3', target: 'step_4', type: 'smoothstep', animated: true },
+          { id: 'e_step_4-end', source: 'step_4', target: 'end', type: 'smoothstep', animated: true }
+      ]
+  }
 };
 
 // --- DATABASE CLEANER (Runs on Startup) ---
@@ -171,16 +193,23 @@ const sanitizeDatabaseOnStartup = async (client) => {
             let settings = res.rows[0].settings;
             let dirty = false;
 
+            // 1. INJECT VISUAL FLOW IF MISSING (Fixes "Missing Start Node" in Live Mode)
+            if (!settings.flowData || !settings.flowData.nodes || settings.flowData.nodes.length === 0) {
+                console.warn("   ⚠️  Injecting default visual flow into existing database...");
+                settings.flowData = DEFAULT_BOT_SETTINGS.flowData;
+                dirty = true;
+            }
+
+            // 2. CLEAN GHOST MESSAGES
             if (settings.steps && Array.isArray(settings.steps)) {
+                const initialCount = settings.steps.length;
                 settings.steps = settings.steps.filter(step => {
-                    // FILTER: Remove steps that are completely empty
                     const hasText = step.message && step.message.trim().length > 0;
                     const hasMedia = step.mediaUrl && step.mediaUrl.trim().length > 0;
                     const hasOptions = step.options && step.options.length > 0;
                     return hasText || hasMedia || hasOptions;
                 }).map(step => {
                     if (step.message && BLOCKED_REGEX.test(step.message)) {
-                        console.warn(`   ⚠️  Purging prohibited text from Step ${step.id}`);
                         if (step.options && step.options.length > 0) {
                             step.message = "Please select an option:";
                         } else {
@@ -190,6 +219,7 @@ const sanitizeDatabaseOnStartup = async (client) => {
                     }
                     return step;
                 });
+                if (settings.steps.length !== initialCount) dirty = true;
             }
 
             if (dirty) {
