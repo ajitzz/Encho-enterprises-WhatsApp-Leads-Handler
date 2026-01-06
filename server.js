@@ -268,12 +268,15 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
   // SANITIZATION: Fix "Replace this sample message!" issue (Meta placeholder)
   // Also handle empty body for interactive messages to prevent API errors
   let safeBody = body;
-  if (!safeBody || safeBody.trim() === "" || safeBody === "Replace this sample message!") {
+  if (!safeBody || !safeBody.trim() || safeBody.includes("Replace this sample message")) {
+      console.warn(`⚠️ Sanitizing outgoing message. Original: "${body}"`);
       if (options && options.length > 0) {
-          safeBody = "Please select an option:";
-      } else if (!templateName && !mediaUrl) {
-          // If pure text but empty, fallback to a generic greeting to avoid crash
-          safeBody = "Hello"; 
+          safeBody = "Please select an option below:";
+      } else if (mediaUrl) {
+           // Media caption is optional, so undefined is fine, but "Replace..." is bad.
+           safeBody = ""; 
+      } else if (!templateName) {
+           safeBody = "Hello! How can I help you today?"; // Fallback for pure text
       }
   }
 
@@ -286,7 +289,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
     // Media Message (Image, Video, or Document)
     payload.type = mediaType;
     payload[mediaType] = { link: mediaUrl };
-    if (safeBody && safeBody !== "Hello") payload[mediaType].caption = safeBody; // Add caption if provided
+    if (safeBody && safeBody.length > 0) payload[mediaType].caption = safeBody; // Add caption if provided
   } else if (options && options.length > 0) {
     // FILTER: Remove empty options
     const validOptions = options.filter(o => o && o.trim().length > 0);

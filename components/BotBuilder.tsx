@@ -24,7 +24,7 @@ import {
   Save, MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
   List, Type, Hash, Mail, Globe, Calendar, Clock, Phone, 
   CreditCard, ShoppingBag, LayoutGrid, MoreHorizontal, X, Trash2,
-  Zap, CheckCircle, Flag, Pencil, Bold, Italic, Link, Play, Music, Upload
+  Zap, CheckCircle, Flag, Pencil, Bold, Italic, Link, Play, Music, Upload, AlertTriangle
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
@@ -302,7 +302,7 @@ const CustomNode = ({ data, id, selected }: any) => {
             {/* Text Preview */}
             {(data.label === 'Text') && (
                 <p className="text-sm text-gray-600 line-clamp-3 font-medium">
-                    {data.message || <span className="text-gray-300 italic">Empty text message...</span>}
+                    {data.message || <span className="text-red-400 italic text-xs flex items-center gap-1"><AlertTriangle size={10} /> Message required</span>}
                 </p>
             )}
 
@@ -313,8 +313,8 @@ const CustomNode = ({ data, id, selected }: any) => {
                         {data.mediaUrl ? (
                             <img src={data.mediaUrl} alt="Preview" className="w-full h-full object-cover" />
                         ) : (
-                            <div className="flex items-center justify-center h-full text-gray-300">
-                                <ImageIcon size={24} />
+                            <div className="flex items-center justify-center h-full text-red-300 bg-red-50">
+                                <AlertTriangle size={24} />
                             </div>
                         )}
                      </div>
@@ -325,18 +325,22 @@ const CustomNode = ({ data, id, selected }: any) => {
             {/* Video Preview */}
             {data.label === 'Video' && (
                 <div className="relative w-full aspect-video bg-gray-100 rounded-lg overflow-hidden group/video">
-                    {getYoutubeId(data.mediaUrl) ? (
+                    {data.mediaUrl && getYoutubeId(data.mediaUrl) ? (
                         <img src={`https://img.youtube.com/vi/${getYoutubeId(data.mediaUrl)}/mqdefault.jpg`} alt="Video" className="w-full h-full object-cover" />
                     ) : (
-                        <div className="w-full h-full flex items-center justify-center bg-gray-100">
-                             <Video size={32} className="text-gray-300" />
-                        </div>
+                         data.mediaUrl ? (
+                            <div className="w-full h-full flex items-center justify-center bg-black text-white text-xs">Video Link</div>
+                         ) : (
+                            <div className="w-full h-full flex items-center justify-center bg-red-50 text-red-300">
+                                <AlertTriangle size={32} />
+                            </div>
+                         )
                     )}
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/10">
+                    {data.mediaUrl && <div className="absolute inset-0 flex items-center justify-center bg-black/10">
                         <div className="w-8 h-8 bg-red-600 rounded-full flex items-center justify-center shadow-md">
                              <Play size={12} fill="white" className="text-white ml-0.5" />
                         </div>
-                    </div>
+                    </div>}
                 </div>
             )}
 
@@ -356,7 +360,7 @@ const CustomNode = ({ data, id, selected }: any) => {
              {/* Choices Preview */}
              {isOptionType && (
                 <div className="space-y-2">
-                    <p className="text-xs text-gray-600 mb-2">{data.message || 'Select an option:'}</p>
+                    <p className="text-xs text-gray-600 mb-2">{data.message || <span className="text-red-400 italic text-xs">Question text required</span>}</p>
                     <div className="flex flex-col gap-1.5">
                         {options.map((opt, i) => (
                             <div key={i} className="w-full bg-gray-50 border border-gray-200 text-gray-600 py-1.5 px-3 rounded text-xs font-medium text-center relative">
@@ -364,7 +368,7 @@ const CustomNode = ({ data, id, selected }: any) => {
                                 <Handle type="source" position={Position.Right} id={`opt_${i}`} style={{...HANDLE_STYLE, right: -21}} />
                             </div>
                         ))}
-                        {options.length === 0 && <span className="text-xs text-gray-400 italic">No options added</span>}
+                        {options.length === 0 && <span className="text-xs text-red-400 italic">No options added</span>}
                     </div>
                 </div>
              )}
@@ -548,8 +552,51 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
     [reactFlowInstance],
   );
 
+  // --- VALIDATION HELPER ---
+  const validateFlow = () => {
+    const errors: string[] = [];
+    nodes.forEach(node => {
+      if (node.data.type === 'start') return;
+      const label = node.data.label;
+      const id = node.id.split('_')[1] || node.id;
+      
+      const isOptionType = node.data.inputType === 'option';
+      
+      // 1. Options/Buttons/List
+      if (isOptionType) {
+         if (!node.data.message || !node.data.message.trim()) {
+             errors.push(`Group #${id} (${label}): Question/Message text is required.`);
+         }
+         if (!node.data.options || node.data.options.length === 0) {
+             errors.push(`Group #${id} (${label}): At least one option is required.`);
+         }
+      }
+      
+      // 2. Pure Text
+      if (label === 'Text') {
+          if (!node.data.message || !node.data.message.trim()) {
+              errors.push(`Group #${id} (Text): Message cannot be empty.`);
+          }
+      }
+      
+      // 3. Media (Image/Video)
+      if (['Image', 'Video'].includes(label)) {
+          if (!node.data.mediaUrl || !node.data.mediaUrl.trim()) {
+              errors.push(`Group #${id} (${label}): Media URL is required.`);
+          }
+      }
+    });
+    return errors;
+  };
+
   // --- SAVE & COMPILE ---
   const handleSave = async () => {
+      const errors = validateFlow();
+      if (errors.length > 0) {
+          alert("Cannot Save - Please Fix Errors:\n\n" + errors.map(e => "• " + e).join("\n"));
+          return;
+      }
+      
       setIsSaving(true);
       
       const compiledSteps: BotStep[] = [];
@@ -557,13 +604,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       nodes.forEach(node => {
           if (node.data.type === 'start') return;
 
-          // FIND NEXT STEP:
-          // We look for ANY edge starting from this node.
-          // Since the backend currently supports a linear flow (single nextStepId),
-          // we take the first outgoing edge we find, regardless of whether it's 
-          // a 'main' handle or an 'option' handle.
           const outgoingEdges = edges.filter(e => e.source === node.id);
-          
           let nextStepId = 'END';
           if (outgoingEdges.length > 0) {
               nextStepId = outgoingEdges[0].target;
@@ -577,14 +618,13 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             options: node.data.options,
             saveToField: node.data.saveToField,
             nextStepId: nextStepId,
-            mediaUrl: node.data.mediaUrl // ADDED MEDIA URL
+            mediaUrl: node.data.mediaUrl
           });
       });
 
       const newSettings: BotSettings = {
           ...mockBackend.getBotSettings(),
           steps: compiledSteps,
-          // Save nodes without icon property (handled by updateNodeData logic anyway, but good to be safe)
           flowData: { nodes, edges } 
       };
 
