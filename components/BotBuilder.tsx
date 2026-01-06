@@ -110,7 +110,7 @@ const CustomNode = ({ data, id, selected }: any) => {
              
              {hasError && (
                  <div className="absolute -top-3 left-4 bg-red-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 shadow-sm">
-                     <AlertTriangle size={10} /> Missing Information
+                     <AlertTriangle size={10} /> {data.errorMessage || "Missing Information"}
                  </div>
              )}
 
@@ -160,7 +160,7 @@ const CustomNode = ({ data, id, selected }: any) => {
                                 value={data.message}
                                 onChange={(e) => handleChange('message', e.target.value)}
                             />
-                            {!data.message && hasError && <span className="text-red-500 text-xs font-bold absolute bottom-2 left-4">Message is required</span>}
+                            {(!data.message || data.message.includes("Replace this")) && hasError && <span className="text-red-500 text-xs font-bold absolute bottom-2 left-4">Valid message required</span>}
                         </div>
                     </div>
                 )}
@@ -334,7 +334,7 @@ const CustomNode = ({ data, id, selected }: any) => {
         </div>
 
         {!isOptionType && (
-            <Handle type="source" position={Position.Right} id="main" style={{...HANDLE_STYLE, right: -12, top: '50%'}} />
+            <Handle type="source" position={Position.Right} id="main" style={{...ACTIVE_HANDLE_STYLE, right: -12, top: '50%'}} />
         )}
     </div>
   );
@@ -505,32 +505,43 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
           if (node.data.type === 'start') return node;
           
           let error = false;
+          let errorMsg = '';
           const { label, message, mediaUrl, inputType, options } = node.data;
           
-          // 1. Text/Questions must have message
-          if ((label === 'Text' || inputType === 'option' || inputType === 'text') && (!message || !message.trim())) {
-              error = true;
+          // 1. Text/Questions must have message, and CANNOT contain the placeholder
+          if ((label === 'Text' || inputType === 'option' || inputType === 'text')) {
+             if (!message || !message.trim()) {
+                 error = true;
+                 errorMsg = 'Message required';
+             } else if (message.includes('Replace this sample message')) {
+                 error = true;
+                 errorMsg = 'Remove placeholder text';
+             }
           }
+
           // 2. Media must have URL (message optional)
           if ((label === 'Image' || label === 'Video') && (!mediaUrl || !mediaUrl.trim())) {
               error = true;
+              errorMsg = 'Media URL required';
           }
+
           // 3. Options must have at least 1 option
           if (inputType === 'option' && (!options || options.length === 0)) {
               error = true;
+              errorMsg = 'Add options';
           }
 
           if (error) hasValidationErrors = true;
           
           return {
               ...node,
-              data: { ...node.data, hasError: error }
+              data: { ...node.data, hasError: error, errorMessage: errorMsg }
           };
       });
 
       if (hasValidationErrors) {
           setNodes(newNodes);
-          alert("Cannot Save: Please fix the errors highlighted in red.\n\n- Text nodes must have a message.\n- Media nodes must have a URL.\n- Option nodes must have a question and choices.");
+          alert("Cannot Save: Validation Failed.\n\nCheck for empty messages or 'Replace this sample message' placeholders in red nodes.");
           return;
       }
 

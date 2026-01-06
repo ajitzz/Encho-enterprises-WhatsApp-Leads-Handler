@@ -231,7 +231,11 @@ app.post('/api/messages/send', async (req, res) => {
         if (driverRes.rows.length === 0) return res.status(404).json({ error: 'Driver not found' });
         
         const phoneNumber = driverRes.rows[0].phone_number;
-        await sendWhatsAppMessage(phoneNumber, text);
+        const sent = await sendWhatsAppMessage(phoneNumber, text);
+        
+        if (!sent) {
+            return res.status(400).json({ error: 'Message blocked due to validation rules.' });
+        }
 
         const msgId = Date.now().toString(); 
         await queryWithRetry(
@@ -253,16 +257,26 @@ app.post('/api/messages/send', async (req, res) => {
 // --- LOGIC ENGINE ---
 
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
-  if (!META_API_TOKEN || !PHONE_NUMBER_ID) return;
+  if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
   
-  // --- ABORT LOGIC: Block Empty/Placeholder Messages ---
-  // If user didn't fix the bot step, we STOP here to avoid sending garbage.
-  // Note: Media messages (Image/Video) allow empty bodies (captions), so we skip this check for them.
-  if (!mediaUrl && !templateName) {
-      if (!body || !body.trim() || body.includes("Replace this sample message")) {
-          console.error(`⛔ BLOCKING MESSAGE: Attempted to send invalid text to ${to}. Body: "${body}"`);
-          return; // STOP EXECUTION
-      }
+  // --- STRICT VALIDATION & BLOCKING ---
+  // The user explicitly wants to STOP empty messages or the "Replace this sample message!" placeholder.
+  // We do NOT replace it. We BLOCK it.
+  
+  const isInvalidBody = !body || !body.trim() || body.includes("Replace this sample message!") || body.includes("Replace this sample message");
+  
+  // Rule 1: Templates and Media (without caption) are allowed to have empty bodies.
+  // Rule 2: Interactive (Options) and Text messages MUST have a valid body.
+  
+  if (!templateName && !mediaUrl && isInvalidBody) {
+      console.error(`⛔ BLOCKED: Invalid message body to ${to}. Content: "${body}"`);
+      return false; // Return false indicating blocked
+  }
+
+  // Rule 3: Interactive messages (Lists/Buttons) must have a body text according to Meta API.
+  if (options && options.length > 0 && isInvalidBody) {
+      console.error(`⛔ BLOCKED: Interactive message to ${to} missing body text.`);
+      return false;
   }
 
   let payload = { messaging_product: 'whatsapp', to: to };
@@ -271,17 +285,17 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
     payload.type = 'template';
     payload.template = { name: templateName, language: { code: language } };
   } else if (mediaUrl) {
-    // Media Message (Image, Video, or Document)
-    // NOTE: Body here is treated as the caption.
+    // Media Message
     payload.type = mediaType;
     payload[mediaType] = { link: mediaUrl };
-    if (body && body.trim().length > 0 && !body.includes("Replace this sample message")) {
+    if (!isInvalidBody) {
         payload[mediaType].caption = body; 
     }
   } else if (options && options.length > 0) {
     const validOptions = options.filter(o => o && o.trim().length > 0);
     
     if (validOptions.length === 0) {
+        // Fallback to text if options are empty (unlikely due to validation)
         payload.type = 'text';
         payload.text = { body: body };
     } 
@@ -320,13 +334,18 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
         };
     }
   } else {
+    // Pure Text Message
     payload.type = 'text';
     payload.text = { body: body };
   }
   
   try {
     await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, payload, { headers: { Authorization: `Bearer ${META_API_TOKEN}` } });
-  } catch (error) { console.error('Meta API Error:', error.response ? error.response.data : error.message); }
+    return true;
+  } catch (error) { 
+    console.error('Meta API Error:', error.response ? error.response.data : error.message); 
+    return false;
+  }
 };
 
 const analyzeWithAI = async (text, systemInstruction) => {
@@ -399,22 +418,36 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             let replyMediaType = null;
             let shouldCallAI = false;
 
+            // STRATEGY: AI ONLY
             if (botSettings.isEnabled && routingStrategy === 'AI_ONLY') {
                 shouldCallAI = true;
             } 
+            // STRATEGY: BOT / HYBRID
             else if (botSettings.isEnabled) {
-                 if (routingStrategy === 'BOT_ONLY' && !driver.is_bot_active) {
-                     const firstStepId = botSettings.steps?.[0]?.id;
-                     if (firstStepId) {
-                         await client.query('UPDATE drivers SET is_bot_active = TRUE, current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
-                         driver.is_bot_active = true;
-                         driver.current_bot_step_id = firstStepId;
-                         isNewDriver = true; 
+                 
+                 // RESTART LOGIC for BOT_ONLY or HYBRID
+                 // If bot finished previously, restart flow on new message
+                 if (!driver.is_bot_active) {
+                     // Check strategy before restarting or doing AI
+                     if (routingStrategy === 'BOT_ONLY') {
+                         // Force restart in BOT_ONLY
+                         const firstStepId = botSettings.steps?.[0]?.id;
+                         if (firstStepId) {
+                             await client.query('UPDATE drivers SET is_bot_active = TRUE, current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
+                             driver.is_bot_active = true;
+                             driver.current_bot_step_id = firstStepId;
+                             isNewDriver = true; 
+                         }
+                     } else if (routingStrategy === 'HYBRID_BOT_FIRST') {
+                         // In Hybrid, if bot inactive, use AI
+                         shouldCallAI = true;
                      }
                  }
 
                  if (driver.is_bot_active && driver.current_bot_step_id) {
                      let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
+                     
+                     // Validate step exists
                      if (!currentStep && botSettings.steps.length > 0) {
                          const firstStepId = botSettings.steps[0].id;
                          await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
@@ -424,7 +457,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      }
 
                      if (currentStep) {
-                         // Process Input
+                         // Process Input (If not new/restart)
                          if (!isNewDriver) {
                              if (currentStep.saveToField === 'name') await client.query('UPDATE drivers SET name = $1 WHERE id = $2', [msgBody, driver.id]);
                              if (currentStep.saveToField === 'availability') await client.query('UPDATE drivers SET availability = $1 WHERE id = $2', [msgBody, driver.id]);
@@ -445,7 +478,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                  await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [nextId, driver.id]);
                                  const nextStep = botSettings.steps.find(s => s.id === nextId);
                                  
-                                 // IMPORTANT: Prepare Next Step, but check validity
+                                 // Prepare Next Step
                                  if (nextStep) {
                                      replyText = nextStep.message;
                                      replyTemplate = nextStep.templateName;
@@ -457,7 +490,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                  }
                              }
                          } else {
-                             // Send Current Step
+                             // Send Current Step (Start/Restart)
                              replyText = currentStep.message;
                              replyTemplate = currentStep.templateName;
                              replyMedia = currentStep.mediaUrl;
@@ -468,9 +501,11 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                          }
                      }
                  } 
-                 else if (routingStrategy === 'HYBRID_BOT_FIRST') {
-                     shouldCallAI = true;
-                 }
+            }
+            
+            // STRICT SAFETY CHECK: Ensure AI is NOT called if strategy is BOT_ONLY
+            if (routingStrategy === 'BOT_ONLY') {
+                shouldCallAI = false;
             }
 
             await client.query('COMMIT');
@@ -486,32 +521,38 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
         // Post-Transaction Actions
         
-        // CHECK: If reply is invalid (empty body for text/interactive), ABORT and Log System Warning
-        if (!result.replyMedia && !result.replyTemplate && !result.shouldCallAI && (!result.replyText || !result.replyText.trim() || result.replyText.includes("Replace this sample message"))) {
-            if (result.driver && result.driver.is_bot_active) {
-                console.log(`Skipping invalid bot message for ${from}`);
-                await logSystemMessage(result.driver.id, "⚠️ Bot Error: Step has no valid text. Message skipped.", 'warning');
-            }
-            return; // EXIT
-        }
-
+        // CHECK: If reply is text/options, sendWhatsAppMessage might return false if body is invalid.
+        let sent = false;
+        
         if (result.replyTemplate) {
-            await sendWhatsAppMessage(from, null, null, result.replyTemplate);
-            await logSystemMessage(result.driver.id, `[Template] ${result.replyTemplate}`, 'template');
+            sent = await sendWhatsAppMessage(from, null, null, result.replyTemplate);
+            if (sent) await logSystemMessage(result.driver.id, `[Template] ${result.replyTemplate}`, 'template');
         }
         else if (result.replyMedia) {
-            await sendWhatsAppMessage(from, result.replyText, null, null, 'en_US', result.replyMedia, result.replyMediaType);
-            await logSystemMessage(result.driver.id, result.replyText || `[${result.replyMediaType}]`, 'image', null, result.replyMedia);
+            sent = await sendWhatsAppMessage(from, result.replyText, null, null, 'en_US', result.replyMedia, result.replyMediaType);
+            if (sent) await logSystemMessage(result.driver.id, result.replyText || `[${result.replyMediaType}]`, 'image', null, result.replyMedia);
         }
         else if (result.replyText) {
-            await sendWhatsAppMessage(from, result.replyText, result.replyOptions);
-            const type = result.replyOptions && result.replyOptions.length > 0 ? 'options' : 'text';
-            await logSystemMessage(result.driver.id, result.replyText, type, result.replyOptions);
+            // Attempt to send
+            sent = await sendWhatsAppMessage(from, result.replyText, result.replyOptions);
+            
+            if (sent) {
+                const type = result.replyOptions && result.replyOptions.length > 0 ? 'options' : 'text';
+                await logSystemMessage(result.driver.id, result.replyText, type, result.replyOptions);
+            } else {
+                // If blocked (returns false), log warning
+                if (result.driver && result.driver.is_bot_active) {
+                    await logSystemMessage(result.driver.id, "⚠️ System blocked invalid message (empty/placeholder).", 'warning');
+                }
+            }
         }
         else if (result.shouldCallAI) {
             const aiReply = await analyzeWithAI(msgBody, result.botSettings.systemInstruction);
-            await sendWhatsAppMessage(from, aiReply);
-            await logSystemMessage(result.driver.id, aiReply, 'text');
+            // AI responses should be safe, but good to check
+            if (aiReply && aiReply.trim()) {
+                sent = await sendWhatsAppMessage(from, aiReply);
+                if (sent) await logSystemMessage(result.driver.id, aiReply, 'text');
+            }
         }
 
     } catch (e) {
