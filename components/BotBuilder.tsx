@@ -1,4 +1,5 @@
 
+
 import React, { useState, useCallback, useEffect } from 'react';
 import { 
   ReactFlow, 
@@ -429,7 +430,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   
   // SYSTEM DOCTOR STATES
   const [showSystemDoctor, setShowSystemDoctor] = useState(false);
-  const [files, setFiles] = useState<Array<{path: string, content: string}>>([]);
   const [issueDescription, setIssueDescription] = useState('Chat flow errors regarding empty options');
   const [doctorDiagnosis, setDoctorDiagnosis] = useState<any>(null);
   const [isAnalyzingCode, setIsAnalyzingCode] = useState(false);
@@ -515,8 +515,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       }
       setIsAuditing(true);
       try {
-          // FIXED: Use Backend API instead of Client-Side Service
-          const report = await liveApiService.auditBotFlow(nodes);
+          // FIXED: Pass edges to the audit function
+          const report = await liveApiService.auditBotFlow(nodes, edges);
           setAuditReport(report);
           
           if (report.issues.length > 0) {
@@ -554,6 +554,38 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               ...prev,
               issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
           }));
+      } else if (issue.autoFixValue === 'AUTOFIX_ADD_WELCOME') {
+          // Special Case: Create a new Welcome node and connect Start to it.
+          const startNode = nodes.find(n => n.data.type === 'start' || n.type === 'start' || n.id === 'start');
+          if (startNode) {
+               const newNodeId = `node_${Date.now()}`;
+               const newNode = {
+                   id: newNodeId,
+                   type: 'custom',
+                   position: { x: startNode.position.x + 300, y: startNode.position.y },
+                   data: { 
+                       label: 'Text', 
+                       message: 'Hello! Welcome to Uber Fleet. How can we help you today?', 
+                       inputType: 'text',
+                       hasError: false
+                   }
+               };
+               addNode(newNode);
+               const newEdge = { 
+                   id: `e_${startNode.id}-${newNodeId}`, 
+                   source: startNode.id, 
+                   target: newNodeId,
+                   type: 'smoothstep',
+                   animated: true,
+                   style: { stroke: '#64748b', strokeWidth: 2 }
+               };
+               setEdges([...edges, newEdge]);
+               
+               setAuditReport((prev: any) => ({
+                   ...prev,
+                   issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
+               }));
+          }
       } else if (issue.autoFixValue) {
           const newNodes = nodes.map(n => {
               if (n.id === issue.nodeId) {
@@ -953,6 +985,13 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                                             className="px-3 py-1.5 bg-red-600 text-white text-xs font-bold rounded hover:bg-red-700 flex items-center gap-1"
                                         >
                                             <Trash2 size={12} /> Delete Node
+                                        </button>
+                                    ) : issue.autoFixValue === 'AUTOFIX_ADD_WELCOME' ? (
+                                        <button 
+                                            onClick={() => applyFix(issue)}
+                                            className="px-3 py-1.5 bg-green-600 text-white text-xs font-bold rounded hover:bg-green-700 flex items-center gap-1"
+                                        >
+                                            <Wand2 size={12} /> Auto-Fix: Add Welcome Node
                                         </button>
                                     ) : issue.autoFixValue ? (
                                         <button 

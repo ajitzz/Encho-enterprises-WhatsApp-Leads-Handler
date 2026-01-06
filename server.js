@@ -490,12 +490,25 @@ app.post('/api/admin/analyze-system', async (req, res) => {
 
 // --- UPDATED AUDIT FLOW (Uses Global Auto-Scaling Strategy + Local Fallback) ---
 app.post('/api/admin/audit-flow', async (req, res) => {
-    const { nodes } = req.body;
+    const { nodes, edges } = req.body; // Now receiving edges too
     try {
+        const nodesLite = nodes.map(n => ({ id: n.id, type: n.data?.label || n.type, message: n.data?.message }));
+        const edgesLite = edges ? edges.map(e => ({ source: e.source, target: e.target })) : [];
+
         const prompt = `
         You are a QA AI for a Chatbot Flow.
-        Analyze this JSON flow configuration for logical errors and empty spaces.
-        INPUT DATA: ${JSON.stringify(nodes.map(n => ({ id: n.id, type: n.data.label, message: n.data.message })))}
+        Analyze this JSON flow configuration for logical errors, empty spaces, and connectivity.
+        
+        INPUT DATA:
+        Nodes: ${JSON.stringify(nodesLite)}
+        Edges: ${JSON.stringify(edgesLite)}
+        
+        VALIDATION RULES:
+        1. "Start" node must have at least one outgoing connection. If disconnected, Issue: "Start node disconnected", Suggestion: "Connect the start node to a welcome message.", AutoFix: "AUTOFIX_ADD_WELCOME".
+        2. Any text node with empty message is Critical. AutoFix: "Please reply to this message."
+        3. Placeholder text like "replace this" is a Warning.
+        4. "Missing End Node" is ONLY an error if a branch dead-ends without logic (implicit end is okay).
+        
         OUTPUT JSON: { "isValid": boolean, "issues": [{ "nodeId": "...", "severity": "CRITICAL|WARNING", "issue": "...", "suggestion": "...", "autoFixValue": "..." }] }
         `;
         
@@ -509,8 +522,6 @@ app.post('/api/admin/audit-flow', async (req, res) => {
         console.warn("⚠️ All AI Models Failed for Audit. Switching to Local Logic.");
         
         // FINAL FALLBACK: Local Heuristic Check
-        // If AI is totally dead, we run a local JS function to check for basic errors.
-        // This ensures the endpoint NEVER returns 500 for the user.
         try {
             const report = runLocalAudit(nodes);
             return res.json(report);

@@ -1,4 +1,5 @@
 
+
 import { Driver, BotSettings, SystemHealth, AuditReport } from '../types';
 
 const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -155,12 +156,12 @@ export const liveApiService = {
       return await response.json();
   },
 
-  // New: Audit Bot Flow via Backend
-  auditBotFlow: async (nodes: any[]): Promise<AuditReport> => {
+  // New: Audit Bot Flow via Backend (Updated to accept edges)
+  auditBotFlow: async (nodes: any[], edges: any[]): Promise<AuditReport> => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/audit-flow`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ nodes })
+          body: JSON.stringify({ nodes, edges })
       });
       if (!response.ok) throw new Error('Audit Failed');
       return await response.json();
