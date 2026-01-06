@@ -6,6 +6,12 @@ const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || "AIzaSyDujw0
 
 const ai = new GoogleGenAI({ apiKey });
 
+const cleanJSON = (text: string) => {
+  if (!text) return "{}";
+  // Remove markdown code blocks like ```json ... ```
+  return text.replace(/```json/g, '').replace(/```/g, '').trim();
+};
+
 export interface AIAnalysisResult {
   intent: string;
   isInterested: boolean;
@@ -68,7 +74,7 @@ export const analyzeMessage = async (text: string, imageUrl?: string, systemInst
       }
     });
 
-    const result = JSON.parse(response.text || '{}');
+    const result = JSON.parse(cleanJSON(response.text || '{}'));
     let status = LeadStatus.NEW;
     switch(result.recommendedStatus) {
       case 'Qualified': status = LeadStatus.QUALIFIED; break;
@@ -100,21 +106,27 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
         const model = "gemini-3-flash-preview";
         
         const prompt = `
-        You are a Root Cause Analysis AI for a WhatsApp Bot.
+        You are a Quality Assurance AI for a Chatbot Flow.
         
-        Analyze this JSON flow configuration for errors.
+        Analyze this JSON flow configuration for logical errors and empty spaces.
         
-        SPECIFIC RULES TO CATCH:
+        STRICT VALIDATION RULES:
         1. "Placeholder Text": Any message containing "replace this", "sample message", "type here".
-        2. "Empty Options": An Options/List node that has no items in the 'options' array.
-        3. "Empty Text": A text node with an empty string message.
+        2. "Empty Options": An Options node where the 'options' array is empty OR contains empty strings.
+        3. "Empty Text": A Text node with an empty or whitespace-only message.
         4. "Missing Media": A Media node (Image/Video) with no URL.
+        5. "Redundant Node": A node with no connections and empty content.
 
         INPUT DATA:
         ${JSON.stringify(nodes.map(n => ({ id: n.id, type: n.data.label, message: n.data.message, options: n.data.options, mediaUrl: n.data.mediaUrl })))}
 
-        Return a JSON report.
-        For "autoFixValue", provide the corrected string (e.g. remove placeholder, add default option).
+        OUTPUT FORMAT:
+        Return a JSON object with 'isValid' (boolean) and 'issues' (array).
+        
+        For 'autoFixValue':
+        - If the node is redundant or hopelessly empty, set autoFixValue to "DELETE_NODE".
+        - If it's a text node, provide a professional fallback message.
+        - If it's an option node with empty options, suggest a fixed list like ["Yes", "No"].
         `;
 
         const response = await ai.models.generateContent({
@@ -144,7 +156,7 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
             }
         });
 
-        const report = JSON.parse(response.text || '{"isValid": true, "issues": []}');
+        const report = JSON.parse(cleanJSON(response.text || '{"isValid": true, "issues": []}'));
         return report;
 
     } catch (e) {
@@ -194,5 +206,5 @@ export const analyzeSystemCode = async (sourceCode: string, issueDescription: st
         }
     });
 
-    return JSON.parse(response.text || '{}');
+    return JSON.parse(cleanJSON(response.text || '{}'));
 }

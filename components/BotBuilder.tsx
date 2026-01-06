@@ -141,8 +141,8 @@ const CustomNode = ({ data, id, selected }: any) => {
              {isOptionType && options.length > 0 && (
                 <div className="mt-3 flex flex-wrap gap-1.5">
                     {options.slice(0, 3).map((opt, i) => (
-                        <span key={i} className="text-[10px] bg-gray-100 border border-gray-200 px-2 py-1 rounded-md text-gray-600 font-medium">
-                            {opt}
+                        <span key={i} className={`text-[10px] bg-gray-100 border px-2 py-1 rounded-md text-gray-600 font-medium ${!opt.trim() ? 'border-red-300 bg-red-50' : 'border-gray-200'}`}>
+                            {opt || '⚠ Empty'}
                         </span>
                     ))}
                     {options.length > 3 && <span className="text-[10px] text-gray-400">+{options.length - 3}</span>}
@@ -294,7 +294,7 @@ const CustomNode = ({ data, id, selected }: any) => {
                     <div className="space-y-2 mb-3">
                         {options.map((opt, idx) => (
                             <div key={idx} className="flex items-center gap-2 group">
-                                <div className="flex-1 flex items-center bg-gray-50 border border-gray-200 rounded-lg pl-3 pr-1 py-1.5 focus-within:ring-1 focus-within:ring-blue-500 focus-within:bg-white transition-all shadow-sm">
+                                <div className={`flex-1 flex items-center bg-gray-50 border rounded-lg pl-3 pr-1 py-1.5 focus-within:ring-1 focus-within:ring-blue-500 focus-within:bg-white transition-all shadow-sm ${!opt.trim() ? 'border-red-300 ring-1 ring-red-100' : 'border-gray-200'}`}>
                                     <span className="text-[10px] text-gray-400 mr-2 font-mono flex items-center justify-center w-4 h-4 rounded bg-gray-200">{idx + 1}</span>
                                     <input 
                                         value={opt}
@@ -401,7 +401,7 @@ export const BotBuilder: React.FC<BotBuilderProps> = ({ isLiveMode = false }) =>
 const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const { 
       nodes, edges, onNodesChange, onEdgesChange, onConnect, 
-      setNodes, setEdges, addNode, updateNodeData 
+      setNodes, setEdges, addNode, updateNodeData, deleteNode
   } = useFlowStore();
   
   const [isSaving, setIsSaving] = useState(false);
@@ -519,26 +519,36 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       }
   };
 
-  const applyAutoFixes = () => {
-      if (!auditReport) return;
-      
-      const newNodes = nodes.map(n => {
-         const issue = auditReport.issues.find((i: any) => i.nodeId === n.id);
-         if (issue && issue.autoFixValue) {
-             return {
-                 ...n,
-                 data: {
-                     ...n.data,
-                     message: issue.autoFixValue, // Apply AI fix
-                     hasError: false,
-                     errorMessage: undefined
-                 }
-             };
-         }
-         return n;
-      });
-      setNodes(newNodes);
-      setAuditReport(null); // Close modal
+  const applyFix = (issue: any) => {
+      if (issue.autoFixValue === 'DELETE_NODE') {
+          deleteNode(issue.nodeId);
+          // Update report UI by removing the issue
+          setAuditReport((prev: any) => ({
+              ...prev,
+              issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
+          }));
+      } else if (issue.autoFixValue) {
+          const newNodes = nodes.map(n => {
+              if (n.id === issue.nodeId) {
+                  return {
+                      ...n,
+                      data: {
+                          ...n.data,
+                          message: issue.autoFixValue,
+                          hasError: false,
+                          errorMessage: undefined
+                      }
+                  };
+              }
+              return n;
+          });
+          setNodes(newNodes);
+          // Remove from report
+          setAuditReport((prev: any) => ({
+            ...prev,
+            issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
+        }));
+      }
   };
 
   const openSystemDoctor = async () => {
@@ -608,9 +618,14 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               errorMsg = 'Missing URL';
           }
 
-          if (inputType === 'option' && (!options || options.length === 0)) {
-              error = true;
-              errorMsg = 'No Options';
+          if (inputType === 'option') {
+              if (!options || options.length === 0) {
+                  error = true;
+                  errorMsg = 'No Options';
+              } else if (options.some((o: string) => !o || !o.trim())) {
+                  error = true;
+                  errorMsg = 'Empty Option Found';
+              }
           }
 
           if (error) hasValidationErrors = true;
@@ -619,7 +634,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
       if (hasValidationErrors) {
           setNodes(newNodes);
-          alert("❌ SAVE BLOCKED: Strict Validation Failed.\n\nPlease fix red nodes.");
+          alert("❌ SAVE BLOCKED: Strict Validation Failed.\n\nPlease fix red nodes (Empty Text or Options).");
           return;
       }
 
@@ -756,7 +771,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             </div>
         </div>
 
-        {/* SYSTEM DOCTOR MODAL */}
+        {/* SYSTEM DOCTOR MODAL (Same as before but uses fixed parsing) */}
         {showSystemDoctor && (
              <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-6">
                  <div className="bg-gray-900 w-full max-w-6xl h-[85vh] rounded-2xl shadow-2xl overflow-hidden flex flex-col border border-gray-800">
@@ -849,7 +864,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
              </div>
         )}
 
-        {/* AI AUDIT REPORT MODAL (Existing) */}
+        {/* AI AUDIT REPORT MODAL */}
         {auditReport && auditReport.issues.length > 0 && (
             <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
                 <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95">
@@ -863,7 +878,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     <div className="p-6 max-h-[60vh] overflow-y-auto space-y-4">
                         <div className="bg-purple-50 text-purple-800 p-3 rounded-lg text-sm border border-purple-100 flex items-center gap-2">
                              <AlertTriangle size={16} />
-                             Found {auditReport.issues.length} potential issues in your flow.
+                             Found {auditReport.issues.length} potential issues.
                         </div>
 
                         {auditReport.issues.map((issue: any, idx: number) => (
@@ -877,11 +892,23 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                                 <h4 className="font-bold text-gray-900 text-sm mb-1">{issue.issue}</h4>
                                 <p className="text-sm text-gray-600 mb-3">{issue.suggestion}</p>
                                 
-                                {issue.autoFixValue && (
-                                    <div className="bg-white border border-gray-200 p-2 rounded text-xs font-mono text-gray-500 mb-2">
-                                        Suggested: "{issue.autoFixValue}"
-                                    </div>
-                                )}
+                                <div className="flex items-center gap-2">
+                                    {issue.autoFixValue === 'DELETE_NODE' ? (
+                                        <button 
+                                            onClick={() => applyFix(issue)}
+                                            className="px-3 py-1.5 bg-red-600 text-white text-xs font-bold rounded hover:bg-red-700 flex items-center gap-1"
+                                        >
+                                            <Trash2 size={12} /> Delete Node
+                                        </button>
+                                    ) : issue.autoFixValue ? (
+                                        <button 
+                                            onClick={() => applyFix(issue)}
+                                            className="px-3 py-1.5 bg-blue-600 text-white text-xs font-bold rounded hover:bg-blue-700 flex items-center gap-1"
+                                        >
+                                            <Wand2 size={12} /> Apply Fix: "{issue.autoFixValue}"
+                                        </button>
+                                    ) : null}
+                                </div>
                             </div>
                         ))}
                     </div>
@@ -892,12 +919,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                            className="flex-1 py-3 text-sm font-medium text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors"
                         >
                            Dismiss
-                        </button>
-                        <button 
-                           onClick={applyAutoFixes}
-                           className="flex-1 py-3 text-sm font-bold text-white bg-purple-600 rounded-xl hover:bg-purple-700 transition-colors flex items-center justify-center gap-2 shadow-lg shadow-purple-200"
-                        >
-                           <Wand2 size={16} /> Auto-Fix All Issues
                         </button>
                     </div>
                 </div>
