@@ -123,9 +123,10 @@ export interface SystemHealth {
         latency: number;
     };
     ai: {
-        status: 'operational' | 'quota_exceeded' | 'error' | 'unknown';
+        status: 'operational' | 'degraded' | 'error' | 'unknown';
         message: string;
         lastCheck: number;
+        activeModel: string; // 'gemini-3-pro' or 'gemini-3-flash'
     };
     whatsapp: {
         status: 'active' | 'waiting_for_webhook' | 'not_configured';

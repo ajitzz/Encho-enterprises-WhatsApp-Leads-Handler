@@ -1,6 +1,6 @@
 
 import React from 'react';
-import { Database, Zap, MessageCircle, AlertTriangle, CheckCircle, Clock, ServerOff } from 'lucide-react';
+import { Database, Zap, MessageCircle, AlertTriangle, CheckCircle, Clock, ServerOff, Server, Activity, ShieldCheck, Flame } from 'lucide-react';
 import { SystemHealth } from '../types';
 
 interface SystemStatusBannerProps {
@@ -11,94 +11,153 @@ interface SystemStatusBannerProps {
 export const SystemStatusBanner: React.FC<SystemStatusBannerProps> = ({ health, isLoading }) => {
     if (!health && isLoading) return (
         <div className="animate-pulse flex gap-4 mb-8">
-            <div className="h-20 bg-gray-200 rounded-xl flex-1"></div>
-            <div className="h-20 bg-gray-200 rounded-xl flex-1"></div>
-            <div className="h-20 bg-gray-200 rounded-xl flex-1"></div>
+            <div className="h-24 bg-gray-200 rounded-2xl flex-1"></div>
+            <div className="h-24 bg-gray-200 rounded-2xl flex-1"></div>
+            <div className="h-24 bg-gray-200 rounded-2xl flex-1"></div>
         </div>
     );
 
     if (!health) return null;
 
-    // Helper for Status Styles
-    const getStatusStyle = (status: string, type: 'ai' | 'db' | 'wa') => {
-        if (type === 'ai') {
-            if (status === 'operational') return { bg: 'bg-gradient-to-br from-purple-500 to-indigo-600', icon: <Zap size={18} className="text-white" />, text: 'text-white', sub: 'text-purple-100', label: 'AI Operational' };
-            if (status === 'quota_exceeded') return { bg: 'bg-gradient-to-br from-amber-500 to-orange-600', icon: <Clock size={18} className="text-white" />, text: 'text-white', sub: 'text-amber-100', label: 'Quota Limit Exceeded' };
-            return { bg: 'bg-red-500', icon: <ServerOff size={18} className="text-white" />, text: 'text-white', sub: 'text-red-100', label: 'AI Error' };
-        }
-        if (type === 'db') {
-            if (status === 'connected') return { bg: 'bg-white border border-gray-200', icon: <Database size={18} className="text-emerald-500" />, text: 'text-gray-900', sub: 'text-gray-500', label: 'Database Active' };
-            return { bg: 'bg-red-50 border border-red-200', icon: <AlertTriangle size={18} className="text-red-500" />, text: 'text-red-800', sub: 'text-red-600', label: 'Database Error' };
-        }
-        if (type === 'wa') {
-            if (status === 'active') return { bg: 'bg-white border border-gray-200', icon: <MessageCircle size={18} className="text-green-500" />, text: 'text-gray-900', sub: 'text-gray-500', label: 'WhatsApp Live' };
-            if (status === 'waiting_for_webhook') return { bg: 'bg-blue-50 border border-blue-200', icon: <Clock size={18} className="text-blue-500" />, text: 'text-blue-900', sub: 'text-blue-600', label: 'Waiting for Webhook' };
-            return { bg: 'bg-gray-50 border border-gray-200', icon: <AlertTriangle size={18} className="text-gray-400" />, text: 'text-gray-500', sub: 'text-gray-400', label: 'WhatsApp Not Configured' };
-        }
-        return { bg: 'bg-gray-100', icon: null, text: '', sub: '', label: '' };
-    };
-
-    const aiStyle = getStatusStyle(health.ai.status, 'ai');
-    const dbStyle = getStatusStyle(health.database.status, 'db');
-    const waStyle = getStatusStyle(health.whatsapp.status, 'wa');
+    // --- AI STATUS LOGIC ---
+    const isPro = health.ai.activeModel?.includes('pro');
+    const isDegraded = health.ai.status === 'degraded' || health.ai.status === 'quota_exceeded';
+    const isError = health.ai.status === 'error';
 
     return (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-            {/* AI CARD (Hero) */}
-            <div className={`relative overflow-hidden rounded-xl p-5 shadow-sm transition-all ${aiStyle.bg}`}>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mb-8">
+            
+            {/* 1. AI ENGINE CARD (Dynamic: Pro vs Flash) */}
+            <div className={`relative overflow-hidden rounded-2xl p-6 shadow-sm border transition-all duration-300 group
+                ${isError ? 'bg-red-50 border-red-200' : isDegraded ? 'bg-amber-50 border-amber-200' : 'bg-white border-purple-100'}
+            `}>
+                <div className="absolute top-0 right-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
+                    <Zap size={80} className={isDegraded ? 'text-amber-500' : 'text-purple-600'} />
+                </div>
+                
                 <div className="relative z-10 flex flex-col h-full justify-between">
-                    <div className="flex items-center justify-between mb-2">
-                         <div className="bg-white/20 p-2 rounded-lg backdrop-blur-sm">{aiStyle.icon}</div>
-                         {health.ai.status === 'quota_exceeded' && (
-                             <span className="text-[10px] font-bold bg-white/20 px-2 py-1 rounded text-white backdrop-blur-sm animate-pulse">
-                                 RETRYING SOON
-                             </span>
-                         )}
+                    <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-3">
+                            <div className={`p-2.5 rounded-xl ${isDegraded ? 'bg-amber-100 text-amber-600' : 'bg-purple-100 text-purple-600'}`}>
+                                {isDegraded ? <Flame size={20} /> : <SparklesIcon />}
+                            </div>
+                            <div>
+                                <h4 className="font-bold text-gray-900">AI Engine</h4>
+                                <div className="flex items-center gap-1.5 mt-0.5">
+                                    <span className={`w-1.5 h-1.5 rounded-full ${isError ? 'bg-red-500' : 'bg-green-500 animate-pulse'}`}></span>
+                                    <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                                        {isPro ? 'GEMINI 3 PRO' : 'GEMINI 3 FLASH'}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                        {isDegraded && (
+                            <span className="bg-amber-100 text-amber-700 text-[10px] font-bold px-2 py-1 rounded-full border border-amber-200">
+                                FALLBACK ACTIVE
+                            </span>
+                        )}
                     </div>
-                    <div>
-                        <h4 className={`font-bold text-lg ${aiStyle.text}`}>{aiStyle.label}</h4>
-                        <p className={`text-xs mt-1 ${aiStyle.sub}`}>
-                            {health.ai.status === 'quota_exceeded' 
-                                ? "System has paused AI to recover credits." 
-                                : health.ai.message || "Gemini 1.5 Flash Ready"}
+
+                    <div className="mt-4">
+                        <p className={`text-sm font-medium ${isDegraded ? 'text-amber-800' : 'text-gray-600'}`}>
+                            {health.ai.message || "Operational"}
                         </p>
+                        {isDegraded && (
+                           <div className="mt-2 text-xs text-amber-600 flex items-center gap-1">
+                               <Clock size={12} />
+                               <span>Auto-recovery in ~60s</span>
+                           </div>
+                        )}
                     </div>
                 </div>
-                {/* Decor */}
-                <div className="absolute -right-4 -bottom-4 w-24 h-24 bg-white/10 rounded-full blur-2xl"></div>
             </div>
 
-            {/* DB CARD */}
-            <div className={`rounded-xl p-5 shadow-sm transition-all flex items-center gap-4 ${dbStyle.bg}`}>
-                <div className="bg-gray-50 p-3 rounded-xl border border-gray-100">
-                    {dbStyle.icon}
+            {/* 2. DATABASE CARD */}
+            <div className={`relative overflow-hidden rounded-2xl p-6 shadow-sm border bg-white border-gray-200 group`}>
+                <div className="absolute top-0 right-0 p-3 opacity-5 group-hover:opacity-10 transition-opacity">
+                    <Database size={80} />
                 </div>
-                <div>
-                    <h4 className={`font-bold text-sm ${dbStyle.text}`}>{dbStyle.label}</h4>
-                    <p className={`text-xs ${dbStyle.sub}`}>
-                        {health.database.status === 'connected' 
-                            ? `Latency: ${health.database.latency}ms` 
-                            : "Check connection string in Vercel."}
-                    </p>
+                
+                <div className="relative z-10 flex flex-col h-full justify-between">
+                    <div className="flex items-start gap-3">
+                         <div className={`p-2.5 rounded-xl ${health.database.status === 'connected' ? 'bg-blue-50 text-blue-600' : 'bg-red-50 text-red-600'}`}>
+                            <Server size={20} />
+                         </div>
+                         <div>
+                             <h4 className="font-bold text-gray-900">Database</h4>
+                             <div className="flex items-center gap-1.5 mt-0.5">
+                                 <span className={`w-1.5 h-1.5 rounded-full ${health.database.status === 'connected' ? 'bg-green-500' : 'bg-red-500'}`}></span>
+                                 <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">NEON POSTGRES</span>
+                             </div>
+                         </div>
+                    </div>
+                    
+                    <div className="mt-4">
+                        {health.database.status === 'connected' ? (
+                             <div className="flex items-center gap-4">
+                                 <div className="flex flex-col">
+                                     <span className="text-[10px] text-gray-400 uppercase font-bold">Latency</span>
+                                     <span className="text-sm font-mono text-gray-700">{health.database.latency}ms</span>
+                                 </div>
+                                 <div className="flex flex-col">
+                                     <span className="text-[10px] text-gray-400 uppercase font-bold">Pool</span>
+                                     <span className="text-sm font-mono text-gray-700">Active</span>
+                                 </div>
+                             </div>
+                        ) : (
+                             <p className="text-xs text-red-600 font-medium bg-red-50 p-2 rounded border border-red-100">
+                                 Connection Failed. Check Vercel Env Vars.
+                             </p>
+                        )}
+                    </div>
                 </div>
             </div>
 
-            {/* WHATSAPP CARD */}
-            <div className={`rounded-xl p-5 shadow-sm transition-all flex items-center gap-4 ${waStyle.bg}`}>
-                <div className="bg-gray-50 p-3 rounded-xl border border-gray-100">
-                    {waStyle.icon}
+            {/* 3. WHATSAPP CARD */}
+            <div className={`relative overflow-hidden rounded-2xl p-6 shadow-sm border bg-white border-gray-200 group`}>
+                <div className="absolute top-0 right-0 p-3 opacity-5 group-hover:opacity-10 transition-opacity">
+                    <MessageCircle size={80} />
                 </div>
-                <div>
-                    <h4 className={`font-bold text-sm ${waStyle.text}`}>{waStyle.label}</h4>
-                    <p className={`text-xs ${waStyle.sub}`}>
-                        {health.whatsapp.status === 'active' 
-                            ? "Receiving messages in real-time."
-                            : health.whatsapp.status === 'waiting_for_webhook' 
-                                ? "Configured. Send a test message to activate." 
-                                : "API Token missing in server.js"}
-                    </p>
+
+                <div className="relative z-10 flex flex-col h-full justify-between">
+                    <div className="flex items-start gap-3">
+                         <div className={`p-2.5 rounded-xl ${health.whatsapp.status === 'active' ? 'bg-green-50 text-green-600' : 'bg-gray-100 text-gray-500'}`}>
+                            <Activity size={20} />
+                         </div>
+                         <div>
+                             <h4 className="font-bold text-gray-900">WhatsApp API</h4>
+                             <div className="flex items-center gap-1.5 mt-0.5">
+                                 <span className={`w-1.5 h-1.5 rounded-full ${health.whatsapp.status === 'active' ? 'bg-green-500 animate-pulse' : 'bg-gray-400'}`}></span>
+                                 <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">META CLOUD</span>
+                             </div>
+                         </div>
+                    </div>
+
+                    <div className="mt-4">
+                        {health.whatsapp.status === 'active' ? (
+                            <p className="text-sm text-gray-600 flex items-center gap-2">
+                                <ShieldCheck size={16} className="text-green-500" />
+                                <span>Webhook Connected</span>
+                            </p>
+                        ) : health.whatsapp.status === 'waiting_for_webhook' ? (
+                            <div className="bg-blue-50 border border-blue-100 rounded-lg p-2">
+                                <p className="text-xs text-blue-700">Waiting for first message...</p>
+                            </div>
+                        ) : (
+                            <div className="bg-gray-100 border border-gray-200 rounded-lg p-2">
+                                <p className="text-xs text-gray-500">API Token Missing in Settings</p>
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
         </div>
     );
 };
+
+// Simple Sparkle Icon Component
+const SparklesIcon = () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 2L14.4 9.6L22 12L14.4 14.4L12 22L9.6 14.4L2 12L9.6 9.6L12 2Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+);
