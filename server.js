@@ -226,7 +226,6 @@ app.post('/api/bot-settings', async (req, res) => {
     try {
         const incoming = req.body || {};
         const steps = Array.isArray(incoming.steps) ? incoming.steps : [];
-        const optionCleanupLogs = [];
 
         // --- STRICT BACKEND VALIDATION ---
         const invalidSteps = [];
@@ -235,16 +234,14 @@ app.post('/api/bot-settings', async (req, res) => {
             const lowerMsg = msg.toLowerCase();
             const isPlaceholder = BLOCKED_PHRASES.some((p) => lowerMsg.includes(p));
             const requiresBody = !['image', 'video', 'file', 'audio'].includes((step.title || '').toLowerCase());
-            const rawOptions = Array.isArray(step.options) ? step.options : [];
-            const filteredOptions = rawOptions.map((o) => (o || '').trim()).filter(Boolean);
+            const filteredOptions = Array.isArray(step.options)
+                ? step.options.map((o) => (o || '').trim()).filter(Boolean)
+                : [];
 
             let error = null;
             if (requiresBody && !msg) error = 'Empty message blocked';
             else if (isPlaceholder) error = 'Placeholder text blocked';
             else if (step.inputType === 'option' && filteredOptions.length === 0) error = 'Missing options';
-            else if (step.inputType === 'option' && filteredOptions.length !== rawOptions.length) {
-                optionCleanupLogs.push(`${step.title || step.id}: removed ${rawOptions.length - filteredOptions.length} blank option(s)`);
-            }
 
             if (error) {
                 invalidSteps.push({ id: step.id, title: step.title, error });
@@ -260,10 +257,6 @@ app.post('/api/bot-settings', async (req, res) => {
         if (invalidSteps.length > 0) {
             console.warn('⚠️ Bot settings rejected by firewall:', invalidSteps);
             return res.status(400).json({ error: 'Invalid bot configuration', details: invalidSteps });
-        }
-
-        if (optionCleanupLogs.length > 0) {
-            console.info('Option sanitization applied:', optionCleanupLogs);
         }
 
         const sanitizedSettings = { ...incoming, steps: sanitizedSteps };

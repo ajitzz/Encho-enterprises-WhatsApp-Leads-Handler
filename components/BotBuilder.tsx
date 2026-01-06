@@ -356,7 +356,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   // --- STRICT SAVE VALIDATION ---
   const handleSave = async () => {
       let hasValidationErrors = false;
-      const optionDiagnostics: string[] = [];
 
       const validatedNodes = nodes.map(node => {
             if (node.data.type === 'start') return node;
@@ -391,14 +390,11 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             }
 
             // 3. Option Check
-            const rawOptions = node.data.options || [];
-            const filteredOptions = rawOptions.map((opt: string) => opt?.trim()).filter(Boolean);
+            const filteredOptions = (node.data.options || []).map((opt: string) => opt?.trim()).filter(Boolean);
             if (inputType === 'option') {
                 if (filteredOptions.length === 0) {
                     error = true;
                     errorMsg = 'No Options';
-                } else if (filteredOptions.length !== rawOptions.length) {
-                    optionDiagnostics.push(`${node.data.label || node.id}: removed ${rawOptions.length - filteredOptions.length} blank option(s)`);
                 }
             }
 
@@ -420,10 +416,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             setNodes(validatedNodes);
             alert("❌ SAVE BLOCKED: Strict Validation Failed.\n\nPlease fix red nodes. Ensure no 'Replace this sample message' text remains.");
             return;
-        }
-
-        if (optionDiagnostics.length > 0) {
-            console.warn('Option cleanup applied before save:', optionDiagnostics);
         }
 
         setNodes(validatedNodes);
