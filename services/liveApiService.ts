@@ -1,4 +1,5 @@
-import { Driver, BotSettings } from '../types';
+
+import { Driver, BotSettings, SystemHealth } from '../types';
 
 const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 const API_BASE_URL = isLocal ? 'http://localhost:3001' : ''; 
@@ -126,6 +127,13 @@ export const liveApiService = {
       body: JSON.stringify(credentials)
     });
     return await response.json();
+  },
+
+  // --- SYSTEM HEALTH ---
+  getHealth: async (): Promise<SystemHealth> => {
+      const response = await fetch(`${API_BASE_URL}/api/health`);
+      if (!response.ok) throw new Error("Health Check Failed");
+      return await response.json();
   },
 
   // --- SYSTEM DOCTOR (ADMIN) ---

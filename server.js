@@ -37,6 +37,10 @@ let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "982841698238647";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0";
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
+// --- STATE TRACKING ---
+let lastWebhookTime = 0;
+let aiStatusCache = { status: 'unknown', message: 'Initializing...', lastCheck: 0 };
+
 // --- SECURITY: CONTENT FIREWALL ---
 // Regex matches: "replace this sample message", "enter your message", etc., case insensitive, ignoring extra spaces
 const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
@@ -199,6 +203,32 @@ const ensureDatabaseInitialized = async (client) => {
 // --- AI ENGINE ---
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
+// --- SYSTEM HEALTH CHECK HELPERS ---
+const checkAIHealth = async () => {
+    // Cache result for 60 seconds to avoid burning quota on health checks
+    if (Date.now() - aiStatusCache.lastCheck < 60000) {
+        return aiStatusCache;
+    }
+
+    try {
+        // Use Flash for minimal cost ping
+        await ai.models.generateContent({ 
+            model: "gemini-3-flash-preview", 
+            contents: "ping",
+            config: { maxOutputTokens: 1 } 
+        });
+        aiStatusCache = { status: 'operational', message: 'Operational', lastCheck: Date.now() };
+    } catch (e) {
+        console.error("AI Check Error:", e.message);
+        if (e.status === 429 || e.message.includes('429')) {
+            aiStatusCache = { status: 'quota_exceeded', message: 'Credit Limit Exceeded', lastCheck: Date.now() };
+        } else {
+            aiStatusCache = { status: 'error', message: 'Connection Failed', lastCheck: Date.now() };
+        }
+    }
+    return aiStatusCache;
+};
+
 // --- ASSISTANT TOOLS DEFINITION ---
 const ASSISTANT_TOOLS = [
   {
@@ -333,7 +363,8 @@ app.post('/api/assistant/chat', async (req, res) => {
     const { message, history } = req.body; // history is array of {role, parts: [{text}]}
     
     try {
-        const model = "gemini-3-pro-preview"; // Use Pro for tool use reasoning
+        // Only use Flash for Assistant to save quota, unless complex reasoning required
+        const model = "gemini-3-flash-preview"; 
         
         // Construct chat session
         const chatHistory = history || [];
@@ -346,16 +377,9 @@ app.post('/api/assistant/chat', async (req, res) => {
             config: {
                 tools: ASSISTANT_TOOLS,
                 systemInstruction: `You are 'Fleet Commander', an advanced AI Operations Manager for an Uber Fleet business.
-                Your goal is to help the user manage leads, update system settings, and analyze performance.
-                
                 You have read/write access to the database via tools.
-                - If the user asks to see leads, use 'list_leads'.
-                - If the user wants to change a lead's status, use 'update_lead_status'.
-                - If the user wants to change how the recruitment bot behaves/speaks, use 'update_bot_instruction'.
-                - If the user asks for stats, use 'run_sql_analytics'.
                 
-                Always be professional, concise, and proactive. confirm actions before doing destructive updates if unsure.
-                If you update the bot instruction, confirm to the user that the "Idea has been saved" and the bot will now behave accordingly.`,
+                Always be professional, concise, and proactive. confirm actions before doing destructive updates.`,
             }
         });
 
@@ -364,9 +388,6 @@ app.post('/api/assistant/chat', async (req, res) => {
         let response = result.response;
         
         // 2. Loop for Tool Execution (Handle multi-turn tool use)
-        // Gemini SDK handles function calling via 'functionCalls' in response
-        // We need to execute them and send 'functionResponse' back.
-        
         let toolSteps = 0;
         const MAX_TOOL_STEPS = 5; // Prevent infinite loops
 
@@ -436,21 +457,46 @@ app.post('/api/assistant/chat', async (req, res) => {
         }
 
         // 3. Final Text Response
-        res.json({ text: response.text() });
+        res.json({ text: response.text });
 
     } catch (e) {
+        if (e.status === 429 || e.message.includes('429')) {
+             return res.status(429).json({ error: "Assistant Overloaded (429). Please wait 30s." });
+        }
         console.error("Assistant Chat Error:", e);
         res.status(500).json({ error: e.message });
     }
 });
 
+// --- UPDATED HEALTH CHECK ---
 app.get('/api/health', async (req, res) => {
+    // 1. Check DB
+    let dbStatus = 'disconnected';
+    let dbLatency = -1;
     try {
+        const start = Date.now();
         await queryWithRetry('SELECT 1');
-        res.json({ database: 'connected', status: 'healthy', mode: 'pooled' });
+        dbLatency = Date.now() - start;
+        dbStatus = 'connected';
     } catch (e) {
-        res.status(500).json({ database: 'disconnected', error: e.message });
+        dbStatus = 'error: ' + e.message;
     }
+
+    // 2. Check AI (Cached)
+    const aiStatus = await checkAIHealth();
+
+    // 3. Check WhatsApp
+    // We assume connection if Token is present. We use lastWebhookTime to determine if it's "live".
+    const waStatus = (META_API_TOKEN && PHONE_NUMBER_ID) ? 
+        (lastWebhookTime > 0 ? 'active' : 'waiting_for_webhook') : 
+        'not_configured';
+
+    res.json({ 
+        database: { status: dbStatus, latency: dbLatency }, 
+        ai: aiStatus,
+        whatsapp: { status: waStatus, lastWebhook: lastWebhookTime },
+        mode: 'pooled' 
+    });
 });
 
 app.get('/api/drivers', async (req, res) => {
@@ -630,14 +676,28 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
 
 const analyzeWithAI = async (text, systemInstruction) => {
   if (!GEMINI_API_KEY) return "Thank you for your message.";
+  
+  // Check Quota cache before making call
+  if (aiStatusCache.status === 'quota_exceeded' && Date.now() - aiStatusCache.lastCheck < 60000) {
+      return "I'm currently overloaded. Please wait a moment.";
+  }
+
   try {
     const response = await ai.models.generateContent({ 
       model: "gemini-3-flash-preview", 
       contents: text,
       config: { systemInstruction, maxOutputTokens: 150 }
     });
+    
+    // Update status to success
+    aiStatusCache = { status: 'operational', message: 'Operational', lastCheck: Date.now() };
     return response.text;
-  } catch (e) { return "Thanks for contacting Uber Fleet."; }
+  } catch (e) { 
+      if (e.status === 429 || e.message.includes('429')) {
+          aiStatusCache = { status: 'quota_exceeded', message: 'Credit Limit Exceeded', lastCheck: Date.now() };
+      }
+      return "Thanks for contacting Uber Fleet."; 
+  }
 };
 
 const logSystemMessage = async (driverId, text, type = 'text', options = null, imageUrl = null) => {
@@ -655,6 +715,9 @@ const logSystemMessage = async (driverId, text, type = 'text', options = null, i
 };
 
 const processIncomingMessage = async (from, name, msgBody, msgType = 'text', timestamp = Date.now()) => {
+    // TRACK WEBHOOK ACTIVITY
+    lastWebhookTime = Date.now();
+
     try {
         const client = await pool.connect();
         let result = {};

@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { Layout } from './components/Layout';
 import { LeadTable } from './components/LeadTable';
@@ -8,9 +9,10 @@ import { NotificationToast } from './components/NotificationToast';
 import { BotBuilder } from './components/BotBuilder';
 import { AITraining } from './components/AITraining';
 import { AssistantChat } from './components/AssistantChat';
+import { SystemStatusBanner } from './components/SystemStatusBanner';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
-import { Driver, LeadStatus, Notification, BotSettings, Message } from './types';
+import { Driver, LeadStatus, Notification, BotSettings, Message, SystemHealth } from './types';
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split, Bot } from 'lucide-react';
 
 export default function App() {
@@ -27,6 +29,9 @@ export default function App() {
 
   // Bot Strategy for Dashboard
   const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
+  
+  // System Health State
+  const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
 
   // Sync with backend (Mock or Live)
   useEffect(() => {
@@ -36,6 +41,7 @@ export default function App() {
       if (dataSource === 'mock') {
          setDrivers(mockBackend.getDrivers());
          setBotSettings(mockBackend.getBotSettings());
+         setSystemHealth(null); // No health check in mock mode
          unsubscribe = mockBackend.subscribe(() => {
              setDrivers(mockBackend.getDrivers());
              setBotSettings(mockBackend.getBotSettings());
@@ -53,11 +59,23 @@ export default function App() {
            const settings = await liveApiService.getBotSettings();
            setBotSettings(settings);
 
+           // Initial Health Check
+           try {
+               const health = await liveApiService.getHealth();
+               setSystemHealth(health);
+           } catch(e) { console.warn("Initial health check failed"); }
+
            // Subscribe triggers polling internally (now every 2s)
            unsubscribe = liveApiService.subscribeToUpdates(async () => {
                try {
                    const updated = await liveApiService.getDrivers();
                    setDrivers(updated);
+                   
+                   // Poll health every 5 cycles (approx 10s) to save bandwidth
+                   if (Math.random() > 0.8) {
+                       const h = await liveApiService.getHealth();
+                       setSystemHealth(h);
+                   }
                } catch (e) {
                    // Silent fail on poll error to avoid spamming console
                }
@@ -309,6 +327,11 @@ export default function App() {
                    </div>
                  </div>
               </div>
+
+              {/* SYSTEM HEALTH MONITOR */}
+              {dataSource === 'live' && (
+                  <SystemStatusBanner health={systemHealth} isLoading={!systemHealth} />
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
