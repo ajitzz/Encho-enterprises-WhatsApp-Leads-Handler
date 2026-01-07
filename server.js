@@ -497,6 +497,15 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      }
                  }
 
+                 // Self-Correction: If active but lost step (or never had one), try to find start
+                 if (driver.is_bot_active && !driver.current_bot_step_id && botSettings.steps.length > 0) {
+                      const firstId = entryPointId || botSettings.steps[0].id;
+                      await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [firstId, driver.id]);
+                      driver.current_bot_step_id = firstId;
+                      // Treat as "New Driver" behavior to send the first message immediately
+                      isNewDriver = true;
+                 }
+
                  if (driver.is_bot_active && driver.current_bot_step_id) {
                      let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
                      
@@ -564,7 +573,11 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                              if(currentStep.options && currentStep.options.length > 0) replyOptions = currentStep.options;
                          }
                      }
-                 } 
+                 } else if (driver.is_bot_active && !driver.current_bot_step_id) {
+                      // Fallback: Bot is theoretically active, but no steps exist at all.
+                      if (routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
+                      else replyText = "Our system is under maintenance. Please try again later.";
+                 }
             }
             
             // Safety: If BOT_ONLY, never call AI

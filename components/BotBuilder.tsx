@@ -34,6 +34,19 @@ import {
 const HANDLE_STYLE = { width: 8, height: 8, background: '#94a3b8', border: '2px solid white', zIndex: 50 };
 const ACTIVE_HANDLE_STYLE = { width: 10, height: 10, background: '#3b82f6', border: '2px solid white', zIndex: 50 };
 
+// --- HELPER: GET ICON ---
+// Prevents storing React Elements in Node Data (Causes JSON Error #31)
+const getIconForLabel = (label: string) => {
+    switch(label) {
+        case 'Image': return <ImageIcon size={14} />;
+        case 'Video': return <Video size={14} />;
+        case 'Quick Reply': 
+        case 'List': return <List size={14} />;
+        case 'Collect Text': return <Type size={14} />;
+        default: return <MessageSquare size={14} />;
+    }
+};
+
 // --- MEDIA PICKER COMPONENT ---
 interface MediaPickerProps {
     onSelect: (url: string) => void;
@@ -163,6 +176,9 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
       );
   }
 
+  // Derive icon to avoid JSON Error #31
+  const icon = getIconForLabel(data.label);
+
   return (
     <div className={`w-[280px] bg-white rounded-xl shadow-lg border-2 transition-all group ${borderColor}`}>
         <Handle type="target" position={Position.Left} style={HANDLE_STYLE} className="-left-3" />
@@ -170,7 +186,7 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
         {/* Header */}
         <div className={`px-4 py-2.5 border-b flex items-center justify-between rounded-t-lg ${accentColor} ${borderColor}`}>
             <div className="flex items-center gap-2">
-                <div className={`p-1 rounded ${iconColor} bg-white/50`}>{data.icon}</div>
+                <div className={`p-1 rounded ${iconColor} bg-white/50`}>{icon}</div>
                 <span className={`text-xs font-bold uppercase ${iconColor}`}>{data.label}</span>
             </div>
             {hasPlaceholder && <ShieldAlert size={14} className="text-red-500 animate-pulse" />}
@@ -247,13 +263,14 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
     const isMediaType = ['Image', 'Video'].includes(localData.label);
     const isOptionType = ['Quick Reply', 'List'].includes(localData.label);
     const isInputType = ['Text', 'Number'].includes(localData.label) || localData.inputType === 'text';
+    const icon = getIconForLabel(localData.label);
 
     return (
         <div className="w-80 bg-white border-l border-gray-200 flex flex-col h-full shadow-xl z-20">
             {/* Header */}
             <div className="px-5 py-4 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                    <div className="p-1.5 bg-white border border-gray-200 rounded-md shadow-sm">{localData.icon}</div>
+                    <div className="p-1.5 bg-white border border-gray-200 rounded-md shadow-sm">{icon}</div>
                     <h3 className="font-bold text-gray-800">{localData.label}</h3>
                 </div>
                 <div className="px-2 py-0.5 bg-blue-100 text-blue-700 text-[10px] rounded font-bold uppercase tracking-wider">Node #{selectedNode.id.split('_')[1] || '01'}</div>
@@ -490,14 +507,9 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         const label = event.dataTransfer.getData('application/reactflow/label');
         if (!type) return;
 
-        // Map icons for new nodes
-        let icon = <MessageSquare size={14} />;
-        if (label === 'Image') icon = <ImageIcon size={14} />;
-        if (label === 'Video') icon = <Video size={14} />;
-        if (label.includes('Button')) icon = <List size={14} />;
-
         const position = { x: event.clientX - 300, y: event.clientY }; // Adjust for sidebar offset approximation
 
+        // NOTE: We do NOT store 'icon' in data anymore to prevent JSON serialization crashes
         const newNode: Node = {
             id: `node_${Date.now()}`,
             type: 'custom',
@@ -506,7 +518,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 label, 
                 message: '', 
                 inputType: inputType || 'text', 
-                icon, 
                 options: inputType === 'option' ? ['Yes', 'No'] : undefined,
                 mediaUrl: ''
             },
@@ -532,10 +543,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             let nextStepId = 'END';
             if (outgoingEdges.length > 0) nextStepId = outgoingEdges[0].target; // Default next
             
-            // For options, handles are named 'opt_0', 'opt_1'. We need complex routing logic here if implementing branching.
-            // Simplified: The backend logic in server.js currently follows `nextStepId`.
-            // Real branching requires server update. For now, we save visual state perfectly.
-
             compiledSteps.push({
                 id: node.id,
                 title: data.label,
