@@ -437,6 +437,14 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                 {/* 5. VARIABLE STORAGE */}
                 {isInputType && (
                     <div className="p-4 bg-purple-50 rounded-xl border border-purple-100 space-y-2">
+                        {/* HELPER TEXT FOR COLLECT TEXT */}
+                        <div className="bg-white/60 p-2 rounded-lg border border-purple-100 mb-2 flex gap-2">
+                            <HelpCircle size={14} className="text-purple-500 shrink-0 mt-0.5" />
+                            <p className="text-[10px] text-purple-700 leading-snug">
+                                <strong>Waits for Input:</strong> Use this node to ask a question (e.g., "What is your name?"). The bot will pause and wait for the user to type a text reply.
+                            </p>
+                        </div>
+
                         <label className="text-xs font-bold text-purple-800 uppercase flex items-center gap-2">
                             <Hash size={12} /> Save Response To
                         </label>
