@@ -142,6 +142,22 @@ export const liveApiService = {
       return await response.json();
   },
 
+  deleteMediaFile: async (id: string) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/files/${id}`, {
+          method: 'DELETE'
+      });
+      if (!response.ok) throw new Error('Failed to delete file');
+      return await response.json();
+  },
+
+  deleteFolder: async (id: string) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${id}`, {
+          method: 'DELETE'
+      });
+      if (!response.ok) throw new Error('Failed to delete folder');
+      return await response.json();
+  },
+
   // --- CONFIG ---
 
   configureWebhook: async (config: any) => {

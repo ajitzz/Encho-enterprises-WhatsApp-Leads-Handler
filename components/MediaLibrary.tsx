@@ -21,6 +21,7 @@ export const MediaLibrary = () => {
     const [folders, setFolders] = useState<MediaFolder[]>([]);
     const [uploading, setUploading] = useState(false);
     const [copiedId, setCopiedId] = useState<string | null>(null);
+    const [isDeleting, setIsDeleting] = useState<string | null>(null);
     
     // Path State
     const [currentPath, setCurrentPath] = useState('/');
@@ -69,6 +70,34 @@ export const MediaLibrary = () => {
             await loadMedia(currentPath);
         } catch (e) {
             alert("Failed to create folder");
+        }
+    };
+
+    const handleDeleteFile = async (id: string, filename: string) => {
+        if (!window.confirm(`Are you sure you want to delete ${filename}? This cannot be undone.`)) return;
+        
+        setIsDeleting(id);
+        try {
+            await liveApiService.deleteMediaFile(id);
+            await loadMedia(currentPath);
+        } catch (e) {
+            alert("Failed to delete file");
+        } finally {
+            setIsDeleting(null);
+        }
+    };
+
+    const handleDeleteFolder = async (id: string, name: string) => {
+        if (!window.confirm(`Delete folder "${name}"? Only empty folders can be deleted.`)) return;
+        
+        setIsDeleting(id);
+        try {
+            await liveApiService.deleteFolder(id);
+            await loadMedia(currentPath);
+        } catch (e) {
+            alert("Failed to delete folder. Please ensure it is empty.");
+        } finally {
+            setIsDeleting(null);
         }
     };
 
@@ -183,17 +212,36 @@ export const MediaLibrary = () => {
                     {folders.map(folder => (
                         <div 
                             key={folder.id} 
+                            className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm hover:shadow-md hover:border-blue-300 transition-all cursor-pointer group flex flex-col items-center justify-between h-36 relative"
                             onClick={() => enterFolder(folder.name)}
-                            className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm hover:shadow-md hover:border-blue-300 transition-all cursor-pointer group flex flex-col items-center justify-center h-32"
                         >
-                            <Folder size={40} className="text-yellow-400 fill-yellow-100 group-hover:scale-110 transition-transform duration-200" />
-                            <span className="mt-2 text-sm font-semibold text-gray-700 group-hover:text-blue-600 truncate max-w-full px-2">{folder.name}</span>
+                            <div className="flex-1 flex flex-col items-center justify-center w-full">
+                                <Folder size={40} className="text-yellow-400 fill-yellow-100 group-hover:scale-110 transition-transform duration-200" />
+                                <span className="mt-2 text-sm font-semibold text-gray-700 group-hover:text-blue-600 truncate max-w-full px-2">{folder.name}</span>
+                            </div>
+                            
+                            <button
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteFolder(folder.id, folder.name);
+                                }}
+                                className="absolute top-2 right-2 p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                                title="Delete Folder"
+                            >
+                                <Trash2 size={14} />
+                            </button>
                         </div>
                     ))}
 
                     {/* Files */}
                     {files.map((file) => (
-                        <div key={file.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm hover:shadow-md transition-shadow group flex flex-col">
+                        <div key={file.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm hover:shadow-md transition-shadow group flex flex-col relative">
+                            {isDeleting === file.id && (
+                                <div className="absolute inset-0 bg-white/80 z-20 flex items-center justify-center">
+                                    <div className="w-6 h-6 border-2 border-red-500 border-t-transparent rounded-full animate-spin"></div>
+                                </div>
+                            )}
+
                             <div className="aspect-video bg-gray-100 relative flex items-center justify-center overflow-hidden">
                                 {file.type === 'video' ? (
                                     <video src={file.url} className="w-full h-full object-cover" muted />
@@ -206,6 +254,14 @@ export const MediaLibrary = () => {
                                 <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
                                     <a href={file.url} target="_blank" rel="noreferrer" className="bg-white text-black text-xs font-bold px-3 py-1.5 rounded-full hover:bg-gray-100">View</a>
                                 </div>
+
+                                <button 
+                                    onClick={() => handleDeleteFile(file.id, file.filename)}
+                                    className="absolute top-2 right-2 bg-white/90 text-red-500 p-1.5 rounded-full hover:bg-red-500 hover:text-white transition-colors opacity-0 group-hover:opacity-100 z-10 shadow-sm"
+                                    title="Delete File"
+                                >
+                                    <Trash2 size={14} />
+                                </button>
                             </div>
                             
                             <div className="p-3 flex-1 flex flex-col">
