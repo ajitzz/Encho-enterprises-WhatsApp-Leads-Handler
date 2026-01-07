@@ -221,6 +221,97 @@ const sanitizeBotSettings = async (client) => {
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 const getS3FolderPrefix = (parentPath) => (!parentPath || parentPath === '/') ? '' : parentPath.replace(/^\//, '') + '/';
 
+// --- CORE MEDIA SYNC ENGINE ---
+// In-Memory Lock to prevent redundant S3 downloads during race conditions (e.g., bulk send or double clicks)
+const activeSyncs = new Set(); // Stores fileIds currently being processed
+
+const performWhatsAppSync = async (fileId) => {
+    // 0. RACE CONDITION PROTECTION (COST SAVING)
+    // If this file is already being synced by another request, skip this one to save bandwidth.
+    if (activeSyncs.has(fileId)) {
+        console.log(`🔒 SYNC LOCKED: ${fileId} is already syncing. Skipping duplicate request.`);
+        // We return a "pending" status or null. The caller should wait or retry, but for now we skip.
+        // For robustness, in a real queue system we'd subscribe to the result, but here we just prevent the transfer.
+        return null;
+    }
+    
+    activeSyncs.add(fileId);
+
+    try {
+        const fileRes = await queryWithRetry('SELECT * FROM media_files WHERE id = $1', [fileId]);
+        if (fileRes.rows.length === 0) throw new Error('File not found');
+        
+        const file = fileRes.rows[0];
+        
+        // 1. DATABASE CACHE CHECK (COST SAVING)
+        // Check if we already have a valid ID in the DB before downloading anything.
+        const cacheRes = await queryWithRetry('SELECT media_id, expires_at FROM whatsapp_media_cache WHERE s3_url = $1', [file.url]);
+        if (cacheRes.rows.length > 0) {
+            const cached = cacheRes.rows[0];
+            const now = Date.now();
+            // BUFFER: We consider it expired if it expires in less than 24 hours. 
+            // This ensures we don't send an ID that might expire during a campaign.
+            const SAFE_BUFFER_MS = 24 * 60 * 60 * 1000; 
+
+            if (cached.expires_at && parseInt(cached.expires_at) > (now + SAFE_BUFFER_MS)) {
+                console.log(`⚡ SMART CACHE: Found valid Media ID ${cached.media_id}. Skipping S3 transfer.`);
+                return cached.media_id;
+            } else {
+                console.log(`♻️ EXPIRED CACHE: Media ID is old or expiring soon. Refreshing...`);
+            }
+        }
+
+        const mediaType = file.type === 'video' ? 'video/mp4' : (file.type === 'image' ? 'image/jpeg' : 'application/pdf');
+
+        console.log(`🔄 STARTING TRANSFER: S3 -> WhatsApp for ${file.filename}...`);
+        
+        // 2. DOWNLOAD FROM S3 (COST: Data Transfer Out)
+        const s3Response = await axios({
+            url: file.url,
+            method: 'GET',
+            responseType: 'arraybuffer'
+        });
+
+        // 3. UPLOAD TO META (COST: Free/Included)
+        const formData = new FormData();
+        const blob = new Blob([s3Response.data], { type: mediaType });
+        formData.append('file', blob, file.filename);
+        formData.append('messaging_product', 'whatsapp');
+
+        const metaRes = await fetch(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/media`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${META_API_TOKEN}` },
+            body: formData
+        });
+
+        if (!metaRes.ok) {
+            const errText = await metaRes.text();
+            throw new Error(`Meta API Error: ${errText}`);
+        }
+
+        const metaData = await metaRes.json();
+        const mediaId = metaData.id;
+
+        // 4. UPDATE CACHE
+        // Meta Media IDs expire in 30 days. We set our expiry to 25 days to be safe.
+        const expiresAt = Date.now() + (25 * 24 * 60 * 60 * 1000); 
+        await queryWithRetry(
+            `INSERT INTO whatsapp_media_cache (s3_url, media_id, created_at, expires_at) 
+             VALUES ($1, $2, $3, $4) 
+             ON CONFLICT (s3_url) DO UPDATE SET media_id = $2, created_at = $3, expires_at = $4`,
+            [file.url, mediaId, Date.now(), expiresAt]
+        );
+
+        console.log(`✅ TRANSFER COMPLETE: ${file.filename} -> ${mediaId}`);
+        return mediaId;
+    } catch (e) {
+        console.error("❌ SYNC FAILED:", e.message);
+        throw e;
+    } finally {
+        activeSyncs.delete(fileId); // RELEASE LOCK
+    }
+};
+
 // --- LOGIC ENGINE ---
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
@@ -242,27 +333,48 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
   } else {
       if (mediaUrl) {
         const isYouTube = mediaUrl.includes('youtube.com') || mediaUrl.includes('youtu.be');
-        
         if (isYouTube) {
             payload.type = 'text';
             payload.text = { body: body ? `${body} ${mediaUrl}` : mediaUrl, preview_url: true };
         } else {
-            // --- NEW: FAST DELIVERY VIA MEDIA ID ---
+            // --- ENTERPRISE MEDIA DELIVERY SYSTEM (COST OPTIMIZED) ---
             let mediaId = null;
             try {
-                // Check Cache
-                const cacheRes = await queryWithRetry('SELECT media_id FROM whatsapp_media_cache WHERE s3_url = $1', [mediaUrl]);
+                // 1. Check Cache
+                const cacheRes = await queryWithRetry('SELECT media_id, expires_at FROM whatsapp_media_cache WHERE s3_url = $1', [mediaUrl]);
+                
                 if (cacheRes.rows.length > 0) {
-                    mediaId = cacheRes.rows[0].media_id;
-                    console.log(`⚡ Using Cached Media ID: ${mediaId}`);
+                    const cached = cacheRes.rows[0];
+                    if (cached.expires_at && Date.now() < parseInt(cached.expires_at)) {
+                        mediaId = cached.media_id;
+                        console.log(`⚡ FAST DELIVERY: Using Cached Media ID ${mediaId}`);
+                    } else {
+                        console.warn(`⚠️ CACHE EXPIRED: Media ID is old.`);
+                    }
                 }
-            } catch (e) { console.warn("Cache Lookup Failed", e.message); }
+
+                // 2. AUTO-HEAL: If no valid ID, try to Sync on the fly (Saves S3 Egress vs using Link)
+                if (!mediaId) {
+                    console.log(`🛠️ AUTO-HEALING: Attempting to generate Media ID for ${mediaUrl}`);
+                    const fileRes = await queryWithRetry('SELECT id FROM media_files WHERE url = $1', [mediaUrl]);
+                    if (fileRes.rows.length > 0) {
+                        const fileId = fileRes.rows[0].id;
+                        // Await sync to ensure we get an ID
+                        mediaId = await performWhatsAppSync(fileId); 
+                    }
+                }
+
+            } catch (e) { console.warn("Optimization Failed", e.message); }
 
             payload.type = mediaType;
             if (mediaId) {
-                payload[mediaType] = { id: mediaId }; // FASTEST WAY
+                // Use ID (Free Egress for subsequent sends)
+                payload[mediaType] = { id: mediaId };
             } else {
-                payload[mediaType] = { link: mediaUrl }; // FALLBACK (Slower)
+                // FALLBACK: Use Link (Each send = 1 S3 Download. Expensive for bulk!)
+                // Only happens if the file isn't in our media library or sync failed.
+                console.warn("⚠️ EXPENSIVE FALLBACK: Using direct link. S3 costs apply.");
+                payload[mediaType] = { link: mediaUrl };
             }
             
             if (body && body.trim().length > 0) payload[mediaType].caption = body;
@@ -327,10 +439,8 @@ const logSystemMessage = async (driverId, text, type = 'text', options = null, i
 };
 
 const processIncomingMessage = async (from, name, msgBody, msgType = 'text', timestamp = Date.now()) => {
-    // ... (Existing logic kept intact for brevity, same as previous file) ...
-    // NOTE: This function's logic remains exactly as provided in the previous "processIncomingMessage" block
-    // I am omitting the full body here to stay concise, but in the real file, the full content from previous steps is preserved.
-    // The key update is in 'sendWhatsAppMessage' above.
+    // ... (Existing logic remains exactly the same, using sendWhatsAppMessage helper) ...
+    // Keeping this function concise as the main logic changes are in sendWhatsAppMessage and performWhatsAppSync
     try {
         const client = await pool.connect();
         let result = {};
@@ -489,63 +599,16 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
 // --- ROUTES ---
 
-// Sync Media Endpoint
+// Sync Media Endpoint (Manual Trigger)
 app.post('/api/files/:id/sync', async (req, res) => {
     try {
         const { id } = req.params;
-        const fileRes = await queryWithRetry('SELECT * FROM media_files WHERE id = $1', [id]);
-        if (fileRes.rows.length === 0) return res.status(404).json({ error: 'File not found' });
-        
-        const file = fileRes.rows[0];
-        const mediaType = file.type === 'video' ? 'video/mp4' : (file.type === 'image' ? 'image/jpeg' : 'application/pdf');
-
-        console.log(`🚀 SYNCING to WhatsApp: ${file.filename}`);
-        
-        // 1. Download from S3
-        const s3Response = await axios({
-            url: file.url,
-            method: 'GET',
-            responseType: 'arraybuffer'
-        });
-
-        // 2. Upload to Meta
-        const formData = new FormData();
-        const blob = new Blob([s3Response.data], { type: mediaType });
-        formData.append('file', blob, file.filename);
-        formData.append('messaging_product', 'whatsapp');
-
-        // Using native fetch for FormData handling in Node 18+
-        const metaRes = await fetch(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/media`, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${META_API_TOKEN}`
-            },
-            body: formData
-        });
-
-        if (!metaRes.ok) {
-            const errText = await metaRes.text();
-            console.error("Meta Upload Failed:", errText);
-            throw new Error(`Meta API Error: ${metaRes.statusText}`);
+        const mediaId = await performWhatsAppSync(id);
+        if (mediaId === null) {
+            return res.status(429).json({ error: 'Sync already in progress' });
         }
-
-        const metaData = await metaRes.json();
-        const mediaId = metaData.id;
-
-        // 3. Cache ID
-        const expiresAt = Date.now() + (25 * 24 * 60 * 60 * 1000); // 25 days (safe buffer for 30 day limit)
-        await queryWithRetry(
-            `INSERT INTO whatsapp_media_cache (s3_url, media_id, created_at, expires_at) 
-             VALUES ($1, $2, $3, $4) 
-             ON CONFLICT (s3_url) DO UPDATE SET media_id = $2, created_at = $3, expires_at = $4`,
-            [file.url, mediaId, Date.now(), expiresAt]
-        );
-
-        console.log(`✅ SYNC COMPLETE. ID: ${mediaId}`);
         res.json({ success: true, mediaId });
-
     } catch (e) {
-        console.error("Sync Error:", e);
         res.status(500).json({ error: e.message });
     }
 });
@@ -556,16 +619,26 @@ app.get('/api/media', async (req, res) => {
         const currentPath = req.query.path || '/';
         const folders = await queryWithRetry('SELECT * FROM media_folders WHERE parent_path = $1 ORDER BY name ASC', [currentPath]);
         
-        // Join with cache to see if synced
+        // Join with cache to see if synced AND VALID
         const files = await queryWithRetry(`
-            SELECT mf.*, wmc.media_id 
+            SELECT mf.*, wmc.media_id, wmc.expires_at
             FROM media_files mf 
             LEFT JOIN whatsapp_media_cache wmc ON mf.url = wmc.s3_url
             WHERE mf.folder_path = $1 
             ORDER BY mf.uploaded_at DESC`,
             [currentPath]
         );
-        res.json({ folders: folders.rows, files: files.rows });
+        
+        // Filter out expired media_ids from the response so UI knows to allow re-sync
+        const now = Date.now();
+        const cleanFiles = files.rows.map(f => {
+            if (f.expires_at && parseInt(f.expires_at) < now) {
+                return { ...f, media_id: null }; // Consider expired as not synced
+            }
+            return f;
+        });
+
+        res.json({ folders: folders.rows, files: cleanFiles });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -576,16 +649,48 @@ app.delete('/api/folders/:id', async (req, res) => { /* ... code ... */ res.json
 app.post('/api/s3/presign', async (req, res) => { /* ... code ... */ 
     try {
         const { filename, fileType, folderPath } = req.body;
+        
+        // --- DUPLICATE CHECK: PREVENT RE-UPLOAD OF SAME FILE NAME ---
+        const existingFile = await queryWithRetry(
+            'SELECT id FROM media_files WHERE filename = $1 AND folder_path = $2',
+            [filename, folderPath]
+        );
+        
+        if (existingFile.rows.length > 0) {
+            return res.status(409).json({ error: 'File already exists in this folder.' });
+        }
+
         const key = `${Date.now()}-${filename.replace(/\s+/g, '_')}`;
         const command = new PutObjectCommand({ Bucket: BUCKET_NAME, Key: key, ContentType: fileType });
         const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
         res.json({ uploadUrl, key, publicUrl: `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}` });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
-app.post('/api/files/register', async (req, res) => { /* ... code ... */ 
-     await queryWithRetry(`INSERT INTO media_files (id, url, filename, type, uploaded_at, folder_path) VALUES ($1, $2, $3, $4, $5, $6)`, [Date.now().toString(), req.body.url, req.body.filename, req.body.type, Date.now(), req.body.folderPath]);
-     res.json({ success: true });
+
+// UPDATED REGISTER ENDPOINT: Triggers Auto-Sync
+app.post('/api/files/register', async (req, res) => { 
+    try {
+        const { key, url, filename, type, folderPath } = req.body;
+        const id = Date.now().toString();
+
+        await queryWithRetry(
+            `INSERT INTO media_files (id, url, filename, type, uploaded_at, folder_path) VALUES ($1, $2, $3, $4, $5, $6)`,
+            [id, url, filename, type, Date.now(), folderPath]
+        );
+        
+        // --- AUTO SYNC TRIGGER (Fire and Forget) ---
+        // The check inside performWhatsAppSync will prevent re-upload if cached
+        if (['image', 'video', 'document'].includes(type)) {
+             performWhatsAppSync(id).catch(err => console.error(`⚠️ Background Sync Failed for ${filename}:`, err.message));
+        }
+
+        res.json({ success: true, id, url });
+    } catch (e) {
+        console.error("Register Error:", e);
+        res.status(500).json({ error: e.message });
+    }
 });
+
 app.delete('/api/files/:id', async (req, res) => { /* ... code ... */ res.json({ success: true }); });
 app.post('/api/messages/send', async (req, res) => { /* ... code ... */ res.json({ success: true }); });
 app.patch('/api/drivers/:id', async (req, res) => { /* ... code ... */ res.json({ success: true }); });

@@ -59,6 +59,18 @@ export const MediaLibrary = () => {
         if (!e.target.files || e.target.files.length === 0) return;
         const file = e.target.files[0];
         
+        // --- DUPLICATE CHECK (FRONTEND) ---
+        // This prevents the upload from starting, saving bandwidth and costs immediately.
+        const duplicate = files.find(f => f.filename === file.name);
+        if (duplicate) {
+            const proceed = window.confirm(`File "${file.name}" already exists in this folder. \n\nUploading it again will create a duplicate copy and consume transfer credits. \n\nDo you want to proceed anyway?`);
+            if (!proceed) {
+                // Clear input so change event can fire again if needed
+                e.target.value = '';
+                return;
+            }
+        }
+        
         setUploadStatus('uploading');
         setUploadError('');
 
@@ -70,7 +82,9 @@ export const MediaLibrary = () => {
             console.error("Upload Error:", e);
             setUploadStatus('error');
             const msg = e.message || "Failed to upload file";
-            if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('CORS')) {
+            if (msg.includes('409') || msg.includes('already exists')) {
+                 setUploadError("File already exists (Backend Check).");
+            } else if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('CORS')) {
                  setUploadError("AWS CORS Error: Bucket permissions missing");
                  setShowCorsHelp(true);
             } else {
