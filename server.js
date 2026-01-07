@@ -221,17 +221,26 @@ const sanitizeBotSettings = async (client) => {
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 const getS3FolderPrefix = (parentPath) => (!parentPath || parentPath === '/') ? '' : parentPath.replace(/^\//, '') + '/';
 
+// --- MIME TYPE HELPER ---
+const getMimeType = (filename) => {
+    const ext = filename.split('.').pop().toLowerCase();
+    const map = {
+        'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'webp': 'image/webp',
+        'mp4': 'video/mp4', '3gp': 'video/3gpp', 'mov': 'video/mp4', 'avi': 'video/mp4',
+        'pdf': 'application/pdf', 
+        'doc': 'application/msword', 
+        'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    };
+    return map[ext] || 'application/octet-stream';
+};
+
 // --- CORE MEDIA SYNC ENGINE ---
-// In-Memory Lock to prevent redundant S3 downloads during race conditions (e.g., bulk send or double clicks)
-const activeSyncs = new Set(); // Stores fileIds currently being processed
+// In-Memory Lock to prevent redundant S3 downloads during race conditions
+const activeSyncs = new Set();
 
 const performWhatsAppSync = async (fileId) => {
-    // 0. RACE CONDITION PROTECTION (COST SAVING)
-    // If this file is already being synced by another request, skip this one to save bandwidth.
     if (activeSyncs.has(fileId)) {
-        console.log(`🔒 SYNC LOCKED: ${fileId} is already syncing. Skipping duplicate request.`);
-        // We return a "pending" status or null. The caller should wait or retry, but for now we skip.
-        // For robustness, in a real queue system we'd subscribe to the result, but here we just prevent the transfer.
+        console.log(`🔒 SYNC LOCKED: ${fileId} is already syncing.`);
         return null;
     }
     
@@ -243,36 +252,40 @@ const performWhatsAppSync = async (fileId) => {
         
         const file = fileRes.rows[0];
         
-        // 1. DATABASE CACHE CHECK (COST SAVING)
-        // Check if we already have a valid ID in the DB before downloading anything.
+        // 1. DATABASE CACHE CHECK
         const cacheRes = await queryWithRetry('SELECT media_id, expires_at FROM whatsapp_media_cache WHERE s3_url = $1', [file.url]);
         if (cacheRes.rows.length > 0) {
             const cached = cacheRes.rows[0];
             const now = Date.now();
-            // BUFFER: We consider it expired if it expires in less than 24 hours. 
-            // This ensures we don't send an ID that might expire during a campaign.
             const SAFE_BUFFER_MS = 24 * 60 * 60 * 1000; 
 
             if (cached.expires_at && parseInt(cached.expires_at) > (now + SAFE_BUFFER_MS)) {
-                console.log(`⚡ SMART CACHE: Found valid Media ID ${cached.media_id}. Skipping S3 transfer.`);
+                console.log(`⚡ SMART CACHE: Found valid Media ID ${cached.media_id}.`);
                 return cached.media_id;
-            } else {
-                console.log(`♻️ EXPIRED CACHE: Media ID is old or expiring soon. Refreshing...`);
             }
         }
 
-        const mediaType = file.type === 'video' ? 'video/mp4' : (file.type === 'image' ? 'image/jpeg' : 'application/pdf');
+        // Determine correct MIME type from filename, fallback to stored type if generic
+        let mediaType = getMimeType(file.filename);
+        if (mediaType === 'application/octet-stream' && file.type === 'video') mediaType = 'video/mp4';
+        if (mediaType === 'application/octet-stream' && file.type === 'image') mediaType = 'image/jpeg';
 
-        console.log(`🔄 STARTING TRANSFER: S3 -> WhatsApp for ${file.filename}...`);
+        console.log(`🔄 STARTING TRANSFER: S3 -> WhatsApp for ${file.filename} (${mediaType})...`);
         
-        // 2. DOWNLOAD FROM S3 (COST: Data Transfer Out)
+        // 2. DOWNLOAD FROM S3
         const s3Response = await axios({
             url: file.url,
             method: 'GET',
             responseType: 'arraybuffer'
         });
 
-        // 3. UPLOAD TO META (COST: Free/Included)
+        // 3. SIZE CHECK (Meta Limit: 16MB for this endpoint)
+        if (s3Response.data.length > 16 * 1024 * 1024) {
+             console.warn(`⚠️ FILE TOO LARGE: ${file.filename} is ${(s3Response.data.length / 1024 / 1024).toFixed(2)}MB. Limit is 16MB. Skipping Sync (Using Link Fallback).`);
+             return null;
+        }
+
+        // 4. UPLOAD TO META
         const formData = new FormData();
         const blob = new Blob([s3Response.data], { type: mediaType });
         formData.append('file', blob, file.filename);
@@ -292,8 +305,7 @@ const performWhatsAppSync = async (fileId) => {
         const metaData = await metaRes.json();
         const mediaId = metaData.id;
 
-        // 4. UPDATE CACHE
-        // Meta Media IDs expire in 30 days. We set our expiry to 25 days to be safe.
+        // 5. UPDATE CACHE
         const expiresAt = Date.now() + (25 * 24 * 60 * 60 * 1000); 
         await queryWithRetry(
             `INSERT INTO whatsapp_media_cache (s3_url, media_id, created_at, expires_at) 
@@ -306,9 +318,10 @@ const performWhatsAppSync = async (fileId) => {
         return mediaId;
     } catch (e) {
         console.error("❌ SYNC FAILED:", e.message);
+        // Throwing ensures the caller knows sync failed and can try fallback
         throw e;
     } finally {
-        activeSyncs.delete(fileId); // RELEASE LOCK
+        activeSyncs.delete(fileId);
     }
 };
 
@@ -316,6 +329,7 @@ const performWhatsAppSync = async (fileId) => {
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
   
+  // Ensure mediaType is correct based on extension if not explicit
   mediaType = mediaType || 'image';
   if (mediaUrl) {
       const ext = mediaUrl.split('.').pop().toLowerCase().split('?')[0];
@@ -337,7 +351,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
             payload.type = 'text';
             payload.text = { body: body ? `${body} ${mediaUrl}` : mediaUrl, preview_url: true };
         } else {
-            // --- ENTERPRISE MEDIA DELIVERY SYSTEM (COST OPTIMIZED) ---
+            // --- ENTERPRISE MEDIA DELIVERY SYSTEM ---
             let mediaId = null;
             try {
                 // 1. Check Cache
@@ -348,32 +362,29 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
                     if (cached.expires_at && Date.now() < parseInt(cached.expires_at)) {
                         mediaId = cached.media_id;
                         console.log(`⚡ FAST DELIVERY: Using Cached Media ID ${mediaId}`);
-                    } else {
-                        console.warn(`⚠️ CACHE EXPIRED: Media ID is old.`);
                     }
                 }
 
-                // 2. AUTO-HEAL: If no valid ID, try to Sync on the fly (Saves S3 Egress vs using Link)
+                // 2. AUTO-HEAL: If no valid ID, try to Sync on the fly
                 if (!mediaId) {
                     console.log(`🛠️ AUTO-HEALING: Attempting to generate Media ID for ${mediaUrl}`);
                     const fileRes = await queryWithRetry('SELECT id FROM media_files WHERE url = $1', [mediaUrl]);
                     if (fileRes.rows.length > 0) {
                         const fileId = fileRes.rows[0].id;
-                        // Await sync to ensure we get an ID
+                        // Await sync. If it fails (e.g. size limit), it returns null/throws, triggering fallback
                         mediaId = await performWhatsAppSync(fileId); 
                     }
                 }
 
-            } catch (e) { console.warn("Optimization Failed", e.message); }
+            } catch (e) { console.warn("Optimization/Sync Failed (Using Link Fallback):", e.message); }
 
             payload.type = mediaType;
             if (mediaId) {
                 // Use ID (Free Egress for subsequent sends)
                 payload[mediaType] = { id: mediaId };
             } else {
-                // FALLBACK: Use Link (Each send = 1 S3 Download. Expensive for bulk!)
-                // Only happens if the file isn't in our media library or sync failed.
-                console.warn("⚠️ EXPENSIVE FALLBACK: Using direct link. S3 costs apply.");
+                // FALLBACK: Use Link (Handles large files > 16MB that Sync skips)
+                console.warn("⚠️ FALLBACK: Using direct link for delivery.");
                 payload[mediaType] = { link: mediaUrl };
             }
             
@@ -381,6 +392,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
             if (mediaType === 'document') payload[mediaType].filename = mediaUrl.split('/').pop();
         }
       } else if (options && options.length > 0) {
+        // ... (Interactive button logic unchanged) ...
         const validOptions = options.filter(o => o && o.trim().length > 0);
         const safeBody = body || "Select an option:";
         if (validOptions.length > 3) {
@@ -605,7 +617,9 @@ app.post('/api/files/:id/sync', async (req, res) => {
         const { id } = req.params;
         const mediaId = await performWhatsAppSync(id);
         if (mediaId === null) {
-            return res.status(429).json({ error: 'Sync already in progress' });
+            // Check if it was size limit or lock
+            // We return success=false but no error to let frontend know sync was skipped
+            return res.json({ success: false, message: 'Sync skipped (File too large or locked)' });
         }
         res.json({ success: true, mediaId });
     } catch (e) {
