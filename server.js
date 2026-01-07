@@ -427,6 +427,9 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
             const routingStrategy = botSettings.routingStrategy || 'HYBRID_BOT_FIRST';
 
+            // Determine Start Node
+            const entryPointId = botSettings.entryPointId || botSettings.steps?.[0]?.id;
+
             // 1. Get Driver & Log Message
             let driverRes = await client.query('SELECT * FROM drivers WHERE phone_number = $1', [from]);
             let driver = driverRes.rows[0];
@@ -439,7 +442,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                 const insertRes = await client.query(
                     `INSERT INTO drivers (id, phone_number, name, source, status, last_message, last_message_time, documents, current_bot_step_id, is_bot_active, is_human_mode)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-                    [timestamp.toString(), from, name, 'WhatsApp', 'New', msgBody, timestamp, [], botSettings.steps?.[0]?.id, shouldActivateBot, false]
+                    [timestamp.toString(), from, name, 'WhatsApp', 'New', msgBody, timestamp, [], entryPointId, shouldActivateBot, false]
                 );
                 driver = insertRes.rows[0];
             }
@@ -475,17 +478,17 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             // PRIORITY 3: BOT LOGIC (Hybrid or Bot Only)
             else if (botSettings.isEnabled) {
                  // Activation Logic:
-                 // If Bot is inactive, we only restart it if it's NOT AI_ONLY (already handled)
-                 // and checks below determine if we loop or handoff.
                  if (!driver.is_bot_active) {
                      // BOT_ONLY: Always restart flow if inactive (Looping)
                      if (routingStrategy === 'BOT_ONLY') {
-                         const firstStepId = botSettings.steps?.[0]?.id;
-                         if (firstStepId) {
-                             await client.query('UPDATE drivers SET is_bot_active = TRUE, current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
+                         if (entryPointId) {
+                             await client.query('UPDATE drivers SET is_bot_active = TRUE, current_bot_step_id = $1 WHERE id = $2', [entryPointId, driver.id]);
                              driver.is_bot_active = true;
-                             driver.current_bot_step_id = firstStepId;
+                             driver.current_bot_step_id = entryPointId;
                              isNewDriver = true; // Treat as new to trigger first msg
+                         } else {
+                             // Fallback if no steps defined but BOT_ONLY is active
+                             replyText = "Our automated system is currently being configured. Please check back later.";
                          }
                      }
                      // HYBRID: If inactive, it implies handoff to AI has happened previously
@@ -497,12 +500,12 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                  if (driver.is_bot_active && driver.current_bot_step_id) {
                      let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
                      
-                     // Fallback if step ID invalid
+                     // Fallback if step ID invalid (deleted node)
                      if (!currentStep && botSettings.steps.length > 0) {
-                         const firstStepId = botSettings.steps[0].id;
+                         const firstStepId = entryPointId || botSettings.steps[0].id;
                          await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
                          driver.current_bot_step_id = firstStepId;
-                         currentStep = botSettings.steps[0];
+                         currentStep = botSettings.steps.find(s => s.id === firstStepId);
                          isNewDriver = true; 
                      }
 

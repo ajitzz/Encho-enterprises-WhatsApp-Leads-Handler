@@ -1,3 +1,4 @@
+
 import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, BotStep } from '../types';
 
 // Initial Bot Config
@@ -39,7 +40,8 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
       saveToField: 'availability',
       nextStepId: 'AI_HANDOFF' 
     }
-  ]
+  ],
+  entryPointId: 'step_1'
 };
 
 // FIREWALL REGEX
@@ -179,6 +181,8 @@ class MockBackendService {
         });
     }
 
+    const entryPointId = settings.entryPointId || settings.steps?.[0]?.id;
+
     if (!driver) {
       isNew = true;
       const shouldActivateBot = settings.isEnabled && settings.routingStrategy !== 'AI_ONLY';
@@ -195,7 +199,7 @@ class MockBackendService {
         onboardingStep: OnboardingStep.WELCOME_SENT,
         qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
         isBotActive: shouldActivateBot,
-        currentBotStepId: settings.steps[0]?.id
+        currentBotStepId: entryPointId
       };
       this.drivers.push(driver);
     }
@@ -210,23 +214,47 @@ class MockBackendService {
     };
     this.addMessage(driver.id, userMsg);
 
+    // HUMAN OVERRIDE
+    if (driver.isHumanMode) return { driver, actionNeeded: 'NONE' };
+
     if (settings.isEnabled && settings.routingStrategy === 'AI_ONLY') {
       return { driver, actionNeeded: 'AI_REPLY' };
     }
 
     if (settings.isEnabled) {
-      if (settings.routingStrategy === 'BOT_ONLY' && !driver.isBotActive) {
-         driver.isBotActive = true;
-         driver.currentBotStepId = settings.steps[0]?.id;
-         isNew = true; 
-         this.persist();
+      if (!driver.isBotActive) {
+          if (settings.routingStrategy === 'BOT_ONLY') {
+              if (entryPointId) {
+                  driver.isBotActive = true;
+                  driver.currentBotStepId = entryPointId;
+                  isNew = true; 
+                  this.persist();
+              } else {
+                  // Fallback for empty bot
+                  const maintenanceMsg: Message = {
+                      id: Date.now().toString() + '_maint',
+                      sender: 'system',
+                      text: "Our automated system is currently being configured. Please check back later.",
+                      timestamp: Date.now() + 500,
+                      type: 'text'
+                  };
+                  this.addMessage(driver.id, maintenanceMsg);
+                  return { driver, reply: maintenanceMsg, actionNeeded: 'NONE' };
+              }
+          }
+          else if (settings.routingStrategy === 'HYBRID_BOT_FIRST') {
+              return { driver, actionNeeded: 'AI_REPLY' };
+          }
       }
 
       if (driver.isBotActive && driver.currentBotStepId) {
         let currentStep = settings.steps.find(s => s.id === driver.currentBotStepId);
+        
+        // Fallback for deleted steps
         if (!currentStep && settings.steps.length > 0) {
-             driver.currentBotStepId = settings.steps[0].id;
-             currentStep = settings.steps[0];
+             const firstId = entryPointId || settings.steps[0].id;
+             driver.currentBotStepId = firstId;
+             currentStep = settings.steps.find(s => s.id === firstId);
              isNew = true; 
         }
         
@@ -286,10 +314,6 @@ class MockBackendService {
           }
         }
       }
-      
-      if (settings.routingStrategy === 'HYBRID_BOT_FIRST' && !driver.isBotActive) {
-          return { driver, actionNeeded: 'AI_REPLY' };
-      }
     }
 
     return { driver, actionNeeded: 'NONE' };
@@ -300,6 +324,7 @@ class MockBackendService {
     if (driver) return driver;
     const settings = this.botSettings;
     const shouldActivateBot = settings.isEnabled && settings.routingStrategy !== 'AI_ONLY';
+    const entryPointId = settings.entryPointId || settings.steps?.[0]?.id;
 
     driver = {
       id: Date.now().toString(),
@@ -314,14 +339,14 @@ class MockBackendService {
       onboardingStep: OnboardingStep.WELCOME_SENT,
       qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
       isBotActive: shouldActivateBot,
-      currentBotStepId: settings.steps[0]?.id
+      currentBotStepId: entryPointId
     };
     
     this.drivers.push(driver);
     this.persist();
     
     if (shouldActivateBot) {
-        const firstStep = this.botSettings.steps[0];
+        const firstStep = settings.steps.find(s => s.id === entryPointId) || settings.steps[0];
         if (firstStep) {
             setTimeout(() => {
                 const isTemplate = !!firstStep.templateName;

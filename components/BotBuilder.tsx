@@ -519,6 +519,10 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         setIsSaving(true);
         const compiledSteps: BotStep[] = [];
         
+        // Find Entry Point from the edge connected to 'start' source
+        const startEdge = edges.find(e => e.source === 'start');
+        let entryPointId = startEdge?.target;
+        
         // Compile logical steps for backend
         nodes.forEach(node => {
             const data = node.data as any; // Cast to any to bypass type issues with Record<string, unknown>
@@ -545,9 +549,15 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             });
         });
 
+        // Fallback: If no explicit connection from Start, assume the first added node is the entry (backward compatibility)
+        if (!entryPointId && compiledSteps.length > 0) {
+            entryPointId = compiledSteps[0].id;
+        }
+
         const newSettings: BotSettings = {
             ...(isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings()),
             steps: compiledSteps,
+            entryPointId,
             flowData: { nodes, edges }
         };
 
