@@ -1,5 +1,4 @@
 
-
 import { Driver, BotSettings } from '../types';
 
 const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -158,6 +157,15 @@ export const liveApiService = {
 
       if (!registerResponse.ok) throw new Error('Failed to register file');
       return { url: publicUrl, type: fileType };
+  },
+
+  // --- NEW: SYNC TO WHATSAPP ---
+  syncFileToWhatsApp: async (fileId: string) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/files/${fileId}/sync`, {
+          method: 'POST'
+      });
+      if (!response.ok) throw new Error('Sync failed');
+      return await response.json();
   },
 
   getMediaLibrary: async (path: string = '/') => {

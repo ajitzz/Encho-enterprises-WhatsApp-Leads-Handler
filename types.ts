@@ -89,6 +89,7 @@ export interface BotStep {
   
   // Rich Media
   mediaUrl?: string;
+  mediaType?: 'image' | 'video' | 'document'; // Explicit type
 }
 
 export interface BotSettings {

@@ -587,6 +587,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 templateName = undefined;
             }
 
+            // EXPLICIT MEDIA TYPE INFERENCE FOR ROBUST BACKEND HANDLING
+            let inferredMediaType: 'image' | 'video' | 'document' | undefined = undefined;
+            if (cleanData.label === 'Video') inferredMediaType = 'video';
+            else if (cleanData.label === 'Image') inferredMediaType = 'image';
+            else if (cleanData.label === 'File') inferredMediaType = 'document';
+
             compiledSteps.push({
                 id: node.id,
                 title: cleanData.label,
@@ -596,7 +602,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 saveToField: cleanData.saveToField,
                 nextStepId, 
                 mediaUrl: cleanData.mediaUrl,
-                templateName: templateName
+                templateName: templateName,
+                mediaType: inferredMediaType // NEW: Store explicit type
             });
         });
 
