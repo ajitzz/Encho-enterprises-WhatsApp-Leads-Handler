@@ -513,9 +513,16 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       setIsAuditing(true);
       try {
           let report;
-          // USE BACKEND IF LIVE MODE (Avoids 429)
+          // USE BACKEND IF LIVE MODE
           if (isLiveMode) {
-              report = await liveApiService.auditFlow(nodes);
+              try {
+                  // Attempt Server Audit
+                  report = await liveApiService.auditFlow(nodes);
+              } catch (e) {
+                  // Fallback to Local Client Audit if Server Fails (404/500/429)
+                  console.warn("Live Audit Failed (404/500/429). Falling back to local.", e);
+                  report = await auditBotFlow(nodes); // This has local regex fallback built-in
+              }
           } else {
               // Client Side (Simulator)
               report = await auditBotFlow(nodes);
@@ -542,7 +549,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               setNodes(newNodes);
           }
       } catch (e) {
-          alert("AI Audit Failed. Please ensure server is running.");
+          alert("Audit Failed.");
       } finally {
           setIsAuditing(false);
       }

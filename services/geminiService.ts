@@ -231,14 +231,8 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
 
     } catch (e: any) {
         console.error("Gemini Audit failed", e);
-        
-        // --- 429 HANDLING ---
-        // If Quota Exceeded or any API error, fallback to local heuristics
-        if (e.message?.includes('429') || e.status === 429 || e.message?.includes('Quota')) {
-            return runLocalAudit(nodes);
-        }
-        
-        return { isValid: true, issues: [] };
+        // Fallback to local heuristics on any AI error
+        return runLocalAudit(nodes);
     }
 };
 
