@@ -254,6 +254,9 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
 
     const update = (field: string, value: any) => {
         const newData = { ...localData, [field]: value };
+        // Clean out any icon if it exists to prevent saving bad data
+        if (newData.icon) delete newData.icon;
+        
         setLocalData(newData);
         onChange(selectedNode.id, newData);
     };
@@ -483,15 +486,19 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
     
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
     const [isSaving, setIsSaving] = useState(false);
-    const [isAuditing, setIsAuditing] = useState(false);
-    const [rawMode, setRawMode] = useState(false);
-
-    // Initial Load
+    
+    // Initial Load & Sanitization
     useEffect(() => {
         const load = async () => {
             const settings = isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
             if (settings.flowData && settings.flowData.nodes.length > 0) {
-                setNodes(settings.flowData.nodes);
+                // SANITIZATION: Remove any legacy 'icon' properties from JSON to prevent React Crash
+                const cleanNodes = settings.flowData.nodes.map((n: any) => {
+                    const { icon, ...cleanData } = n.data || {};
+                    return { ...n, data: cleanData };
+                });
+                
+                setNodes(cleanNodes);
                 setEdges(settings.flowData.edges);
             }
         };
@@ -543,16 +550,19 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             let nextStepId = 'END';
             if (outgoingEdges.length > 0) nextStepId = outgoingEdges[0].target; // Default next
             
+            // Clean data before saving (double check)
+            const { icon, ...cleanData } = data;
+
             compiledSteps.push({
                 id: node.id,
-                title: data.label,
-                message: data.message,
-                inputType: data.inputType,
-                options: data.options,
-                saveToField: data.saveToField,
+                title: cleanData.label,
+                message: cleanData.message,
+                inputType: cleanData.inputType,
+                options: cleanData.options,
+                saveToField: cleanData.saveToField,
                 nextStepId, 
-                mediaUrl: data.mediaUrl,
-                templateName: data.templateName
+                mediaUrl: cleanData.mediaUrl,
+                templateName: cleanData.templateName
             });
         });
 
@@ -561,11 +571,17 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             entryPointId = compiledSteps[0].id;
         }
 
+        // Clean nodes for storage (remove any runtime props)
+        const storageNodes = nodes.map(n => {
+            const { icon, ...cleanData } = n.data as any;
+            return { ...n, data: cleanData };
+        });
+
         const newSettings: BotSettings = {
             ...(isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings()),
             steps: compiledSteps,
             entryPointId,
-            flowData: { nodes, edges }
+            flowData: { nodes: storageNodes, edges }
         };
 
         try {
