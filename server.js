@@ -254,6 +254,17 @@ const runLocalAudit = (nodes) => {
     return { isValid: issues.length === 0, issues };
 };
 
+const sanitizeBotStep = (step) => {
+    if (!step) return step;
+    const message = step.message || "";
+    if (!BLOCKED_REGEX.test(message)) return step;
+    const hasOptions = step.options && step.options.length > 0;
+    return {
+        ...step,
+        message: hasOptions ? "Please select an option:" : ""
+    };
+};
+
 // --- LOGIC ENGINE ---
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
@@ -390,14 +401,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             
             // --- RUNTIME SANITIZATION (In Memory) ---
             if (botSettings.steps && Array.isArray(botSettings.steps)) {
-                botSettings.steps = botSettings.steps.map(step => {
-                    const msg = step.message || "";
-                    if (BLOCKED_REGEX.test(msg)) {
-                        if (step.options && step.options.length > 0) step.message = "Please select an option:";
-                        else step.message = ""; // Empty string
-                    }
-                    return step;
-                });
+                botSettings.steps = botSettings.steps.map(sanitizeBotStep);
             }
 
             const routingStrategy = botSettings.routingStrategy || 'HYBRID_BOT_FIRST';
@@ -459,6 +463,17 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      }
 
                      if (currentStep) {
+                         currentStep = sanitizeBotStep(currentStep);
+                         while (currentStep && !currentStep.message && !currentStep.templateName && !currentStep.mediaUrl && (!currentStep.options || currentStep.options.length === 0)) {
+                             const nextId = currentStep.nextStepId;
+                             if (!nextId || nextId === 'END' || nextId === 'AI_HANDOFF') {
+                                 break;
+                             }
+                             await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [nextId, driver.id]);
+                             driver.current_bot_step_id = nextId;
+                             currentStep = botSettings.steps.find(s => s.id === nextId);
+                             currentStep = sanitizeBotStep(currentStep);
+                         }
                          // Save logic and step advancement (same as before)
                          if (!isNewDriver) {
                              if (currentStep.saveToField === 'name') await client.query('UPDATE drivers SET name = $1 WHERE id = $2', [msgBody, driver.id]);
@@ -609,7 +624,24 @@ app.get('/api/bot-settings', async (req, res) => {
 });
 app.post('/api/bot-settings', async (req, res) => {
     try {
-        await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(req.body)]);
+        const sanitized = { ...req.body };
+        if (sanitized.steps && Array.isArray(sanitized.steps)) {
+            sanitized.steps = sanitized.steps.map(sanitizeBotStep);
+        }
+        if (sanitized.flowData?.nodes && Array.isArray(sanitized.flowData.nodes)) {
+            sanitized.flowData = {
+                ...sanitized.flowData,
+                nodes: sanitized.flowData.nodes.map(node => {
+                    const data = node.data || {};
+                    const message = data.message || "";
+                    if (BLOCKED_REGEX.test(message)) {
+                        return { ...node, data: { ...data, message: "" } };
+                    }
+                    return node;
+                })
+            };
+        }
+        await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(sanitized)]);
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
