@@ -140,12 +140,18 @@ const SCHEMA_SQL = `
         id INT PRIMARY KEY DEFAULT 1,
         settings JSONB
     );
+    CREATE TABLE IF NOT EXISTS media_folders (
+        id VARCHAR(255) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        parent_path VARCHAR(255) DEFAULT '/'
+    );
     CREATE TABLE IF NOT EXISTS media_files (
         id VARCHAR(255) PRIMARY KEY,
         url TEXT NOT NULL,
         filename TEXT,
         type VARCHAR(50),
-        uploaded_at BIGINT
+        uploaded_at BIGINT,
+        folder_path VARCHAR(255) DEFAULT '/'
     );
 `;
 
@@ -204,6 +210,7 @@ const ensureDatabaseInitialized = async (client) => {
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS vehicle_registration TEXT;
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS availability TEXT;
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS qualification_checks JSONB DEFAULT '{"hasValidLicense": false, "hasVehicle": false, "isLocallyAvailable": true}'::jsonb;
+            ALTER TABLE media_files ADD COLUMN IF NOT EXISTS folder_path VARCHAR(255) DEFAULT '/';
         `);
 
         const settingsRes = await client.query('SELECT * FROM bot_settings WHERE id = 1');
@@ -545,6 +552,22 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 };
 
 // --- ROUTES ---
+
+// Create Folder
+app.post('/api/folders', async (req, res) => {
+    try {
+        const { name, parentPath } = req.body;
+        const id = Date.now().toString() + Math.random().toString(36).substr(2, 5);
+        await queryWithRetry(
+            `INSERT INTO media_folders (id, name, parent_path) VALUES ($1, $2, $3)`,
+            [id, name, parentPath]
+        );
+        res.json({ success: true, id });
+    } catch(e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     
@@ -553,9 +576,13 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         return res.status(503).json({ error: 'AWS S3 is not configured on the server.' });
     }
 
-    const fileType = req.file.mimetype.split('/')[0]; // 'image' or 'video'
-    const folder = fileType === 'video' ? 'videos' : (fileType === 'image' ? 'images' : 'documents');
-    const filename = `${folder}/${Date.now()}-${req.file.originalname.replace(/\s+/g, '_')}`;
+    const folderPath = req.body.folderPath || '/';
+    // Clean path to ensure no leading slash issues for S3 keys
+    const cleanFolderPath = folderPath === '/' ? '' : folderPath.replace(/^\//, '') + '/';
+
+    const fileType = req.file.mimetype.split('/')[0]; 
+    // S3 Key Structure: optional_user_folder/timestamp-filename
+    const filename = `${cleanFolderPath}${Date.now()}-${req.file.originalname.replace(/\s+/g, '_')}`;
 
     try {
         const command = new PutObjectCommand({
@@ -563,18 +590,16 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             Key: filename,
             Body: req.file.buffer,
             ContentType: req.file.mimetype,
-            // ACL: 'public-read' // Note: Check your S3 Bucket Policy to ensure public access is allowed
         });
 
         await s3Client.send(command);
         
-        // Construct Public URL (Assuming standard S3 public access)
         const publicUrl = `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${filename}`;
         
-        // Store in Database for "Library" access
+        // Store in Database with Folder Path
         await queryWithRetry(
-            `INSERT INTO media_files (id, url, filename, type, uploaded_at) VALUES ($1, $2, $3, $4, $5)`,
-            [Date.now().toString(), publicUrl, req.file.originalname, fileType, Date.now()]
+            `INSERT INTO media_files (id, url, filename, type, uploaded_at, folder_path) VALUES ($1, $2, $3, $4, $5, $6)`,
+            [Date.now().toString(), publicUrl, req.file.originalname, fileType, Date.now(), folderPath]
         );
 
         res.json({ url: publicUrl, type: fileType });
@@ -584,10 +609,24 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     }
 });
 
+// Get Media (Files + Folders) for a specific path
 app.get('/api/media', async (req, res) => {
     try {
-        const result = await queryWithRetry('SELECT * FROM media_files ORDER BY uploaded_at DESC');
-        res.json(result.rows);
+        const currentPath = req.query.path || '/';
+        
+        // Fetch subfolders in this path
+        const folders = await queryWithRetry(
+            'SELECT * FROM media_folders WHERE parent_path = $1 ORDER BY name ASC',
+            [currentPath]
+        );
+
+        // Fetch files in this path
+        const files = await queryWithRetry(
+            'SELECT * FROM media_files WHERE folder_path = $1 ORDER BY uploaded_at DESC',
+            [currentPath]
+        );
+
+        res.json({ folders: folders.rows, files: files.rows });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }

@@ -111,9 +111,10 @@ export const liveApiService = {
   },
 
   // --- S3 MEDIA UPLOAD ---
-  uploadMedia: async (file: File) => {
+  uploadMedia: async (file: File, folderPath: string = '/') => {
       const formData = new FormData();
       formData.append('file', file);
+      formData.append('folderPath', folderPath);
 
       const response = await fetchWithRetry(`${API_BASE_URL}/api/upload`, {
           method: 'POST',
@@ -123,9 +124,21 @@ export const liveApiService = {
       return await response.json(); // Returns { url: string, type: string }
   },
 
-  getMediaLibrary: async () => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/media`);
+  getMediaLibrary: async (path: string = '/') => {
+      // Encode path for URL safety
+      const encodedPath = encodeURIComponent(path);
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/media?path=${encodedPath}`);
       if (!response.ok) throw new Error('Failed to fetch media');
+      return await response.json(); // Returns { folders: [], files: [] }
+  },
+
+  createFolder: async (name: string, parentPath: string) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, parentPath })
+      });
+      if (!response.ok) throw new Error('Failed to create folder');
       return await response.json();
   },
 
