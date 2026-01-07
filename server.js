@@ -132,7 +132,8 @@ const SCHEMA_SQL = `
         is_bot_active BOOLEAN DEFAULT FALSE,
         onboarding_step INTEGER DEFAULT 0,
         vehicle_registration TEXT,
-        availability TEXT
+        availability TEXT,
+        is_human_mode BOOLEAN DEFAULT FALSE
     );
     CREATE TABLE IF NOT EXISTS messages (
         id VARCHAR(255) PRIMARY KEY,
@@ -226,6 +227,7 @@ const ensureDatabaseInitialized = async (client) => {
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS onboarding_step INTEGER DEFAULT 0;
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS vehicle_registration TEXT;
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS availability TEXT;
+            ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;
             ALTER TABLE media_files ADD COLUMN IF NOT EXISTS folder_path VARCHAR(255) DEFAULT '/';
         `);
 
@@ -415,32 +417,45 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             const settingsRes = await client.query('SELECT settings FROM bot_settings WHERE id = 1');
             let botSettings = settingsRes.rows[0]?.settings || DEFAULT_BOT_SETTINGS;
             
+            // Sanitize steps in memory
             if (botSettings.steps && Array.isArray(botSettings.steps)) {
                 botSettings.steps = botSettings.steps.map(step => cleanStep(step));
             }
 
             const routingStrategy = botSettings.routingStrategy || 'HYBRID_BOT_FIRST';
 
+            // 1. Get Driver & Log Message
             let driverRes = await client.query('SELECT * FROM drivers WHERE phone_number = $1', [from]);
             let driver = driverRes.rows[0];
             let isNewDriver = false;
 
             if (!driver) {
                 isNewDriver = true;
+                // Only active bot on new driver if not AI_ONLY
                 const shouldActivateBot = botSettings.isEnabled && routingStrategy !== 'AI_ONLY';
                 const insertRes = await client.query(
-                    `INSERT INTO drivers (id, phone_number, name, source, status, last_message, last_message_time, documents, current_bot_step_id, is_bot_active)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-                    [timestamp.toString(), from, name, 'WhatsApp', 'New', msgBody, timestamp, [], botSettings.steps?.[0]?.id, shouldActivateBot]
+                    `INSERT INTO drivers (id, phone_number, name, source, status, last_message, last_message_time, documents, current_bot_step_id, is_bot_active, is_human_mode)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+                    [timestamp.toString(), from, name, 'WhatsApp', 'New', msgBody, timestamp, [], botSettings.steps?.[0]?.id, shouldActivateBot, false]
                 );
                 driver = insertRes.rows[0];
             }
 
+            // Log User Message
             await client.query(
                 `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'driver', $3, $4, $5)`,
                 [`${timestamp}_${Math.random().toString(36).substr(2, 5)}`, driver.id, msgBody, timestamp, msgType]
             );
             await client.query('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [msgBody, timestamp, driver.id]);
+
+            // --- STRATEGY LOGIC ---
+            
+            // PRIORITY 1: HUMAN MODE (Stop Everything)
+            if (driver.is_human_mode) {
+                 await client.query('COMMIT');
+                 console.log(`🛑 HUMAN MODE: Skipped automation for ${driver.name}`);
+                 return; // EXIT IMMEDIATELY
+            }
 
             let replyText = null;
             let replyOptions = null;
@@ -450,25 +465,36 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             let shouldCallAI = false;
             let currentStepId = null;
 
+            // PRIORITY 2: AI ONLY
             if (botSettings.isEnabled && routingStrategy === 'AI_ONLY') {
                 shouldCallAI = true;
             } 
+            // PRIORITY 3: BOT LOGIC (Hybrid or Bot Only)
             else if (botSettings.isEnabled) {
+                 // Activation Logic:
+                 // If Bot is inactive, we only restart it if it's NOT AI_ONLY (already handled)
+                 // and checks below determine if we loop or handoff.
                  if (!driver.is_bot_active) {
-                     if (routingStrategy === 'BOT_ONLY' || routingStrategy === 'HYBRID_BOT_FIRST') {
+                     // BOT_ONLY: Always restart flow if inactive (Looping)
+                     if (routingStrategy === 'BOT_ONLY') {
                          const firstStepId = botSettings.steps?.[0]?.id;
                          if (firstStepId) {
                              await client.query('UPDATE drivers SET is_bot_active = TRUE, current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
                              driver.is_bot_active = true;
                              driver.current_bot_step_id = firstStepId;
-                             isNewDriver = true; 
+                             isNewDriver = true; // Treat as new to trigger first msg
                          }
+                     }
+                     // HYBRID: If inactive, it implies handoff to AI has happened previously
+                     else if (routingStrategy === 'HYBRID_BOT_FIRST') {
+                         shouldCallAI = true; 
                      }
                  }
 
                  if (driver.is_bot_active && driver.current_bot_step_id) {
                      let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
                      
+                     // Fallback if step ID invalid
                      if (!currentStep && botSettings.steps.length > 0) {
                          const firstStepId = botSettings.steps[0].id;
                          await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
@@ -480,19 +506,32 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      if (currentStep) {
                          currentStepId = currentStep.id; 
 
+                         // If NOT new, process their answer to the *previous* step and move to next
                          if (!isNewDriver) {
+                             // Save Data
                              if (currentStep.saveToField === 'name') await client.query('UPDATE drivers SET name = $1 WHERE id = $2', [msgBody, driver.id]);
                              if (currentStep.saveToField === 'availability') await client.query('UPDATE drivers SET availability = $1 WHERE id = $2', [msgBody, driver.id]);
                              if (currentStep.saveToField === 'vehicleRegistration') await client.query('UPDATE drivers SET vehicle_registration = $1 WHERE id = $2', [msgBody, driver.id]);
 
                              let nextId = currentStep.nextStepId;
                              
+                             // COMPLETION LOGIC
                              if (nextId === 'AI_HANDOFF' || nextId === 'END' || !nextId) {
+                                 // Stop Bot
                                  await client.query('UPDATE drivers SET is_bot_active = FALSE, current_bot_step_id = NULL WHERE id = $1', [driver.id]);
                                  driver.is_bot_active = false; 
-                                 if (nextId === 'AI_HANDOFF' && routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
-                                 else replyText = "Thank you! We have received your details.";
+                                 
+                                 // Determine Handoff vs Loop End
+                                 if (routingStrategy === 'HYBRID_BOT_FIRST') {
+                                     if (nextId === 'AI_HANDOFF') shouldCallAI = true; // Explicit Handoff
+                                     // Else: Flow ended naturally. Next message will hit "if !is_bot_active -> shouldCallAI" above.
+                                     else replyText = "Thank you! We have received your details.";
+                                 } else if (routingStrategy === 'BOT_ONLY') {
+                                     // End of Loop. Send final message. Next user text will trigger "isNewDriver" logic above because we set active=false.
+                                     replyText = "Thank you! Your details are saved.";
+                                 }
                              } else {
+                                 // Move to Next Step
                                  await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [nextId, driver.id]);
                                  const nextStep = botSettings.steps.find(s => s.id === nextId);
                                  if (nextStep) {
@@ -509,6 +548,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                  }
                              }
                          } else {
+                             // IS NEW (First interaction or Restart) -> Send Current Step
                              replyText = currentStep.message;
                              replyTemplate = currentStep.templateName;
                              replyMedia = currentStep.mediaUrl;
@@ -520,7 +560,10 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      }
                  } 
             }
+            
+            // Safety: If BOT_ONLY, never call AI
             if (routingStrategy === 'BOT_ONLY') shouldCallAI = false; 
+
             await client.query('COMMIT');
             result = { replyText, replyOptions, replyTemplate, replyMedia, replyMediaType, shouldCallAI, driver, botSettings, debugNodeId: currentStepId };
         } catch (err) {
@@ -531,6 +574,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             client.release();
         }
         
+        // --- SENDING LOGIC ---
         let sent = false;
         
         const hasContent = (result.replyText && result.replyText.trim().length > 0) || 
@@ -833,6 +877,37 @@ app.post('/api/messages/send', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Update driver details including is_human_mode
+app.patch('/api/drivers/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updates = req.body;
+        
+        // Build dynamic query
+        const fields = [];
+        const values = [];
+        let idx = 1;
+        
+        if (updates.status) { fields.push(`status = $${idx++}`); values.push(updates.status); }
+        if (updates.name) { fields.push(`name = $${idx++}`); values.push(updates.name); }
+        if (updates.vehicleRegistration) { fields.push(`vehicle_registration = $${idx++}`); values.push(updates.vehicleRegistration); }
+        if (updates.availability) { fields.push(`availability = $${idx++}`); values.push(updates.availability); }
+        if (updates.qualificationChecks) { fields.push(`qualification_checks = $${idx++}`); values.push(updates.qualificationChecks); }
+        if (updates.isHumanMode !== undefined) { fields.push(`is_human_mode = $${idx++}`); values.push(updates.isHumanMode); }
+        
+        if (fields.length === 0) return res.json({ success: true });
+
+        values.push(id);
+        const query = `UPDATE drivers SET ${fields.join(', ')} WHERE id = $${idx}`;
+        
+        await queryWithRetry(query, values);
+        
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // Update the drivers fetch to include messages and proper mapping
 app.get('/api/drivers', async (req, res) => {
     try {
@@ -852,6 +927,7 @@ app.get('/api/drivers', async (req, res) => {
                 d.qualification_checks as "qualificationChecks",
                 d.current_bot_step_id as "currentBotStepId",
                 d.is_bot_active as "isBotActive",
+                d.is_human_mode as "isHumanMode",
                 COALESCE(
                     (
                         SELECT JSON_AGG(

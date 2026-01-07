@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, LeadStatus, OnboardingStep } from '../types';
-import { X, Send, Image as ImageIcon, Video, CheckCircle, AlertTriangle, UserX, Car, Clock, ShieldCheck, ChevronRight, Facebook, Globe } from 'lucide-react';
+import { X, Send, Image as ImageIcon, Video, CheckCircle, AlertTriangle, UserX, Car, Clock, ShieldCheck, ChevronRight, Facebook, Globe, Headset, MicOff } from 'lucide-react';
 
 interface ChatDrawerProps {
   driver: Driver | null;
@@ -43,6 +43,17 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const handleUpdateDetails = (updates: Partial<Driver>) => {
     onUpdateDriver(driver.id, updates);
   };
+  
+  const toggleHumanMode = () => {
+      const newState = !driver.isHumanMode;
+      // 1. Update backend state
+      onUpdateDriver(driver.id, { isHumanMode: newState });
+      
+      // 2. If turning ON, send the specific message
+      if (newState) {
+          onSendMessage("Now our executive on the line to connect");
+      }
+  };
 
   const steps = [
     { label: 'Welcome', done: true },
@@ -82,7 +93,20 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                  <p className="text-gray-400 text-sm font-mono">{driver.phoneNumber}</p>
                </div>
             </div>
-            <div className="flex items-center gap-3">
+            
+            <div className="flex items-center gap-4">
+               {/* Human Agent Toggle */}
+               <div className="flex items-center gap-2 bg-gray-900 rounded-lg p-1 border border-gray-800">
+                    <button 
+                        onClick={toggleHumanMode}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${driver.isHumanMode ? 'bg-amber-500 text-black' : 'text-gray-400 hover:text-white'}`}
+                        title={driver.isHumanMode ? 'Bot is Stopped' : 'Bot is Active'}
+                    >
+                        {driver.isHumanMode ? <Headset size={14} /> : <MicOff size={14} />}
+                        {driver.isHumanMode ? 'Human Agent Mode' : 'Automation Active'}
+                    </button>
+               </div>
+
                <select 
                   className="bg-gray-800 text-white text-sm border-none rounded-md px-3 py-1.5 cursor-pointer outline-none focus:ring-2 focus:ring-blue-500"
                   value={driver.status}
@@ -102,8 +126,17 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
           <div className="flex-1 flex overflow-hidden">
             
             {/* Left: Chat History */}
-            <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px]">
-              <div className="flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4">
+            <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px] relative">
+              
+              {/* Human Mode Banner */}
+              {driver.isHumanMode && (
+                  <div className="absolute top-0 left-0 right-0 bg-amber-50 border-b border-amber-200 p-2 z-10 flex items-center justify-center gap-2 text-xs font-bold text-amber-800 shadow-sm">
+                      <Headset size={14} />
+                      Automation Paused. You are in manual control.
+                  </div>
+              )}
+
+              <div className={`flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4 ${driver.isHumanMode ? 'pt-10' : ''}`}>
                 {messages.length > 0 ? (
                     messages.map((msg) => (
                     <div 

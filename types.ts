@@ -52,6 +52,9 @@ export interface Driver {
   // Bot State Tracking
   currentBotStepId?: string; 
   isBotActive: boolean;
+  
+  // Human Handover
+  isHumanMode?: boolean;
 }
 
 export interface MetaTemplate {

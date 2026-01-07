@@ -5,6 +5,7 @@ import {
   MiniMap, 
   Controls, 
   Background, 
+  BackgroundVariant,
   Handle, 
   Position,
   Node,
@@ -520,7 +521,9 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         
         // Compile logical steps for backend
         nodes.forEach(node => {
-            if (node.data.type === 'start') return;
+            const data = node.data as any; // Cast to any to bypass type issues with Record<string, unknown>
+
+            if (data.type === 'start') return;
             const outgoingEdges = edges.filter(e => e.source === node.id);
             let nextStepId = 'END';
             if (outgoingEdges.length > 0) nextStepId = outgoingEdges[0].target; // Default next
@@ -531,14 +534,14 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
             compiledSteps.push({
                 id: node.id,
-                title: node.data.label,
-                message: node.data.message,
-                inputType: node.data.inputType,
-                options: node.data.options,
-                saveToField: node.data.saveToField,
+                title: data.label,
+                message: data.message,
+                inputType: data.inputType,
+                options: data.options,
+                saveToField: data.saveToField,
                 nextStepId, 
-                mediaUrl: node.data.mediaUrl,
-                templateName: node.data.templateName
+                mediaUrl: data.mediaUrl,
+                templateName: data.templateName
             });
         });
 
@@ -609,7 +612,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                         minZoom={0.2} maxZoom={1.5}
                         fitView
                     >
-                        <Background color="#cbd5e1" gap={20} size={1} variant="dots" />
+                        <Background color="#cbd5e1" gap={20} size={1} variant={BackgroundVariant.Dots} />
                         <Controls className="bg-white border border-gray-200 shadow-xl rounded-lg p-1" />
                         <MiniMap className="border border-gray-200 rounded-lg shadow-xl" nodeColor="#3b82f6" maskColor="rgba(240, 242, 245, 0.7)" />
                     </ReactFlow>
