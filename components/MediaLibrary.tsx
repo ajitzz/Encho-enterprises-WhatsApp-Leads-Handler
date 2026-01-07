@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle } from 'lucide-react';
+import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, HelpCircle } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface MediaFile {
@@ -33,6 +33,9 @@ export const MediaLibrary = () => {
     const [showCreateFolder, setShowCreateFolder] = useState(false);
     const [newFolderName, setNewFolderName] = useState('');
 
+    // CORS Help Modal
+    const [showCorsHelp, setShowCorsHelp] = useState(false);
+
     useEffect(() => {
         loadMedia(currentPath);
     }, [currentPath]);
@@ -64,8 +67,15 @@ export const MediaLibrary = () => {
         } catch (e: any) {
             console.error("Upload Error:", e);
             setUploadStatus('error');
-            setUploadError(e.message || "Failed to upload file");
-            setTimeout(() => setUploadStatus('idle'), 5000);
+            const msg = e.message || "Failed to upload file";
+            
+            // Heuristic to detect CORS issues
+            if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('CORS')) {
+                 setUploadError("AWS CORS Error: Bucket permissions missing");
+                 setShowCorsHelp(true);
+            } else {
+                 setUploadError(msg);
+            }
         }
     };
 
@@ -173,7 +183,7 @@ export const MediaLibrary = () => {
     );
 
     return (
-        <div className="p-8 max-w-7xl mx-auto h-screen flex flex-col">
+        <div className="p-8 max-w-7xl mx-auto h-screen flex flex-col relative">
             {/* Header */}
             <div className="flex items-center justify-between mb-6">
                 <div>
@@ -185,9 +195,17 @@ export const MediaLibrary = () => {
                 
                 <div className="flex gap-3 items-center">
                      {uploadStatus === 'error' && (
-                         <div className="text-xs text-red-600 font-bold bg-red-50 px-3 py-2 rounded-lg border border-red-100 flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
-                             <AlertCircle size={14} />
-                             {uploadError}
+                         <div className="flex items-center gap-2">
+                             <div className="text-xs text-red-600 font-bold bg-red-50 px-3 py-2 rounded-lg border border-red-100 flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
+                                 <AlertCircle size={14} />
+                                 {uploadError}
+                             </div>
+                             <button 
+                                onClick={() => setShowCorsHelp(true)}
+                                className="bg-red-600 text-white text-xs font-bold px-3 py-2 rounded-lg hover:bg-red-700 shadow-sm"
+                             >
+                                Fix Config
+                             </button>
                          </div>
                      )}
 
@@ -361,6 +379,86 @@ export const MediaLibrary = () => {
                                 </button>
                             </div>
                         </form>
+                    </div>
+                </div>
+            )}
+
+            {/* CORS HELP MODAL */}
+            {showCorsHelp && (
+                <div className="fixed inset-0 bg-black/50 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden animate-in fade-in zoom-in-95 flex flex-col max-h-[90vh]">
+                        <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                            <h3 className="font-bold text-red-600 flex items-center gap-2">
+                                <AlertCircle size={20} />
+                                AWS S3 CORS Configuration Required
+                            </h3>
+                            <button onClick={() => setShowCorsHelp(false)}><X size={20} className="text-gray-400" /></button>
+                        </div>
+                        <div className="p-6 overflow-y-auto">
+                            <p className="text-sm text-gray-600 mb-4">
+                                Your browser blocked the upload because the S3 Bucket does not allow cross-origin requests from this website. 
+                                <br /><strong>You must paste the following JSON into your AWS S3 Console.</strong>
+                            </p>
+                            
+                            <ol className="list-decimal list-inside text-sm text-gray-700 space-y-2 mb-6 ml-2">
+                                <li>Go to the <a href="https://s3.console.aws.amazon.com/s3/buckets" target="_blank" rel="noreferrer" className="text-blue-600 underline">AWS S3 Console</a>.</li>
+                                <li>Click on your bucket name.</li>
+                                <li>Go to the <strong>Permissions</strong> tab.</li>
+                                <li>Scroll down to <strong>Cross-origin resource sharing (CORS)</strong>.</li>
+                                <li>Click <strong>Edit</strong> and paste this JSON:</li>
+                            </ol>
+
+                            <div className="bg-gray-900 text-gray-100 p-4 rounded-lg font-mono text-xs relative overflow-auto">
+                                <pre>{`[
+    {
+        "AllowedHeaders": [
+            "*"
+        ],
+        "AllowedMethods": [
+            "PUT",
+            "POST",
+            "DELETE",
+            "GET"
+        ],
+        "AllowedOrigins": [
+            "https://encho-enterprises-whats-app-leads-h.vercel.app",
+            "http://localhost:5173",
+            "http://localhost:3000"
+        ],
+        "ExposeHeaders": []
+    }
+]`}</pre>
+                                <button 
+                                    onClick={() => navigator.clipboard.writeText(`[
+    {
+        "AllowedHeaders": [
+            "*"
+        ],
+        "AllowedMethods": [
+            "PUT",
+            "POST",
+            "DELETE",
+            "GET"
+        ],
+        "AllowedOrigins": [
+            "https://encho-enterprises-whats-app-leads-h.vercel.app",
+            "http://localhost:5173",
+            "http://localhost:3000"
+        ],
+        "ExposeHeaders": []
+    }
+]`)}
+                                    className="absolute top-2 right-2 bg-white text-black px-2 py-1 rounded text-[10px] font-bold hover:bg-gray-200"
+                                >
+                                    Copy JSON
+                                </button>
+                            </div>
+                        </div>
+                        <div className="p-4 border-t border-gray-100 bg-gray-50 flex justify-end">
+                             <button onClick={() => setShowCorsHelp(false)} className="px-6 py-2 bg-black text-white rounded-lg font-bold text-sm">
+                                 I have updated S3
+                             </button>
+                        </div>
                     </div>
                 </div>
             )}

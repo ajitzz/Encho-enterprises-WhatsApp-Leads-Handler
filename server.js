@@ -42,7 +42,10 @@ const s3Client = new S3Client({
     credentials: {
         accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
         secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || ''
-    }
+    },
+    // CRITICAL: Disable auto-checksums for presigned URLs to prevent signature mismatch in browser uploads
+    requestChecksumCalculation: "WHEN_REQUIRED",
+    responseChecksumValidation: "WHEN_REQUIRED"
 });
 const BUCKET_NAME = process.env.AWS_BUCKET_NAME || '';
 const upload = multer({ storage: multer.memoryStorage() });
