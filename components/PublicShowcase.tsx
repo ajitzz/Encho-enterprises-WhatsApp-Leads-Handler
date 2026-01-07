@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { liveApiService } from '../services/liveApiService';
-import { Share2, Volume2, VolumeX, MessageCircle, ArrowLeft, Loader2 } from 'lucide-react';
+import { Share2, Volume2, VolumeX, MessageCircle, ArrowLeft, Loader2, Store, Clock } from 'lucide-react';
 
 interface ShowcaseItem {
     id: string;
@@ -86,9 +86,22 @@ export const PublicShowcase = () => {
 
     if (items.length === 0) {
         return (
-            <div className="h-screen w-full bg-black text-white flex flex-col items-center justify-center p-8 text-center">
-                <h2 className="text-2xl font-bold mb-2">Showcase Not Ready</h2>
-                <p className="text-gray-400">Check back later for updates.</p>
+            <div className="h-screen w-full bg-neutral-900 text-white flex flex-col items-center justify-center p-8 text-center relative overflow-hidden">
+                <div className="absolute inset-0 bg-[url('https://images.unsplash.com/photo-1492144534655-ae79c964c9d7?q=80&w=2000&auto=format&fit=crop')] bg-cover bg-center opacity-10"></div>
+                <div className="z-10 bg-black/40 backdrop-blur-xl p-10 rounded-2xl border border-white/10 shadow-2xl flex flex-col items-center max-w-md">
+                    <div className="bg-white/10 p-4 rounded-full mb-6">
+                         <Store size={40} className="text-white" />
+                    </div>
+                    <h2 className="text-3xl font-bold mb-3 tracking-tight">Showcase Offline</h2>
+                    <p className="text-gray-300 text-sm leading-relaxed mb-6">
+                        We are currently updating our vehicle fleet showcase. <br />
+                        Please check back shortly for new additions.
+                    </p>
+                    <div className="flex items-center gap-2 text-xs font-mono text-gray-400 bg-black/30 px-4 py-2 rounded-lg">
+                        <Clock size={12} />
+                        Updates in progress...
+                    </div>
+                </div>
             </div>
         );
     }

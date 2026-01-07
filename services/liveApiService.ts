@@ -181,6 +181,12 @@ export const liveApiService = {
       return await response.json();
   },
 
+  getShowcaseStatus: async () => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/public/status`);
+      if (!response.ok) throw new Error('Failed to fetch status');
+      return await response.json();
+  },
+
   // --- SYNC TO WHATSAPP ---
   syncFileToWhatsApp: async (fileId: string) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/files/${fileId}/sync`, {

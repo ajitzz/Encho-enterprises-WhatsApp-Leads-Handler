@@ -625,10 +625,10 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
 // --- ROUTES ---
 
-// NEW: Public Showcase API (No Auth)
+// NEW: Public Showcase API (No Auth) - FIXED PATH LOGIC
 app.get('/api/public/showcase', async (req, res) => {
     try {
-        const folderRes = await queryWithRetry('SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE LIMIT 1', []);
+        const folderRes = await queryWithRetry('SELECT id, name, parent_path FROM media_folders WHERE is_public_showcase = TRUE LIMIT 1', []);
         
         if (folderRes.rows.length === 0) {
             return res.json({ title: 'Welcome', items: [] });
@@ -636,13 +636,18 @@ app.get('/api/public/showcase', async (req, res) => {
 
         const folder = folderRes.rows[0];
         
+        // Construct correct path for media files query
+        const folderPath = folder.parent_path === '/' 
+            ? `/${folder.name}` 
+            : `${folder.parent_path}/${folder.name}`;
+
         // Fetch files, handling S3 Presigning for public viewing
         const filesRes = await queryWithRetry(`
             SELECT id, url, filename, type 
             FROM media_files 
             WHERE folder_path = $1 
             ORDER BY uploaded_at DESC`, 
-            ['/' + folder.name]
+            [folderPath]
         );
 
         // Sign URLs if needed (if bucket is private)
@@ -668,6 +673,20 @@ app.get('/api/public/showcase', async (req, res) => {
     } catch (e) {
         console.error("Showcase Fetch Error:", e);
         res.status(500).json({ error: "Failed to load showcase" });
+    }
+});
+
+// NEW: Get Status Endpoint
+app.get('/api/public/status', async (req, res) => {
+    try {
+        const folderRes = await queryWithRetry('SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE LIMIT 1', []);
+        if (folderRes.rows.length > 0) {
+            res.json({ active: true, folderName: folderRes.rows[0].name, folderId: folderRes.rows[0].id });
+        } else {
+            res.json({ active: false });
+        }
+    } catch(e) {
+        res.status(500).json({ error: e.message });
     }
 });
 
