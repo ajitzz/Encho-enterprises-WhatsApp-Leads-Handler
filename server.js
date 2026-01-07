@@ -637,9 +637,12 @@ app.get('/api/public/showcase', async (req, res) => {
         const folder = folderRes.rows[0];
         
         // Construct correct path for media files query
-        const folderPath = folder.parent_path === '/' 
+        let folderPath = folder.parent_path === '/' 
             ? `/${folder.name}` 
             : `${folder.parent_path}/${folder.name}`;
+            
+        // Clean double slashes if any
+        folderPath = folderPath.replace(/\/\//g, '/');
 
         // Fetch files, handling S3 Presigning for public viewing
         const filesRes = await queryWithRetry(`
@@ -656,7 +659,8 @@ app.get('/api/public/showcase', async (req, res) => {
             try {
                 const urlObj = new URL(file.url);
                 if (urlObj.hostname.includes('s3') && urlObj.hostname.includes('amazonaws.com')) {
-                    const key = urlObj.pathname.substring(1);
+                    // Important: Decode key to handle spaces and special chars
+                    const key = decodeURIComponent(urlObj.pathname.substring(1));
                     const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key });
                     signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
                 }
