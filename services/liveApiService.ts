@@ -213,7 +213,10 @@ export const liveApiService = {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, parentPath })
       });
-      if (!response.ok) throw new Error('Failed to create folder');
+      if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || `Error ${response.status}: Failed to create folder`);
+      }
       return await response.json();
   },
 
@@ -224,7 +227,10 @@ export const liveApiService = {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: newName })
       });
-      if (!response.ok) throw new Error('Failed to rename folder');
+      if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.error || `Error ${response.status}: Failed to rename folder`);
+      }
       return await response.json();
   },
 

@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye, Link as LinkIcon, ExternalLink, Share2, Power, Edit2, Pencil } from 'lucide-react';
+import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye, Link as LinkIcon, ExternalLink, Share2, Power, Edit2, Pencil, AlertTriangle } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface MediaFile {
@@ -44,6 +44,10 @@ export const MediaLibrary = () => {
     
     // Rename Specific State
     const [editingFolder, setEditingFolder] = useState<{id: string, name: string} | null>(null);
+
+    // Delete Confirmation State
+    const [deleteConfirmation, setDeleteConfirmation] = useState<{id: string, name: string} | null>(null);
+    const [deleteInput, setDeleteInput] = useState('');
 
     // CORS Help Modal
     const [showCorsHelp, setShowCorsHelp] = useState(false);
@@ -186,8 +190,13 @@ export const MediaLibrary = () => {
             setEditingFolder(null);
             setShowCreateFolder(false);
             await loadMedia(currentPath);
-        } catch (e) {
-            alert(editingFolder ? "Failed to rename folder" : "Failed to create folder");
+        } catch (e: any) {
+            // Check for specific duplicate name error or backend error message
+            let msg = e.message || "Failed to complete operation";
+            if (msg.includes("409") || msg.includes("exists") || msg.includes("taken")) {
+                msg = `Folder name "${newFolderName}" is already taken globally. Please use a unique name.`;
+            }
+            alert(msg);
         } finally {
             setIsCreatingFolder(false);
         }
@@ -218,14 +227,23 @@ export const MediaLibrary = () => {
         }
     };
 
-    const handleDeleteFolder = async (id: string, name: string) => {
-        if (!window.confirm(`Delete folder "${name}"? Only empty folders can be deleted.`)) return;
-        setIsDeleting(id);
+    // Trigger Delete Modal
+    const handleDeleteFolder = (id: string, name: string) => {
+        setDeleteConfirmation({ id, name });
+        setDeleteInput('');
+    };
+
+    // Confirm Execution
+    const confirmDeleteFolder = async () => {
+        if (!deleteConfirmation) return;
+        
+        setIsDeleting(deleteConfirmation.id);
         try {
-            await liveApiService.deleteFolder(id);
+            await liveApiService.deleteFolder(deleteConfirmation.id);
+            setDeleteConfirmation(null);
             await loadMedia(currentPath);
-        } catch (e) {
-            alert("Failed to delete folder. Please ensure it is empty.");
+        } catch (e: any) {
+            alert(e.message || "Failed to delete folder. Please ensure it is empty.");
         } finally {
             setIsDeleting(null);
         }
@@ -502,6 +520,61 @@ export const MediaLibrary = () => {
                                     </button>
                                 </div>
                             </form>
+                        </div>
+                    </div>
+                )}
+
+                {/* DELETE CONFIRMATION MODAL */}
+                {deleteConfirmation && (
+                    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+                        <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95">
+                            <div className="p-6">
+                                <div className="flex items-start gap-4 mb-4">
+                                    <div className="p-3 bg-red-100 rounded-full shrink-0">
+                                        <AlertTriangle size={24} className="text-red-600" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-lg font-bold text-gray-900">Delete Folder?</h3>
+                                        <p className="text-sm text-gray-600 mt-1">
+                                            This action cannot be undone. This will permanently delete the folder 
+                                            <span className="font-bold text-gray-900 mx-1">{deleteConfirmation.name}</span>.
+                                        </p>
+                                        <p className="text-xs text-red-600 mt-2 font-medium">
+                                            Note: Folder must be empty before deletion.
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-3">
+                                    <label className="block text-xs font-bold text-gray-700 uppercase">
+                                        Type <span className="select-all font-mono bg-gray-100 px-1 rounded border border-gray-200">{deleteConfirmation.name}</span> to confirm
+                                    </label>
+                                    <input 
+                                        type="text" 
+                                        value={deleteInput}
+                                        onChange={(e) => setDeleteInput(e.target.value)}
+                                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500 focus:border-red-500 outline-none"
+                                        placeholder={deleteConfirmation.name}
+                                        autoFocus
+                                    />
+                                </div>
+
+                                <div className="flex gap-3 mt-6">
+                                    <button 
+                                        onClick={() => setDeleteConfirmation(null)}
+                                        className="flex-1 px-4 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button 
+                                        onClick={confirmDeleteFolder}
+                                        disabled={deleteInput !== deleteConfirmation.name || isDeleting === deleteConfirmation.id}
+                                        className="flex-1 px-4 py-2 bg-red-600 rounded-lg text-sm font-bold text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
+                                    >
+                                        {isDeleting === deleteConfirmation.id ? <Loader2 size={16} className="animate-spin" /> : 'Delete Folder'}
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 )}

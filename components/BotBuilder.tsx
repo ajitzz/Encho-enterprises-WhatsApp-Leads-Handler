@@ -27,7 +27,7 @@ import {
   MessageSquare, Image as ImageIcon, Video, List, Type, Hash, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, ShieldAlert, 
   GripVertical, MousePointerClick, FileCode, Brush, Eye, 
-  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus
+  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle
 } from 'lucide-react';
 
 // --- STYLES ---
@@ -51,9 +51,11 @@ const getIconForLabel = (label: string) => {
     switch(label) {
         case 'Image': return <ImageIcon size={14} />;
         case 'Video': return <Video size={14} />;
+        case 'Question':
         case 'Quick Reply': 
         case 'List': return <List size={14} />;
         case 'Collect Text': return <Type size={14} />;
+        case 'Link': return <Link size={14} />;
         default: return <MessageSquare size={14} />;
     }
 };
@@ -160,7 +162,8 @@ const MediaPicker: React.FC<MediaPickerProps> = ({ onSelect, onClose, type }) =>
 const NodePreviewCard = ({ data, id, selected }: any) => {
   const isInputType = ['Text', 'Number', 'Email', 'Website', 'Date', 'Time'].includes(data.label);
   const isMediaType = ['Image', 'Video', 'File', 'Audio'].includes(data.label);
-  const isOptionType = ['Quick Reply', 'List'].includes(data.label);
+  const isOptionType = ['Quick Reply', 'List', 'Question'].includes(data.label);
+  const isLinkType = data.label === 'Link';
   const hasPlaceholder = data.message && /replace\s+this|enter\s+your/i.test(data.message);
   
   let borderColor = 'border-gray-200';
@@ -169,6 +172,7 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
 
   if (isMediaType) { borderColor = 'border-amber-200'; accentColor = 'bg-amber-50'; iconColor = 'text-amber-600'; }
   else if (isOptionType) { borderColor = 'border-purple-200'; accentColor = 'bg-purple-50'; iconColor = 'text-purple-600'; }
+  else if (isLinkType) { borderColor = 'border-sky-200'; accentColor = 'bg-sky-50'; iconColor = 'text-sky-600'; }
   else if (data.label === 'Text Message') { borderColor = 'border-blue-200'; accentColor = 'bg-blue-50'; iconColor = 'text-blue-600'; }
 
   if (selected) borderColor = 'border-blue-500 ring-2 ring-blue-100';
@@ -220,6 +224,14 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
             <p className={`text-xs line-clamp-3 mb-3 font-medium ${hasPlaceholder ? 'text-red-600' : 'text-gray-700'}`}>
                 {data.message || <span className="italic text-gray-300">No message text...</span>}
             </p>
+
+            {/* Link Preview */}
+            {isLinkType && (
+                <div className="mb-2 p-2 bg-sky-50 border border-sky-100 rounded text-xs text-sky-700 break-all flex items-center gap-2">
+                    <Link size={12} className="shrink-0" />
+                    {data.linkUrl ? <span className="truncate">{data.linkUrl}</span> : <span className="opacity-50">No URL set</span>}
+                </div>
+            )}
 
             {/* Interactive Options */}
             {isOptionType && (
@@ -281,7 +293,8 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
     if (localData.type === 'start') return <div className="p-6 text-center text-gray-400 text-sm">Start Node has no properties.</div>;
 
     const isMediaType = ['Image', 'Video'].includes(localData.label);
-    const isOptionType = ['Quick Reply', 'List'].includes(localData.label);
+    const isOptionType = ['Quick Reply', 'List', 'Question'].includes(localData.label);
+    const isLinkType = localData.label === 'Link';
     const isInputType = ['Text', 'Number'].includes(localData.label) || localData.inputType === 'text';
     const icon = getIconForLabel(localData.label);
 
@@ -301,19 +314,36 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                 {/* 1. MESSAGE TEXT */}
                 <div className="space-y-2">
                     <label className="text-xs font-bold text-gray-500 uppercase flex justify-between">
-                        Message Body
+                        {isLinkType ? 'Link Description' : 'Message Body'}
                         <span className="text-gray-300 font-normal">{localData.message?.length || 0} chars</span>
                     </label>
                     <textarea 
                         className="w-full h-32 p-3 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-shadow shadow-sm"
-                        placeholder="Type the message sent to the user..."
+                        placeholder={isLinkType ? "Click the link below to..." : "Type the message sent to the user..."}
                         value={localData.message}
                         onChange={(e) => update('message', e.target.value)}
                     />
                     <p className="text-[10px] text-gray-400">Supports emojis and basic formatting.</p>
                 </div>
 
-                {/* 2. MEDIA CONFIGURATION */}
+                {/* 2. LINK CONFIGURATION (NEW) */}
+                {isLinkType && (
+                    <div className="space-y-2 p-4 bg-sky-50 rounded-xl border border-sky-100">
+                        <label className="text-xs font-bold text-sky-800 uppercase flex items-center gap-2">
+                            <Link size={12} /> Destination URL
+                        </label>
+                        <input 
+                            type="url"
+                            className="w-full p-2 text-xs border border-sky-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500"
+                            placeholder="https://example.com/calendar"
+                            value={localData.linkUrl || ''}
+                            onChange={(e) => update('linkUrl', e.target.value)}
+                        />
+                        <p className="text-[10px] text-sky-600">This URL will be sent with a preview.</p>
+                    </div>
+                )}
+
+                {/* 3. MEDIA CONFIGURATION */}
                 {isMediaType && (
                     <div className="space-y-3 p-4 bg-amber-50 rounded-xl border border-amber-100">
                         <label className="text-xs font-bold text-amber-800 uppercase flex items-center gap-2">
@@ -358,11 +388,11 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                     </div>
                 )}
 
-                {/* 3. OPTIONS / BUTTONS */}
+                {/* 4. OPTIONS / BUTTONS */}
                 {isOptionType && (
                     <div className="space-y-3">
                         <label className="text-xs font-bold text-gray-500 uppercase flex justify-between items-center">
-                            <span>Interactive Buttons</span>
+                            <span>Answer Options</span>
                             <span className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded text-[10px]">{localData.options?.length || 0} / 10</span>
                         </label>
                         
@@ -379,7 +409,7 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                                                 update('options', newOpts);
                                             }}
                                             className="flex-1 px-3 py-2 text-xs outline-none text-gray-700 font-medium"
-                                            placeholder="Label (e.g. Yes)"
+                                            placeholder={idx === 0 ? "e.g. 10-20" : idx === 1 ? "e.g. 20-30" : "Option Label"}
                                         />
                                     </div>
                                     <button 
@@ -399,12 +429,12 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                             onClick={() => update('options', [...(localData.options || []), `Option ${(localData.options?.length || 0) + 1}`])}
                             className="w-full py-2 border border-dashed border-gray-300 rounded-lg text-xs font-bold text-gray-500 hover:text-purple-600 hover:border-purple-300 hover:bg-purple-50 transition-all flex items-center justify-center gap-2"
                         >
-                            <Plus size={14} /> Add Button Option
+                            <Plus size={14} /> Add Option
                         </button>
                     </div>
                 )}
 
-                {/* 4. VARIABLE STORAGE */}
+                {/* 5. VARIABLE STORAGE */}
                 {isInputType && (
                     <div className="p-4 bg-purple-50 rounded-xl border border-purple-100 space-y-2">
                         <label className="text-xs font-bold text-purple-800 uppercase flex items-center gap-2">
@@ -426,7 +456,7 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                     </div>
                 )}
 
-                {/* 5. TEMPLATE OVERRIDE (MODIFIED to Select Only) */}
+                {/* 6. TEMPLATE OVERRIDE (MODIFIED to Select Only) */}
                 <div className="pt-4 border-t border-gray-100">
                     <div className="flex items-center justify-between mb-2">
                          <label className="text-xs font-bold text-gray-500 uppercase flex items-center gap-1">
@@ -554,7 +584,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 message: '', 
                 inputType,
                 options: inputType === 'option' ? ['Yes', 'No'] : undefined,
-                mediaUrl: ''
+                mediaUrl: '',
+                linkUrl: ''
             },
         };
         addNode(newNode);
@@ -587,6 +618,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 templateName = undefined;
             }
 
+            // LINK LOGIC COMPILATION: Append URL to message so backend sends as one text block
+            let finalMessage = cleanData.message || "";
+            if (cleanData.label === 'Link' && cleanData.linkUrl) {
+                finalMessage = `${finalMessage} ${cleanData.linkUrl}`;
+            }
+
             // EXPLICIT MEDIA TYPE INFERENCE FOR ROBUST BACKEND HANDLING
             let inferredMediaType: 'image' | 'video' | 'document' | undefined = undefined;
             if (cleanData.label === 'Video') inferredMediaType = 'video';
@@ -596,7 +633,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             compiledSteps.push({
                 id: node.id,
                 title: cleanData.label,
-                message: cleanData.message,
+                message: finalMessage,
                 inputType: cleanData.inputType,
                 options: cleanData.options,
                 saveToField: cleanData.saveToField,
@@ -651,12 +688,13 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                             <DraggableSidebarItem type="text" label="Text Message" icon={<MessageSquare size={16} />} />
                             <DraggableSidebarItem type="image" label="Image" icon={<ImageIcon size={16} />} />
                             <DraggableSidebarItem type="video" label="Video" icon={<Video size={16} />} />
+                            <DraggableSidebarItem type="link" inputType="text" label="Link" icon={<Link size={16} />} />
                         </div>
                     </div>
                     <div>
                         <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-3 tracking-wider">Interaction</h4>
                         <div className="space-y-2">
-                            <DraggableSidebarItem type="option" inputType="option" label="Quick Reply / List" icon={<List size={16} />} />
+                            <DraggableSidebarItem type="option" inputType="option" label="Question" icon={<List size={16} />} />
                             <DraggableSidebarItem type="input" inputType="text" label="Collect Text" icon={<Type size={16} />} />
                         </div>
                     </div>

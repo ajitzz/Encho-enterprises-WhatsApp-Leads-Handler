@@ -549,7 +549,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
 // --- ROUTES ---
 
-// NEW: Rename Folder Endpoint
+// NEW: Rename Folder Endpoint with Strict Duplicate Check
 app.put('/api/folders/:id', async (req, res) => {
     const client = await pool.connect();
     try {
@@ -572,6 +572,16 @@ app.put('/api/folders/:id', async (req, res) => {
         const oldName = folderRes.rows[0].name;
         const parentPath = folderRes.rows[0].parent_path;
         
+        // STRICT DUPLICATE CHECK: Check if new name exists GLOBALLY (regardless of path)
+        const dupCheck = await client.query(
+            'SELECT id FROM media_folders WHERE name = $1 AND id != $2',
+            [name, id]
+        );
+        if (dupCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ error: "Folder name already taken. Please choose a unique name." });
+        }
+
         // Construct paths
         const oldPathPrefix = parentPath === '/' ? `/${oldName}` : `${parentPath}/${oldName}`;
         const newPathPrefix = parentPath === '/' ? `/${name}` : `${parentPath}/${name}`;
@@ -700,10 +710,22 @@ app.get('/api/media', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// NEW: Create Folder with Strict Duplicate Check
 app.post('/api/folders', async (req, res) => { 
     try {
+        const { name, parentPath } = req.body;
+        
+        // STRICT DUPLICATE CHECK: Global
+        const existing = await queryWithRetry(
+            'SELECT id FROM media_folders WHERE name = $1',
+            [name]
+        );
+        if (existing.rows.length > 0) {
+            return res.status(409).json({ error: 'Folder name already exists. Please choose a unique name.' });
+        }
+
         const id = Date.now().toString();
-        await queryWithRetry('INSERT INTO media_folders (id, name, parent_path, is_public_showcase) VALUES ($1, $2, $3, FALSE)', [id, req.body.name, req.body.parentPath]);
+        await queryWithRetry('INSERT INTO media_folders (id, name, parent_path, is_public_showcase) VALUES ($1, $2, $3, FALSE)', [id, name, parentPath]);
         res.json({ success: true, id });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
