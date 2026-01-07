@@ -17,6 +17,7 @@ const VideoPlayer = ({ src, isActive, isMuted }: { src: string, isActive: boolea
         if (videoRef.current) {
             if (isActive) {
                 videoRef.current.currentTime = 0;
+                // Attempt play; catch autplay policies error
                 videoRef.current.play().catch(e => console.log("Autoplay prevented", e));
             } else {
                 videoRef.current.pause();
@@ -24,14 +25,25 @@ const VideoPlayer = ({ src, isActive, isMuted }: { src: string, isActive: boolea
         }
     }, [isActive]);
 
+    const handleTogglePlay = () => {
+        if (videoRef.current) {
+            if (videoRef.current.paused) {
+                videoRef.current.play();
+            } else {
+                videoRef.current.pause();
+            }
+        }
+    };
+
     return (
         <video 
             ref={videoRef}
             src={src}
-            className="h-full w-full object-contain rounded-2xl shadow-2xl z-10"
+            className="h-full w-full object-contain rounded-2xl shadow-2xl z-10 cursor-pointer"
             loop
             muted={isMuted}
             playsInline
+            onClick={handleTogglePlay}
         />
     );
 };
@@ -41,7 +53,8 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
     const [title, setTitle] = useState('');
     const [loading, setLoading] = useState(true);
     const [activeIndex, setActiveIndex] = useState(0);
-    const [isMuted, setIsMuted] = useState(true);
+    // Updated default: False (Unmuted)
+    const [isMuted, setIsMuted] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {

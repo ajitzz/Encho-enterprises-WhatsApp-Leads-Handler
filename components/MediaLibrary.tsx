@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye, Link as LinkIcon, ExternalLink, Share2, Power } from 'lucide-react';
+import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye, Link as LinkIcon, ExternalLink, Share2, Power, Edit2, Pencil } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface MediaFile {
@@ -38,9 +38,12 @@ export const MediaLibrary = () => {
     // Path State
     const [currentPath, setCurrentPath] = useState('/');
     
-    // Create Folder State
+    // Create/Rename Folder State
     const [showCreateFolder, setShowCreateFolder] = useState(false);
     const [newFolderName, setNewFolderName] = useState('');
+    
+    // Rename Specific State
+    const [editingFolder, setEditingFolder] = useState<{id: string, name: string} | null>(null);
 
     // CORS Help Modal
     const [showCorsHelp, setShowCorsHelp] = useState(false);
@@ -165,21 +168,41 @@ export const MediaLibrary = () => {
         setShareUrl(`${window.location.origin}/showcase/${encodeURIComponent(folderName)}`);
     };
 
-    const handleCreateFolder = async (e: React.FormEvent) => {
+    // Shared handler for Create and Rename
+    const handleFolderSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!newFolderName.trim() || isCreatingFolder) return;
 
         setIsCreatingFolder(true);
         try {
-            await liveApiService.createFolder(newFolderName.trim(), currentPath);
+            if (editingFolder) {
+                // RENAME
+                await liveApiService.renameFolder(editingFolder.id, newFolderName.trim());
+            } else {
+                // CREATE
+                await liveApiService.createFolder(newFolderName.trim(), currentPath);
+            }
             setNewFolderName('');
+            setEditingFolder(null);
             setShowCreateFolder(false);
             await loadMedia(currentPath);
         } catch (e) {
-            alert("Failed to create folder");
+            alert(editingFolder ? "Failed to rename folder" : "Failed to create folder");
         } finally {
             setIsCreatingFolder(false);
         }
+    };
+
+    const openCreateModal = () => {
+        setEditingFolder(null);
+        setNewFolderName('');
+        setShowCreateFolder(true);
+    };
+
+    const openRenameModal = (folder: MediaFolder) => {
+        setEditingFolder({ id: folder.id, name: folder.name });
+        setNewFolderName(folder.name);
+        setShowCreateFolder(true);
     };
 
     const handleDeleteFile = async (id: string, filename: string) => {
@@ -311,7 +334,7 @@ export const MediaLibrary = () => {
                         )}
 
                         <button 
-                            onClick={() => setShowCreateFolder(true)}
+                            onClick={openCreateModal}
                             className="flex items-center gap-2 px-4 py-3 rounded-lg text-gray-700 bg-white border border-gray-300 font-bold hover:bg-gray-50 transition-all shadow-sm disabled:opacity-50"
                             disabled={uploadStatus === 'uploading' || isCreatingFolder}
                         >
@@ -346,7 +369,7 @@ export const MediaLibrary = () => {
                             {folders.map(folder => (
                                 <div 
                                     key={folder.id} 
-                                    className={`bg-white rounded-xl border p-4 shadow-sm hover:shadow-md transition-all cursor-pointer group flex flex-col items-center justify-between h-40 relative select-none ${folder.is_public_showcase ? 'border-green-400 ring-2 ring-green-100' : 'border-gray-200 hover:border-blue-300'}`}
+                                    className={`bg-white rounded-xl border p-4 shadow-sm hover:shadow-md transition-all cursor-pointer group flex flex-col items-center justify-between h-44 relative select-none ${folder.is_public_showcase ? 'border-green-400 ring-2 ring-green-100' : 'border-gray-200 hover:border-blue-300'}`}
                                     onClick={() => enterFolder(folder.name)}
                                 >
                                     {folder.is_public_showcase && (
@@ -361,7 +384,7 @@ export const MediaLibrary = () => {
                                     </div>
                                     
                                     <div className="w-full flex justify-between mt-1 pt-2 border-t border-gray-100">
-                                        <div className="flex items-center gap-2">
+                                        <div className="flex items-center gap-1">
                                             <button
                                                 onClick={(e) => { e.stopPropagation(); handleTogglePublic(folder); }}
                                                 className={`p-1.5 rounded-full transition-colors flex items-center gap-1 ${folder.is_public_showcase ? 'text-green-600 bg-green-50 hover:bg-green-100' : 'text-gray-300 hover:text-green-600 hover:bg-green-50'}`}
@@ -370,7 +393,6 @@ export const MediaLibrary = () => {
                                                 <Globe size={14} />
                                             </button>
                                             
-                                            {/* Separate Share Button: Only visible if active */}
                                             {folder.is_public_showcase && (
                                                 <button
                                                     onClick={(e) => { e.stopPropagation(); handleOpenShare(folder.name); }}
@@ -382,20 +404,29 @@ export const MediaLibrary = () => {
                                             )}
                                         </div>
 
-                                        <button
-                                            onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id, folder.name); }}
-                                            className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
-                                        >
-                                            {isDeleting === folder.id ? <Loader2 size={14} className="animate-spin text-red-500" /> : <Trash2 size={14} />}
-                                        </button>
+                                        <div className="flex items-center gap-1">
+                                            <button
+                                                onClick={(e) => { e.stopPropagation(); openRenameModal(folder); }}
+                                                className="p-1.5 text-gray-300 hover:text-blue-500 hover:bg-blue-50 rounded-full transition-colors"
+                                                title="Rename"
+                                            >
+                                                <Pencil size={14} />
+                                            </button>
+                                            <button
+                                                onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id, folder.name); }}
+                                                className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
+                                            >
+                                                {isDeleting === folder.id ? <Loader2 size={14} className="animate-spin text-red-500" /> : <Trash2 size={14} />}
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             ))}
 
                             {/* Files */}
                             {files.map((file) => (
-                                <div key={file.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm hover:shadow-md transition-shadow group flex flex-col relative select-none">
-                                    <div className="aspect-video bg-gray-100 relative flex items-center justify-center overflow-hidden">
+                                <div key={file.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm hover:shadow-md transition-shadow group flex flex-col relative select-none h-44">
+                                    <div className="aspect-video bg-gray-100 relative flex items-center justify-center overflow-hidden h-28">
                                         {file.type === 'video' ? (
                                             <video src={file.url} className="w-full h-full object-cover" muted />
                                         ) : file.type === 'image' ? (
@@ -411,7 +442,7 @@ export const MediaLibrary = () => {
                                         </button>
                                     </div>
                                     
-                                    <div className="p-3 flex-1 flex flex-col">
+                                    <div className="p-2 flex-1 flex flex-col justify-between">
                                         <div className="flex items-center justify-between mb-1">
                                             <div className="flex items-center gap-1">
                                                 {file.type === 'video' ? <Video size={12} className="text-purple-500" /> : <ImageIcon size={12} className="text-blue-500" />}
@@ -432,14 +463,16 @@ export const MediaLibrary = () => {
                                                 </button>
                                             )}
                                         </div>
-                                        <h3 className="text-xs font-medium text-gray-900 truncate mb-3" title={file.filename}>{file.filename}</h3>
                                         
-                                        <button 
-                                            onClick={(e) => { e.stopPropagation(); copyToClipboard(file.url); }}
-                                            className={`mt-auto w-full flex items-center justify-center gap-2 py-1.5 rounded-lg text-xs font-bold transition-colors border ${copiedId === file.url ? 'bg-green-50 border-green-200 text-green-700' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-white'}`}
-                                        >
-                                            {copiedId === file.url ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy Link</>}
-                                        </button>
+                                        <div className="flex items-center gap-2 mt-1">
+                                            <h3 className="text-xs font-medium text-gray-900 truncate flex-1" title={file.filename}>{file.filename}</h3>
+                                            <button 
+                                                onClick={(e) => { e.stopPropagation(); copyToClipboard(file.url); }}
+                                                className={`p-1 rounded-md transition-colors border ${copiedId === file.url ? 'bg-green-50 border-green-200 text-green-700' : 'bg-white border-gray-200 text-gray-400 hover:text-blue-600'}`}
+                                            >
+                                                {copiedId === file.url ? <Check size={12} /> : <Copy size={12} />}
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             ))}
@@ -451,15 +484,22 @@ export const MediaLibrary = () => {
                     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
                         <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden animate-in fade-in zoom-in-95">
                             <div className="p-4 border-b border-gray-100 flex justify-between items-center">
-                                <h3 className="font-bold text-gray-900 flex items-center gap-2"><FolderPlus size={18} className="text-blue-600" /> Create New Folder</h3>
+                                <h3 className="font-bold text-gray-900 flex items-center gap-2">
+                                    {editingFolder ? <Edit2 size={18} className="text-blue-600" /> : <FolderPlus size={18} className="text-blue-600" />} 
+                                    {editingFolder ? 'Rename Folder' : 'Create New Folder'}
+                                </h3>
                                 <button onClick={() => setShowCreateFolder(false)}><X size={20} className="text-gray-400" /></button>
                             </div>
-                            <form onSubmit={handleCreateFolder} className="p-6">
-                                <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Folder Name</label>
+                            <form onSubmit={handleFolderSubmit} className="p-6">
+                                <label className="block text-xs font-bold text-gray-500 uppercase mb-2">
+                                    {editingFolder ? 'New Name' : 'Folder Name'}
+                                </label>
                                 <input type="text" autoFocus value={newFolderName} onChange={(e) => setNewFolderName(e.target.value)} placeholder="e.g. Marketing" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none mb-4" />
                                 <div className="flex gap-3">
                                     <button type="button" onClick={() => setShowCreateFolder(false)} className="flex-1 py-2 border border-gray-300 rounded-lg text-sm font-medium hover:bg-gray-50">Cancel</button>
-                                    <button type="submit" disabled={!newFolderName.trim() || isCreatingFolder} className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2">{isCreatingFolder ? <Loader2 size={14} className="animate-spin" /> : 'Create'}</button>
+                                    <button type="submit" disabled={!newFolderName.trim() || isCreatingFolder} className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2">
+                                        {isCreatingFolder ? <Loader2 size={14} className="animate-spin" /> : (editingFolder ? 'Rename' : 'Create')}
+                                    </button>
                                 </div>
                             </form>
                         </div>

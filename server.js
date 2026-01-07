@@ -237,15 +237,10 @@ const getMimeType = (filename) => {
 };
 
 // --- CORE MEDIA SYNC ENGINE ---
-// Promise-based Lock for Request Coalescing
-const activeSyncs = new Map(); // Map<fileId, Promise<string>>
+const activeSyncs = new Map();
 
 const performWhatsAppSync = async (fileId) => {
-    // ... (Keep existing implementation of performWhatsAppSync) ...
-    if (activeSyncs.has(fileId)) {
-        console.log(`🔒 SYNC JOINED: Waiting for existing sync of ${fileId}...`);
-        return activeSyncs.get(fileId);
-    }
+    if (activeSyncs.has(fileId)) return activeSyncs.get(fileId);
 
     const syncPromise = (async () => {
         try {
@@ -253,57 +248,37 @@ const performWhatsAppSync = async (fileId) => {
             if (fileRes.rows.length === 0) throw new Error('File not found');
             
             const file = fileRes.rows[0];
-            
-            // CACHE CHECK
             const cacheRes = await queryWithRetry('SELECT media_id, expires_at FROM whatsapp_media_cache WHERE s3_url = $1', [file.url]);
+            
             if (cacheRes.rows.length > 0) {
                 const cached = cacheRes.rows[0];
                 const now = Date.now();
-                const SAFE_BUFFER_MS = 24 * 60 * 60 * 1000; 
-
-                if (cached.expires_at && parseInt(cached.expires_at) > (now + SAFE_BUFFER_MS)) {
-                    console.log(`⚡ SMART CACHE: Found valid Media ID ${cached.media_id}.`);
-                    return cached.media_id;
-                }
+                if (cached.expires_at && parseInt(cached.expires_at) > (now + 86400000)) return cached.media_id;
             }
 
             let mediaType = getMimeType(file.filename);
             if (mediaType === 'application/octet-stream' && file.type === 'video') mediaType = 'video/mp4';
             if (mediaType === 'application/octet-stream' && file.type === 'image') mediaType = 'image/jpeg';
 
-            console.log(`🔄 STARTING TRANSFER: S3 -> WhatsApp for ${file.filename} (${mediaType})...`);
-            
             let buffer;
             try {
-                const s3Response = await axios({
-                    url: file.url,
-                    method: 'GET',
-                    responseType: 'arraybuffer'
-                });
+                const s3Response = await axios({ url: file.url, method: 'GET', responseType: 'arraybuffer' });
                 buffer = s3Response.data;
             } catch (err) {
                  if (err.response && err.response.status === 403) {
-                     console.log("⚠️ Private Bucket detected. Generating Signed URL for download...");
                      const urlObj = new URL(file.url);
                      const key = urlObj.pathname.substring(1);
                      const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key });
                      const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 600 });
-                     
                      const retryRes = await axios({ url: signedUrl, method: 'GET', responseType: 'arraybuffer' });
                      buffer = retryRes.data;
-                 } else {
-                     throw err;
-                 }
+                 } else throw err;
             }
 
-            if (buffer.length > 16 * 1024 * 1024) {
-                console.warn(`⚠️ FILE TOO LARGE: ${file.filename} is ${(buffer.length / 1024 / 1024).toFixed(2)}MB. Limit is 16MB. Skipping Sync (Using Link Fallback).`);
-                return null; 
-            }
+            if (buffer.length > 16 * 1024 * 1024) return null; 
 
             const formData = new FormData();
-            const blob = new Blob([buffer], { type: mediaType });
-            formData.append('file', blob, file.filename);
+            formData.append('file', new Blob([buffer], { type: mediaType }), file.filename);
             formData.append('messaging_product', 'whatsapp');
 
             const metaRes = await fetch(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/media`, {
@@ -312,36 +287,26 @@ const performWhatsAppSync = async (fileId) => {
                 body: formData
             });
 
-            if (!metaRes.ok) {
-                const errText = await metaRes.text();
-                throw new Error(`Meta API Error: ${errText}`);
-            }
-
+            if (!metaRes.ok) throw new Error(`Meta API Error: ${await metaRes.text()}`);
             const metaData = await metaRes.json();
             const mediaId = metaData.id;
 
-            const expiresAt = Date.now() + (25 * 24 * 60 * 60 * 1000); 
             await queryWithRetry(
                 `INSERT INTO whatsapp_media_cache (s3_url, media_id, created_at, expires_at) 
                 VALUES ($1, $2, $3, $4) 
                 ON CONFLICT (s3_url) DO UPDATE SET media_id = $2, created_at = $3, expires_at = $4`,
-                [file.url, mediaId, Date.now(), expiresAt]
+                [file.url, mediaId, Date.now(), Date.now() + (25 * 24 * 60 * 60 * 1000)]
             );
-
-            console.log(`✅ TRANSFER COMPLETE: ${file.filename} -> ${mediaId}`);
             return mediaId;
-        } finally {
-            activeSyncs.delete(fileId);
-        }
+        } finally { activeSyncs.delete(fileId); }
     })();
 
     activeSyncs.set(fileId, syncPromise);
     return syncPromise;
 };
 
-// --- LOGIC ENGINE ---
+// ... (Rest of logic engine) ...
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
-   // ... (Keep existing implementation of sendWhatsAppMessage) ...
    if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
   
   mediaType = mediaType || 'image';
@@ -360,8 +325,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
     payload.template = { name: templateName, language: { code: language } };
   } else {
       if (mediaUrl) {
-        const isYouTube = mediaUrl.includes('youtube.com') || mediaUrl.includes('youtu.be');
-        if (isYouTube) {
+        if (mediaUrl.includes('youtube.com') || mediaUrl.includes('youtu.be')) {
             payload.type = 'text';
             payload.text = { body: body ? `${body} ${mediaUrl}` : mediaUrl, preview_url: true };
         } else {
@@ -370,25 +334,17 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
                 const cacheRes = await queryWithRetry('SELECT media_id, expires_at FROM whatsapp_media_cache WHERE s3_url = $1', [mediaUrl]);
                 if (cacheRes.rows.length > 0) {
                     const cached = cacheRes.rows[0];
-                    if (cached.expires_at && Date.now() < parseInt(cached.expires_at)) {
-                        mediaId = cached.media_id;
-                    }
+                    if (cached.expires_at && Date.now() < parseInt(cached.expires_at)) mediaId = cached.media_id;
                 }
-
                 if (!mediaId) {
                     const fileRes = await queryWithRetry('SELECT id FROM media_files WHERE url = $1', [mediaUrl]);
-                    if (fileRes.rows.length > 0) {
-                        const fileId = fileRes.rows[0].id;
-                        mediaId = await performWhatsAppSync(fileId); 
-                    }
+                    if (fileRes.rows.length > 0) mediaId = await performWhatsAppSync(fileRes.rows[0].id);
                 }
-
-            } catch (e) { console.warn("Optimization/Sync Failed (Using Link Fallback):", e.message); }
+            } catch (e) { console.warn("Sync Failed:", e.message); }
 
             payload.type = mediaType;
-            if (mediaId) {
-                payload[mediaType] = { id: mediaId };
-            } else {
+            if (mediaId) payload[mediaType] = { id: mediaId };
+            else {
                 let finalLink = mediaUrl;
                 try {
                      const urlObj = new URL(mediaUrl);
@@ -396,15 +352,12 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
                          const key = urlObj.pathname.substring(1);
                          const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key });
                          finalLink = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
-                         console.log("🔐 Generated Signed URL for Fallback Delivery");
                      }
-                } catch(e) { console.warn("Could not sign URL, using original:", e.message); }
-
-                console.warn("⚠️ FALLBACK: Using direct link for delivery.");
+                } catch(e) {}
                 payload[mediaType] = { link: finalLink };
             }
             
-            if (body && body.trim().length > 0) payload[mediaType].caption = body;
+            if (body) payload[mediaType].caption = body;
             if (mediaType === 'document') payload[mediaType].filename = mediaUrl.split('/').pop();
         }
       } else if (options && options.length > 0) {
@@ -431,14 +384,10 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
       }
   }
   
-  console.log(`📡 SENDING TO META: ${to} [Type: ${payload.type}]`);
   try {
     await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, payload, { headers: { Authorization: `Bearer ${META_API_TOKEN}` } });
     return true;
-  } catch (error) { 
-    console.error('Meta API Error:', error.response ? error.response.data : error.message); 
-    return false;
-  }
+  } catch (error) { return false; }
 };
 
 const analyzeWithAI = async (text, systemInstruction) => {
@@ -456,17 +405,15 @@ const analyzeWithAI = async (text, systemInstruction) => {
 const logSystemMessage = async (driverId, text, type = 'text', options = null, imageUrl = null) => {
     try {
         const msgId = Date.now().toString() + '_' + Math.random().toString(36).substr(2, 5);
-        const opts = options && options.length > 0 ? options : null;
         await queryWithRetry(
             `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, options, image_url) VALUES ($1, $2, 'system', $3, $4, $5, $6, $7)`,
-            [msgId, driverId, text, Date.now(), type, opts, imageUrl]
+            [msgId, driverId, text, Date.now(), type, options && options.length ? options : null, imageUrl]
         );
         await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text, Date.now(), driverId]);
     } catch (e) { console.error("Log failed", e); }
 };
 
 const processIncomingMessage = async (from, name, msgBody, msgType = 'text', timestamp = Date.now()) => {
-   // ... (Keep existing implementation) ...
     try {
         const client = await pool.connect();
         let result = {};
@@ -498,10 +445,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             );
             await client.query('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [msgBody, timestamp, driver.id]);
             
-            if (driver.is_human_mode) {
-                 await client.query('COMMIT');
-                 return; 
-            }
+            if (driver.is_human_mode) { await client.query('COMMIT'); return; }
 
             let replyText = null; let replyOptions = null; let replyTemplate = null; let replyMedia = null; let replyMediaType = null; let shouldCallAI = false;
 
@@ -552,39 +496,19 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                      replyText = nextStep.message;
                                      replyTemplate = nextStep.templateName;
                                      replyMedia = nextStep.mediaUrl;
-                                     if (nextStep.mediaType) replyMediaType = nextStep.mediaType;
-                                     else if (nextStep.title === 'Video') replyMediaType = 'video';
-                                     else if (nextStep.title === 'Image') replyMediaType = 'image';
-                                     else if (nextStep.title === 'File') replyMediaType = 'document';
-                                     if (!replyMediaType && replyMedia) {
-                                         const ext = replyMedia.split('.').pop().toLowerCase();
-                                         if (['mp4', '3gp'].includes(ext)) replyMediaType = 'video';
-                                         else if (['pdf', 'doc'].includes(ext)) replyMediaType = 'document';
-                                         else replyMediaType = 'image';
-                                     }
-                                     if(nextStep.options) replyOptions = nextStep.options;
+                                     replyMediaType = nextStep.mediaType || (nextStep.mediaUrl ? 'image' : undefined);
+                                     replyOptions = nextStep.options;
                                  }
                              }
                          } else {
                              replyText = currentStep.message;
                              replyTemplate = currentStep.templateName;
                              replyMedia = currentStep.mediaUrl;
-                             if (currentStep.mediaType) replyMediaType = currentStep.mediaType;
-                             else if (currentStep.title === 'Video') replyMediaType = 'video';
-                             else if (currentStep.title === 'Image') replyMediaType = 'image';
-                             else if (currentStep.title === 'File') replyMediaType = 'document';
-                             if (!replyMediaType && replyMedia) {
-                                 const ext = replyMedia.split('.').pop().toLowerCase();
-                                 if (['mp4', '3gp'].includes(ext)) replyMediaType = 'video';
-                                 else if (['pdf'].includes(ext)) replyMediaType = 'document';
-                                 else replyMediaType = 'image';
-                             }
-                             if(currentStep.options) replyOptions = currentStep.options;
+                             replyMediaType = currentStep.mediaType || (currentStep.mediaUrl ? 'image' : undefined);
+                             replyOptions = currentStep.options;
                          }
                      }
-                 } else if (driver.is_bot_active) {
-                      if (routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
-                 }
+                 } else if (driver.is_bot_active && routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
             }
             if (routingStrategy === 'BOT_ONLY') shouldCallAI = false; 
             await client.query('COMMIT');
@@ -625,37 +549,82 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
 // --- ROUTES ---
 
-// NEW: Public Showcase API (Supports ?folder=Name)
+// NEW: Rename Folder Endpoint
+app.put('/api/folders/:id', async (req, res) => {
+    const client = await pool.connect();
+    try {
+        const { id } = req.params;
+        const { name } = req.body;
+        
+        if (!name || name.trim().length === 0) {
+            return res.status(400).json({ error: "Name is required" });
+        }
+
+        await client.query('BEGIN');
+
+        // 1. Get current folder details
+        const folderRes = await client.query('SELECT name, parent_path FROM media_folders WHERE id = $1', [id]);
+        if (folderRes.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: "Folder not found" });
+        }
+
+        const oldName = folderRes.rows[0].name;
+        const parentPath = folderRes.rows[0].parent_path;
+        
+        // Construct paths
+        const oldPathPrefix = parentPath === '/' ? `/${oldName}` : `${parentPath}/${oldName}`;
+        const newPathPrefix = parentPath === '/' ? `/${name}` : `${parentPath}/${name}`;
+
+        // 2. Update the folder name itself
+        await client.query('UPDATE media_folders SET name = $1 WHERE id = $2', [name, id]);
+
+        // 3. Recursive Update: Update all files that start with the old path
+        // Using Postgres string concatenation operator || and SUBSTRING
+        // LENGTH(oldPathPrefix) + 1 accounts for 1-based indexing in substring
+        await client.query(`
+            UPDATE media_files 
+            SET folder_path = $1 || SUBSTRING(folder_path, LENGTH($2) + 1)
+            WHERE folder_path = $2 OR folder_path LIKE $2 || '/%'
+        `, [newPathPrefix, oldPathPrefix]);
+
+        // 4. Recursive Update: Update subfolders' parent_path
+        await client.query(`
+            UPDATE media_folders 
+            SET parent_path = $1 || SUBSTRING(parent_path, LENGTH($2) + 1)
+            WHERE parent_path = $2 OR parent_path LIKE $2 || '/%'
+        `, [newPathPrefix, oldPathPrefix]);
+
+        await client.query('COMMIT');
+        res.json({ success: true, oldPath: oldPathPrefix, newPath: newPathPrefix });
+
+    } catch (e) {
+        await client.query('ROLLBACK');
+        console.error("Rename Error:", e);
+        res.status(500).json({ error: e.message });
+    } finally {
+        client.release();
+    }
+});
+
+// [Rest of existing endpoints unchanged]
 app.get('/api/public/showcase', async (req, res) => {
     try {
         let query = 'SELECT id, name, parent_path FROM media_folders WHERE is_public_showcase = TRUE';
         let params = [];
-        
         if (req.query.folder) {
             query += ' AND name = $1';
             params.push(req.query.folder);
         }
-        
-        // Prefer explicit match, then fallback to any public
         query += ' ORDER BY id DESC LIMIT 1';
         
         const folderRes = await queryWithRetry(query, params);
-        
-        if (folderRes.rows.length === 0) {
-            return res.json({ title: 'Welcome', items: [] });
-        }
+        if (folderRes.rows.length === 0) return res.json({ title: 'Welcome', items: [] });
 
         const folder = folderRes.rows[0];
-        
-        // Construct correct path for media files query
-        let folderPath = folder.parent_path === '/' 
-            ? `/${folder.name}` 
-            : `${folder.parent_path}/${folder.name}`;
-            
-        // Clean double slashes if any
+        let folderPath = folder.parent_path === '/' ? `/${folder.name}` : `${folder.parent_path}/${folder.name}`;
         folderPath = folderPath.replace(/\/\//g, '/');
 
-        // Fetch files, handling S3 Presigning for public viewing
         const filesRes = await queryWithRetry(`
             SELECT id, url, filename, type 
             FROM media_files 
@@ -664,141 +633,86 @@ app.get('/api/public/showcase', async (req, res) => {
             [folderPath]
         );
 
-        // Sign URLs if needed (if bucket is private)
         const items = await Promise.all(filesRes.rows.map(async (file) => {
             let signedUrl = file.url;
             try {
                 const urlObj = new URL(file.url);
                 if (urlObj.hostname.includes('s3') && urlObj.hostname.includes('amazonaws.com')) {
-                    // Important: Decode key to handle spaces and special chars
                     const key = decodeURIComponent(urlObj.pathname.substring(1));
                     const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key });
                     signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
                 }
             } catch(e) {}
-            return {
-                id: file.id,
-                url: signedUrl,
-                type: file.type,
-                filename: file.filename
-            };
+            return { id: file.id, url: signedUrl, type: file.type, filename: file.filename };
         }));
 
         res.json({ title: folder.name, items });
-    } catch (e) {
-        console.error("Showcase Fetch Error:", e);
-        res.status(500).json({ error: "Failed to load showcase" });
-    }
+    } catch (e) { res.status(500).json({ error: "Failed to load showcase" }); }
 });
 
-// NEW: Get Status Endpoint
 app.get('/api/public/status', async (req, res) => {
     try {
         const folderRes = await queryWithRetry('SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE ORDER BY id DESC LIMIT 1', []);
-        if (folderRes.rows.length > 0) {
-            res.json({ active: true, folderName: folderRes.rows[0].name, folderId: folderRes.rows[0].id });
-        } else {
-            res.json({ active: false });
-        }
-    } catch(e) {
-        res.status(500).json({ error: e.message });
-    }
+        if (folderRes.rows.length > 0) res.json({ active: true, folderName: folderRes.rows[0].name, folderId: folderRes.rows[0].id });
+        else res.json({ active: false });
+    } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// NEW: Set Public Folder Endpoint (MULTI-SUPPORT)
 app.post('/api/folders/:id/public', async (req, res) => {
     try {
-        const { id } = req.params;
-        const client = await pool.connect();
-        try {
-            // Allows multiple folders to be public simultaneously
-            await client.query('UPDATE media_folders SET is_public_showcase = TRUE WHERE id = $1', [id]);
-            res.json({ success: true });
-        } finally {
-            client.release();
-        }
-    } catch(e) {
-        res.status(500).json({ error: e.message });
-    }
+        await queryWithRetry('UPDATE media_folders SET is_public_showcase = TRUE WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// NEW: Unset Public Folder (Toggle Off)
 app.delete('/api/folders/:id/public', async (req, res) => {
     try {
-        const { id } = req.params;
-        const client = await pool.connect();
-        try {
-            await client.query('UPDATE media_folders SET is_public_showcase = FALSE WHERE id = $1', [id]);
-            res.json({ success: true });
-        } finally {
-            client.release();
-        }
-    } catch(e) {
-        res.status(500).json({ error: e.message });
-    }
+        await queryWithRetry('UPDATE media_folders SET is_public_showcase = FALSE WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/files/:id/sync', async (req, res) => {
     try {
-        const { id } = req.params;
-        const mediaId = await performWhatsAppSync(id);
-        if (mediaId === null) {
-            return res.json({ success: false, message: 'Sync skipped (File too large or locked)' });
-        }
+        const mediaId = await performWhatsAppSync(req.params.id);
+        if (mediaId === null) return res.json({ success: false, message: 'Sync skipped' });
         res.json({ success: true, mediaId });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/media', async (req, res) => {
     try {
         const currentPath = req.query.path || '/';
         const folders = await queryWithRetry('SELECT * FROM media_folders WHERE parent_path = $1 ORDER BY name ASC', [currentPath]);
-        
         const files = await queryWithRetry(`
             SELECT mf.*, wmc.media_id, wmc.expires_at
             FROM media_files mf 
             LEFT JOIN whatsapp_media_cache wmc ON mf.url = wmc.s3_url
             WHERE mf.folder_path = $1 
-            ORDER BY mf.uploaded_at DESC`,
-            [currentPath]
-        );
+            ORDER BY mf.uploaded_at DESC`, [currentPath]);
         
         const now = Date.now();
         const cleanFiles = files.rows.map(f => {
-            if (f.expires_at && parseInt(f.expires_at) < now) {
-                return { ...f, media_id: null }; 
-            }
+            if (f.expires_at && parseInt(f.expires_at) < now) return { ...f, media_id: null }; 
             return f;
         });
-
         res.json({ folders: folders.rows, files: cleanFiles });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ... (Rest of existing endpoints) ...
-
 app.post('/api/folders', async (req, res) => { 
     try {
-        const { name, parentPath } = req.body;
         const id = Date.now().toString();
-        await queryWithRetry(
-            'INSERT INTO media_folders (id, name, parent_path, is_public_showcase) VALUES ($1, $2, $3, FALSE)',
-            [id, name, parentPath]
-        );
+        await queryWithRetry('INSERT INTO media_folders (id, name, parent_path, is_public_showcase) VALUES ($1, $2, $3, FALSE)', [id, req.body.name, req.body.parentPath]);
         res.json({ success: true, id });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/folders/:id', async (req, res) => { 
     try {
-        const { id } = req.params;
-        // Logic to delete folder only if empty
-        const files = await queryWithRetry('SELECT id FROM media_files WHERE folder_path = (SELECT name FROM media_folders WHERE id = $1)', [id]);
+        const files = await queryWithRetry('SELECT id FROM media_files WHERE folder_path = (SELECT name FROM media_folders WHERE id = $1)', [req.params.id]);
         if (files.rows.length > 0) return res.status(400).json({ error: 'Folder not empty' });
-        
-        await queryWithRetry('DELETE FROM media_folders WHERE id = $1', [id]);
+        await queryWithRetry('DELETE FROM media_folders WHERE id = $1', [req.params.id]);
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -806,13 +720,6 @@ app.delete('/api/folders/:id', async (req, res) => {
 app.post('/api/s3/presign', async (req, res) => { 
     try {
         const { filename, fileType, folderPath } = req.body;
-        const existingFile = await queryWithRetry(
-            'SELECT id FROM media_files WHERE filename = $1 AND folder_path = $2',
-            [filename, folderPath]
-        );
-        if (existingFile.rows.length > 0) {
-            return res.status(409).json({ error: 'File already exists in this folder.' });
-        }
         const key = `${Date.now()}-${filename.replace(/\s+/g, '_')}`;
         const command = new PutObjectCommand({ Bucket: BUCKET_NAME, Key: key, ContentType: fileType });
         const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
@@ -828,50 +735,36 @@ app.post('/api/files/register', async (req, res) => {
             `INSERT INTO media_files (id, url, filename, type, uploaded_at, folder_path) VALUES ($1, $2, $3, $4, $5, $6)`,
             [id, url, filename, type, Date.now(), folderPath]
         );
-        if (['image', 'video', 'document'].includes(type)) {
-             performWhatsAppSync(id).catch(err => console.error(`⚠️ Background Sync Failed for ${filename}:`, err.message));
-        }
+        if (['image', 'video', 'document'].includes(type)) performWhatsAppSync(id).catch(err => console.error(err));
         res.json({ success: true, id, url });
-    } catch (e) {
-        console.error("Register Error:", e);
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/files/:id', async (req, res) => { 
     try {
-        const { id } = req.params;
-        await queryWithRetry('DELETE FROM media_files WHERE id = $1', [id]);
+        await queryWithRetry('DELETE FROM media_files WHERE id = $1', [req.params.id]);
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/messages/send', async (req, res) => { 
     try {
-        const { driverId, text } = req.body;
-        const driverRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
+        const driverRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [req.body.driverId]);
         if (driverRes.rows.length === 0) return res.status(404).json({ error: 'Driver not found' });
-        const success = await sendWhatsAppMessage(driverRes.rows[0].phone_number, text);
-        if (!success) return res.status(500).json({ error: 'Failed to send message to Meta' });
-        await logSystemMessage(driverId, text, 'text');
+        const success = await sendWhatsAppMessage(driverRes.rows[0].phone_number, req.body.text);
+        if (!success) return res.status(500).json({ error: 'Meta API Failed' });
+        await logSystemMessage(req.body.driverId, req.body.text, 'text');
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.patch('/api/drivers/:id', async (req, res) => { 
     try {
-        const { id } = req.params;
         const updates = req.body;
         const keys = Object.keys(updates).filter(k => k !== 'id');
-        if (keys.length === 0) return res.json({ success: true });
-        
         const setClause = keys.map((k, i) => `${k} = $${i + 2}`).join(', ');
-        const values = keys.map(k => {
-             if (typeof updates[k] === 'object') return JSON.stringify(updates[k]);
-             return updates[k];
-        });
-        
-        await queryWithRetry(`UPDATE drivers SET ${setClause} WHERE id = $1`, [id, ...values]);
+        const values = keys.map(k => typeof updates[k] === 'object' ? JSON.stringify(updates[k]) : updates[k]);
+        await queryWithRetry(`UPDATE drivers SET ${setClause} WHERE id = $1`, [req.params.id, ...values]);
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });

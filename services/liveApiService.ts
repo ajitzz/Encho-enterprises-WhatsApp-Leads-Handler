@@ -217,6 +217,17 @@ export const liveApiService = {
       return await response.json();
   },
 
+  // NEW: Rename Folder
+  renameFolder: async (id: string, newName: string) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: newName })
+      });
+      if (!response.ok) throw new Error('Failed to rename folder');
+      return await response.json();
+  },
+
   deleteMediaFile: async (id: string) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/files/${id}`, {
           method: 'DELETE'
