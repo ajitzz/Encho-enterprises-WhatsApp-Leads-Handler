@@ -999,21 +999,62 @@ app.post('/api/bot-settings', async (req, res) => { try { let settings = req.bod
 app.get('/webhook', (req, res) => { if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) res.send(req.query['hub.challenge']); else res.sendStatus(403); });
 app.post('/webhook', async (req, res) => {
     const body = req.body;
-    if (body.object && body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
-        const msgObj = body.entry[0].changes[0].value.messages[0];
-        const contact = body.entry[0].changes[0].value.contacts?.[0];
-        const phone = msgObj.from;
-        const name = contact?.profile?.name || 'Unknown';
-        let msgBody = msgObj.text?.body || '[Media]';
-        let msgType = 'text';
-        if (msgObj.type === 'interactive') { 
-            if (msgObj.interactive.type === 'list_reply') msgBody = msgObj.interactive.list_reply.title;
-            else if (msgObj.interactive.type === 'button_reply') msgBody = msgObj.interactive.button_reply.title; 
-            msgType = 'option_reply'; 
-        } else if (msgObj.type === 'image') { msgBody = '[Image]'; msgType = 'image'; }
-        await processIncomingMessage(phone, name, msgBody, msgType);
+    const inboundMessages = [];
+
+    if (body.object && Array.isArray(body.entry)) {
+        body.entry.forEach(entry => {
+            (entry.changes || []).forEach(change => {
+                const value = change.value || {};
+                const messages = value.messages || [];
+                const contact = value.contacts?.[0];
+
+                messages.forEach(msgObj => {
+                    if (!msgObj?.from) return;
+                    inboundMessages.push({
+                        msgObj,
+                        contact
+                    });
+                });
+            });
+        });
     }
+
     res.sendStatus(200);
+
+    if (inboundMessages.length === 0) return;
+
+    setImmediate(async () => {
+        for (const { msgObj, contact } of inboundMessages) {
+            const phone = msgObj.from;
+            const name = contact?.profile?.name || 'Unknown';
+            const msgTimestamp = msgObj.timestamp ? Number(msgObj.timestamp) * 1000 : Date.now();
+            let msgBody = msgObj.text?.body || '[Media]';
+            let msgType = 'text';
+
+            if (msgObj.type === 'interactive') {
+                if (msgObj.interactive?.type === 'list_reply') msgBody = msgObj.interactive.list_reply.title;
+                else if (msgObj.interactive?.type === 'button_reply') msgBody = msgObj.interactive.button_reply.title;
+                msgType = 'option_reply';
+            } else if (msgObj.type === 'image') {
+                msgBody = '[Image]';
+                msgType = 'image';
+            } else if (msgObj.type === 'video') {
+                msgBody = '[Video]';
+                msgType = 'video';
+            } else if (msgObj.type === 'document') {
+                msgBody = '[Document]';
+                msgType = 'document';
+            } else if (msgObj.type === 'audio') {
+                msgBody = '[Audio]';
+                msgType = 'audio';
+            } else if (msgObj.type && msgObj.type !== 'text') {
+                msgBody = '[Media]';
+                msgType = msgObj.type;
+            }
+
+            await processIncomingMessage(phone, name, msgBody, msgType, msgTimestamp);
+        }
+    });
 });
 
 module.exports = app;
