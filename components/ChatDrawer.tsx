@@ -1,7 +1,22 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, LeadStatus, OnboardingStep } from '../types';
-import { X, Send, Image as ImageIcon, Video, CheckCircle, AlertTriangle, UserX, Car, Clock, ShieldCheck, ChevronRight, Facebook, Globe, Headset, MicOff } from 'lucide-react';
+import { 
+  X, 
+  Send, 
+  Image as ImageIcon, 
+  Video, 
+  CheckCircle, 
+  UserX, 
+  Car, 
+  Clock, 
+  ShieldCheck, 
+  ChevronRight, 
+  Facebook, 
+  Globe, 
+  Headset, 
+  MicOff 
+} from 'lucide-react';
 
 interface ChatDrawerProps {
   driver: Driver | null;
