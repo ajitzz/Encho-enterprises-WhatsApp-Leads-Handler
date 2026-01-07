@@ -22,7 +22,7 @@ import {
   List, Type, Hash, Mail, Globe, Calendar, Clock, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Play, AlertTriangle, ShieldAlert, GripVertical, Settings,
   MousePointerClick, Bold, Italic, Link, MoreHorizontal, Upload, Cloud, Stethoscope, Wand2, Terminal, Code,
-  FileCode, Layers, Youtube, Eraser, Brush
+  FileCode, Layers, Youtube, Eraser, Brush, Eye
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
@@ -372,6 +372,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const [isSaving, setIsSaving] = useState(false);
   const [isAuditing, setIsAuditing] = useState(false);
   const [auditReport, setAuditReport] = useState<any>(null);
+  const [showRawJson, setShowRawJson] = useState(false);
   
   // SYSTEM DOCTOR STATES
   const [showSystemDoctor, setShowSystemDoctor] = useState(false);
@@ -680,6 +681,13 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     <Brush size={16} /> Sanitize
                  </button>
 
+                 <button
+                    onClick={() => setShowRawJson(true)}
+                    className="bg-white border border-gray-300 text-gray-700 px-4 py-2.5 rounded-full text-sm font-bold shadow-md hover:bg-gray-50 transition-all flex items-center gap-2"
+                 >
+                    <Eye size={16} /> Raw Data
+                 </button>
+
                  {isLiveMode && (
                      <button onClick={openSystemDoctor} className="bg-red-600 text-white px-4 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-red-700 transition-all flex items-center gap-2">
                         <Code size={16} /> System Doctor
@@ -723,6 +731,26 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                  </ReactFlow>
             </div>
         </div>
+
+        {/* RAW JSON INSPECTOR MODAL */}
+        {showRawJson && (
+            <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center p-6">
+                 <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl h-[80vh] flex flex-col overflow-hidden">
+                     <div className="p-4 border-b border-gray-100 flex items-center justify-between">
+                         <h3 className="font-bold text-gray-900 flex items-center gap-2"><Eye size={18} /> Raw Flow Data Inspector</h3>
+                         <button onClick={() => setShowRawJson(false)}><X size={20} /></button>
+                     </div>
+                     <div className="flex-1 bg-gray-50 p-4 overflow-auto">
+                         <pre className="text-xs font-mono text-gray-700 leading-relaxed whitespace-pre-wrap">
+                             {JSON.stringify(nodes.map(n => ({ id: n.id, data: n.data })), null, 2)}
+                         </pre>
+                     </div>
+                     <div className="p-4 bg-gray-100 text-xs text-gray-500 border-t border-gray-200">
+                         Check here for hidden 'templateName' fields or lingering default text.
+                     </div>
+                 </div>
+            </div>
+        )}
 
         {/* SYSTEM DOCTOR & AUDIT MODALS (Same as before) */}
         {showSystemDoctor && (
