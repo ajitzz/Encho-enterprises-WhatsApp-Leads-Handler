@@ -281,13 +281,18 @@ const getS3FolderPrefix = (parentPath) => {
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
   
-  // Auto-detect Media Type from URL Extension if not explicitly provided
-  if (mediaUrl && mediaType === 'image') { // Default was image
+  // 1. Force valid mediaType default (handles null/undefined)
+  mediaType = mediaType || 'image';
+
+  // 2. Strong Auto-Detection (Override if extension strongly indicates a type)
+  if (mediaUrl) {
       const ext = mediaUrl.split('.').pop().toLowerCase().split('?')[0]; // Handle query params
-      if (['mp4', '3gp', 'mov'].includes(ext)) {
+      if (['mp4', '3gp', 'mov', 'avi'].includes(ext)) {
           mediaType = 'video';
-      } else if (['pdf', 'doc', 'docx', 'ppt'].includes(ext)) {
+      } else if (['pdf', 'doc', 'docx', 'ppt', 'pptx'].includes(ext)) {
           mediaType = 'document';
+      } else if (['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext)) {
+          mediaType = 'image';
       }
   }
 
@@ -354,7 +359,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
   }
   
   console.log("\n================ TRAFFIC WATCHDOG (OUTGOING) ================");
-  console.log(`📡 SENDING TO META: ${to}`);
+  console.log(`📡 SENDING TO META: ${to} [Type: ${payload.type}]`);
   console.log(JSON.stringify(payload, null, 2));
   console.log("=============================================================\n");
 
@@ -514,9 +519,20 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                      replyText = nextStep.message;
                                      replyTemplate = nextStep.templateName;
                                      replyMedia = nextStep.mediaUrl;
+                                     
+                                     // Robust Media Type Detection
                                      if (nextStep.title === 'Video') replyMediaType = 'video';
                                      else if (nextStep.title === 'Image') replyMediaType = 'image';
                                      else if (nextStep.title === 'File') replyMediaType = 'document';
+                                     
+                                     // Fallback: If type not explicitly set by title, try extension
+                                     if (!replyMediaType && replyMedia) {
+                                         const ext = replyMedia.split('.').pop().toLowerCase();
+                                         if (['mp4', '3gp', 'mov'].includes(ext)) replyMediaType = 'video';
+                                         else if (['pdf', 'doc'].includes(ext)) replyMediaType = 'document';
+                                         else replyMediaType = 'image';
+                                     }
+
                                      if(nextStep.options && nextStep.options.length > 0) replyOptions = nextStep.options;
                                  } else {
                                      replyText = "Thank you.";
@@ -526,9 +542,19 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                              replyText = currentStep.message;
                              replyTemplate = currentStep.templateName;
                              replyMedia = currentStep.mediaUrl;
+                             
                              if (currentStep.title === 'Video') replyMediaType = 'video';
                              else if (currentStep.title === 'Image') replyMediaType = 'image';
                              else if (currentStep.title === 'File') replyMediaType = 'document';
+                             
+                             // Fallback detection
+                             if (!replyMediaType && replyMedia) {
+                                 const ext = replyMedia.split('.').pop().toLowerCase();
+                                 if (['mp4', '3gp', 'mov'].includes(ext)) replyMediaType = 'video';
+                                 else if (['pdf', 'doc'].includes(ext)) replyMediaType = 'document';
+                                 else replyMediaType = 'image';
+                             }
+
                              if(currentStep.options && currentStep.options.length > 0) replyOptions = currentStep.options;
                          }
                      }
@@ -828,9 +854,9 @@ app.post('/api/messages/send', async (req, res) => {
         
         if (text.startsWith('http') && (text.includes('s3.amazonaws.com') || text.includes('youtube'))) {
             mediaUrl = text;
-            const ext = text.split('.').pop().toLowerCase();
-            if (['mp4', 'mov', '3gp'].includes(ext)) mediaType = 'video';
-            if (['pdf', 'doc'].includes(ext)) mediaType = 'document';
+            const ext = text.split('.').pop().toLowerCase().split('?')[0];
+            if (['mp4', 'mov', '3gp', 'avi'].includes(ext)) mediaType = 'video';
+            if (['pdf', 'doc', 'docx'].includes(ext)) mediaType = 'document';
         }
 
         const sent = await sendWhatsAppMessage(
