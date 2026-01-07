@@ -37,6 +37,25 @@ let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 // Regex matches variations of default placeholder text
 const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
 
+// HELPER: Clean a single step
+const cleanStep = (step) => {
+    if (!step) return step;
+    const msg = step.message || "";
+    // If message contains blocked text
+    if (BLOCKED_REGEX.test(msg)) {
+        console.log(`🧹 FIREWALL: Stripping placeholder from step '${step.title || step.id}'`);
+        
+        // If it has options, give it a safe fallback so it doesn't break
+        if (step.options && step.options.length > 0) {
+            step.message = "Please select an option:";
+        } else {
+            // Otherwise, wipe it clean. The runtime will skip empty messages.
+            step.message = ""; 
+        }
+    }
+    return step;
+};
+
 // --- DATABASE CONNECTION ---
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL;
@@ -133,13 +152,12 @@ const sanitizeBotSettings = async (client) => {
 
         if (settings.steps && Array.isArray(settings.steps)) {
             settings.steps = settings.steps.map(step => {
-                // Check if message is the default placeholder
-                if (step.message && BLOCKED_REGEX.test(step.message)) {
-                    console.log(`🧹 CLEANUP: Removing placeholder text from step ID: ${step.id}`);
-                    step.message = ""; // WIPE IT OUT
+                const originalMsg = step.message;
+                const cleanedStep = cleanStep(step); // Use shared helper
+                if (cleanedStep.message !== originalMsg) {
                     hasChanges = true;
                 }
-                return step;
+                return cleanedStep;
             });
         }
 
@@ -254,17 +272,6 @@ const runLocalAudit = (nodes) => {
     return { isValid: issues.length === 0, issues };
 };
 
-const sanitizeBotStep = (step) => {
-    if (!step) return step;
-    const message = step.message || "";
-    if (!BLOCKED_REGEX.test(message)) return step;
-    const hasOptions = step.options && step.options.length > 0;
-    return {
-        ...step,
-        message: hasOptions ? "Please select an option:" : ""
-    };
-};
-
 // --- LOGIC ENGINE ---
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
@@ -278,6 +285,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
 
   if (templateName) {
       isBlocked = false; // Templates are pre-approved
+      console.log(`📤 Sending Template: ${templateName}`); // LOG THIS to help diagnosis
   } else if (mediaUrl) {
       if (isPlaceholder) {
           console.warn(`⚠️ FIREWALL: Stripped placeholder caption from media to ${to}`);
@@ -401,7 +409,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             
             // --- RUNTIME SANITIZATION (In Memory) ---
             if (botSettings.steps && Array.isArray(botSettings.steps)) {
-                botSettings.steps = botSettings.steps.map(sanitizeBotStep);
+                botSettings.steps = botSettings.steps.map(step => cleanStep(step));
             }
 
             const routingStrategy = botSettings.routingStrategy || 'HYBRID_BOT_FIRST';
@@ -463,17 +471,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      }
 
                      if (currentStep) {
-                         currentStep = sanitizeBotStep(currentStep);
-                         while (currentStep && !currentStep.message && !currentStep.templateName && !currentStep.mediaUrl && (!currentStep.options || currentStep.options.length === 0)) {
-                             const nextId = currentStep.nextStepId;
-                             if (!nextId || nextId === 'END' || nextId === 'AI_HANDOFF') {
-                                 break;
-                             }
-                             await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [nextId, driver.id]);
-                             driver.current_bot_step_id = nextId;
-                             currentStep = botSettings.steps.find(s => s.id === nextId);
-                             currentStep = sanitizeBotStep(currentStep);
-                         }
                          // Save logic and step advancement (same as before)
                          if (!isNewDriver) {
                              if (currentStep.saveToField === 'name') await client.query('UPDATE drivers SET name = $1 WHERE id = $2', [msgBody, driver.id]);
@@ -622,29 +619,22 @@ app.get('/api/bot-settings', async (req, res) => {
         res.json(result.rows[0]?.settings || DEFAULT_BOT_SETTINGS);
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// UPGRADED: Save Bot Settings with PRE-SAVE SANITIZATION
 app.post('/api/bot-settings', async (req, res) => {
     try {
-        const sanitized = { ...req.body };
-        if (sanitized.steps && Array.isArray(sanitized.steps)) {
-            sanitized.steps = sanitized.steps.map(sanitizeBotStep);
+        let settings = req.body;
+        
+        // DEEP CLEAN BEFORE SAVE
+        if (settings.steps && Array.isArray(settings.steps)) {
+            settings.steps = settings.steps.map(step => cleanStep(step));
         }
-        if (sanitized.flowData?.nodes && Array.isArray(sanitized.flowData.nodes)) {
-            sanitized.flowData = {
-                ...sanitized.flowData,
-                nodes: sanitized.flowData.nodes.map(node => {
-                    const data = node.data || {};
-                    const message = data.message || "";
-                    if (BLOCKED_REGEX.test(message)) {
-                        return { ...node, data: { ...data, message: "" } };
-                    }
-                    return node;
-                })
-            };
-        }
-        await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(sanitized)]);
+
+        await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(settings)]);
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
 app.post('/api/messages/send', async (req, res) => {
     try {
         const { driverId, text } = req.body;

@@ -45,16 +45,6 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
 // FIREWALL REGEX
 const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
 
-const sanitizeBotStep = (step: BotStep) => {
-  const message = step.message || '';
-  if (!BLOCKED_REGEX.test(message)) return step;
-  const hasOptions = step.options && step.options.length > 0;
-  return {
-    ...step,
-    message: hasOptions ? 'Please select an option:' : ''
-  };
-};
-
 // Initial Mock Data
 const MOCK_DRIVERS: Driver[] = [
   {
@@ -128,24 +118,7 @@ class MockBackendService {
   }
 
   updateBotSettings(settings: BotSettings) {
-    const sanitized = { ...settings };
-    if (sanitized.steps) {
-      sanitized.steps = sanitized.steps.map(sanitizeBotStep);
-    }
-    if (sanitized.flowData?.nodes) {
-      sanitized.flowData = {
-        ...sanitized.flowData,
-        nodes: sanitized.flowData.nodes.map(node => {
-          const data = node.data || {};
-          const message = data.message || '';
-          if (BLOCKED_REGEX.test(message)) {
-            return { ...node, data: { ...data, message: '' } };
-          }
-          return node;
-        })
-      };
-    }
-    this.botSettings = sanitized;
+    this.botSettings = settings;
     this.persist();
   }
 
@@ -196,7 +169,14 @@ class MockBackendService {
 
     // --- MOCK SANITIZATION ---
     if (settings.steps) {
-        settings.steps = settings.steps.map(sanitizeBotStep);
+        settings.steps = settings.steps.map(s => {
+             const m = s.message || "";
+             if (BLOCKED_REGEX.test(m)) {
+                 if (s.options && s.options.length > 0) s.message = "Please select an option:";
+                 else s.message = ""; 
+             }
+             return s;
+        });
     }
 
     if (!driver) {
@@ -251,16 +231,6 @@ class MockBackendService {
         }
         
         if (currentStep) {
-          currentStep = sanitizeBotStep(currentStep);
-          while (currentStep && !currentStep.message && !currentStep.templateName && !currentStep.mediaUrl && (!currentStep.options || currentStep.options.length === 0)) {
-            const nextId = currentStep.nextStepId;
-            if (!nextId || nextId === 'END' || nextId === 'AI_HANDOFF') {
-              break;
-            }
-            driver.currentBotStepId = nextId;
-            currentStep = settings.steps.find(s => s.id === nextId);
-            currentStep = sanitizeBotStep(currentStep);
-          }
           if (!isNew) { 
               if (currentStep.saveToField === 'name') driver.name = text;
               if (currentStep.saveToField === 'availability') driver.availability = text as any;
@@ -293,10 +263,7 @@ class MockBackendService {
               }
           }
 
-          let nextStep = settings.steps.find(s => s.id === driver.currentBotStepId);
-          if (nextStep) {
-              nextStep = sanitizeBotStep(nextStep);
-          }
+          const nextStep = settings.steps.find(s => s.id === driver.currentBotStepId);
           if (nextStep) {
               const safeText = nextStep.message || (nextStep.options?.length ? "Select Option:" : "");
               if (!safeText && !nextStep.mediaUrl && !nextStep.templateName) {
