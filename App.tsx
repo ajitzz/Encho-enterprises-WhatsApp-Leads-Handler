@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { Layout } from './components/Layout';
 import { LeadTable } from './components/LeadTable';
@@ -8,6 +9,7 @@ import { NotificationToast } from './components/NotificationToast';
 import { BotBuilder } from './components/BotBuilder';
 import { AITraining } from './components/AITraining';
 import { AssistantChat } from './components/AssistantChat';
+import { MediaLibrary } from './components/MediaLibrary';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
 import { Driver, LeadStatus, Notification, BotSettings, Message } from './types';
@@ -165,11 +167,14 @@ export default function App() {
   };
 
   const handleSendWelcome = (driver: Driver) => {
+    // S3 URL PLACEHOLDER - In a real scenario, this would come from the Media Library
+    const welcomeVideoUrl = "https://your-s3-bucket.s3.amazonaws.com/welcome-video.mp4"; 
+    
     if (dataSource === 'mock') {
         const msg = {
           id: Date.now().toString(),
           sender: 'system' as const,
-          text: 'https://youtube.com/shorts/welcome-video',
+          text: welcomeVideoUrl,
           timestamp: Date.now(),
           type: 'video_link' as const
         };
@@ -181,7 +186,7 @@ export default function App() {
           message: `Onboarding initiated for ${driver.name}`
         });
     } else {
-         handleSendMessage('https://youtube.com/shorts/welcome-video');
+         handleSendMessage(welcomeVideoUrl);
          addNotification({
             type: 'success',
             title: 'Welcome Video Sent',
@@ -388,6 +393,9 @@ export default function App() {
           </div>
         </div>
         )}
+
+        {/* VIEW: MEDIA LIBRARY (New) */}
+        {activeTab === 'media-library' && <MediaLibrary />}
 
         {/* VIEW: BOT STUDIO */}
         {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}

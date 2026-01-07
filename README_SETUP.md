@@ -1,6 +1,19 @@
+
 # WhatsApp API Integration Setup
 
 To make the automation work, you must connect your local computer to the Internet so Meta (Facebook) can send you messages.
+
+### 🛑 CRITICAL: Disable "Replace this sample message"
+
+If you see a default "Replace this sample message" reply, it is coming from **Meta Business Suite Automations**, not your code.
+
+1.  Go to **[Meta Business Suite](https://business.facebook.com)**.
+2.  Make sure your **Business Account** is selected in the top-left dropdown.
+3.  Click **Inbox** on the left sidebar.
+4.  Look at the top-right of the Inbox page. Click the **"Automations" icon** (✨ looks like a sparkle or an atom).
+5.  Click **Instant Reply**. Toggle it **OFF**.
+6.  Click **Away Message**. Toggle it **OFF**.
+7.  Check **Frequently Asked Questions**. Toggle it **OFF**.
 
 ### 1. Meta Developer Account
 1. Go to [developers.facebook.com](https://developers.facebook.com).

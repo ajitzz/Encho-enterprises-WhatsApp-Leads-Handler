@@ -1,4 +1,5 @@
 
+
 import { Driver, BotSettings } from '../types';
 
 const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -106,6 +107,25 @@ export const liveApiService = {
           body: JSON.stringify(updates)
       });
       if (!response.ok) throw new Error('Failed to update driver');
+      return await response.json();
+  },
+
+  // --- S3 MEDIA UPLOAD ---
+  uploadMedia: async (file: File) => {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/upload`, {
+          method: 'POST',
+          body: formData
+      });
+      if (!response.ok) throw new Error('Upload Failed');
+      return await response.json(); // Returns { url: string, type: string }
+  },
+
+  getMediaLibrary: async () => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/media`);
+      if (!response.ok) throw new Error('Failed to fetch media');
       return await response.json();
   },
 

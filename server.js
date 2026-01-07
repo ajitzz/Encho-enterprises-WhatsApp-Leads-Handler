@@ -11,6 +11,8 @@ const { Pool } = require('pg');
 const { GoogleGenAI } = require('@google/genai');
 const fs = require('fs'); 
 const path = require('path'); 
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const multer = require('multer');
 require('dotenv').config();
 
 const app = express();
@@ -32,6 +34,17 @@ let META_API_TOKEN = process.env.META_API_TOKEN || "EAAkr7Y9S2qYBQfHTNZASIugAzOi
 let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "982841698238647"; 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0";
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
+
+// AWS S3 Config
+const s3Client = new S3Client({
+    region: process.env.AWS_REGION || 'us-east-1',
+    credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || ''
+    }
+});
+const BUCKET_NAME = process.env.AWS_BUCKET_NAME || '';
+const upload = multer({ storage: multer.memoryStorage() });
 
 // --- SECURITY: CONTENT FIREWALL ---
 const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
@@ -127,6 +140,13 @@ const SCHEMA_SQL = `
         id INT PRIMARY KEY DEFAULT 1,
         settings JSONB
     );
+    CREATE TABLE IF NOT EXISTS media_files (
+        id VARCHAR(255) PRIMARY KEY,
+        url TEXT NOT NULL,
+        filename TEXT,
+        type VARCHAR(50),
+        uploaded_at BIGINT
+    );
 `;
 
 const DEFAULT_BOT_SETTINGS = {
@@ -144,8 +164,13 @@ const sanitizeBotSettings = async (client) => {
 
         let settings = res.rows[0].settings;
         let hasChanges = false;
-
+        
+        console.log("----- STARTUP INSPECTION: BOT SETTINGS FROM DB -----");
         if (settings.steps && Array.isArray(settings.steps)) {
+            settings.steps.forEach(s => {
+                console.log(`Step ${s.id}: "${s.message?.substring(0, 30)}..." [Template: ${s.templateName || 'None'}]`);
+            });
+
             settings.steps = settings.steps.map(step => {
                 const originalMsg = step.message;
                 const cleanedStep = cleanStep(step); // Use shared helper
@@ -155,10 +180,11 @@ const sanitizeBotSettings = async (client) => {
                 return cleanedStep;
             });
         }
+        console.log("----------------------------------------------------");
 
         if (hasChanges) {
             await client.query('UPDATE bot_settings SET settings = $1 WHERE id = 1', [JSON.stringify(settings)]);
-            console.log("✅ DATABASE SANITIZED: Placeholder texts removed.");
+            console.log("✅ DATABASE SANITIZED ON STARTUP: Placeholder texts removed.");
         }
     } catch (e) {
         console.error("Sanitization failed:", e);
@@ -201,6 +227,16 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
   
+  // Auto-detect Media Type from URL Extension if not explicitly provided
+  if (mediaUrl && mediaType === 'image') { // Default was image
+      const ext = mediaUrl.split('.').pop().toLowerCase().split('?')[0]; // Handle query params
+      if (['mp4', '3gp', 'mov'].includes(ext)) {
+          mediaType = 'video';
+      } else if (['pdf', 'doc', 'docx', 'ppt'].includes(ext)) {
+          mediaType = 'document';
+      }
+  }
+
   // --- CONTENT FIREWALL ---
   const lowerBody = body ? body.toLowerCase() : "";
   const isPlaceholder = BLOCKED_REGEX.test(lowerBody);
@@ -221,7 +257,6 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
                console.warn(`⚠️ FIREWALL: Auto-fixing placeholder for ${to}. Replaced with 'Please select an option:'`);
                body = "Please select an option:";
            } else {
-               console.error(`⛔ FIREWALL: Blocked Restricted Phrase: "${body}"`);
                isBlocked = true;
            }
       } else if (isEmpty) {
@@ -229,13 +264,17 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
               console.log("⚠️ FIREWALL: Fixed Empty Body for Options Message");
               body = "Please select an option:";
           } else {
-              console.error(`⛔ FIREWALL: Blocked Empty Message to ${to}`);
               isBlocked = true;
           }
       }
   }
 
-  if (isBlocked) return false;
+  if (isBlocked) {
+      console.log("\n================ TRAFFIC WATCHDOG (BLOCKED) ================");
+      console.log(`⛔ BLOCKED SUSPICIOUS MESSAGE TO: ${to}`);
+      console.log(`CONTENT: "${body}"`);
+      return false;
+  }
 
   let payload = { messaging_product: 'whatsapp', to: to };
   
@@ -244,13 +283,21 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
     payload.template = { name: templateName, language: { code: language } };
   } else if (mediaUrl) {
     const isYouTube = mediaUrl.includes('youtube.com') || mediaUrl.includes('youtu.be');
+    
+    // YOUTUBE SPECIAL CASE: Send as text preview link
     if (isYouTube) {
         payload.type = 'text';
         payload.text = { body: body ? `${body} ${mediaUrl}` : mediaUrl, preview_url: true };
-    } else {
+    } 
+    // AWS S3 / DIRECT FILE CASE: Send as Native Media
+    else {
         payload.type = mediaType;
         payload[mediaType] = { link: mediaUrl };
-        if (body && body.trim().length > 0) payload[mediaType].caption = body; 
+        if (body && body.trim().length > 0) payload[mediaType].caption = body;
+        // Document requires filename
+        if (mediaType === 'document') {
+             payload[mediaType].filename = mediaUrl.split('/').pop();
+        }
     }
   } else if (options && options.length > 0) {
     const validOptions = options.filter(o => o && o.trim().length > 0);
@@ -285,11 +332,10 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
     payload.text = { body: body };
   }
   
-  // --- TRAFFIC WATCHDOG LOGGING ---
-  console.log("\n================ TRAFFIC WATCHDOG ================");
+  console.log("\n================ TRAFFIC WATCHDOG (OUTGOING) ================");
   console.log(`📡 SENDING TO META: ${to}`);
   console.log(JSON.stringify(payload, null, 2));
-  console.log("==================================================\n");
+  console.log("=============================================================\n");
 
   try {
     await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, payload, { headers: { Authorization: `Bearer ${META_API_TOKEN}` } });
@@ -336,7 +382,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             const settingsRes = await client.query('SELECT settings FROM bot_settings WHERE id = 1');
             let botSettings = settingsRes.rows[0]?.settings || DEFAULT_BOT_SETTINGS;
             
-            // --- RUNTIME SANITIZATION (In Memory) ---
             if (botSettings.steps && Array.isArray(botSettings.steps)) {
                 botSettings.steps = botSettings.steps.map(step => cleanStep(step));
             }
@@ -376,7 +421,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                 shouldCallAI = true;
             } 
             else if (botSettings.isEnabled) {
-                 // AUTO-ACTIVATE BOT IF STRATEGY DEMANDS
                  if (!driver.is_bot_active) {
                      if (routingStrategy === 'BOT_ONLY' || routingStrategy === 'HYBRID_BOT_FIRST') {
                          const firstStepId = botSettings.steps?.[0]?.id;
@@ -392,7 +436,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                  if (driver.is_bot_active && driver.current_bot_step_id) {
                      let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
                      
-                     // AUTO-HEAL: If driver is stuck on a step that doesn't exist
                      if (!currentStep && botSettings.steps.length > 0) {
                          const firstStepId = botSettings.steps[0].id;
                          await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
@@ -402,7 +445,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      }
 
                      if (currentStep) {
-                         currentStepId = currentStep.id; // For Debug Tagging
+                         currentStepId = currentStep.id; 
 
                          if (!isNewDriver) {
                              if (currentStep.saveToField === 'name') await client.query('UPDATE drivers SET name = $1 WHERE id = $2', [msgBody, driver.id]);
@@ -502,67 +545,52 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 };
 
 // --- ROUTES ---
-app.post('/api/admin/audit-flow', async (req, res) => {
-    try {
-        const { nodes } = req.body;
-        console.log(`🕵️ [AI AUDIT] Request received for ${nodes?.length} nodes...`);
-        
-        if (!nodes || nodes.length === 0) return res.json({ isValid: true, issues: [] });
+app.post('/api/upload', upload.single('file'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    
+    // Safety check for S3 credentials
+    if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY || !process.env.AWS_BUCKET_NAME) {
+        return res.status(503).json({ error: 'AWS S3 is not configured on the server.' });
+    }
 
-        // Add Logic to detect Ghost Templates (templates in data but maybe not visible)
-        const ghostIssues = [];
-        nodes.forEach(n => {
-            if (n.data.templateName && n.data.templateName.length > 0) {
-                 // Check if it's a known placeholder
-                 if (['hello_world', 'sample_flight_confirmation'].includes(n.data.templateName)) {
-                     ghostIssues.push({
-                         nodeId: n.id,
-                         severity: 'WARNING',
-                         issue: 'Sample Template Detected',
-                         suggestion: `Node '${n.data.label}' is using a default Meta template: ${n.data.templateName}`,
-                         autoFixValue: null
-                     });
-                 }
-            }
+    const fileType = req.file.mimetype.split('/')[0]; // 'image' or 'video'
+    const folder = fileType === 'video' ? 'videos' : (fileType === 'image' ? 'images' : 'documents');
+    const filename = `${folder}/${Date.now()}-${req.file.originalname.replace(/\s+/g, '_')}`;
+
+    try {
+        const command = new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: filename,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype,
+            // ACL: 'public-read' // Note: Check your S3 Bucket Policy to ensure public access is allowed
         });
 
-        // ... Existing AI Logic ...
-        res.json({ isValid: ghostIssues.length === 0, issues: ghostIssues });
+        await s3Client.send(command);
         
-    } catch (e) {
-        res.status(500).json({ error: e.message });
+        // Construct Public URL (Assuming standard S3 public access)
+        const publicUrl = `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${filename}`;
+        
+        // Store in Database for "Library" access
+        await queryWithRetry(
+            `INSERT INTO media_files (id, url, filename, type, uploaded_at) VALUES ($1, $2, $3, $4, $5)`,
+            [Date.now().toString(), publicUrl, req.file.originalname, fileType, Date.now()]
+        );
+
+        res.json({ url: publicUrl, type: fileType });
+    } catch (err) {
+        console.error("S3 Upload Error:", err);
+        res.status(500).json({ error: 'Failed to upload to S3', details: err.message });
     }
 });
 
-// Standard Routes
-app.get('/api/health', async (req, res) => {
-    try { await queryWithRetry('SELECT 1'); res.json({ status: 'healthy' }); } catch (e) { res.status(500).json({ error: e.message }); }
-});
-app.get('/api/drivers', async (req, res) => {
+app.get('/api/media', async (req, res) => {
     try {
-        const result = await queryWithRetry(`SELECT * FROM drivers ORDER BY last_message_time DESC`);
+        const result = await queryWithRetry('SELECT * FROM media_files ORDER BY uploaded_at DESC');
         res.json(result.rows);
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-app.get('/api/bot-settings', async (req, res) => {
-    try {
-        const result = await queryWithRetry('SELECT * FROM bot_settings WHERE id = 1');
-        res.json(result.rows[0]?.settings || DEFAULT_BOT_SETTINGS);
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/bot-settings', async (req, res) => {
-    try {
-        let settings = req.body;
-        
-        // DEEP CLEAN BEFORE SAVE
-        if (settings.steps && Array.isArray(settings.steps)) {
-            settings.steps = settings.steps.map(step => cleanStep(step));
-        }
-
-        await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(settings)]);
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.post('/api/messages/send', async (req, res) => {
@@ -570,18 +598,63 @@ app.post('/api/messages/send', async (req, res) => {
         const { driverId, text } = req.body;
         const driverRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
         if (driverRes.rows.length === 0) return res.status(404).json({ error: 'Driver not found' });
-        const sent = await sendWhatsAppMessage(driverRes.rows[0].phone_number, text);
+        
+        // Check if text is a Media URL from our S3
+        let mediaUrl = null;
+        let mediaType = 'image';
+        
+        if (text.startsWith('http') && (text.includes('s3.amazonaws.com') || text.includes('youtube'))) {
+            mediaUrl = text;
+            const ext = text.split('.').pop().toLowerCase();
+            if (['mp4', 'mov', '3gp'].includes(ext)) mediaType = 'video';
+            if (['pdf', 'doc'].includes(ext)) mediaType = 'document';
+        }
+
+        const sent = await sendWhatsAppMessage(
+            driverRes.rows[0].phone_number, 
+            mediaUrl ? "" : text, // Caption is empty if just media, or text if message
+            null, 
+            null, 
+            'en_US', 
+            mediaUrl, 
+            mediaType
+        );
+
         if (!sent) return res.status(400).json({ error: 'Message blocked by firewall' });
-        await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'agent', $3, $4, 'text')`, [Date.now().toString(), driverId, text, Date.now()]);
-        await queryWithRetry(`UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3`, [text, Date.now(), driverId]);
+        
+        await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type, image_url) VALUES ($1, $2, 'agent', $3, $4, $5, $6)`, 
+            [Date.now().toString(), driverId, mediaUrl ? '' : text, Date.now(), mediaUrl ? 'image' : 'text', mediaUrl]
+        );
+        await queryWithRetry(`UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3`, [mediaUrl ? '[Media Sent]' : text, Date.now(), driverId]);
+        
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/webhook', (req, res) => {
-    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) res.send(req.query['hub.challenge']);
-    else res.sendStatus(403);
+// ... Existing Routes ...
+app.post('/api/admin/audit-flow', async (req, res) => {
+    try {
+        const { nodes } = req.body;
+        console.log(`🕵️ [AI AUDIT] Request received for ${nodes?.length} nodes...`);
+        if (!nodes || nodes.length === 0) return res.json({ isValid: true, issues: [] });
+        const ghostIssues = [];
+        nodes.forEach(n => {
+            if (n.data.templateName && n.data.templateName.length > 0) {
+                 if (['hello_world', 'sample_flight_confirmation'].includes(n.data.templateName)) {
+                     ghostIssues.push({ nodeId: n.id, severity: 'WARNING', issue: 'Sample Template Detected', suggestion: `Node '${n.data.label}' is using a default Meta template: ${n.data.templateName}`, autoFixValue: null });
+                 }
+            }
+        });
+        res.json({ isValid: ghostIssues.length === 0, issues: ghostIssues });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+app.get('/api/health', async (req, res) => { try { await queryWithRetry('SELECT 1'); res.json({ status: 'healthy' }); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.get('/api/drivers', async (req, res) => { try { const result = await queryWithRetry(`SELECT * FROM drivers ORDER BY last_message_time DESC`); res.json(result.rows); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.get('/api/bot-settings', async (req, res) => { try { const result = await queryWithRetry('SELECT * FROM bot_settings WHERE id = 1'); res.json(result.rows[0]?.settings || DEFAULT_BOT_SETTINGS); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.post('/api/bot-settings', async (req, res) => { try { let settings = req.body; if (settings.steps && Array.isArray(settings.steps)) { settings.steps = settings.steps.map(step => cleanStep(step)); } await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(settings)]); res.json({ success: true }); } catch (e) { res.status(500).json({ error: e.message }); } });
+
+app.get('/webhook', (req, res) => { if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) res.send(req.query['hub.challenge']); else res.sendStatus(403); });
 app.post('/webhook', async (req, res) => {
     const body = req.body;
     if (body.object && body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {

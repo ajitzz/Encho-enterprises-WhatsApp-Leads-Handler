@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { 
   LayoutDashboard, 
@@ -7,7 +8,8 @@ import {
   Car,
   Users,
   Bot,
-  Sparkles
+  Sparkles,
+  Cloud
 } from 'lucide-react';
 
 interface LayoutProps {
@@ -54,6 +56,18 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
           >
             <Users size={20} />
             Lead Management
+          </button>
+
+          <button
+            onClick={() => onTabChange('media-library')}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
+              activeTab === 'media-library' 
+                ? 'bg-white text-black font-medium' 
+                : 'text-gray-400 hover:bg-gray-900 hover:text-white'
+            }`}
+          >
+            <Cloud size={20} />
+            Media Library (S3)
           </button>
           
           <div className="pt-4 pb-2">
