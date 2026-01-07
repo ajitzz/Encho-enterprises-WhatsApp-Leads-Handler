@@ -230,6 +230,13 @@ const ensureDatabaseInitialized = async (client) => {
 // --- AI ENGINE ---
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
+// --- HELPER: S3 KEY GEN ---
+const getS3FolderPrefix = (parentPath) => {
+    // Converts "/marketing" to "marketing/" and "/" to ""
+    if (!parentPath || parentPath === '/') return '';
+    return parentPath.replace(/^\//, '') + '/';
+};
+
 // --- LOGIC ENGINE ---
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
@@ -553,37 +560,73 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
 // --- ROUTES ---
 
-// Create Folder
+// Create Folder (Now Syncs with S3)
 app.post('/api/folders', async (req, res) => {
     try {
         const { name, parentPath } = req.body;
         const id = Date.now().toString() + Math.random().toString(36).substr(2, 5);
+        
+        // 1. Create DB Record
         await queryWithRetry(
             `INSERT INTO media_folders (id, name, parent_path) VALUES ($1, $2, $3)`,
             [id, name, parentPath]
         );
+        
+        // 2. Create S3 "Folder" (0-byte object with trailing slash)
+        if (process.env.AWS_BUCKET_NAME) {
+            try {
+                const parentPrefix = getS3FolderPrefix(parentPath);
+                const folderKey = `${parentPrefix}${name}/`;
+                
+                await s3Client.send(new PutObjectCommand({
+                    Bucket: BUCKET_NAME,
+                    Key: folderKey,
+                    Body: '', // Empty body for folder placeholder
+                }));
+                console.log(`✅ S3 Folder Created: ${folderKey}`);
+            } catch (s3Err) {
+                console.error("⚠️ S3 Folder Creation Error:", s3Err);
+                // Continue despite S3 error to maintain DB consistency, or rollback? 
+                // For now, allow DB success even if S3 fails slightly (resilience).
+            }
+        }
+
         res.json({ success: true, id });
     } catch(e) {
         res.status(500).json({ error: e.message });
     }
 });
 
+// Delete Folder (Now Syncs with S3)
 app.delete('/api/folders/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        // Check if folder is empty (no subfolders, no files)
+        
+        // 1. Get folder details
         const folderRes = await queryWithRetry('SELECT * FROM media_folders WHERE id = $1', [id]);
         if (folderRes.rows.length === 0) return res.status(404).json({ error: 'Folder not found' });
         
-        const folderName = folderRes.rows[0].name;
-        // Construct path check. NOTE: This simple check assumes unique names per level or relies on ID. 
-        // Real implementation would need full path resolution.
-        // For now, we allow deletion only if NO files link to this folder ID? 
-        // Actually, the DB stores `folder_path`. We need to construct the path of the folder being deleted to check files.
-        // However, to keep it simple as requested (focus on file deletion), we will just delete the folder record if user requests.
-        // WARN: This leaves orphaned files if not careful.
+        const folder = folderRes.rows[0];
         
+        // 2. Delete from DB
         await queryWithRetry('DELETE FROM media_folders WHERE id = $1', [id]);
+        
+        // 3. Delete from S3
+        if (process.env.AWS_BUCKET_NAME) {
+             try {
+                const parentPrefix = getS3FolderPrefix(folder.parent_path);
+                const folderKey = `${parentPrefix}${folder.name}/`;
+                
+                await s3Client.send(new DeleteObjectCommand({
+                    Bucket: BUCKET_NAME,
+                    Key: folderKey
+                }));
+                console.log(`✅ S3 Folder Deleted: ${folderKey}`);
+             } catch (s3Err) {
+                 console.error("⚠️ S3 Folder Deletion Error:", s3Err);
+             }
+        }
+
         res.json({ success: true });
     } catch(e) {
         res.status(500).json({ error: e.message });
