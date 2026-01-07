@@ -11,7 +11,7 @@ const { Pool } = require('pg');
 const { GoogleGenAI } = require('@google/genai');
 const fs = require('fs'); 
 const path = require('path'); 
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const multer = require('multer');
 require('dotenv').config();
@@ -235,94 +235,116 @@ const getMimeType = (filename) => {
 };
 
 // --- CORE MEDIA SYNC ENGINE ---
-// In-Memory Lock to prevent redundant S3 downloads during race conditions
-const activeSyncs = new Set();
+// Promise-based Lock for Request Coalescing
+// This prevents double-downloads while allowing concurrent callers to wait for the same result.
+const activeSyncs = new Map(); // Map<fileId, Promise<string>>
 
 const performWhatsAppSync = async (fileId) => {
+    // 1. Check if sync is already in progress
     if (activeSyncs.has(fileId)) {
-        console.log(`🔒 SYNC LOCKED: ${fileId} is already syncing.`);
-        return null;
+        console.log(`🔒 SYNC JOINED: Waiting for existing sync of ${fileId}...`);
+        return activeSyncs.get(fileId);
     }
-    
-    activeSyncs.add(fileId);
 
-    try {
-        const fileRes = await queryWithRetry('SELECT * FROM media_files WHERE id = $1', [fileId]);
-        if (fileRes.rows.length === 0) throw new Error('File not found');
-        
-        const file = fileRes.rows[0];
-        
-        // 1. DATABASE CACHE CHECK
-        const cacheRes = await queryWithRetry('SELECT media_id, expires_at FROM whatsapp_media_cache WHERE s3_url = $1', [file.url]);
-        if (cacheRes.rows.length > 0) {
-            const cached = cacheRes.rows[0];
-            const now = Date.now();
-            const SAFE_BUFFER_MS = 24 * 60 * 60 * 1000; 
+    // 2. Create the sync promise
+    const syncPromise = (async () => {
+        try {
+            const fileRes = await queryWithRetry('SELECT * FROM media_files WHERE id = $1', [fileId]);
+            if (fileRes.rows.length === 0) throw new Error('File not found');
+            
+            const file = fileRes.rows[0];
+            
+            // CACHE CHECK
+            const cacheRes = await queryWithRetry('SELECT media_id, expires_at FROM whatsapp_media_cache WHERE s3_url = $1', [file.url]);
+            if (cacheRes.rows.length > 0) {
+                const cached = cacheRes.rows[0];
+                const now = Date.now();
+                const SAFE_BUFFER_MS = 24 * 60 * 60 * 1000; 
 
-            if (cached.expires_at && parseInt(cached.expires_at) > (now + SAFE_BUFFER_MS)) {
-                console.log(`⚡ SMART CACHE: Found valid Media ID ${cached.media_id}.`);
-                return cached.media_id;
+                if (cached.expires_at && parseInt(cached.expires_at) > (now + SAFE_BUFFER_MS)) {
+                    console.log(`⚡ SMART CACHE: Found valid Media ID ${cached.media_id}.`);
+                    return cached.media_id;
+                }
             }
+
+            let mediaType = getMimeType(file.filename);
+            if (mediaType === 'application/octet-stream' && file.type === 'video') mediaType = 'video/mp4';
+            if (mediaType === 'application/octet-stream' && file.type === 'image') mediaType = 'image/jpeg';
+
+            console.log(`🔄 STARTING TRANSFER: S3 -> WhatsApp for ${file.filename} (${mediaType})...`);
+            
+            // DOWNLOAD (Handle S3 vs Public)
+            // If S3 bucket is private, we must sign the URL first, or use GetObjectCommand. 
+            // Here we use axios on the stored URL. If that fails, we try signing it.
+            let buffer;
+            try {
+                const s3Response = await axios({
+                    url: file.url,
+                    method: 'GET',
+                    responseType: 'arraybuffer'
+                });
+                buffer = s3Response.data;
+            } catch (err) {
+                 if (err.response && err.response.status === 403) {
+                     console.log("⚠️ Private Bucket detected. Generating Signed URL for download...");
+                     // Extract Key from URL
+                     // URL format: https://BUCKET.s3.REGION.amazonaws.com/KEY
+                     const urlObj = new URL(file.url);
+                     const key = urlObj.pathname.substring(1); // Remove leading slash
+                     const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key });
+                     const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 600 });
+                     
+                     const retryRes = await axios({ url: signedUrl, method: 'GET', responseType: 'arraybuffer' });
+                     buffer = retryRes.data;
+                 } else {
+                     throw err;
+                 }
+            }
+
+            // SIZE CHECK (Meta Limit: 16MB for this endpoint)
+            if (buffer.length > 16 * 1024 * 1024) {
+                console.warn(`⚠️ FILE TOO LARGE: ${file.filename} is ${(buffer.length / 1024 / 1024).toFixed(2)}MB. Limit is 16MB. Skipping Sync (Using Link Fallback).`);
+                return null; // Return null to trigger fallback
+            }
+
+            // UPLOAD TO META
+            const formData = new FormData();
+            const blob = new Blob([buffer], { type: mediaType });
+            formData.append('file', blob, file.filename);
+            formData.append('messaging_product', 'whatsapp');
+
+            const metaRes = await fetch(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/media`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${META_API_TOKEN}` },
+                body: formData
+            });
+
+            if (!metaRes.ok) {
+                const errText = await metaRes.text();
+                throw new Error(`Meta API Error: ${errText}`);
+            }
+
+            const metaData = await metaRes.json();
+            const mediaId = metaData.id;
+
+            // UPDATE CACHE
+            const expiresAt = Date.now() + (25 * 24 * 60 * 60 * 1000); 
+            await queryWithRetry(
+                `INSERT INTO whatsapp_media_cache (s3_url, media_id, created_at, expires_at) 
+                VALUES ($1, $2, $3, $4) 
+                ON CONFLICT (s3_url) DO UPDATE SET media_id = $2, created_at = $3, expires_at = $4`,
+                [file.url, mediaId, Date.now(), expiresAt]
+            );
+
+            console.log(`✅ TRANSFER COMPLETE: ${file.filename} -> ${mediaId}`);
+            return mediaId;
+        } finally {
+            activeSyncs.delete(fileId); // Cleanup map when done
         }
+    })();
 
-        // Determine correct MIME type from filename, fallback to stored type if generic
-        let mediaType = getMimeType(file.filename);
-        if (mediaType === 'application/octet-stream' && file.type === 'video') mediaType = 'video/mp4';
-        if (mediaType === 'application/octet-stream' && file.type === 'image') mediaType = 'image/jpeg';
-
-        console.log(`🔄 STARTING TRANSFER: S3 -> WhatsApp for ${file.filename} (${mediaType})...`);
-        
-        // 2. DOWNLOAD FROM S3
-        const s3Response = await axios({
-            url: file.url,
-            method: 'GET',
-            responseType: 'arraybuffer'
-        });
-
-        // 3. SIZE CHECK (Meta Limit: 16MB for this endpoint)
-        if (s3Response.data.length > 16 * 1024 * 1024) {
-             console.warn(`⚠️ FILE TOO LARGE: ${file.filename} is ${(s3Response.data.length / 1024 / 1024).toFixed(2)}MB. Limit is 16MB. Skipping Sync (Using Link Fallback).`);
-             return null;
-        }
-
-        // 4. UPLOAD TO META
-        const formData = new FormData();
-        const blob = new Blob([s3Response.data], { type: mediaType });
-        formData.append('file', blob, file.filename);
-        formData.append('messaging_product', 'whatsapp');
-
-        const metaRes = await fetch(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/media`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${META_API_TOKEN}` },
-            body: formData
-        });
-
-        if (!metaRes.ok) {
-            const errText = await metaRes.text();
-            throw new Error(`Meta API Error: ${errText}`);
-        }
-
-        const metaData = await metaRes.json();
-        const mediaId = metaData.id;
-
-        // 5. UPDATE CACHE
-        const expiresAt = Date.now() + (25 * 24 * 60 * 60 * 1000); 
-        await queryWithRetry(
-            `INSERT INTO whatsapp_media_cache (s3_url, media_id, created_at, expires_at) 
-             VALUES ($1, $2, $3, $4) 
-             ON CONFLICT (s3_url) DO UPDATE SET media_id = $2, created_at = $3, expires_at = $4`,
-            [file.url, mediaId, Date.now(), expiresAt]
-        );
-
-        console.log(`✅ TRANSFER COMPLETE: ${file.filename} -> ${mediaId}`);
-        return mediaId;
-    } catch (e) {
-        console.error("❌ SYNC FAILED:", e.message);
-        // Throwing ensures the caller knows sync failed and can try fallback
-        throw e;
-    } finally {
-        activeSyncs.delete(fileId);
-    }
+    activeSyncs.set(fileId, syncPromise);
+    return syncPromise;
 };
 
 // --- LOGIC ENGINE ---
@@ -356,12 +378,10 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
             try {
                 // 1. Check Cache
                 const cacheRes = await queryWithRetry('SELECT media_id, expires_at FROM whatsapp_media_cache WHERE s3_url = $1', [mediaUrl]);
-                
                 if (cacheRes.rows.length > 0) {
                     const cached = cacheRes.rows[0];
                     if (cached.expires_at && Date.now() < parseInt(cached.expires_at)) {
                         mediaId = cached.media_id;
-                        console.log(`⚡ FAST DELIVERY: Using Cached Media ID ${mediaId}`);
                     }
                 }
 
@@ -371,7 +391,6 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
                     const fileRes = await queryWithRetry('SELECT id FROM media_files WHERE url = $1', [mediaUrl]);
                     if (fileRes.rows.length > 0) {
                         const fileId = fileRes.rows[0].id;
-                        // Await sync. If it fails (e.g. size limit), it returns null/throws, triggering fallback
                         mediaId = await performWhatsAppSync(fileId); 
                     }
                 }
@@ -383,16 +402,30 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
                 // Use ID (Free Egress for subsequent sends)
                 payload[mediaType] = { id: mediaId };
             } else {
-                // FALLBACK: Use Link (Handles large files > 16MB that Sync skips)
+                // FALLBACK: Use Link
+                // CRITICAL: Generate a PRESIGNED URL if using fallback, in case the bucket is private.
+                // Meta cannot access private S3 URLs directly.
+                let finalLink = mediaUrl;
+                try {
+                     const urlObj = new URL(mediaUrl);
+                     // Check if it's an S3 URL
+                     if (urlObj.hostname.includes('s3') && urlObj.hostname.includes('amazonaws.com')) {
+                         const key = urlObj.pathname.substring(1);
+                         const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key });
+                         // Generate signed URL valid for 1 hour
+                         finalLink = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+                         console.log("🔐 Generated Signed URL for Fallback Delivery");
+                     }
+                } catch(e) { console.warn("Could not sign URL, using original:", e.message); }
+
                 console.warn("⚠️ FALLBACK: Using direct link for delivery.");
-                payload[mediaType] = { link: mediaUrl };
+                payload[mediaType] = { link: finalLink };
             }
             
             if (body && body.trim().length > 0) payload[mediaType].caption = body;
             if (mediaType === 'document') payload[mediaType].filename = mediaUrl.split('/').pop();
         }
       } else if (options && options.length > 0) {
-        // ... (Interactive button logic unchanged) ...
         const validOptions = options.filter(o => o && o.trim().length > 0);
         const safeBody = body || "Select an option:";
         if (validOptions.length > 3) {
@@ -706,7 +739,20 @@ app.post('/api/files/register', async (req, res) => {
 });
 
 app.delete('/api/files/:id', async (req, res) => { /* ... code ... */ res.json({ success: true }); });
-app.post('/api/messages/send', async (req, res) => { /* ... code ... */ res.json({ success: true }); });
+app.post('/api/messages/send', async (req, res) => { 
+    try {
+        const { driverId, text } = req.body;
+        const driverRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
+        if (driverRes.rows.length === 0) return res.status(404).json({ error: 'Driver not found' });
+        
+        const success = await sendWhatsAppMessage(driverRes.rows[0].phone_number, text);
+        if (!success) return res.status(500).json({ error: 'Failed to send message to Meta' });
+        
+        // Log manual message
+        await logSystemMessage(driverId, text, 'text');
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
 app.patch('/api/drivers/:id', async (req, res) => { /* ... code ... */ res.json({ success: true }); });
 app.get('/api/drivers', async (req, res) => { /* ... code ... */ res.json([]); });
 app.get('/api/bot-settings', async (req, res) => { /* ... code ... */ res.json({}); });
