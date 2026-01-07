@@ -285,7 +285,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
 
   if (templateName) {
       isBlocked = false; // Templates are pre-approved
-      console.log(`📤 Sending Template: ${templateName}`); // LOG THIS to help diagnosis
+      console.log(`📤 Sending Template: ${templateName}`); 
   } else if (mediaUrl) {
       if (isPlaceholder) {
           console.warn(`⚠️ FIREWALL: Stripped placeholder caption from media to ${to}`);
@@ -441,52 +441,64 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             let replyMedia = null;
             let replyMediaType = null;
             let shouldCallAI = false;
+            let currentStepId = null;
 
             if (botSettings.isEnabled && routingStrategy === 'AI_ONLY') {
                 shouldCallAI = true;
             } 
             else if (botSettings.isEnabled) {
+                 // AUTO-ACTIVATE BOT IF STRATEGY DEMANDS
                  if (!driver.is_bot_active) {
-                     if (routingStrategy === 'BOT_ONLY') {
+                     if (routingStrategy === 'BOT_ONLY' || routingStrategy === 'HYBRID_BOT_FIRST') {
                          const firstStepId = botSettings.steps?.[0]?.id;
                          if (firstStepId) {
                              await client.query('UPDATE drivers SET is_bot_active = TRUE, current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
                              driver.is_bot_active = true;
                              driver.current_bot_step_id = firstStepId;
+                             // Treat as new driver so we send the first step IMMEDIATELY instead of waiting for next user input
                              isNewDriver = true; 
                          }
-                     } else if (routingStrategy === 'HYBRID_BOT_FIRST') {
-                         shouldCallAI = true;
                      }
                  }
 
                  if (driver.is_bot_active && driver.current_bot_step_id) {
                      let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
+                     
+                     // AUTO-HEAL: If driver is stuck on a step that doesn't exist (e.g., flow edited), reset to start
                      if (!currentStep && botSettings.steps.length > 0) {
+                         console.log(`⚠️ AUTO-HEAL: Driver ${driver.id} stuck on invalid step '${driver.current_bot_step_id}'. Resetting to start.`);
                          const firstStepId = botSettings.steps[0].id;
                          await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
                          driver.current_bot_step_id = firstStepId;
                          currentStep = botSettings.steps[0];
-                         isNewDriver = true; 
+                         isNewDriver = true; // Force send welcome
                      }
 
                      if (currentStep) {
+                         currentStepId = currentStep.id; // For Debug Tagging
+
                          // Save logic and step advancement (same as before)
                          if (!isNewDriver) {
+                             // User replied to 'currentStep', so save data
                              if (currentStep.saveToField === 'name') await client.query('UPDATE drivers SET name = $1 WHERE id = $2', [msgBody, driver.id]);
                              if (currentStep.saveToField === 'availability') await client.query('UPDATE drivers SET availability = $1 WHERE id = $2', [msgBody, driver.id]);
                              if (currentStep.saveToField === 'vehicleRegistration') await client.query('UPDATE drivers SET vehicle_registration = $1 WHERE id = $2', [msgBody, driver.id]);
 
                              let nextId = currentStep.nextStepId;
+                             
+                             // If flow ends
                              if (nextId === 'AI_HANDOFF' || nextId === 'END' || !nextId) {
                                  await client.query('UPDATE drivers SET is_bot_active = FALSE, current_bot_step_id = NULL WHERE id = $1', [driver.id]);
                                  driver.is_bot_active = false; 
                                  if (nextId === 'AI_HANDOFF' && routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
                                  else replyText = "Thank you! We have received your details.";
                              } else {
+                                 // Advance to next step
                                  await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [nextId, driver.id]);
                                  const nextStep = botSettings.steps.find(s => s.id === nextId);
                                  if (nextStep) {
+                                     // PREPARE NEXT STEP MESSAGE
+                                     currentStepId = nextStep.id; // Update Debug ID for the *outgoing* message
                                      replyText = nextStep.message;
                                      replyTemplate = nextStep.templateName;
                                      replyMedia = nextStep.mediaUrl;
@@ -494,9 +506,13 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                      else if (nextStep.title === 'Image') replyMediaType = 'image';
                                      else if (nextStep.title === 'File') replyMediaType = 'document';
                                      if(nextStep.options && nextStep.options.length > 0) replyOptions = nextStep.options;
+                                 } else {
+                                     // Next step not found? End gracefully.
+                                     replyText = "Thank you.";
                                  }
                              }
                          } else {
+                             // New Driver: Just send the current (first) step
                              replyText = currentStep.message;
                              replyTemplate = currentStep.templateName;
                              replyMedia = currentStep.mediaUrl;
@@ -510,7 +526,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             }
             if (routingStrategy === 'BOT_ONLY') shouldCallAI = false; 
             await client.query('COMMIT');
-            result = { replyText, replyOptions, replyTemplate, replyMedia, replyMediaType, shouldCallAI, driver, botSettings };
+            result = { replyText, replyOptions, replyTemplate, replyMedia, replyMediaType, shouldCallAI, driver, botSettings, debugNodeId: currentStepId };
         } catch (err) {
             await client.query('ROLLBACK');
             if(err.code === '42P01') await ensureDatabaseInitialized(client);
@@ -522,7 +538,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         let sent = false;
         
         // CRITICAL CHECK: Do not send if text is empty/null AND no options/media/template
-        // This prevents the "Replace this sample message!" (if sanitized to "") from sending an empty bubble.
         const hasContent = (result.replyText && result.replyText.trim().length > 0) || 
                            (result.replyOptions && result.replyOptions.length > 0) ||
                            result.replyTemplate || 
@@ -531,15 +546,28 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         if (hasContent) {
             if (result.replyTemplate) {
                 sent = await sendWhatsAppMessage(from, null, null, result.replyTemplate);
-                if (sent) await logSystemMessage(result.driver.id, `[Template] ${result.replyTemplate}`, 'template');
+                if (sent) await logSystemMessage(result.driver.id, `[Template: ${result.replyTemplate}]`, 'template');
             } else if (result.replyMedia) {
-                sent = await sendWhatsAppMessage(from, result.replyText, null, null, 'en_US', result.replyMedia, result.replyMediaType);
-                if (sent) await logSystemMessage(result.driver.id, result.replyText || `[${result.replyMediaType}]`, 'image', null, result.replyMedia);
+                // DEBUG TRACE: Append Node ID to media caption if possible, or log it
+                let caption = result.replyText || "";
+                if (result.debugNodeId) caption += ` [Debug: Node ${result.debugNodeId}]`;
+
+                sent = await sendWhatsAppMessage(from, caption, null, null, 'en_US', result.replyMedia, result.replyMediaType);
+                if (sent) await logSystemMessage(result.driver.id, caption || `[${result.replyMediaType}]`, 'image', null, result.replyMedia);
             } else if (result.replyText || (result.replyOptions && result.replyOptions.length > 0)) {
-                // Double check sanitization happened
-                sent = await sendWhatsAppMessage(from, result.replyText, result.replyOptions);
+                // DEBUG TRACE: Append Node ID to Text
+                let finalText = result.replyText || "";
+                if (result.debugNodeId) {
+                    finalText += `\n\n[🔍 Debug: Node ${result.debugNodeId}]`;
+                }
+                // DEBUG TRACE: Catch the bad placeholder specifically
+                if (BLOCKED_REGEX.test(finalText)) {
+                    finalText += `\n\n[🚨 CRITICAL: Placeholder Detected from Node ${result.debugNodeId}]`;
+                }
+
+                sent = await sendWhatsAppMessage(from, finalText, result.replyOptions);
                 if (sent) {
-                    const loggedText = !result.replyText && result.replyOptions ? "Please select an option:" : result.replyText;
+                    const loggedText = !finalText && result.replyOptions ? "Please select an option:" : finalText;
                     await logSystemMessage(result.driver.id, loggedText, result.replyOptions ? 'options' : 'text', result.replyOptions);
                 }
             }
