@@ -34,6 +34,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
 // --- SECURITY: CONTENT FIREWALL ---
+// Regex matches variations of default placeholder text
 const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
 
 // --- DATABASE CONNECTION ---
@@ -121,6 +122,37 @@ const DEFAULT_BOT_SETTINGS = {
   steps: []
 };
 
+// --- DATA SANITIZATION ---
+const sanitizeBotSettings = async (client) => {
+    try {
+        const res = await client.query('SELECT settings FROM bot_settings WHERE id = 1');
+        if (res.rows.length === 0) return;
+
+        let settings = res.rows[0].settings;
+        let hasChanges = false;
+
+        if (settings.steps && Array.isArray(settings.steps)) {
+            settings.steps = settings.steps.map(step => {
+                // Check if message is the default placeholder
+                if (step.message && BLOCKED_REGEX.test(step.message)) {
+                    console.log(`🧹 CLEANUP: Removing placeholder text from step ID: ${step.id}`);
+                    step.message = ""; // WIPE IT OUT
+                    hasChanges = true;
+                }
+                return step;
+            });
+        }
+
+        // If we found bad data, save the clean version back to DB
+        if (hasChanges) {
+            await client.query('UPDATE bot_settings SET settings = $1 WHERE id = 1', [JSON.stringify(settings)]);
+            console.log("✅ DATABASE SANITIZED: Placeholder texts removed.");
+        }
+    } catch (e) {
+        console.error("Sanitization failed:", e);
+    }
+};
+
 const ensureDatabaseInitialized = async (client) => {
     try {
         await client.query('BEGIN');
@@ -140,7 +172,13 @@ const ensureDatabaseInitialized = async (client) => {
         if (settingsRes.rows.length === 0) {
             await client.query('INSERT INTO bot_settings (id, settings) VALUES (1, $1)', [JSON.stringify(DEFAULT_BOT_SETTINGS)]);
         }
+        
+        // Run sanitization inside the transaction context if needed, or after commit
         await client.query('COMMIT');
+        
+        // Run clean up immediately after init
+        await sanitizeBotSettings(client);
+
     } catch (e) {
         await client.query('ROLLBACK');
         console.error("Schema Init Failed:", e);
@@ -350,13 +388,13 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             const settingsRes = await client.query('SELECT settings FROM bot_settings WHERE id = 1');
             let botSettings = settingsRes.rows[0]?.settings || DEFAULT_BOT_SETTINGS;
             
-            // --- RUNTIME SANITIZATION ---
+            // --- RUNTIME SANITIZATION (In Memory) ---
             if (botSettings.steps && Array.isArray(botSettings.steps)) {
                 botSettings.steps = botSettings.steps.map(step => {
                     const msg = step.message || "";
                     if (BLOCKED_REGEX.test(msg)) {
                         if (step.options && step.options.length > 0) step.message = "Please select an option:";
-                        else step.message = ""; 
+                        else step.message = ""; // Empty string
                     }
                     return step;
                 });
@@ -470,19 +508,33 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         }
         
         let sent = false;
-        if (result.replyTemplate) {
-            sent = await sendWhatsAppMessage(from, null, null, result.replyTemplate);
-            if (sent) await logSystemMessage(result.driver.id, `[Template] ${result.replyTemplate}`, 'template');
-        } else if (result.replyMedia) {
-            sent = await sendWhatsAppMessage(from, result.replyText, null, null, 'en_US', result.replyMedia, result.replyMediaType);
-            if (sent) await logSystemMessage(result.driver.id, result.replyText || `[${result.replyMediaType}]`, 'image', null, result.replyMedia);
-        } else if (result.replyText || (result.replyOptions && result.replyOptions.length > 0)) {
-            sent = await sendWhatsAppMessage(from, result.replyText, result.replyOptions);
-            if (sent) {
-                const loggedText = !result.replyText && result.replyOptions ? "Please select an option:" : result.replyText;
-                await logSystemMessage(result.driver.id, loggedText, result.replyOptions ? 'options' : 'text', result.replyOptions);
+        
+        // CRITICAL CHECK: Do not send if text is empty/null AND no options/media/template
+        // This prevents the "Replace this sample message!" (if sanitized to "") from sending an empty bubble.
+        const hasContent = (result.replyText && result.replyText.trim().length > 0) || 
+                           (result.replyOptions && result.replyOptions.length > 0) ||
+                           result.replyTemplate || 
+                           result.replyMedia;
+
+        if (hasContent) {
+            if (result.replyTemplate) {
+                sent = await sendWhatsAppMessage(from, null, null, result.replyTemplate);
+                if (sent) await logSystemMessage(result.driver.id, `[Template] ${result.replyTemplate}`, 'template');
+            } else if (result.replyMedia) {
+                sent = await sendWhatsAppMessage(from, result.replyText, null, null, 'en_US', result.replyMedia, result.replyMediaType);
+                if (sent) await logSystemMessage(result.driver.id, result.replyText || `[${result.replyMediaType}]`, 'image', null, result.replyMedia);
+            } else if (result.replyText || (result.replyOptions && result.replyOptions.length > 0)) {
+                // Double check sanitization happened
+                sent = await sendWhatsAppMessage(from, result.replyText, result.replyOptions);
+                if (sent) {
+                    const loggedText = !result.replyText && result.replyOptions ? "Please select an option:" : result.replyText;
+                    await logSystemMessage(result.driver.id, loggedText, result.replyOptions ? 'options' : 'text', result.replyOptions);
+                }
             }
-        } else if (result.shouldCallAI) {
+        } 
+        
+        // Only call AI if NO bot step was matched/sent, or strategy dictates it
+        if (!sent && result.shouldCallAI) {
             const aiReply = await analyzeWithAI(msgBody, result.botSettings.systemInstruction);
             if (aiReply && aiReply.trim()) {
                 sent = await sendWhatsAppMessage(from, aiReply);
