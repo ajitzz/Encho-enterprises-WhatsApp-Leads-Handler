@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye } from 'lucide-react';
+import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye, Link as LinkIcon, ExternalLink, Share2 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface MediaFile {
@@ -38,6 +38,9 @@ export const MediaLibrary = () => {
 
     // CORS Help Modal
     const [showCorsHelp, setShowCorsHelp] = useState(false);
+
+    // Share Modal State
+    const [shareUrl, setShareUrl] = useState<string | null>(null);
 
     useEffect(() => {
         loadMedia(currentPath);
@@ -103,16 +106,30 @@ export const MediaLibrary = () => {
         }
     };
 
-    const handleSetPublic = async (folderId: string, folderName: string) => {
-        const confirm = window.confirm(`Set "${folderName}" as the Public Showcase folder?\n\nThis will instantly make its contents visible on the public showcase page.`);
-        if (!confirm) return;
-
-        try {
-            await liveApiService.setPublicFolder(folderId);
-            await loadMedia(currentPath);
-        } catch(e) {
-            alert("Failed to update public folder.");
+    const handleTogglePublic = async (folder: MediaFolder) => {
+        if (folder.is_public_showcase) {
+            // Toggle OFF
+            const confirm = window.confirm(`Stop showcasing "${folder.name}"?`);
+            if (!confirm) return;
+            try {
+                await liveApiService.unsetPublicFolder(folder.id);
+                await loadMedia(currentPath);
+            } catch(e) { alert("Failed to stop showcase"); }
+        } else {
+            // Toggle ON
+            const confirm = window.confirm(`Set "${folder.name}" as Public Showcase?`);
+            if (!confirm) return;
+            try {
+                await liveApiService.setPublicFolder(folder.id);
+                await loadMedia(currentPath);
+                setShareUrl(`${window.location.origin}/showcase`); // Auto-open share
+            } catch(e) { alert("Failed to start showcase"); }
         }
+    };
+
+    const handleOpenShare = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        setShareUrl(`${window.location.origin}/showcase`);
     };
 
     const handleCreateFolder = async (e: React.FormEvent) => {
@@ -285,13 +302,27 @@ export const MediaLibrary = () => {
                                 </div>
                                 
                                 <div className="w-full flex justify-between mt-1 pt-2 border-t border-gray-100">
-                                     <button
-                                        onClick={(e) => { e.stopPropagation(); handleSetPublic(folder.id, folder.name); }}
-                                        className={`p-1.5 rounded-full transition-colors ${folder.is_public_showcase ? 'text-green-600 bg-green-50' : 'text-gray-300 hover:text-green-600 hover:bg-green-50'}`}
-                                        title="Toggle Public Showcase"
-                                    >
-                                        <Globe size={14} />
-                                    </button>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={(e) => { e.stopPropagation(); handleTogglePublic(folder); }}
+                                            className={`p-1.5 rounded-full transition-colors flex items-center gap-1 ${folder.is_public_showcase ? 'text-green-600 bg-green-50 hover:bg-green-100' : 'text-gray-300 hover:text-green-600 hover:bg-green-50'}`}
+                                            title={folder.is_public_showcase ? "Stop Showcase (Turn Off)" : "Set as Public Showcase"}
+                                        >
+                                            <Globe size={14} />
+                                        </button>
+                                        
+                                        {/* Separate Share Button: Only visible if active */}
+                                        {folder.is_public_showcase && (
+                                            <button
+                                                onClick={handleOpenShare}
+                                                className="p-1.5 rounded-full transition-colors text-blue-500 bg-blue-50 hover:bg-blue-100"
+                                                title="Get Share Link"
+                                            >
+                                                <Share2 size={14} />
+                                            </button>
+                                        )}
+                                    </div>
+
                                     <button
                                         onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id, folder.name); }}
                                         className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
@@ -372,6 +403,45 @@ export const MediaLibrary = () => {
                                 <button type="submit" disabled={!newFolderName.trim() || isCreatingFolder} className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-2">{isCreatingFolder ? <Loader2 size={14} className="animate-spin" /> : 'Create'}</button>
                             </div>
                         </form>
+                    </div>
+                </div>
+            )}
+
+            {shareUrl && (
+                <div className="fixed inset-0 bg-black/50 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95">
+                        <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                            <h3 className="font-bold text-gray-900 flex items-center gap-2"><Globe size={18} className="text-green-600" /> Public Showcase Link</h3>
+                            <button onClick={() => setShareUrl(null)}><X size={20} className="text-gray-400" /></button>
+                        </div>
+                        <div className="p-6">
+                            <p className="text-sm text-gray-600 mb-4">Share this link with customers to showcase the contents of this folder in an immersive viewer.</p>
+                            
+                            <div className="flex items-center gap-2 p-2 bg-gray-100 rounded-lg border border-gray-200 mb-4">
+                                <LinkIcon size={16} className="text-gray-400 flex-shrink-0" />
+                                <input 
+                                    type="text" 
+                                    readOnly 
+                                    value={shareUrl} 
+                                    className="bg-transparent border-none text-sm text-gray-800 flex-1 outline-none truncate font-mono"
+                                />
+                                <button 
+                                    onClick={() => copyToClipboard(shareUrl)} 
+                                    className={`p-2 rounded-md transition-colors ${copiedId === shareUrl ? 'bg-green-100 text-green-700' : 'bg-white shadow-sm hover:bg-gray-50 text-gray-600'}`}
+                                >
+                                    {copiedId === shareUrl ? <Check size={16} /> : <Copy size={16} />}
+                                </button>
+                            </div>
+
+                            <a 
+                                href={shareUrl} 
+                                target="_blank" 
+                                rel="noreferrer"
+                                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded-lg flex items-center justify-center gap-2 transition-colors"
+                            >
+                                <ExternalLink size={16} /> Open Page
+                            </a>
+                        </div>
                     </div>
                 </div>
             )}

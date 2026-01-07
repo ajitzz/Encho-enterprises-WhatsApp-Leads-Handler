@@ -167,6 +167,14 @@ export const liveApiService = {
       return await response.json();
   },
 
+  unsetPublicFolder: async (folderId: string) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${folderId}/public`, {
+          method: 'DELETE'
+      });
+      if (!response.ok) throw new Error('Failed to unset public folder');
+      return await response.json();
+  },
+
   getPublicShowcase: async () => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/public/showcase`);
       if (!response.ok) throw new Error('Failed to fetch showcase');

@@ -695,6 +695,22 @@ app.post('/api/folders/:id/public', async (req, res) => {
     }
 });
 
+// NEW: Unset Public Folder (Toggle Off)
+app.delete('/api/folders/:id/public', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const client = await pool.connect();
+        try {
+            await client.query('UPDATE media_folders SET is_public_showcase = FALSE WHERE id = $1', [id]);
+            res.json({ success: true });
+        } finally {
+            client.release();
+        }
+    } catch(e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.post('/api/files/:id/sync', async (req, res) => {
     try {
         const { id } = req.params;
