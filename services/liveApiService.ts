@@ -1,6 +1,4 @@
-
-
-import { Driver, BotSettings, SystemHealth, AuditReport } from '../types';
+import { Driver, BotSettings } from '../types';
 
 const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 const API_BASE_URL = isLocal ? 'http://localhost:3001' : ''; 
@@ -130,40 +128,11 @@ export const liveApiService = {
     return await response.json();
   },
 
-  // --- SYSTEM HEALTH ---
-  getHealth: async (): Promise<SystemHealth> => {
-      const response = await fetch(`${API_BASE_URL}/api/health`);
-      if (!response.ok) throw new Error("Health Check Failed");
-      return await response.json();
-  },
-
   // --- SYSTEM DOCTOR (ADMIN) ---
   
   getProjectContext: async (): Promise<{files: Array<{path: string, content: string}>}> => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/project-context`);
       if (!response.ok) throw new Error('Failed to read project context');
-      return await response.json();
-  },
-
-  // New: Analyze System via Backend
-  analyzeSystem: async (issueDescription: string): Promise<{ diagnosis: string, changes: any[] }> => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/analyze-system`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ issueDescription })
-      });
-      if (!response.ok) throw new Error('System Analysis Failed');
-      return await response.json();
-  },
-
-  // New: Audit Bot Flow via Backend (Updated to accept edges)
-  auditBotFlow: async (nodes: any[], edges: any[]): Promise<AuditReport> => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/audit-flow`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ nodes, edges })
-      });
-      if (!response.ok) throw new Error('Audit Failed');
       return await response.json();
   },
 

@@ -1,4 +1,3 @@
-
 import React, { useState, useCallback, useEffect } from 'react';
 import { 
   ReactFlow, 
@@ -16,12 +15,13 @@ import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
 import { useFlowStore } from '../services/flowStore'; 
+import { auditBotFlow, analyzeSystemCode } from '../services/geminiService';
 import { 
   MessageSquare, Image as ImageIcon, Video, FileText, MapPin, 
   List, Type, Hash, Mail, Globe, Calendar, Clock, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, Play, AlertTriangle, ShieldAlert, GripVertical, Settings,
   MousePointerClick, Bold, Italic, Link, MoreHorizontal, Upload, Cloud, Stethoscope, Wand2, Terminal, Code,
-  FileCode, Layers, Youtube, StopCircle
+  FileCode, Layers, Youtube
 } from 'lucide-react';
 
 // --- STYLES & CONSTANTS ---
@@ -71,16 +71,6 @@ const CustomNode = ({ data, id, selected }: any) => {
     handleChange('options', newOpts);
   };
 
-  const handleDelete = () => {
-    // Allow deleting Start node if user really wants to (since we added drag-drop support to restore it)
-    // But warn them it breaks the flow until restored.
-    if (data.type === 'start') {
-        const confirm = window.confirm("Deleting the Start node will break the flow entry point. Are you sure?");
-        if (!confirm) return;
-    }
-    deleteNode(id);
-  };
-
   // --- NODE TYPES IDENTIFICATION ---
   const isInputType = ['Text', 'Number', 'Email', 'Website', 'Date', 'Time'].includes(data.label);
   const isMediaType = ['Image', 'Video', 'File', 'Audio'].includes(data.label);
@@ -88,46 +78,18 @@ const CustomNode = ({ data, id, selected }: any) => {
   const hasError = data.hasError;
   const isYouTube = data.mediaUrl && (data.mediaUrl.includes('youtube.com') || data.mediaUrl.includes('youtu.be'));
 
-  // --- START NODE (Visual Only) ---
+  // --- START NODE (Always Simple) ---
   if (data.type === 'start') {
     return (
       <div className={`group relative shadow-md rounded-xl bg-white border-2 transition-all ${selected ? 'border-green-500 ring-4 ring-green-50' : 'border-gray-100'}`}>
         <div className="bg-green-50 px-4 py-2 rounded-t-xl border-b border-green-100 flex items-center gap-2">
            <Flag size={14} className="text-green-600" />
-           <span className="text-xs font-bold text-green-800 uppercase tracking-wide">Start Point</span>
+           <span className="text-xs font-bold text-green-800 uppercase tracking-wide">Starting Step</span>
         </div>
         <div className="p-4 flex items-center justify-center">
-            <p className="text-xs font-medium text-gray-500">Entry Point</p>
+            <p className="text-sm font-medium text-gray-600">Conversation Begins Here</p>
         </div>
         <Handle type="source" position={Position.Right} style={ACTIVE_HANDLE_STYLE} className="-right-3" />
-        <button 
-            onClick={handleDelete}
-            className="absolute -top-2 -right-2 bg-gray-200 hover:bg-red-500 hover:text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all shadow-sm"
-        >
-            <X size={12} />
-        </button>
-      </div>
-    );
-  }
-
-  // --- END NODE (Visual Only) ---
-  if (data.type === 'end') {
-    return (
-      <div className={`group relative shadow-md rounded-xl bg-white border-2 transition-all ${selected ? 'border-red-500 ring-4 ring-red-50' : 'border-gray-100'}`}>
-        <Handle type="target" position={Position.Left} style={ACTIVE_HANDLE_STYLE} className="-left-3 !bg-red-500" />
-        <div className="bg-red-50 px-4 py-2 rounded-t-xl border-b border-red-100 flex items-center gap-2">
-           <StopCircle size={14} className="text-red-600" />
-           <span className="text-xs font-bold text-red-800 uppercase tracking-wide">End Point</span>
-        </div>
-        <div className="p-4 flex items-center justify-center">
-            <p className="text-xs font-medium text-gray-500">Flow Terminates</p>
-        </div>
-        <button 
-            onClick={handleDelete}
-            className="absolute -top-2 -right-2 bg-gray-200 hover:bg-red-500 hover:text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-all shadow-sm"
-        >
-            <X size={12} />
-        </button>
       </div>
     );
   }
@@ -258,7 +220,7 @@ const CustomNode = ({ data, id, selected }: any) => {
                     <p className="text-[10px] text-gray-500 font-medium">Configure this interaction</p>
                 </div>
             </div>
-            <button onClick={handleDelete} className="text-gray-400 hover:text-red-500 hover:bg-red-50 p-2 rounded-lg transition-colors" title="Delete Step">
+            <button onClick={() => deleteNode(id)} className="text-gray-400 hover:text-red-500 hover:bg-red-50 p-2 rounded-lg transition-colors" title="Delete Step">
                 <Trash2 size={16} />
             </button>
         </div>
@@ -462,12 +424,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   } = useFlowStore();
   
   const [isSaving, setIsSaving] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [isAuditing, setIsAuditing] = useState(false);
   const [auditReport, setAuditReport] = useState<any>(null);
   
   // SYSTEM DOCTOR STATES
   const [showSystemDoctor, setShowSystemDoctor] = useState(false);
+  const [files, setFiles] = useState<Array<{path: string, content: string}>>([]);
   const [issueDescription, setIssueDescription] = useState('Chat flow errors regarding empty options');
   const [doctorDiagnosis, setDoctorDiagnosis] = useState<any>(null);
   const [isAnalyzingCode, setIsAnalyzingCode] = useState(false);
@@ -481,35 +443,14 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
     const load = async () => {
         let settings: BotSettings;
         if (isLiveMode) {
-             try { 
-                 settings = await liveApiService.getBotSettings(); 
-                 // PATCH: If Live data is empty or missing flow data, fallback to Mock structure to ensure consistency.
-                 if (!settings.flowData || !settings.flowData.nodes || settings.flowData.nodes.length === 0) {
-                     console.log("Live flow empty, using default template.");
-                     settings.flowData = mockBackend.getBotSettings().flowData;
-                 }
-             } catch(e) { return; }
+             try { settings = await liveApiService.getBotSettings(); } catch(e) { return; }
         } else {
              settings = mockBackend.getBotSettings();
         }
 
-        let loadedNodes = settings.flowData?.nodes || [];
-        let loadedEdges = settings.flowData?.edges || [];
-
-        // 1. Ensure Start Node Exists (Vital for consistency)
-        const hasStart = loadedNodes.some((n: any) => n.data.type === 'start' || n.type === 'start' || n.id === 'start');
-        if (!hasStart) {
-            loadedNodes.unshift({ 
-                id: 'start', 
-                type: 'custom', 
-                position: { x: 50, y: 300 }, 
-                data: { type: 'start', label: 'Start' } 
-            });
-        }
-
-        if (loadedNodes.length > 0) {
+        if (settings.flowData && settings.flowData.nodes.length > 0) {
             // Auto-clean placeholders on load
-            const cleanedNodes = loadedNodes.map((n: any) => {
+            const cleanedNodes = settings.flowData.nodes.map((n: any) => {
                 const newData = { ...n.data };
                 const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
                 if (newData.message && BLOCKED_REGEX.test(newData.message)) {
@@ -521,17 +462,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             });
 
             setNodes(cleanedNodes);
-            setEdges(loadedEdges);
-        } else {
-            // Absolute Fallback (Should be caught by PATCH above, but double safety)
-            const defaultStartNode: Node = { 
-                id: 'start', 
-                type: 'custom', 
-                position: { x: 50, y: 300 }, 
-                data: { type: 'start', label: 'Start', message: 'START' } 
-            };
-            setNodes([defaultStartNode]);
-            setEdges([]);
+            setEdges(settings.flowData.edges);
         }
     };
     load();
@@ -557,32 +488,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         y: event.clientY,
       });
 
-      // Handle 'start' node drop
-      if (type === 'start') {
-          const startNode: Node = {
-              id: 'start', // Ensure fixed ID for start
-              type: 'custom',
-              position,
-              data: { type: 'start', label: 'Start' }
-          };
-          // Remove existing start if any to enforce single entry
-          const nodesWithoutStart = nodes.filter(n => n.data.type !== 'start' && n.id !== 'start');
-          setNodes([...nodesWithoutStart, startNode]);
-          return;
-      }
-
-      // Handle 'end' node drop separately
-      if (type === 'end') {
-          const endNode: Node = {
-              id: `end_${Date.now()}`,
-              type: 'custom',
-              position,
-              data: { type: 'end', label: 'End' }
-          };
-          addNode(endNode);
-          return;
-      }
-
       const newNode: Node = {
         id: `node_${Date.now()}`,
         type: 'custom',
@@ -600,21 +505,17 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
       addNode(newNode);
     },
-    [reactFlowInstance, addNode, nodes, setNodes],
+    [reactFlowInstance, addNode],
   );
 
   const runAIAudit = async () => {
-      if (!isLiveMode) {
-          alert("AI Audit requires Live Mode (node server.js)");
-          return;
-      }
       setIsAuditing(true);
       try {
-          // FIXED: Pass edges to the audit function
-          const report = await liveApiService.auditBotFlow(nodes, edges);
+          const report = await auditBotFlow(nodes);
           setAuditReport(report);
           
           if (report.issues.length > 0) {
+              // Highlight faulty nodes
               const badNodeIds = report.issues.map((i: any) => i.nodeId);
               const newNodes = nodes.map(n => {
                   if (badNodeIds.includes(n.id)) {
@@ -631,12 +532,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               });
               setNodes(newNodes);
           }
-      } catch (e: any) {
-          if (e.message.includes('429')) {
-             alert("System Overloaded. Please wait 30 seconds before auditing again.");
-          } else {
-             alert("AI Audit Failed. Check server logs.");
-          }
+      } catch (e) {
+          alert("AI Audit Failed");
       } finally {
           setIsAuditing(false);
       }
@@ -645,73 +542,32 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const applyFix = (issue: any) => {
       if (issue.autoFixValue === 'DELETE_NODE') {
           deleteNode(issue.nodeId);
+          // Update report UI by removing the issue
           setAuditReport((prev: any) => ({
               ...prev,
               issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
           }));
-      } else if (issue.autoFixValue === 'AUTOFIX_ADD_WELCOME') {
-          // Special Case: Create a new Welcome node and connect Start to it.
-          const startNode = nodes.find(n => n.data.type === 'start' || n.type === 'start' || n.id === 'start');
-          if (startNode) {
-               const newNodeId = `node_${Date.now()}`;
-               const newNode = {
-                   id: newNodeId,
-                   type: 'custom',
-                   position: { x: startNode.position.x + 300, y: startNode.position.y },
-                   data: { 
-                       label: 'Text', 
-                       message: 'Hello! Welcome to Uber Fleet. How can we help you today?', 
-                       inputType: 'text',
-                       hasError: false
-                   }
-               };
-               addNode(newNode);
-               const newEdge = { 
-                   id: `e_${startNode.id}-${newNodeId}`, 
-                   source: startNode.id, 
-                   target: newNodeId,
-                   type: 'smoothstep',
-                   animated: true,
-                   style: { stroke: '#64748b', strokeWidth: 2 }
-               };
-               setEdges([...edges, newEdge]);
-               
-               setAuditReport((prev: any) => ({
-                   ...prev,
-                   issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
-               }));
-          }
       } else if (issue.autoFixValue) {
-          const targetNode = nodes.find(n => n.id === issue.nodeId);
-          if (targetNode) {
-              const newNodes = nodes.map(n => {
-                  if (n.id === issue.nodeId) {
-                      // INTELLIGENT PATCHING based on value type or node type
-                      let newData = { ...n.data, hasError: false, errorMessage: undefined };
-                      
-                      if (Array.isArray(issue.autoFixValue)) {
-                          // It's options
-                          newData.options = issue.autoFixValue;
-                          // Ensure we have a message if it was empty
-                          if (!newData.message) newData.message = "Please select an option:";
-                      } else if (newData.label === 'Image' || newData.label === 'Video') {
-                          // It's media
-                          newData.mediaUrl = issue.autoFixValue;
-                      } else {
-                          // It's standard text
-                          newData.message = issue.autoFixValue;
+          const newNodes = nodes.map(n => {
+              if (n.id === issue.nodeId) {
+                  return {
+                      ...n,
+                      data: {
+                          ...n.data,
+                          message: issue.autoFixValue,
+                          hasError: false,
+                          errorMessage: undefined
                       }
-
-                      return { ...n, data: newData };
-                  }
-                  return n;
-              });
-              setNodes(newNodes);
-              setAuditReport((prev: any) => ({
-                  ...prev,
-                  issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
-              }));
-          }
+                  };
+              }
+              return n;
+          });
+          setNodes(newNodes);
+          // Remove from report
+          setAuditReport((prev: any) => ({
+            ...prev,
+            issues: prev.issues.filter((i: any) => i.nodeId !== issue.nodeId)
+        }));
       }
   };
 
@@ -721,26 +577,28 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
           return;
       }
       setShowSystemDoctor(true);
-      // Removed file fetching logic since server handles it now
-      setDoctorDiagnosis(null);
+      try {
+          // Fetch complete project structure now
+          const res = await liveApiService.getProjectContext();
+          setFiles(res.files);
+          setDoctorDiagnosis(null);
+      } catch(e) {
+          alert("Could not access project files. Ensure server is running.");
+          setShowSystemDoctor(false);
+      }
   };
 
   const analyzeCode = async () => {
       setIsAnalyzingCode(true);
       try {
-          // FIXED: Use Backend API
-          const res = await liveApiService.analyzeSystem(issueDescription);
+          const res = await analyzeSystemCode(files, issueDescription);
           setDoctorDiagnosis(res);
+          // Select first changed file if any
           if (res.changes && res.changes.length > 0) {
               setSelectedFile(res.changes[0].filePath);
           }
-      } catch(e: any) {
-          console.error(e);
-          if (e.message.includes('429')) {
-              alert("System Overloaded (429). Please wait 30s before trying again.");
-          } else {
-              alert("Analysis Failed. Check server console.");
-          }
+      } catch(e) {
+          alert("Analysis Failed");
       } finally {
           setIsAnalyzingCode(false);
       }
@@ -762,8 +620,9 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
   const handleSave = async () => {
       let hasValidationErrors = false;
+      
       const newNodes = nodes.map(node => {
-          if (node.data.type === 'start' || node.data.type === 'end') return node;
+          if (node.data.type === 'start') return node;
           
           let error = false;
           let errorMsg = '';
@@ -806,56 +665,18 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       }
 
       setIsSaving(true);
-      setSaveStatus('idle');
       
-      // --- INTELLIGENT FLOW COMPILATION ---
       const compiledSteps: BotStep[] = [];
-      
-      // 1. Identify Entry Point (Node connected to Start)
-      const startNode = nodes.find(n => n.data.type === 'start' || n.type === 'start');
-      
-      if (!startNode) {
-          setIsSaving(false);
-          alert("❌ CRITICAL: No 'Start' node found! You must have an entry point.");
-          return;
-      }
-
-      const startEdge = edges.find(e => e.source === startNode?.id);
-      const firstStepId = startEdge?.target;
-
-      if (!firstStepId) {
-          setIsSaving(false);
-          alert("❌ START DISCONNECTED: Please connect the 'Start' node to your first message.");
-          return;
-      }
-
-      // 2. Filter out structural nodes (start/end) so they are NEVER saved as messages
-      const contentNodes = nodes.filter(n => n.data.type !== 'start' && n.data.type !== 'end');
-
-      contentNodes.forEach(node => {
-          const outgoingEdge = edges.find(e => e.source === node.id);
+      nodes.forEach(node => {
+          if (node.data.type === 'start') return;
+          const outgoingEdges = edges.filter(e => e.source === node.id);
           let nextStepId = 'END';
-          
-          if (outgoingEdge) {
-              const targetNode = nodes.find(n => n.id === outgoingEdge.target);
-              // If connected to an 'end' node, explicitly terminate
-              if (targetNode?.data.type === 'end') {
-                  nextStepId = 'END';
-              } else {
-                  nextStepId = outgoingEdge.target;
-              }
-          }
-
-          // Strict Empty Check to be safe - FIREWALL AGAINST GHOST BUBBLES
-          if (!node.data.message && !node.data.mediaUrl && (!node.data.options || node.data.options.length === 0)) {
-              console.warn("Skipping empty node during compile:", node.id);
-              return;
-          }
+          if (outgoingEdges.length > 0) nextStepId = outgoingEdges[0].target;
 
           compiledSteps.push({
             id: node.id,
             title: node.data.label,
-            message: node.data.message || '',
+            message: node.data.message,
             inputType: node.data.inputType,
             options: node.data.options,
             saveToField: node.data.saveToField,
@@ -863,15 +684,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             mediaUrl: node.data.mediaUrl
           });
       });
-
-      // 3. Reorder: Ensure the first step matches the Start connection
-      if (firstStepId) {
-          const firstIdx = compiledSteps.findIndex(s => s.id === firstStepId);
-          if (firstIdx > -1) {
-              const [first] = compiledSteps.splice(firstIdx, 1);
-              compiledSteps.unshift(first);
-          }
-      }
 
       const newSettings: BotSettings = {
           ...mockBackend.getBotSettings(),
@@ -882,15 +694,11 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
       try {
           if (isLiveMode) await liveApiService.saveBotSettings(newSettings);
           else mockBackend.updateBotSettings(newSettings);
-          
-          setSaveStatus('success');
-          setTimeout(() => setSaveStatus('idle'), 3000); // Revert after 3s
       } catch(e) {
-          setSaveStatus('error');
           alert("Save Failed");
       }
       
-      setIsSaving(false);
+      setTimeout(() => setIsSaving(false), 500);
   };
 
   return (
@@ -923,14 +731,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                         <DraggableSidebarItem type="input" inputType="text" label="Collect Number" icon={<Hash size={16} />} />
                     </div>
                 </div>
-
-                <div>
-                    <h4 className="text-xs font-bold text-gray-400 uppercase mb-3 tracking-wider">Logic</h4>
-                    <div className="space-y-2">
-                        <DraggableSidebarItem type="start" label="Start Point" icon={<Flag size={16} className="text-green-500" />} />
-                        <DraggableSidebarItem type="end" label="End Point" icon={<StopCircle size={16} className="text-red-500" />} />
-                    </div>
-                </div>
             </div>
         </div>
 
@@ -957,30 +757,11 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                  </button>
                  <button 
                     onClick={handleSave}
-                    disabled={isSaving || saveStatus === 'success'}
-                    className={`px-5 py-2.5 rounded-full text-sm font-bold shadow-lg transition-all flex items-center gap-2
-                        ${saveStatus === 'success' 
-                            ? 'bg-green-600 text-white cursor-default' 
-                            : 'bg-black text-white hover:bg-gray-800'
-                        }
-                    `}
+                    disabled={isSaving}
+                    className="bg-black text-white px-5 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-gray-800 transition-all flex items-center gap-2"
                  >
-                    {isSaving ? (
-                        <>
-                            <span className="animate-spin"><Zap size={16} /></span>
-                            Saving...
-                        </>
-                    ) : saveStatus === 'success' ? (
-                        <>
-                            <CheckCircle size={16} />
-                            Saved Successfully!
-                        </>
-                    ) : (
-                        <>
-                            <CheckCircle size={16} />
-                            Publish Flow
-                        </>
-                    )}
+                    {isSaving ? <span className="animate-spin"><Zap size={16} /></span> : <CheckCircle size={16} />}
+                    {isSaving ? 'Validating...' : 'Publish Flow'}
                  </button>
             </div>
 
@@ -1002,7 +783,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     <Controls className="bg-white border border-gray-200 shadow-xl rounded-lg p-1" />
                     <MiniMap 
                         className="border border-gray-200 rounded-lg shadow-xl" 
-                        nodeColor={(n) => n.type === 'start' ? '#10b981' : (n.data.type === 'end' ? '#ef4444' : '#3b82f6')} 
+                        nodeColor={(n) => n.type === 'start' ? '#10b981' : '#3b82f6'} 
                         maskColor="rgba(240, 242, 245, 0.7)"
                     />
                     
@@ -1170,19 +951,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                                         >
                                             <Trash2 size={12} /> Delete Node
                                         </button>
-                                    ) : issue.autoFixValue === 'AUTOFIX_ADD_WELCOME' ? (
-                                        <button 
-                                            onClick={() => applyFix(issue)}
-                                            className="px-3 py-1.5 bg-green-600 text-white text-xs font-bold rounded hover:bg-green-700 flex items-center gap-1"
-                                        >
-                                            <Wand2 size={12} /> Auto-Fix: Add Welcome Node
-                                        </button>
                                     ) : issue.autoFixValue ? (
                                         <button 
                                             onClick={() => applyFix(issue)}
                                             className="px-3 py-1.5 bg-blue-600 text-white text-xs font-bold rounded hover:bg-blue-700 flex items-center gap-1"
                                         >
-                                            <Wand2 size={12} /> Apply Fix: "{Array.isArray(issue.autoFixValue) ? "Update Options" : (issue.autoFixValue.startsWith('http') ? 'Update Link' : issue.autoFixValue.substring(0, 15) + '...')}"
+                                            <Wand2 size={12} /> Apply Fix: "{issue.autoFixValue}"
                                         </button>
                                     ) : null}
                                 </div>

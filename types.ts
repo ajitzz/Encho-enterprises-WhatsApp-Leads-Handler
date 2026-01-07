@@ -1,5 +1,4 @@
 
-
 export enum LeadStatus {
   NEW = 'New',
   QUALIFIED = 'Qualified',
@@ -114,23 +113,4 @@ export interface AuditReport {
   isValid: boolean;
   issues: AuditIssue[];
   fixedNodes?: any[]; // The auto-healed node list
-}
-
-// --- SYSTEM HEALTH TYPES ---
-export interface SystemHealth {
-    database: {
-        status: 'connected' | 'disconnected' | string;
-        latency: number;
-    };
-    ai: {
-        status: 'operational' | 'degraded' | 'error' | 'unknown';
-        message: string;
-        lastCheck: number;
-        activeModel: string; // 'gemini-3-pro' or 'gemini-3-flash'
-    };
-    whatsapp: {
-        status: 'active' | 'waiting_for_webhook' | 'not_configured';
-        lastWebhook: number;
-    };
-    mode: 'pooled' | 'local';
 }

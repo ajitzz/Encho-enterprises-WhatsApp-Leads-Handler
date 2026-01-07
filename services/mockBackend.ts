@@ -1,4 +1,3 @@
-
 import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, BotStep } from '../types';
 
 // Initial Bot Config
@@ -40,24 +39,7 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
       saveToField: 'availability',
       nextStepId: 'AI_HANDOFF' 
     }
-  ],
-  flowData: {
-      nodes: [
-          { id: 'start', type: 'custom', position: { x: 50, y: 300 }, data: { type: 'start', label: 'Start' } },
-          { id: 'step_1', type: 'custom', position: { x: 300, y: 300 }, data: { label: 'Text', message: 'നമസ്കാരം! Uber Fleet-ലേക്ക് സ്വാഗതം. നിങ്ങളുടെ പേര് പറയാമോ?', inputType: 'text', saveToField: 'name' } },
-          { id: 'step_2', type: 'custom', position: { x: 600, y: 300 }, data: { label: 'Quick Reply', message: 'നന്ദി! നിങ്ങളുടെ കൈയ്യിൽ valid ആയ Commercial Driving License ഉണ്ടോ?', inputType: 'option', options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'] } },
-          { id: 'step_3', type: 'custom', position: { x: 900, y: 300 }, data: { label: 'Image', message: 'Verification-ന് വേണ്ടി License-ന്റെ ഒരു ഫോട്ടോ അയച്ചുതരൂ.', inputType: 'image', saveToField: 'document' } },
-          { id: 'step_4', type: 'custom', position: { x: 1200, y: 300 }, data: { label: 'Quick Reply', message: 'എപ്പോഴാണ് ഡ്രൈവ് ചെയ്യാൻ താല്പര്യം? (Full-time / Part-time)', inputType: 'option', options: ['Full-time', 'Part-time', 'Weekends'], saveToField: 'availability' } },
-          { id: 'end', type: 'custom', position: { x: 1500, y: 300 }, data: { type: 'end', label: 'End' } }
-      ],
-      edges: [
-          { id: 'e_start-step_1', source: 'start', target: 'step_1', type: 'smoothstep', animated: true },
-          { id: 'e_step_1-step_2', source: 'step_1', target: 'step_2', type: 'smoothstep', animated: true },
-          { id: 'e_step_2-step_3', source: 'step_2', target: 'step_3', sourceHandle: 'opt_0', type: 'smoothstep', animated: true },
-          { id: 'e_step_3-step_4', source: 'step_3', target: 'step_4', type: 'smoothstep', animated: true },
-          { id: 'e_step_4-end', source: 'step_4', target: 'end', type: 'smoothstep', animated: true }
-      ]
-  }
+  ]
 };
 
 // FIREWALL REGEX
