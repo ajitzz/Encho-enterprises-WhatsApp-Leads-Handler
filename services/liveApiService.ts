@@ -1,4 +1,5 @@
 
+
 import { Driver, BotSettings } from '../types';
 
 const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -126,8 +127,6 @@ export const liveApiService = {
       const { uploadUrl, key, publicUrl } = await presignResponse.json();
 
       // 2. Upload Direct to S3
-      // Note: We do not use fetchWithRetry here because S3 might reject retries with the same URL if strict,
-      // and we want strict error reporting for network fails during big uploads.
       const uploadResponse = await fetch(uploadUrl, {
           method: 'PUT',
           body: file,
@@ -159,7 +158,22 @@ export const liveApiService = {
       return { url: publicUrl, type: fileType };
   },
 
-  // --- NEW: SYNC TO WHATSAPP ---
+  // --- NEW: PUBLIC SHOWCASE APIs ---
+  setPublicFolder: async (folderId: string) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${folderId}/public`, {
+          method: 'POST'
+      });
+      if (!response.ok) throw new Error('Failed to set public folder');
+      return await response.json();
+  },
+
+  getPublicShowcase: async () => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/public/showcase`);
+      if (!response.ok) throw new Error('Failed to fetch showcase');
+      return await response.json();
+  },
+
+  // --- SYNC TO WHATSAPP ---
   syncFileToWhatsApp: async (fileId: string) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/files/${fileId}/sync`, {
           method: 'POST'
@@ -230,14 +244,12 @@ export const liveApiService = {
       return await response.json();
   },
 
-  // Fallback for single file if needed
   getSourceCode: async (): Promise<{code: string}> => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/source-code`);
       if (!response.ok) throw new Error('Failed to read source code');
       return await response.json();
   },
 
-  // Multi-file patcher
   applySystemPatch: async (changes: Array<{filePath: string, content: string}>): Promise<{success: boolean, message: string}> => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/write-files`, {
           method: 'POST',

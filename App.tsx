@@ -1,4 +1,5 @@
 
+
 import React, { useState, useEffect } from 'react';
 import { Layout } from './components/Layout';
 import { LeadTable } from './components/LeadTable';
@@ -10,12 +11,22 @@ import { BotBuilder } from './components/BotBuilder';
 import { AITraining } from './components/AITraining';
 import { AssistantChat } from './components/AssistantChat';
 import { MediaLibrary } from './components/MediaLibrary';
+import { PublicShowcase } from './components/PublicShowcase'; // New Import
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
 import { Driver, LeadStatus, Notification, BotSettings, Message } from './types';
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split, Bot } from 'lucide-react';
 
 export default function App() {
+  // ROUTING CHECK: If url is /showcase, render public page only
+  const [isShowcaseMode, setIsShowcaseMode] = useState(false);
+
+  useEffect(() => {
+      if (window.location.pathname === '/showcase') {
+          setIsShowcaseMode(true);
+      }
+  }, []);
+
   const [activeTab, setActiveTab] = useState('dashboard');
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [selectedDriver, setSelectedDriver] = useState<Driver | null>(null);
@@ -32,6 +43,8 @@ export default function App() {
 
   // Sync with backend (Mock or Live)
   useEffect(() => {
+    if (isShowcaseMode) return; // Don't fetch admin data in showcase mode
+
     let unsubscribe: () => void = () => {};
 
     const fetchData = async () => {
@@ -82,7 +95,7 @@ export default function App() {
 
     fetchData();
     return () => unsubscribe();
-  }, [dataSource, activeTab]); 
+  }, [dataSource, activeTab, isShowcaseMode]); 
 
   // Auto-sync Chat Drawer when polling updates the drivers list
   useEffect(() => {
@@ -244,6 +257,12 @@ export default function App() {
     new: drivers.filter(d => d.status === LeadStatus.NEW).length
   };
 
+  // RENDER: PUBLIC SHOWCASE MODE
+  if (isShowcaseMode) {
+      return <PublicShowcase />;
+  }
+
+  // RENDER: ADMIN APP
   return (
     <>
       <Layout activeTab={activeTab} onTabChange={setActiveTab}>

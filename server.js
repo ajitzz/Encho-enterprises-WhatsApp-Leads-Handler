@@ -155,7 +155,8 @@ const SCHEMA_SQL = `
     CREATE TABLE IF NOT EXISTS media_folders (
         id VARCHAR(255) PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
-        parent_path VARCHAR(255) DEFAULT '/'
+        parent_path VARCHAR(255) DEFAULT '/',
+        is_public_showcase BOOLEAN DEFAULT FALSE
     );
     CREATE TABLE IF NOT EXISTS media_files (
         id VARCHAR(255) PRIMARY KEY,
@@ -196,6 +197,7 @@ const ensureDatabaseInitialized = async (client) => {
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;
             ALTER TABLE media_files ADD COLUMN IF NOT EXISTS folder_path VARCHAR(255) DEFAULT '/';
             ALTER TABLE whatsapp_media_cache ADD COLUMN IF NOT EXISTS expires_at BIGINT;
+            ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS is_public_showcase BOOLEAN DEFAULT FALSE;
         `);
         const settingsRes = await client.query('SELECT * FROM bot_settings WHERE id = 1');
         if (settingsRes.rows.length === 0) {
@@ -236,17 +238,15 @@ const getMimeType = (filename) => {
 
 // --- CORE MEDIA SYNC ENGINE ---
 // Promise-based Lock for Request Coalescing
-// This prevents double-downloads while allowing concurrent callers to wait for the same result.
 const activeSyncs = new Map(); // Map<fileId, Promise<string>>
 
 const performWhatsAppSync = async (fileId) => {
-    // 1. Check if sync is already in progress
+    // ... (Keep existing implementation of performWhatsAppSync) ...
     if (activeSyncs.has(fileId)) {
         console.log(`🔒 SYNC JOINED: Waiting for existing sync of ${fileId}...`);
         return activeSyncs.get(fileId);
     }
 
-    // 2. Create the sync promise
     const syncPromise = (async () => {
         try {
             const fileRes = await queryWithRetry('SELECT * FROM media_files WHERE id = $1', [fileId]);
@@ -273,9 +273,6 @@ const performWhatsAppSync = async (fileId) => {
 
             console.log(`🔄 STARTING TRANSFER: S3 -> WhatsApp for ${file.filename} (${mediaType})...`);
             
-            // DOWNLOAD (Handle S3 vs Public)
-            // If S3 bucket is private, we must sign the URL first, or use GetObjectCommand. 
-            // Here we use axios on the stored URL. If that fails, we try signing it.
             let buffer;
             try {
                 const s3Response = await axios({
@@ -287,10 +284,8 @@ const performWhatsAppSync = async (fileId) => {
             } catch (err) {
                  if (err.response && err.response.status === 403) {
                      console.log("⚠️ Private Bucket detected. Generating Signed URL for download...");
-                     // Extract Key from URL
-                     // URL format: https://BUCKET.s3.REGION.amazonaws.com/KEY
                      const urlObj = new URL(file.url);
-                     const key = urlObj.pathname.substring(1); // Remove leading slash
+                     const key = urlObj.pathname.substring(1);
                      const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key });
                      const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 600 });
                      
@@ -301,13 +296,11 @@ const performWhatsAppSync = async (fileId) => {
                  }
             }
 
-            // SIZE CHECK (Meta Limit: 16MB for this endpoint)
             if (buffer.length > 16 * 1024 * 1024) {
                 console.warn(`⚠️ FILE TOO LARGE: ${file.filename} is ${(buffer.length / 1024 / 1024).toFixed(2)}MB. Limit is 16MB. Skipping Sync (Using Link Fallback).`);
-                return null; // Return null to trigger fallback
+                return null; 
             }
 
-            // UPLOAD TO META
             const formData = new FormData();
             const blob = new Blob([buffer], { type: mediaType });
             formData.append('file', blob, file.filename);
@@ -327,7 +320,6 @@ const performWhatsAppSync = async (fileId) => {
             const metaData = await metaRes.json();
             const mediaId = metaData.id;
 
-            // UPDATE CACHE
             const expiresAt = Date.now() + (25 * 24 * 60 * 60 * 1000); 
             await queryWithRetry(
                 `INSERT INTO whatsapp_media_cache (s3_url, media_id, created_at, expires_at) 
@@ -339,7 +331,7 @@ const performWhatsAppSync = async (fileId) => {
             console.log(`✅ TRANSFER COMPLETE: ${file.filename} -> ${mediaId}`);
             return mediaId;
         } finally {
-            activeSyncs.delete(fileId); // Cleanup map when done
+            activeSyncs.delete(fileId);
         }
     })();
 
@@ -349,9 +341,9 @@ const performWhatsAppSync = async (fileId) => {
 
 // --- LOGIC ENGINE ---
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
-  if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
+   // ... (Keep existing implementation of sendWhatsAppMessage) ...
+   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
   
-  // Ensure mediaType is correct based on extension if not explicit
   mediaType = mediaType || 'image';
   if (mediaUrl) {
       const ext = mediaUrl.split('.').pop().toLowerCase().split('?')[0];
@@ -373,10 +365,8 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
             payload.type = 'text';
             payload.text = { body: body ? `${body} ${mediaUrl}` : mediaUrl, preview_url: true };
         } else {
-            // --- ENTERPRISE MEDIA DELIVERY SYSTEM ---
             let mediaId = null;
             try {
-                // 1. Check Cache
                 const cacheRes = await queryWithRetry('SELECT media_id, expires_at FROM whatsapp_media_cache WHERE s3_url = $1', [mediaUrl]);
                 if (cacheRes.rows.length > 0) {
                     const cached = cacheRes.rows[0];
@@ -385,9 +375,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
                     }
                 }
 
-                // 2. AUTO-HEAL: If no valid ID, try to Sync on the fly
                 if (!mediaId) {
-                    console.log(`🛠️ AUTO-HEALING: Attempting to generate Media ID for ${mediaUrl}`);
                     const fileRes = await queryWithRetry('SELECT id FROM media_files WHERE url = $1', [mediaUrl]);
                     if (fileRes.rows.length > 0) {
                         const fileId = fileRes.rows[0].id;
@@ -399,20 +387,14 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
 
             payload.type = mediaType;
             if (mediaId) {
-                // Use ID (Free Egress for subsequent sends)
                 payload[mediaType] = { id: mediaId };
             } else {
-                // FALLBACK: Use Link
-                // CRITICAL: Generate a PRESIGNED URL if using fallback, in case the bucket is private.
-                // Meta cannot access private S3 URLs directly.
                 let finalLink = mediaUrl;
                 try {
                      const urlObj = new URL(mediaUrl);
-                     // Check if it's an S3 URL
                      if (urlObj.hostname.includes('s3') && urlObj.hostname.includes('amazonaws.com')) {
                          const key = urlObj.pathname.substring(1);
                          const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key });
-                         // Generate signed URL valid for 1 hour
                          finalLink = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
                          console.log("🔐 Generated Signed URL for Fallback Delivery");
                      }
@@ -484,8 +466,7 @@ const logSystemMessage = async (driverId, text, type = 'text', options = null, i
 };
 
 const processIncomingMessage = async (from, name, msgBody, msgType = 'text', timestamp = Date.now()) => {
-    // ... (Existing logic remains exactly the same, using sendWhatsAppMessage helper) ...
-    // Keeping this function concise as the main logic changes are in sendWhatsAppMessage and performWhatsAppSync
+   // ... (Keep existing implementation) ...
     try {
         const client = await pool.connect();
         let result = {};
@@ -644,14 +625,81 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
 // --- ROUTES ---
 
-// Sync Media Endpoint (Manual Trigger)
+// NEW: Public Showcase API (No Auth)
+app.get('/api/public/showcase', async (req, res) => {
+    try {
+        const folderRes = await queryWithRetry('SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE LIMIT 1', []);
+        
+        if (folderRes.rows.length === 0) {
+            return res.json({ title: 'Welcome', items: [] });
+        }
+
+        const folder = folderRes.rows[0];
+        
+        // Fetch files, handling S3 Presigning for public viewing
+        const filesRes = await queryWithRetry(`
+            SELECT id, url, filename, type 
+            FROM media_files 
+            WHERE folder_path = $1 
+            ORDER BY uploaded_at DESC`, 
+            ['/' + folder.name]
+        );
+
+        // Sign URLs if needed (if bucket is private)
+        const items = await Promise.all(filesRes.rows.map(async (file) => {
+            let signedUrl = file.url;
+            try {
+                const urlObj = new URL(file.url);
+                if (urlObj.hostname.includes('s3') && urlObj.hostname.includes('amazonaws.com')) {
+                    const key = urlObj.pathname.substring(1);
+                    const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: key });
+                    signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+                }
+            } catch(e) {}
+            return {
+                id: file.id,
+                url: signedUrl,
+                type: file.type,
+                filename: file.filename
+            };
+        }));
+
+        res.json({ title: folder.name, items });
+    } catch (e) {
+        console.error("Showcase Fetch Error:", e);
+        res.status(500).json({ error: "Failed to load showcase" });
+    }
+});
+
+// NEW: Set Public Folder Endpoint
+app.post('/api/folders/:id/public', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            // Reset all
+            await client.query('UPDATE media_folders SET is_public_showcase = FALSE');
+            // Set new one
+            await client.query('UPDATE media_folders SET is_public_showcase = TRUE WHERE id = $1', [id]);
+            await client.query('COMMIT');
+            res.json({ success: true });
+        } catch (e) {
+            await client.query('ROLLBACK');
+            throw e;
+        } finally {
+            client.release();
+        }
+    } catch(e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.post('/api/files/:id/sync', async (req, res) => {
     try {
         const { id } = req.params;
         const mediaId = await performWhatsAppSync(id);
         if (mediaId === null) {
-            // Check if it was size limit or lock
-            // We return success=false but no error to let frontend know sync was skipped
             return res.json({ success: false, message: 'Sync skipped (File too large or locked)' });
         }
         res.json({ success: true, mediaId });
@@ -660,13 +708,11 @@ app.post('/api/files/:id/sync', async (req, res) => {
     }
 });
 
-// Get Media (Updated to check Sync Status)
 app.get('/api/media', async (req, res) => {
     try {
         const currentPath = req.query.path || '/';
         const folders = await queryWithRetry('SELECT * FROM media_folders WHERE parent_path = $1 ORDER BY name ASC', [currentPath]);
         
-        // Join with cache to see if synced AND VALID
         const files = await queryWithRetry(`
             SELECT mf.*, wmc.media_id, wmc.expires_at
             FROM media_files mf 
@@ -676,11 +722,10 @@ app.get('/api/media', async (req, res) => {
             [currentPath]
         );
         
-        // Filter out expired media_ids from the response so UI knows to allow re-sync
         const now = Date.now();
         const cleanFiles = files.rows.map(f => {
             if (f.expires_at && parseInt(f.expires_at) < now) {
-                return { ...f, media_id: null }; // Consider expired as not synced
+                return { ...f, media_id: null }; 
             }
             return f;
         });
@@ -689,24 +734,42 @@ app.get('/api/media', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ... (Other endpoints kept identical to previous version) ...
+// ... (Rest of existing endpoints) ...
 
-app.post('/api/folders', async (req, res) => { /* ... code ... */ res.json({ success: true }); });
-app.delete('/api/folders/:id', async (req, res) => { /* ... code ... */ res.json({ success: true }); });
-app.post('/api/s3/presign', async (req, res) => { /* ... code ... */ 
+app.post('/api/folders', async (req, res) => { 
+    try {
+        const { name, parentPath } = req.body;
+        const id = Date.now().toString();
+        await queryWithRetry(
+            'INSERT INTO media_folders (id, name, parent_path, is_public_showcase) VALUES ($1, $2, $3, FALSE)',
+            [id, name, parentPath]
+        );
+        res.json({ success: true, id });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/folders/:id', async (req, res) => { 
+    try {
+        const { id } = req.params;
+        // Logic to delete folder only if empty
+        const files = await queryWithRetry('SELECT id FROM media_files WHERE folder_path = (SELECT name FROM media_folders WHERE id = $1)', [id]);
+        if (files.rows.length > 0) return res.status(400).json({ error: 'Folder not empty' });
+        
+        await queryWithRetry('DELETE FROM media_folders WHERE id = $1', [id]);
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/s3/presign', async (req, res) => { 
     try {
         const { filename, fileType, folderPath } = req.body;
-        
-        // --- DUPLICATE CHECK: PREVENT RE-UPLOAD OF SAME FILE NAME ---
         const existingFile = await queryWithRetry(
             'SELECT id FROM media_files WHERE filename = $1 AND folder_path = $2',
             [filename, folderPath]
         );
-        
         if (existingFile.rows.length > 0) {
             return res.status(409).json({ error: 'File already exists in this folder.' });
         }
-
         const key = `${Date.now()}-${filename.replace(/\s+/g, '_')}`;
         const command = new PutObjectCommand({ Bucket: BUCKET_NAME, Key: key, ContentType: fileType });
         const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
@@ -714,23 +777,17 @@ app.post('/api/s3/presign', async (req, res) => { /* ... code ... */
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// UPDATED REGISTER ENDPOINT: Triggers Auto-Sync
 app.post('/api/files/register', async (req, res) => { 
     try {
         const { key, url, filename, type, folderPath } = req.body;
         const id = Date.now().toString();
-
         await queryWithRetry(
             `INSERT INTO media_files (id, url, filename, type, uploaded_at, folder_path) VALUES ($1, $2, $3, $4, $5, $6)`,
             [id, url, filename, type, Date.now(), folderPath]
         );
-        
-        // --- AUTO SYNC TRIGGER (Fire and Forget) ---
-        // The check inside performWhatsAppSync will prevent re-upload if cached
         if (['image', 'video', 'document'].includes(type)) {
              performWhatsAppSync(id).catch(err => console.error(`⚠️ Background Sync Failed for ${filename}:`, err.message));
         }
-
         res.json({ success: true, id, url });
     } catch (e) {
         console.error("Register Error:", e);
@@ -738,25 +795,65 @@ app.post('/api/files/register', async (req, res) => {
     }
 });
 
-app.delete('/api/files/:id', async (req, res) => { /* ... code ... */ res.json({ success: true }); });
+app.delete('/api/files/:id', async (req, res) => { 
+    try {
+        const { id } = req.params;
+        await queryWithRetry('DELETE FROM media_files WHERE id = $1', [id]);
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/messages/send', async (req, res) => { 
     try {
         const { driverId, text } = req.body;
         const driverRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
         if (driverRes.rows.length === 0) return res.status(404).json({ error: 'Driver not found' });
-        
         const success = await sendWhatsAppMessage(driverRes.rows[0].phone_number, text);
         if (!success) return res.status(500).json({ error: 'Failed to send message to Meta' });
-        
-        // Log manual message
         await logSystemMessage(driverId, text, 'text');
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
-app.patch('/api/drivers/:id', async (req, res) => { /* ... code ... */ res.json({ success: true }); });
-app.get('/api/drivers', async (req, res) => { /* ... code ... */ res.json([]); });
-app.get('/api/bot-settings', async (req, res) => { /* ... code ... */ res.json({}); });
-app.post('/api/bot-settings', async (req, res) => { /* ... code ... */ res.json({ success: true }); });
+
+app.patch('/api/drivers/:id', async (req, res) => { 
+    try {
+        const { id } = req.params;
+        const updates = req.body;
+        const keys = Object.keys(updates).filter(k => k !== 'id');
+        if (keys.length === 0) return res.json({ success: true });
+        
+        const setClause = keys.map((k, i) => `${k} = $${i + 2}`).join(', ');
+        const values = keys.map(k => {
+             if (typeof updates[k] === 'object') return JSON.stringify(updates[k]);
+             return updates[k];
+        });
+        
+        await queryWithRetry(`UPDATE drivers SET ${setClause} WHERE id = $1`, [id, ...values]);
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/drivers', async (req, res) => { 
+    try {
+        const resDb = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC LIMIT 100', []);
+        res.json(resDb.rows);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/bot-settings', async (req, res) => { 
+    try {
+        const resDb = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1', []);
+        res.json(resDb.rows[0]?.settings || DEFAULT_BOT_SETTINGS);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/bot-settings', async (req, res) => { 
+    try {
+        await queryWithRetry('UPDATE bot_settings SET settings = $1 WHERE id = 1', [JSON.stringify(req.body)]);
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/webhook', (req, res) => { res.send(req.query['hub.challenge']); });
 app.post('/webhook', async (req, res) => { 
     if (req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {

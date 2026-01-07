@@ -1,6 +1,7 @@
 
+
 import React, { useState, useEffect } from 'react';
-import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap } from 'lucide-react';
+import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface MediaFile {
@@ -8,13 +9,14 @@ interface MediaFile {
     url: string;
     filename: string;
     type: string;
-    media_id?: string; // New: WhatsApp Media ID present if synced
+    media_id?: string;
 }
 
 interface MediaFolder {
     id: string;
     name: string;
     parent_path: string;
+    is_public_showcase: boolean;
 }
 
 export const MediaLibrary = () => {
@@ -59,13 +61,10 @@ export const MediaLibrary = () => {
         if (!e.target.files || e.target.files.length === 0) return;
         const file = e.target.files[0];
         
-        // --- DUPLICATE CHECK (FRONTEND) ---
-        // This prevents the upload from starting, saving bandwidth and costs immediately.
         const duplicate = files.find(f => f.filename === file.name);
         if (duplicate) {
             const proceed = window.confirm(`File "${file.name}" already exists in this folder. \n\nUploading it again will create a duplicate copy and consume transfer credits. \n\nDo you want to proceed anyway?`);
             if (!proceed) {
-                // Clear input so change event can fire again if needed
                 e.target.value = '';
                 return;
             }
@@ -77,7 +76,7 @@ export const MediaLibrary = () => {
         try {
             await liveApiService.uploadMedia(file, currentPath);
             setUploadStatus('idle');
-            await loadMedia(currentPath); // Refresh
+            await loadMedia(currentPath); 
         } catch (e: any) {
             console.error("Upload Error:", e);
             setUploadStatus('error');
@@ -97,11 +96,23 @@ export const MediaLibrary = () => {
         setIsSyncing(id);
         try {
             await liveApiService.syncFileToWhatsApp(id);
-            await loadMedia(currentPath); // Reload to show new status
+            await loadMedia(currentPath);
         } catch (e) {
             alert("Failed to sync media to WhatsApp. Check console.");
         } finally {
             setIsSyncing(null);
+        }
+    };
+
+    const handleSetPublic = async (folderId: string, folderName: string) => {
+        const confirm = window.confirm(`Set "${folderName}" as the Public Showcase folder?\n\nThis will instantly make its contents visible on the public showcase page.`);
+        if (!confirm) return;
+
+        try {
+            await liveApiService.setPublicFolder(folderId);
+            await loadMedia(currentPath);
+        } catch(e) {
+            alert("Failed to update public folder.");
         }
     };
 
@@ -210,7 +221,7 @@ export const MediaLibrary = () => {
                     <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
                         <Cloud className="text-blue-600" /> AWS S3 Media Library
                     </h1>
-                    <p className="text-gray-500 text-sm mt-1">Organize and upload approved assets. Sync to WhatsApp for faster delivery.</p>
+                    <p className="text-gray-500 text-sm mt-1">Organize and upload approved assets. Sync to WhatsApp or Public Showcase.</p>
                 </div>
                 
                 <div className="flex gap-3 items-center">
@@ -260,19 +271,35 @@ export const MediaLibrary = () => {
                         {folders.map(folder => (
                             <div 
                                 key={folder.id} 
-                                className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm hover:shadow-md hover:border-blue-300 transition-all cursor-pointer group flex flex-col items-center justify-between h-36 relative select-none"
+                                className={`bg-white rounded-xl border p-4 shadow-sm hover:shadow-md transition-all cursor-pointer group flex flex-col items-center justify-between h-40 relative select-none ${folder.is_public_showcase ? 'border-green-400 ring-2 ring-green-100' : 'border-gray-200 hover:border-blue-300'}`}
                                 onClick={() => enterFolder(folder.name)}
                             >
-                                <div className="flex-1 flex flex-col items-center justify-center w-full">
+                                {folder.is_public_showcase && (
+                                    <div className="absolute top-2 left-2 bg-green-500 text-white text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1 shadow-sm z-10">
+                                        <Eye size={10} /> Public
+                                    </div>
+                                )}
+                                
+                                <div className="flex-1 flex flex-col items-center justify-center w-full mt-4">
                                     <Folder size={40} className="text-yellow-400 fill-yellow-100 group-hover:scale-110 transition-transform duration-200" />
                                     <span className="mt-2 text-sm font-semibold text-gray-700 group-hover:text-blue-600 truncate max-w-full px-2">{folder.name}</span>
                                 </div>
-                                <button
-                                    onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id, folder.name); }}
-                                    className="absolute top-2 right-2 p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
-                                >
-                                    {isDeleting === folder.id ? <Loader2 size={14} className="animate-spin text-red-500" /> : <Trash2 size={14} />}
-                                </button>
+                                
+                                <div className="w-full flex justify-between mt-1 pt-2 border-t border-gray-100">
+                                     <button
+                                        onClick={(e) => { e.stopPropagation(); handleSetPublic(folder.id, folder.name); }}
+                                        className={`p-1.5 rounded-full transition-colors ${folder.is_public_showcase ? 'text-green-600 bg-green-50' : 'text-gray-300 hover:text-green-600 hover:bg-green-50'}`}
+                                        title="Toggle Public Showcase"
+                                    >
+                                        <Globe size={14} />
+                                    </button>
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id, folder.name); }}
+                                        className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
+                                    >
+                                        {isDeleting === folder.id ? <Loader2 size={14} className="animate-spin text-red-500" /> : <Trash2 size={14} />}
+                                    </button>
+                                </div>
                             </div>
                         ))}
 
