@@ -134,21 +134,22 @@ export const MediaLibrary = () => {
                 checkGlobalStatus();
             } catch(e) { alert("Failed to stop showcase"); }
         } else {
-            // Toggle ON
-            const confirm = window.confirm(`Set "${folder.name}" as Public Showcase?`);
+            // Toggle ON - Supports multiple
+            const confirm = window.confirm(`Enable public link for "${folder.name}"?`);
             if (!confirm) return;
             try {
                 await liveApiService.setPublicFolder(folder.id);
                 await loadMedia(currentPath);
                 checkGlobalStatus();
-                setShareUrl(`${window.location.origin}/showcase`); // Auto-open share
+                // Generate deep link
+                setShareUrl(`${window.location.origin}/showcase/${encodeURIComponent(folder.name)}`); 
             } catch(e) { alert("Failed to start showcase"); }
         }
     };
     
     const handleGlobalShutdown = async () => {
         if (!globalStatus?.folderId) return;
-        const confirm = window.confirm("Are you sure you want to shut down the public showcase page? It will go offline immediately.");
+        const confirm = window.confirm("This will turn off the most recently active showcase. Continue?");
         if (!confirm) return;
         
         try {
@@ -160,9 +161,8 @@ export const MediaLibrary = () => {
         }
     };
 
-    const handleOpenShare = (e: React.MouseEvent) => {
-        e.stopPropagation();
-        setShareUrl(`${window.location.origin}/showcase`);
+    const handleOpenShare = (folderName: string) => {
+        setShareUrl(`${window.location.origin}/showcase/${encodeURIComponent(folderName)}`);
     };
 
     const handleCreateFolder = async (e: React.FormEvent) => {
@@ -275,22 +275,16 @@ export const MediaLibrary = () => {
                         <div>
                             <span className="font-bold text-sm">Public Showcase Active</span>
                             <div className="text-xs text-green-100 flex items-center gap-1">
-                                Serving folder: <span className="font-mono bg-black/20 px-1 rounded">{globalStatus.folderName}</span>
+                                Latest: <span className="font-mono bg-black/20 px-1 rounded">{globalStatus.folderName}</span>
                             </div>
                         </div>
                     </div>
                     <div className="flex items-center gap-3">
                         <button 
-                            onClick={handleOpenShare}
-                            className="text-xs font-bold bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2"
-                        >
-                            <ExternalLink size={14} /> View Page
-                        </button>
-                        <button 
                             onClick={handleGlobalShutdown}
                             className="text-xs font-bold bg-white text-red-600 px-3 py-1.5 rounded-lg hover:bg-red-50 transition-colors flex items-center gap-2 shadow-sm"
                         >
-                            <Power size={14} /> Turn Off Showcase
+                            <Power size={14} /> Turn Off Latest
                         </button>
                     </div>
                 </div>
@@ -371,7 +365,7 @@ export const MediaLibrary = () => {
                                             <button
                                                 onClick={(e) => { e.stopPropagation(); handleTogglePublic(folder); }}
                                                 className={`p-1.5 rounded-full transition-colors flex items-center gap-1 ${folder.is_public_showcase ? 'text-green-600 bg-green-50 hover:bg-green-100' : 'text-gray-300 hover:text-green-600 hover:bg-green-50'}`}
-                                                title={folder.is_public_showcase ? "Stop Showcase (Turn Off)" : "Set as Public Showcase"}
+                                                title={folder.is_public_showcase ? "Stop Showcase" : "Make Public"}
                                             >
                                                 <Globe size={14} />
                                             </button>
@@ -379,7 +373,7 @@ export const MediaLibrary = () => {
                                             {/* Separate Share Button: Only visible if active */}
                                             {folder.is_public_showcase && (
                                                 <button
-                                                    onClick={handleOpenShare}
+                                                    onClick={(e) => { e.stopPropagation(); handleOpenShare(folder.name); }}
                                                     className="p-1.5 rounded-full transition-colors text-blue-500 bg-blue-50 hover:bg-blue-100"
                                                     title="Get Share Link"
                                                 >

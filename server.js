@@ -625,10 +625,21 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
 // --- ROUTES ---
 
-// NEW: Public Showcase API (No Auth) - FIXED PATH LOGIC
+// NEW: Public Showcase API (Supports ?folder=Name)
 app.get('/api/public/showcase', async (req, res) => {
     try {
-        const folderRes = await queryWithRetry('SELECT id, name, parent_path FROM media_folders WHERE is_public_showcase = TRUE LIMIT 1', []);
+        let query = 'SELECT id, name, parent_path FROM media_folders WHERE is_public_showcase = TRUE';
+        let params = [];
+        
+        if (req.query.folder) {
+            query += ' AND name = $1';
+            params.push(req.query.folder);
+        }
+        
+        // Prefer explicit match, then fallback to any public
+        query += ' ORDER BY id DESC LIMIT 1';
+        
+        const folderRes = await queryWithRetry(query, params);
         
         if (folderRes.rows.length === 0) {
             return res.json({ title: 'Welcome', items: [] });
@@ -683,7 +694,7 @@ app.get('/api/public/showcase', async (req, res) => {
 // NEW: Get Status Endpoint
 app.get('/api/public/status', async (req, res) => {
     try {
-        const folderRes = await queryWithRetry('SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE LIMIT 1', []);
+        const folderRes = await queryWithRetry('SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE ORDER BY id DESC LIMIT 1', []);
         if (folderRes.rows.length > 0) {
             res.json({ active: true, folderName: folderRes.rows[0].name, folderId: folderRes.rows[0].id });
         } else {
@@ -694,22 +705,15 @@ app.get('/api/public/status', async (req, res) => {
     }
 });
 
-// NEW: Set Public Folder Endpoint
+// NEW: Set Public Folder Endpoint (MULTI-SUPPORT)
 app.post('/api/folders/:id/public', async (req, res) => {
     try {
         const { id } = req.params;
         const client = await pool.connect();
         try {
-            await client.query('BEGIN');
-            // Reset all
-            await client.query('UPDATE media_folders SET is_public_showcase = FALSE');
-            // Set new one
+            // Allows multiple folders to be public simultaneously
             await client.query('UPDATE media_folders SET is_public_showcase = TRUE WHERE id = $1', [id]);
-            await client.query('COMMIT');
             res.json({ success: true });
-        } catch (e) {
-            await client.query('ROLLBACK');
-            throw e;
         } finally {
             client.release();
         }

@@ -1,5 +1,6 @@
 
 
+
 import React, { useState, useEffect } from 'react';
 import { Layout } from './components/Layout';
 import { LeadTable } from './components/LeadTable';
@@ -18,12 +19,18 @@ import { Driver, LeadStatus, Notification, BotSettings, Message } from './types'
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split, Bot } from 'lucide-react';
 
 export default function App() {
-  // ROUTING CHECK: If url is /showcase, render public page only
+  // ROUTING CHECK: Supports /showcase and /showcase/:folderName
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
+  const [showcaseFolderName, setShowcaseFolderName] = useState<string | undefined>(undefined);
 
   useEffect(() => {
-      if (window.location.pathname === '/showcase') {
+      const path = window.location.pathname;
+      if (path.startsWith('/showcase')) {
           setIsShowcaseMode(true);
+          const parts = path.split('/showcase/');
+          if (parts.length > 1 && parts[1].trim() !== '') {
+              setShowcaseFolderName(decodeURIComponent(parts[1]));
+          }
       }
   }, []);
 
@@ -259,7 +266,7 @@ export default function App() {
 
   // RENDER: PUBLIC SHOWCASE MODE
   if (isShowcaseMode) {
-      return <PublicShowcase />;
+      return <PublicShowcase folderName={showcaseFolderName} />;
   }
 
   // RENDER: ADMIN APP

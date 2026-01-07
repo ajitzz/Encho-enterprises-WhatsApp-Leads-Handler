@@ -175,8 +175,11 @@ export const liveApiService = {
       return await response.json();
   },
 
-  getPublicShowcase: async () => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/public/showcase`);
+  getPublicShowcase: async (folderName?: string) => {
+      const url = folderName 
+        ? `${API_BASE_URL}/api/public/showcase?folder=${encodeURIComponent(folderName)}`
+        : `${API_BASE_URL}/api/public/showcase`;
+      const response = await fetchWithRetry(url);
       if (!response.ok) throw new Error('Failed to fetch showcase');
       return await response.json();
   },

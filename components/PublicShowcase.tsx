@@ -36,7 +36,7 @@ const VideoPlayer = ({ src, isActive, isMuted }: { src: string, isActive: boolea
     );
 };
 
-export const PublicShowcase = () => {
+export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
     const [items, setItems] = useState<ShowcaseItem[]>([]);
     const [title, setTitle] = useState('');
     const [loading, setLoading] = useState(true);
@@ -47,7 +47,8 @@ export const PublicShowcase = () => {
     useEffect(() => {
         const fetchShowcase = async () => {
             try {
-                const data = await liveApiService.getPublicShowcase();
+                // Pass folderName to API to support specific folder links
+                const data = await liveApiService.getPublicShowcase(folderName);
                 setItems(data.items);
                 setTitle(data.title);
             } catch (e) {
@@ -57,7 +58,7 @@ export const PublicShowcase = () => {
             }
         };
         fetchShowcase();
-    }, []);
+    }, [folderName]);
 
     const handleScroll = () => {
         if (!containerRef.current) return;
@@ -66,12 +67,9 @@ export const PublicShowcase = () => {
     };
 
     const handleWhatsAppReturn = () => {
-        // Fallback to generic WhatsApp if no specific number is targeted, 
-        // or history back if they came from a chat link
         if (document.referrer.includes('whatsapp')) {
              window.history.back();
         } else {
-             // Or generic open whatsapp
              window.location.href = "https://wa.me/"; 
         }
     };
@@ -94,8 +92,8 @@ export const PublicShowcase = () => {
                     </div>
                     <h2 className="text-3xl font-bold mb-3 tracking-tight">Showcase Offline</h2>
                     <p className="text-gray-300 text-sm leading-relaxed mb-6">
-                        We are currently updating our vehicle fleet showcase. <br />
-                        Please check back shortly for new additions.
+                        {folderName ? `The folder "${folderName}" is empty or not available.` : 'We are currently updating our vehicle fleet showcase.'} <br />
+                        Please check back shortly.
                     </p>
                     <div className="flex items-center gap-2 text-xs font-mono text-gray-400 bg-black/30 px-4 py-2 rounded-lg">
                         <Clock size={12} />
