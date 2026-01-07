@@ -2,13 +2,6 @@
 /**
  * UBER FLEET RECRUITER - BACKEND SERVER
  * Enterprise-Grade Connection Handling for Vercel + Neon
- * 
- * Strategy:
- * 1. Singleton Pool with TCP Keep-Alive
- * 2. Automatic Query Retries (Self-Healing)
- * 3. Circuit Breaker for Connection Deadlocks
- * 4. Auto-Scaling AI Model Selection (Pro -> Flash -> Lite -> Local)
- * 5. Smart Traffic Control (Queueing + Caching + Circuit Breaker)
  */
 
 const express = require('express');
@@ -18,7 +11,7 @@ const { Pool } = require('pg');
 const { GoogleGenAI } = require('@google/genai');
 const fs = require('fs'); 
 const path = require('path'); 
-const crypto = require('crypto'); // For cache hashing
+const crypto = require('crypto'); 
 require('dotenv').config();
 
 const app = express();
@@ -27,7 +20,7 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(cors()); 
 
-// Disable Caching
+// Disable Caching to ensure fresh data
 app.set('etag', false);
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -49,22 +42,15 @@ const MODEL_PRO = "gemini-3-pro-preview";
 const MODEL_FLASH = "gemini-3-flash-preview";
 const MODEL_LITE = "gemini-flash-lite-latest";
 
-// 1. Circuit Breaker
+// 1. Circuit Breaker for AI
 let isCircuitOpen = false;
 let circuitResetTime = 0;
 const CIRCUIT_COOLDOWN_MS = 60000; // 60 seconds full stop on 429
 
-// 2. Caching
-const responseCache = new Map();
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes cache for heavy tasks
-
-// 3. Background Queue
-let backgroundQueue = Promise.resolve();
-
 let aiStatusCache = { status: 'unknown', message: 'Initializing...', lastCheck: 0, activeModel: MODEL_PRO };
 
 const getActiveModel = () => {
-    if (isCircuitOpen) return 'NONE'; // Should catch before this
+    if (isCircuitOpen) return 'NONE'; 
     // If recently downgraded, stick to Flash
     if (aiStatusCache.activeModel === MODEL_LITE || aiStatusCache.activeModel === MODEL_FLASH) {
         // Try to upgrade back to Pro after 2 minutes of stability
@@ -77,7 +63,7 @@ const getActiveModel = () => {
 // --- SECURITY: CONTENT FIREWALL ---
 const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
 
-// --- ROBUST DATABASE CONNECTION ---
+// --- DATABASE CONNECTION ---
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL;
 
@@ -103,7 +89,7 @@ const queryWithRetry = async (text, params, retries = 2) => {
         if (client) { try { client.release(true); } catch(e) {} client = null; }
         console.warn(`⚠️ DB Error (${err.code}): ${err.message}`);
         if ((err.code === '57P01' || err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === '42P01' || err.code === '42703') && retries > 0) {
-            console.log(`♻️ Retrying... (${retries} left)`);
+            console.log(`♻️ Retrying DB query... (${retries} left)`);
             if (err.code === '42P01' || err.code === '42703') {
                 const healClient = await pool.connect();
                 await ensureDatabaseInitialized(healClient);
@@ -159,29 +145,8 @@ const DEFAULT_BOT_SETTINGS = {
   isEnabled: true,
   routingStrategy: 'HYBRID_BOT_FIRST',
   systemInstruction: "You are a friendly and persuasive recruiter for Uber Fleet in Kerala.",
-  steps: [
-    { id: 'step_1', title: 'Welcome & Name', message: 'നമസ്കാരം! Uber Fleet-ലേക്ക് സ്വാഗതം. നിങ്ങളുടെ പേര് പറയാമോ?', inputType: 'text', saveToField: 'name', nextStepId: 'step_2' },
-    { id: 'step_2', title: 'License Check', message: 'നന്ദി! നിങ്ങളുടെ കൈയ്യിൽ valid ആയ Commercial Driving License ഉണ്ടോ?', inputType: 'option', options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'], nextStepId: 'step_3' },
-    { id: 'step_3', title: 'Upload License', message: 'Verification-ന് വേണ്ടി License-ന്റെ ഒരു ഫോട്ടോ അയച്ചുതരൂ.', inputType: 'image', saveToField: 'document', nextStepId: 'step_4' },
-    { id: 'step_4', title: 'Availability', message: 'എപ്പോഴാണ് ഡ്രൈവ് ചെയ്യാൻ താല്പര്യം? (Full-time / Part-time)', inputType: 'option', options: ['Full-time', 'Part-time', 'Weekends'], saveToField: 'availability', nextStepId: 'AI_HANDOFF' }
-  ],
-  flowData: {
-      nodes: [
-          { id: 'start', type: 'custom', position: { x: 50, y: 300 }, data: { type: 'start', label: 'Start' } },
-          { id: 'step_1', type: 'custom', position: { x: 300, y: 300 }, data: { label: 'Text', message: 'നമസ്കാരം! Uber Fleet-ലേക്ക് സ്വാഗതം. നിങ്ങളുടെ പേര് പറയാമോ?', inputType: 'text', saveToField: 'name' } },
-          { id: 'step_2', type: 'custom', position: { x: 600, y: 300 }, data: { label: 'Quick Reply', message: 'നന്ദി! നിങ്ങളുടെ കൈയ്യിൽ valid ആയ Commercial Driving License ഉണ്ടോ?', inputType: 'option', options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'] } },
-          { id: 'step_3', type: 'custom', position: { x: 900, y: 300 }, data: { label: 'Image', message: 'Verification-ന് വേണ്ടി License-ന്റെ ഒരു ഫോട്ടോ അയച്ചുതരൂ.', inputType: 'image', saveToField: 'document' } },
-          { id: 'step_4', type: 'custom', position: { x: 1200, y: 300 }, data: { label: 'Quick Reply', message: 'എപ്പോഴാണ് ഡ്രൈവ് ചെയ്യാൻ താല്പര്യം? (Full-time / Part-time)', inputType: 'option', options: ['Full-time', 'Part-time', 'Weekends'], saveToField: 'availability' } },
-          { id: 'end', type: 'custom', position: { x: 1500, y: 300 }, data: { type: 'end', label: 'End' } }
-      ],
-      edges: [
-          { id: 'e_start-step_1', source: 'start', target: 'step_1', type: 'smoothstep', animated: true },
-          { id: 'e_step_1-step_2', source: 'step_1', target: 'step_2', type: 'smoothstep', animated: true },
-          { id: 'e_step_2-step_3', source: 'step_2', target: 'step_3', sourceHandle: 'opt_0', type: 'smoothstep', animated: true },
-          { id: 'e_step_3-step_4', source: 'step_3', target: 'step_4', type: 'smoothstep', animated: true },
-          { id: 'e_step_4-end', source: 'step_4', target: 'end', type: 'smoothstep', animated: true }
-      ]
-  }
+  steps: [],
+  flowData: { nodes: [], edges: [] }
 };
 
 // --- DATABASE CLEANER (Runs on Startup) ---
@@ -193,41 +158,30 @@ const sanitizeDatabaseOnStartup = async (client) => {
             let settings = res.rows[0].settings;
             let dirty = false;
 
-            // 1. INJECT VISUAL FLOW IF MISSING
-            if (!settings.flowData || !settings.flowData.nodes || settings.flowData.nodes.length === 0) {
-                console.warn("   ⚠️  Injecting default visual flow into existing database...");
-                settings.flowData = DEFAULT_BOT_SETTINGS.flowData;
+            // Initialize if empty
+            if (!settings.flowData) {
+                settings.flowData = { nodes: [], edges: [] };
                 dirty = true;
             }
 
-            // 2. CLEAN GHOST MESSAGES & PLACEHOLDERS
+            // Clean blocked messages
             if (settings.steps && Array.isArray(settings.steps)) {
                 const initialCount = settings.steps.length;
-                settings.steps = settings.steps.filter(step => {
-                    const hasText = step.message && step.message.trim().length > 0;
-                    const hasMedia = step.mediaUrl && step.mediaUrl.trim().length > 0;
-                    const hasOptions = step.options && step.options.length > 0;
-                    return hasText || hasMedia || hasOptions;
-                }).map(step => {
-                    // Check for placeholder text
+                settings.steps = settings.steps.map(step => {
                     if (step.message && BLOCKED_REGEX.test(step.message)) {
                         if (step.options && step.options.length > 0) {
                             step.message = "Please select an option:";
                         } else {
-                            step.message = ""; // Clear it if no options, will be filtered next run or ignored
+                            step.message = ""; 
                         }
                         dirty = true;
                     }
                     return step;
                 });
-                if (settings.steps.length !== initialCount) dirty = true;
-            }
-
-            if (dirty) {
-                await client.query('UPDATE bot_settings SET settings = $1 WHERE id = 1', [JSON.stringify(settings)]);
-                console.log("   ✅ Database Cleaned & Updated.");
-            } else {
-                console.log("   ✨ Database is clean.");
+                if (dirty) {
+                    await client.query('UPDATE bot_settings SET settings = $1 WHERE id = 1', [JSON.stringify(settings)]);
+                    console.log("   ✅ Database Cleaned & Updated.");
+                }
             }
         }
     } catch (e) {
@@ -240,6 +194,7 @@ const ensureDatabaseInitialized = async (client) => {
         await client.query('BEGIN');
         await client.query(SCHEMA_SQL);
         
+        // Add missing columns if they don't exist
         await client.query(`
             ALTER TABLE messages ADD COLUMN IF NOT EXISTS options TEXT[];
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS current_bot_step_id TEXT;
@@ -272,11 +227,6 @@ const cleanJSON = (text) => {
   return text.replace(/```json/g, '').replace(/```/g, '').trim();
 };
 
-const getCacheKey = (task, content) => {
-    const str = typeof content === 'string' ? content : JSON.stringify(content);
-    return crypto.createHash('md5').update(`${task}:${str}`).digest('hex');
-};
-
 const generateContentSmart = async (contents, config = {}, systemInstruction = undefined, taskName = 'General Task') => {
     if (isCircuitOpen) {
         const timeLeft = Math.ceil((circuitResetTime - Date.now()) / 1000);
@@ -285,6 +235,7 @@ const generateContentSmart = async (contents, config = {}, systemInstruction = u
 
     const executeCall = async () => {
         let targetModel = getActiveModel();
+        
         const runModel = async (model) => {
             const reqConfig = { ...config };
             if (systemInstruction) reqConfig.systemInstruction = systemInstruction;
@@ -331,7 +282,6 @@ const runLocalAudit = (nodes) => {
     console.log("🛡️ [Local Auditor] Running heuristic check...");
     const issues = [];
     nodes.forEach(node => {
-        // Skip structural nodes
         if (node.id === 'start' || node.type === 'start' || node.data?.type === 'start' || 
             node.id === 'end' || node.type === 'end' || node.data?.type === 'end') return;
         
@@ -376,6 +326,33 @@ const runLocalAudit = (nodes) => {
 
 // --- ROUTES ---
 
+// 1. HEALTH CHECK
+app.get('/api/health', async (req, res) => {
+    const health = {
+        database: { status: 'disconnected', latency: 0 },
+        ai: aiStatusCache,
+        whatsapp: { status: 'not_configured', lastWebhook: lastWebhookTime },
+        mode: 'pooled'
+    };
+
+    try {
+        const start = Date.now();
+        await pool.query('SELECT 1');
+        health.database.status = 'connected';
+        health.database.latency = Date.now() - start;
+    } catch(e) {
+        health.database.status = 'error: ' + e.message;
+    }
+
+    if (META_API_TOKEN && PHONE_NUMBER_ID) {
+        health.whatsapp.status = lastWebhookTime > 0 ? 'active' : 'waiting_for_webhook';
+    }
+
+    console.log("[HEALTH CHECK] Status:", health.database.status);
+    res.json(health);
+});
+
+// 2. DATA ROUTES
 app.get('/api/drivers', async (req, res) => {
     try {
         const result = await queryWithRetry(`SELECT * FROM drivers ORDER BY last_message_time DESC`);
@@ -397,7 +374,7 @@ app.post('/api/bot-settings', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- NEW AI AUDIT ROUTE ---
+// 3. AI AUDIT ROUTE
 app.post('/api/admin/audit-flow', async (req, res) => {
     try {
         const { nodes, edges } = req.body;
@@ -465,6 +442,7 @@ app.post('/api/admin/audit-flow', async (req, res) => {
     }
 });
 
+// 4. MESSAGING ROUTES
 app.post('/api/messages/send', async (req, res) => {
     try {
         const { driverId, text } = req.body;
@@ -482,6 +460,18 @@ app.post('/api/messages/send', async (req, res) => {
 
         res.json({ success: true, messageId: msgId });
     } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 5. WEBHOOK CONFIG
+app.post('/api/configure-webhook', (req, res) => {
+    if(req.body.verifyToken) VERIFY_TOKEN = req.body.verifyToken;
+    res.json({ success: true });
+});
+
+app.post('/api/update-credentials', (req, res) => {
+    if(req.body.phoneNumberId) PHONE_NUMBER_ID = req.body.phoneNumberId;
+    if(req.body.apiToken) META_API_TOKEN = req.body.apiToken;
+    res.json({ success: true });
 });
 
 // --- HELPER: LOGIC ENGINE ---
@@ -657,16 +647,13 @@ app.patch('/api/drivers/:id', async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/update-credentials', (req, res) => {
-    if(req.body.phoneNumberId) PHONE_NUMBER_ID = req.body.phoneNumberId;
-    if(req.body.apiToken) META_API_TOKEN = req.body.apiToken;
-    res.json({ success: true });
-});
-
-app.post('/api/configure-webhook', (req, res) => {
-    if(req.body.verifyToken) VERIFY_TOKEN = req.body.verifyToken;
-    res.json({ success: true });
-});
+// START SERVER
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`🚀 Server running on port ${PORT}`);
+        console.log(`   Health Check: http://localhost:${PORT}/api/health`);
+        console.log(`   Audit Endpoint: http://localhost:${PORT}/api/admin/audit-flow`);
+    });
+}
 
 module.exports = app;
-if (require.main === module) app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
