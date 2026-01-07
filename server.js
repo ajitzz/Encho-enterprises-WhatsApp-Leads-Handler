@@ -53,19 +53,52 @@ const upload = multer({ storage: multer.memoryStorage() });
 // --- SECURITY: CONTENT FIREWALL ---
 const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
 
-// HELPER: Clean a single step
-const cleanStep = (step) => {
-    if (!step) return step;
-    const msg = step.message || "";
-    if (BLOCKED_REGEX.test(msg)) {
-        console.log(`🧹 FIREWALL: Stripping placeholder from step '${step.title || step.id}'`);
-        if (step.options && step.options.length > 0) {
-            step.message = "Please select an option:";
-        } else {
-            step.message = ""; 
-        }
+// HELPER: Deep Clean Bot Settings (Fixes React Error #31 & Logic Bugs)
+const cleanBotSettings = (settings) => {
+    if (!settings) return settings;
+    
+    // 1. Clean Steps
+    if (settings.steps && Array.isArray(settings.steps)) {
+        settings.steps = settings.steps.map(step => {
+            const msg = step.message || "";
+            // Remove placeholders
+            if (BLOCKED_REGEX.test(msg)) {
+                if (step.options && step.options.length > 0) {
+                    step.message = "Please select an option:";
+                } else {
+                    step.message = ""; 
+                }
+            }
+            // Remove garbage template names (Fixes "No Response" issue)
+            if (step.templateName && (step.templateName.includes(' ') || step.templateName.includes(':') || step.templateName.length < 3)) {
+                console.log(`🧹 Removing invalid template name: "${step.templateName}"`);
+                delete step.templateName; 
+                step.templateName = null;
+            }
+            return step;
+        });
     }
-    return step;
+
+    // 2. Clean Flow Data (Remove React Components causing Crash #31)
+    if (settings.flowData && Array.isArray(settings.flowData.nodes)) {
+        settings.flowData.nodes = settings.flowData.nodes.map(node => {
+            if (node.data) {
+                // Remove the 'icon' object which is a React Component and crashes the frontend
+                if (node.data.icon) delete node.data.icon;
+                
+                // Fix "undefined" string bug
+                if (node.data.inputType === 'undefined') node.data.inputType = 'text';
+                
+                // Remove garbage template names from visual nodes too
+                if (node.data.templateName && (node.data.templateName.includes(' ') || node.data.templateName.includes(':'))) {
+                    delete node.data.templateName;
+                }
+            }
+            return node;
+        });
+    }
+
+    return settings;
 };
 
 // --- DATABASE CONNECTION ---
@@ -181,29 +214,14 @@ const sanitizeBotSettings = async (client) => {
         if (res.rows.length === 0) return;
 
         let settings = res.rows[0].settings;
-        let hasChanges = false;
         
-        console.log("----- STARTUP INSPECTION: BOT SETTINGS FROM DB -----");
-        if (settings.steps && Array.isArray(settings.steps)) {
-            settings.steps.forEach(s => {
-                console.log(`Step ${s.id}: "${s.message?.substring(0, 30)}..." [Template: ${s.templateName || 'None'}]`);
-            });
-
-            settings.steps = settings.steps.map(step => {
-                const originalMsg = step.message;
-                const cleanedStep = cleanStep(step); // Use shared helper
-                if (cleanedStep.message !== originalMsg) {
-                    hasChanges = true;
-                }
-                return cleanedStep;
-            });
-        }
-        console.log("----------------------------------------------------");
-
-        if (hasChanges) {
-            await client.query('UPDATE bot_settings SET settings = $1 WHERE id = 1', [JSON.stringify(settings)]);
-            console.log("✅ DATABASE SANITIZED ON STARTUP: Placeholder texts removed.");
-        }
+        // Cleanse the DB data using the shared helper
+        const cleanedSettings = cleanBotSettings(settings);
+        
+        // Always update to ensure DB is clean
+        await client.query('UPDATE bot_settings SET settings = $1 WHERE id = 1', [JSON.stringify(cleanedSettings)]);
+        console.log("✅ DATABASE SANITIZED: Removed React icons and fixed templates.");
+        
     } catch (e) {
         console.error("Sanitization failed:", e);
     }
@@ -217,8 +235,7 @@ const ensureDatabaseInitialized = async (client) => {
         // 1. Create Tables if missing
         await client.query(SCHEMA_SQL);
         
-        // 2. Self-Heal Columns (If tables exist but columns are missing)
-        // This fixes the "undefined column" error if schema evolved
+        // 2. Self-Heal Columns
         await client.query(`
             ALTER TABLE messages ADD COLUMN IF NOT EXISTS options TEXT[];
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS documents TEXT[];
@@ -256,7 +273,6 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // --- HELPER: S3 KEY GEN ---
 const getS3FolderPrefix = (parentPath) => {
-    // Converts "/marketing" to "marketing/" and "/" to ""
     if (!parentPath || parentPath === '/') return '';
     return parentPath.replace(/^\//, '') + '/';
 };
@@ -275,99 +291,66 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
       }
   }
 
-  // --- CONTENT FIREWALL ---
-  const lowerBody = body ? body.toLowerCase() : "";
-  const isPlaceholder = BLOCKED_REGEX.test(lowerBody);
-  const isEmpty = !body || !body.trim();
-
-  let isBlocked = false;
-
-  if (templateName) {
-      isBlocked = false; 
-  } else if (mediaUrl) {
-      if (isPlaceholder) {
-          console.warn(`⚠️ FIREWALL: Stripped placeholder caption from media to ${to}`);
-          body = ""; 
-      }
-  } else {
-      if (isPlaceholder) {
-           if (options && options.length > 0) {
-               console.warn(`⚠️ FIREWALL: Auto-fixing placeholder for ${to}. Replaced with 'Please select an option:'`);
-               body = "Please select an option:";
-           } else {
-               isBlocked = true;
-           }
-      } else if (isEmpty) {
-          if (options && options.length > 0) {
-              console.log("⚠️ FIREWALL: Fixed Empty Body for Options Message");
-              body = "Please select an option:";
-          } else {
-              isBlocked = true;
-          }
-      }
-  }
-
-  if (isBlocked) {
-      console.log("\n================ TRAFFIC WATCHDOG (BLOCKED) ================");
-      console.log(`⛔ BLOCKED SUSPICIOUS MESSAGE TO: ${to}`);
-      console.log(`CONTENT: "${body}"`);
-      return false;
-  }
-
   let payload = { messaging_product: 'whatsapp', to: to };
   
-  if (templateName) {
+  // Check for valid template name. If invalid, fall back to text/media.
+  const isValidTemplate = templateName && /^[a-zA-Z0-9_]+$/.test(templateName);
+
+  if (isValidTemplate) {
     payload.type = 'template';
     payload.template = { name: templateName, language: { code: language } };
-  } else if (mediaUrl) {
-    const isYouTube = mediaUrl.includes('youtube.com') || mediaUrl.includes('youtu.be');
-    
-    // YOUTUBE SPECIAL CASE: Send as text preview link
-    if (isYouTube) {
-        payload.type = 'text';
-        payload.text = { body: body ? `${body} ${mediaUrl}` : mediaUrl, preview_url: true };
-    } 
-    // AWS S3 / DIRECT FILE CASE: Send as Native Media
-    else {
-        payload.type = mediaType;
-        payload[mediaType] = { link: mediaUrl };
-        if (body && body.trim().length > 0) payload[mediaType].caption = body;
-        // Document requires filename
-        if (mediaType === 'document') {
-             payload[mediaType].filename = mediaUrl.split('/').pop();
+  } else {
+      // Logic for Text/Media
+      if (templateName && !isValidTemplate) {
+          console.warn(`⚠️ Invalid Template Name '${templateName}' ignored. Sending as standard message.`);
+      }
+
+      if (mediaUrl) {
+        const isYouTube = mediaUrl.includes('youtube.com') || mediaUrl.includes('youtu.be');
+        
+        if (isYouTube) {
+            payload.type = 'text';
+            payload.text = { body: body ? `${body} ${mediaUrl}` : mediaUrl, preview_url: true };
+        } else {
+            payload.type = mediaType;
+            payload[mediaType] = { link: mediaUrl };
+            if (body && body.trim().length > 0) payload[mediaType].caption = body;
+            if (mediaType === 'document') {
+                 payload[mediaType].filename = mediaUrl.split('/').pop();
+            }
         }
-    }
-  } else if (options && options.length > 0) {
-    const validOptions = options.filter(o => o && o.trim().length > 0);
-    if (validOptions.length === 0) {
+      } else if (options && options.length > 0) {
+        const validOptions = options.filter(o => o && o.trim().length > 0);
+        if (validOptions.length === 0) {
+            payload.type = 'text';
+            payload.text = { body: body };
+        } else {
+            const safeBody = body || "Select an option:";
+            if (validOptions.length > 3) {
+                payload.type = 'interactive';
+                payload.interactive = {
+                    type: 'list',
+                    body: { text: safeBody },
+                    action: {
+                        button: "Select",
+                        sections: [{ title: "Options", rows: validOptions.slice(0, 10).map((opt, i) => ({ id: `opt_${i}`, title: opt.substring(0, 24) })) }]
+                    }
+                };
+            } else {
+                payload.type = 'interactive';
+                payload.interactive = {
+                    type: 'button',
+                    body: { text: safeBody },
+                    action: { 
+                        buttons: validOptions.map((opt, i) => ({ type: 'reply', reply: { id: `btn_${i}`, title: opt.substring(0, 20) } })) 
+                    }
+                };
+            }
+        }
+      } else {
         payload.type = 'text';
         payload.text = { body: body };
-    } else {
-        const safeBody = body || "Select an option:";
-        if (validOptions.length > 3) {
-            payload.type = 'interactive';
-            payload.interactive = {
-                type: 'list',
-                body: { text: safeBody },
-                action: {
-                    button: "Select",
-                    sections: [{ title: "Options", rows: validOptions.slice(0, 10).map((opt, i) => ({ id: `opt_${i}`, title: opt.substring(0, 24) })) }]
-                }
-            };
-        } else {
-            payload.type = 'interactive';
-            payload.interactive = {
-                type: 'button',
-                body: { text: safeBody },
-                action: { 
-                    buttons: validOptions.map((opt, i) => ({ type: 'reply', reply: { id: `btn_${i}`, title: opt.substring(0, 20) } })) 
-                }
-            };
-        }
-    }
-  } else {
-    payload.type = 'text';
-    payload.text = { body: body };
+      }
   }
   
   console.log("\n================ TRAFFIC WATCHDOG (OUTGOING) ================");
@@ -418,16 +401,11 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         try {
             await client.query('BEGIN');
             const settingsRes = await client.query('SELECT settings FROM bot_settings WHERE id = 1');
-            let botSettings = settingsRes.rows[0]?.settings || DEFAULT_BOT_SETTINGS;
             
-            // Sanitize steps in memory
-            if (botSettings.steps && Array.isArray(botSettings.steps)) {
-                botSettings.steps = botSettings.steps.map(step => cleanStep(step));
-            }
-
+            // Clean settings immediately upon read
+            let botSettings = cleanBotSettings(settingsRes.rows[0]?.settings || DEFAULT_BOT_SETTINGS);
+            
             const routingStrategy = botSettings.routingStrategy || 'HYBRID_BOT_FIRST';
-
-            // Determine Start Node
             const entryPointId = botSettings.entryPointId || botSettings.steps?.[0]?.id;
 
             // 1. Get Driver & Log Message
@@ -437,7 +415,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
             if (!driver) {
                 isNewDriver = true;
-                // Only active bot on new driver if not AI_ONLY
                 const shouldActivateBot = botSettings.isEnabled && routingStrategy !== 'AI_ONLY';
                 const insertRes = await client.query(
                     `INSERT INTO drivers (id, phone_number, name, source, status, last_message, last_message_time, documents, current_bot_step_id, is_bot_active, is_human_mode)
@@ -456,11 +433,10 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
             // --- STRATEGY LOGIC ---
             
-            // PRIORITY 1: HUMAN MODE (Stop Everything)
             if (driver.is_human_mode) {
                  await client.query('COMMIT');
                  console.log(`🛑 HUMAN MODE: Skipped automation for ${driver.name}`);
-                 return; // EXIT IMMEDIATELY
+                 return; 
             }
 
             let replyText = null;
@@ -471,45 +447,37 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             let shouldCallAI = false;
             let currentStepId = null;
 
-            // PRIORITY 2: AI ONLY
             if (botSettings.isEnabled && routingStrategy === 'AI_ONLY') {
                 shouldCallAI = true;
             } 
-            // PRIORITY 3: BOT LOGIC (Hybrid or Bot Only)
             else if (botSettings.isEnabled) {
-                 // Activation Logic:
                  if (!driver.is_bot_active) {
-                     // BOT_ONLY: Always restart flow if inactive (Looping)
                      if (routingStrategy === 'BOT_ONLY') {
                          if (entryPointId) {
                              await client.query('UPDATE drivers SET is_bot_active = TRUE, current_bot_step_id = $1 WHERE id = $2', [entryPointId, driver.id]);
                              driver.is_bot_active = true;
                              driver.current_bot_step_id = entryPointId;
-                             isNewDriver = true; // Treat as new to trigger first msg
+                             isNewDriver = true; 
                          } else {
-                             // Fallback if no steps defined but BOT_ONLY is active
                              replyText = "Our automated system is currently being configured. Please check back later.";
                          }
                      }
-                     // HYBRID: If inactive, it implies handoff to AI has happened previously
                      else if (routingStrategy === 'HYBRID_BOT_FIRST') {
                          shouldCallAI = true; 
                      }
                  }
 
-                 // Self-Correction: If active but lost step (or never had one), try to find start
+                 // Self-Correction: If active but lost step
                  if (driver.is_bot_active && !driver.current_bot_step_id && botSettings.steps.length > 0) {
                       const firstId = entryPointId || botSettings.steps[0].id;
                       await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [firstId, driver.id]);
                       driver.current_bot_step_id = firstId;
-                      // Treat as "New Driver" behavior to send the first message immediately
                       isNewDriver = true;
                  }
 
                  if (driver.is_bot_active && driver.current_bot_step_id) {
                      let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
                      
-                     // Fallback if step ID invalid (deleted node)
                      if (!currentStep && botSettings.steps.length > 0) {
                          const firstStepId = entryPointId || botSettings.steps[0].id;
                          await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [firstStepId, driver.id]);
@@ -521,32 +489,24 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      if (currentStep) {
                          currentStepId = currentStep.id; 
 
-                         // If NOT new, process their answer to the *previous* step and move to next
                          if (!isNewDriver) {
-                             // Save Data
                              if (currentStep.saveToField === 'name') await client.query('UPDATE drivers SET name = $1 WHERE id = $2', [msgBody, driver.id]);
                              if (currentStep.saveToField === 'availability') await client.query('UPDATE drivers SET availability = $1 WHERE id = $2', [msgBody, driver.id]);
                              if (currentStep.saveToField === 'vehicleRegistration') await client.query('UPDATE drivers SET vehicle_registration = $1 WHERE id = $2', [msgBody, driver.id]);
 
                              let nextId = currentStep.nextStepId;
                              
-                             // COMPLETION LOGIC
                              if (nextId === 'AI_HANDOFF' || nextId === 'END' || !nextId) {
-                                 // Stop Bot
                                  await client.query('UPDATE drivers SET is_bot_active = FALSE, current_bot_step_id = NULL WHERE id = $1', [driver.id]);
                                  driver.is_bot_active = false; 
                                  
-                                 // Determine Handoff vs Loop End
                                  if (routingStrategy === 'HYBRID_BOT_FIRST') {
-                                     if (nextId === 'AI_HANDOFF') shouldCallAI = true; // Explicit Handoff
-                                     // Else: Flow ended naturally. Next message will hit "if !is_bot_active -> shouldCallAI" above.
+                                     if (nextId === 'AI_HANDOFF') shouldCallAI = true; 
                                      else replyText = "Thank you! We have received your details.";
                                  } else if (routingStrategy === 'BOT_ONLY') {
-                                     // End of Loop. Send final message. Next user text will trigger "isNewDriver" logic above because we set active=false.
                                      replyText = "Thank you! Your details are saved.";
                                  }
                              } else {
-                                 // Move to Next Step
                                  await client.query('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [nextId, driver.id]);
                                  const nextStep = botSettings.steps.find(s => s.id === nextId);
                                  if (nextStep) {
@@ -563,7 +523,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                                  }
                              }
                          } else {
-                             // IS NEW (First interaction or Restart) -> Send Current Step
                              replyText = currentStep.message;
                              replyTemplate = currentStep.templateName;
                              replyMedia = currentStep.mediaUrl;
@@ -574,13 +533,11 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                          }
                      }
                  } else if (driver.is_bot_active && !driver.current_bot_step_id) {
-                      // Fallback: Bot is theoretically active, but no steps exist at all.
                       if (routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
                       else replyText = "Our system is under maintenance. Please try again later.";
                  }
             }
             
-            // Safety: If BOT_ONLY, never call AI
             if (routingStrategy === 'BOT_ONLY') shouldCallAI = false; 
 
             await client.query('COMMIT');
@@ -604,26 +561,27 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         if (hasContent) {
             if (result.replyTemplate) {
                 sent = await sendWhatsAppMessage(from, null, null, result.replyTemplate);
-                if (sent) await logSystemMessage(result.driver.id, `[Template: ${result.replyTemplate}]`, 'template');
-            } else if (result.replyMedia) {
+                // Fallback: If template failed (invalid name), send text/media instead
+                if (!sent) {
+                    console.log("⚠️ Template failed, falling back to basic message");
+                    sent = await sendWhatsAppMessage(from, result.replyText, result.replyOptions, null, 'en_US', result.replyMedia, result.replyMediaType);
+                } else {
+                    if (sent) await logSystemMessage(result.driver.id, `[Template: ${result.replyTemplate}]`, 'template');
+                }
+            } 
+            
+            // If template wasn't tried, or failed and we need to send regular content
+            if (!sent && !result.replyTemplate) {
                 let caption = result.replyText || "";
-                if (result.debugNodeId) caption += ` [Debug: Node ${result.debugNodeId}]`;
-
-                sent = await sendWhatsAppMessage(from, caption, null, null, 'en_US', result.replyMedia, result.replyMediaType);
-                if (sent) await logSystemMessage(result.driver.id, caption || `[${result.replyMediaType}]`, 'image', null, result.replyMedia);
-            } else if (result.replyText || (result.replyOptions && result.replyOptions.length > 0)) {
-                let finalText = result.replyText || "";
-                if (result.debugNodeId) {
-                    finalText += `\n\n[🔍 Debug: Node ${result.debugNodeId}]`;
-                }
-                if (BLOCKED_REGEX.test(finalText)) {
-                    finalText += `\n\n[🚨 CRITICAL: Placeholder Detected from Node ${result.debugNodeId}]`;
-                }
-
-                sent = await sendWhatsAppMessage(from, finalText, result.replyOptions);
-                if (sent) {
-                    const loggedText = !finalText && result.replyOptions ? "Please select an option:" : finalText;
-                    await logSystemMessage(result.driver.id, loggedText, result.replyOptions ? 'options' : 'text', result.replyOptions);
+                if (result.replyMedia) {
+                    sent = await sendWhatsAppMessage(from, caption, null, null, 'en_US', result.replyMedia, result.replyMediaType);
+                    if (sent) await logSystemMessage(result.driver.id, caption || `[${result.replyMediaType}]`, 'image', null, result.replyMedia);
+                } else {
+                    sent = await sendWhatsAppMessage(from, caption, result.replyOptions);
+                    if (sent) {
+                        const loggedText = !caption && result.replyOptions ? "Please select an option:" : caption;
+                        await logSystemMessage(result.driver.id, loggedText, result.replyOptions ? 'options' : 'text', result.replyOptions);
+                    }
                 }
             }
         } 
@@ -993,68 +951,46 @@ app.post('/api/admin/audit-flow', async (req, res) => {
 });
 
 app.get('/api/health', async (req, res) => { try { await queryWithRetry('SELECT 1'); res.json({ status: 'healthy' }); } catch (e) { res.status(500).json({ error: e.message }); } });
-app.get('/api/bot-settings', async (req, res) => { try { const result = await queryWithRetry('SELECT * FROM bot_settings WHERE id = 1'); res.json(result.rows[0]?.settings || DEFAULT_BOT_SETTINGS); } catch (e) { res.status(500).json({ error: e.message }); } });
-app.post('/api/bot-settings', async (req, res) => { try { let settings = req.body; if (settings.steps && Array.isArray(settings.steps)) { settings.steps = settings.steps.map(step => cleanStep(step)); } await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(settings)]); res.json({ success: true }); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.get('/api/bot-settings', async (req, res) => { 
+    try { 
+        const result = await queryWithRetry('SELECT * FROM bot_settings WHERE id = 1'); 
+        // CLEANSE before sending to frontend to prevent crashes
+        const settings = cleanBotSettings(result.rows[0]?.settings || DEFAULT_BOT_SETTINGS);
+        res.json(settings); 
+    } catch (e) { 
+        res.status(500).json({ error: e.message }); 
+    } 
+});
+app.post('/api/bot-settings', async (req, res) => { 
+    try { 
+        let settings = req.body; 
+        // CLEANSE before saving to backend
+        settings = cleanBotSettings(settings);
+        await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(settings)]); 
+        res.json({ success: true }); 
+    } catch (e) { 
+        res.status(500).json({ error: e.message }); 
+    } 
+});
 
 app.get('/webhook', (req, res) => { if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) res.send(req.query['hub.challenge']); else res.sendStatus(403); });
 app.post('/webhook', async (req, res) => {
     const body = req.body;
-    const inboundMessages = [];
-
-    if (body.object && Array.isArray(body.entry)) {
-        body.entry.forEach(entry => {
-            (entry.changes || []).forEach(change => {
-                const value = change.value || {};
-                const messages = value.messages || [];
-                const contact = value.contacts?.[0];
-
-                messages.forEach(msgObj => {
-                    if (!msgObj?.from) return;
-                    inboundMessages.push({
-                        msgObj,
-                        contact
-                    });
-                });
-            });
-        });
+    if (body.object && body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
+        const msgObj = body.entry[0].changes[0].value.messages[0];
+        const contact = body.entry[0].changes[0].value.contacts?.[0];
+        const phone = msgObj.from;
+        const name = contact?.profile?.name || 'Unknown';
+        let msgBody = msgObj.text?.body || '[Media]';
+        let msgType = 'text';
+        if (msgObj.type === 'interactive') { 
+            if (msgObj.interactive.type === 'list_reply') msgBody = msgObj.interactive.list_reply.title;
+            else if (msgObj.interactive.type === 'button_reply') msgBody = msgObj.interactive.button_reply.title; 
+            msgType = 'option_reply'; 
+        } else if (msgObj.type === 'image') { msgBody = '[Image]'; msgType = 'image'; }
+        await processIncomingMessage(phone, name, msgBody, msgType);
     }
-
     res.sendStatus(200);
-
-    if (inboundMessages.length === 0) return;
-
-    setImmediate(async () => {
-        for (const { msgObj, contact } of inboundMessages) {
-            const phone = msgObj.from;
-            const name = contact?.profile?.name || 'Unknown';
-            const msgTimestamp = msgObj.timestamp ? Number(msgObj.timestamp) * 1000 : Date.now();
-            let msgBody = msgObj.text?.body || '[Media]';
-            let msgType = 'text';
-
-            if (msgObj.type === 'interactive') {
-                if (msgObj.interactive?.type === 'list_reply') msgBody = msgObj.interactive.list_reply.title;
-                else if (msgObj.interactive?.type === 'button_reply') msgBody = msgObj.interactive.button_reply.title;
-                msgType = 'option_reply';
-            } else if (msgObj.type === 'image') {
-                msgBody = '[Image]';
-                msgType = 'image';
-            } else if (msgObj.type === 'video') {
-                msgBody = '[Video]';
-                msgType = 'video';
-            } else if (msgObj.type === 'document') {
-                msgBody = '[Document]';
-                msgType = 'document';
-            } else if (msgObj.type === 'audio') {
-                msgBody = '[Audio]';
-                msgType = 'audio';
-            } else if (msgObj.type && msgObj.type !== 'text') {
-                msgBody = '[Media]';
-                msgType = msgObj.type;
-            }
-
-            await processIncomingMessage(phone, name, msgBody, msgType, msgTimestamp);
-        }
-    });
 });
 
 module.exports = app;

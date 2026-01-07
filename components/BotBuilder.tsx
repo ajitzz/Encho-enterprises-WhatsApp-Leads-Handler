@@ -34,6 +34,17 @@ import {
 const HANDLE_STYLE = { width: 8, height: 8, background: '#94a3b8', border: '2px solid white', zIndex: 50 };
 const ACTIVE_HANDLE_STYLE = { width: 10, height: 10, background: '#3b82f6', border: '2px solid white', zIndex: 50 };
 
+// --- CONSTANTS ---
+const SYSTEM_TEMPLATES = [
+    'hello_world',
+    'sample_shipping_confirmation',
+    'sample_movie_ticket_confirmation',
+    'sample_purchase_feedback',
+    'sample_issue_resolution',
+    'sample_flight_confirmation',
+    'sample_happy_hour_announcement'
+];
+
 // --- HELPER: GET ICON ---
 // Prevents storing React Elements in Node Data (Causes JSON Error #31)
 const getIconForLabel = (label: string) => {
@@ -257,6 +268,12 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
         // Clean out any icon if it exists to prevent saving bad data
         if (newData.icon) delete newData.icon;
         
+        // Sanitize template name (prevent invalid values that break backend)
+        if (field === 'templateName' && value) {
+             const cleanVal = value.replace(/[^a-zA-Z0-9_]/g, '');
+             newData[field] = cleanVal;
+        }
+
         setLocalData(newData);
         onChange(selectedNode.id, newData);
     };
@@ -409,21 +426,26 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                     </div>
                 )}
 
-                {/* 5. TEMPLATE OVERRIDE */}
+                {/* 5. TEMPLATE OVERRIDE (MODIFIED to Select Only) */}
                 <div className="pt-4 border-t border-gray-100">
                     <div className="flex items-center justify-between mb-2">
                          <label className="text-xs font-bold text-gray-500 uppercase flex items-center gap-1">
-                             <FileCode size={12} /> Advanced: Template ID
+                             <FileCode size={12} /> Meta Template ID
                          </label>
                     </div>
-                    <input 
-                         type="text"
+                    <select 
                          value={localData.templateName || ''}
                          onChange={(e) => update('templateName', e.target.value)}
                          className="w-full bg-gray-50 border border-gray-200 text-gray-600 text-xs font-mono rounded-lg px-3 py-2 focus:ring-2 focus:ring-gray-300 outline-none"
-                         placeholder="e.g. hello_world"
-                    />
-                    <p className="text-[10px] text-gray-400 mt-1">Overrides text/media with a Meta Template.</p>
+                    >
+                        <option value="">-- Select System Template --</option>
+                        {SYSTEM_TEMPLATES.map(t => (
+                            <option key={t} value={t}>{t}</option>
+                        ))}
+                    </select>
+                    <p className="text-[10px] text-gray-400 mt-1">
+                        Use only pre-approved Meta System Templates.
+                    </p>
                 </div>
 
             </div>
@@ -449,7 +471,8 @@ const nodeTypes = { custom: NodePreviewCard };
 const DraggableSidebarItem = ({ type, inputType, label, icon }: any) => {
     const onDragStart = (event: React.DragEvent) => {
       event.dataTransfer.setData('application/reactflow/type', type);
-      event.dataTransfer.setData('application/reactflow/inputType', inputType);
+      // Ensure inputType is defined or defaults to 'text'
+      event.dataTransfer.setData('application/reactflow/inputType', inputType || 'text');
       event.dataTransfer.setData('application/reactflow/label', label);
       event.dataTransfer.effectAllowed = 'move';
     };
@@ -495,6 +518,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 // SANITIZATION: Remove any legacy 'icon' properties from JSON to prevent React Crash
                 const cleanNodes = settings.flowData.nodes.map((n: any) => {
                     const { icon, ...cleanData } = n.data || {};
+                    // Ensure inputType isn't the string "undefined"
+                    if (cleanData.inputType === "undefined") cleanData.inputType = "text";
                     return { ...n, data: cleanData };
                 });
                 
@@ -510,9 +535,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
     const onDrop = useCallback((event: React.DragEvent) => {
         event.preventDefault();
         const type = event.dataTransfer.getData('application/reactflow/type');
-        const inputType = event.dataTransfer.getData('application/reactflow/inputType');
+        let inputType = event.dataTransfer.getData('application/reactflow/inputType');
         const label = event.dataTransfer.getData('application/reactflow/label');
         if (!type) return;
+
+        // Fix potential string "undefined"
+        if (!inputType || inputType === "undefined") inputType = "text";
 
         const position = { x: event.clientX - 300, y: event.clientY }; // Adjust for sidebar offset approximation
 
@@ -524,7 +552,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             data: { 
                 label, 
                 message: '', 
-                inputType: inputType || 'text', 
+                inputType,
                 options: inputType === 'option' ? ['Yes', 'No'] : undefined,
                 mediaUrl: ''
             },
@@ -553,6 +581,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             // Clean data before saving (double check)
             const { icon, ...cleanData } = data;
 
+            // Sanitize template name
+            let templateName = cleanData.templateName;
+            if (templateName && (templateName.includes(':') || templateName.includes(' '))) {
+                templateName = undefined;
+            }
+
             compiledSteps.push({
                 id: node.id,
                 title: cleanData.label,
@@ -562,7 +596,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 saveToField: cleanData.saveToField,
                 nextStepId, 
                 mediaUrl: cleanData.mediaUrl,
-                templateName: cleanData.templateName
+                templateName: templateName
             });
         });
 
