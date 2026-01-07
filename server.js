@@ -12,6 +12,7 @@ const { GoogleGenAI } = require('@google/genai');
 const fs = require('fs'); 
 const path = require('path'); 
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const multer = require('multer');
 require('dotenv').config();
 
@@ -88,14 +89,21 @@ const queryWithRetry = async (text, params, retries = 2) => {
         return res;
     } catch (err) {
         if (client) { try { client.release(true); } catch(e) {} client = null; }
+        
         console.warn(`⚠️ DB Error (${err.code}): ${err.message}`);
+        
+        // 42P01: undefined_table
+        // 42703: undefined_column (Missing 'documents' or 'bot_state' etc.)
         if ((err.code === '57P01' || err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === '42P01' || err.code === '42703') && retries > 0) {
-            console.log(`♻️ Retrying... (${retries} left)`);
+            console.log(`♻️ Retrying with SELF HEAL... (${retries} left)`);
+            
+            // Trigger Self Heal on Table/Column missing
             if (err.code === '42P01' || err.code === '42703') {
                 const healClient = await pool.connect();
                 await ensureDatabaseInitialized(healClient);
                 healClient.release();
             }
+            
             await new Promise(res => setTimeout(res, 500));
             return queryWithRetry(text, params, retries - 1);
         }
@@ -105,7 +113,7 @@ const queryWithRetry = async (text, params, retries = 2) => {
     }
 };
 
-// --- SCHEMA & INITIALIZATION ---
+// --- SCHEMA & SELF HEALING INITIALIZATION ---
 const SCHEMA_SQL = `
     CREATE TABLE IF NOT EXISTS drivers (
         id VARCHAR(255) PRIMARY KEY,
@@ -199,31 +207,42 @@ const sanitizeBotSettings = async (client) => {
 
 const ensureDatabaseInitialized = async (client) => {
     try {
+        console.log("🩺 RUNNING DATABASE SELF-HEAL...");
         await client.query('BEGIN');
+        
+        // 1. Create Tables if missing
         await client.query(SCHEMA_SQL);
         
+        // 2. Self-Heal Columns (If tables exist but columns are missing)
+        // This fixes the "undefined column" error if schema evolved
         await client.query(`
             ALTER TABLE messages ADD COLUMN IF NOT EXISTS options TEXT[];
+            ALTER TABLE drivers ADD COLUMN IF NOT EXISTS documents TEXT[];
+            ALTER TABLE drivers ADD COLUMN IF NOT EXISTS bot_state JSONB DEFAULT '{}';
+            ALTER TABLE drivers ADD COLUMN IF NOT EXISTS vehicle_details JSONB DEFAULT '{}';
+            ALTER TABLE drivers ADD COLUMN IF NOT EXISTS qualification_checks JSONB DEFAULT '{"hasValidLicense": false, "hasVehicle": false, "isLocallyAvailable": true}'::jsonb;
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS current_bot_step_id TEXT;
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_bot_active BOOLEAN DEFAULT FALSE;
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS onboarding_step INTEGER DEFAULT 0;
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS vehicle_registration TEXT;
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS availability TEXT;
-            ALTER TABLE drivers ADD COLUMN IF NOT EXISTS qualification_checks JSONB DEFAULT '{"hasValidLicense": false, "hasVehicle": false, "isLocallyAvailable": true}'::jsonb;
             ALTER TABLE media_files ADD COLUMN IF NOT EXISTS folder_path VARCHAR(255) DEFAULT '/';
         `);
 
+        // 3. Ensure Default Settings
         const settingsRes = await client.query('SELECT * FROM bot_settings WHERE id = 1');
         if (settingsRes.rows.length === 0) {
             await client.query('INSERT INTO bot_settings (id, settings) VALUES (1, $1)', [JSON.stringify(DEFAULT_BOT_SETTINGS)]);
         }
         
         await client.query('COMMIT');
+        console.log("✅ DATABASE SELF-HEAL COMPLETE");
+        
         await sanitizeBotSettings(client);
 
     } catch (e) {
         await client.query('ROLLBACK');
-        console.error("Schema Init Failed:", e);
+        console.error("❌ Schema Init/Heal Failed:", e);
     }
 };
 
@@ -586,8 +605,6 @@ app.post('/api/folders', async (req, res) => {
                 console.log(`✅ S3 Folder Created: ${folderKey}`);
             } catch (s3Err) {
                 console.error("⚠️ S3 Folder Creation Error:", s3Err);
-                // Continue despite S3 error to maintain DB consistency, or rollback? 
-                // For now, allow DB success even if S3 fails slightly (resilience).
             }
         }
 
@@ -633,20 +650,55 @@ app.delete('/api/folders/:id', async (req, res) => {
     }
 });
 
+// --- NEW: DIRECT S3 PRESIGNED UPLOAD ---
+app.post('/api/s3/presign', async (req, res) => {
+    try {
+        if (!process.env.AWS_BUCKET_NAME) return res.status(503).json({ error: 'AWS Config Missing' });
+        
+        const { filename, fileType, folderPath } = req.body;
+        const cleanFolderPath = folderPath === '/' ? '' : folderPath.replace(/^\//, '') + '/';
+        const key = `${cleanFolderPath}${Date.now()}-${filename.replace(/\s+/g, '_')}`;
+
+        const command = new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: key,
+            ContentType: fileType
+        });
+
+        const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 }); // 5 minutes
+        const publicUrl = `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+
+        res.json({ uploadUrl, key, publicUrl });
+    } catch (e) {
+        console.error("Presign Error:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- NEW: REGISTER UPLOADED FILE ---
+app.post('/api/files/register', async (req, res) => {
+    try {
+        const { key, url, filename, type, folderPath } = req.body;
+        const id = Date.now().toString();
+
+        await queryWithRetry(
+            `INSERT INTO media_files (id, url, filename, type, uploaded_at, folder_path) VALUES ($1, $2, $3, $4, $5, $6)`,
+            [id, url, filename, type, Date.now(), folderPath]
+        );
+        res.json({ success: true, id, url });
+    } catch (e) {
+        console.error("Registration Error:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// OLD Upload Endpoint (Fallback/Deprecated - but kept for small files if needed)
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-    
-    // Safety check for S3 credentials
-    if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY || !process.env.AWS_BUCKET_NAME) {
-        return res.status(503).json({ error: 'AWS S3 is not configured on the server.' });
-    }
-
+    // This endpoint is server-limited. Clients should prefer /api/s3/presign
     const folderPath = req.body.folderPath || '/';
-    // Clean path to ensure no leading slash issues for S3 keys
     const cleanFolderPath = folderPath === '/' ? '' : folderPath.replace(/^\//, '') + '/';
-
     const fileType = req.file.mimetype.split('/')[0]; 
-    // S3 Key Structure: optional_user_folder/timestamp-filename
     const filename = `${cleanFolderPath}${Date.now()}-${req.file.originalname.replace(/\s+/g, '_')}`;
 
     try {
@@ -658,19 +710,15 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         });
 
         await s3Client.send(command);
-        
         const publicUrl = `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${filename}`;
         
-        // Store in Database with Folder Path
         await queryWithRetry(
             `INSERT INTO media_files (id, url, filename, type, uploaded_at, folder_path) VALUES ($1, $2, $3, $4, $5, $6)`,
             [Date.now().toString(), publicUrl, req.file.originalname, fileType, Date.now(), folderPath]
         );
-
         res.json({ url: publicUrl, type: fileType });
     } catch (err) {
-        console.error("S3 Upload Error:", err);
-        res.status(500).json({ error: 'Failed to upload to S3', details: err.message });
+        res.status(500).json({ error: 'Upload Failed', details: err.message });
     }
 });
 
@@ -785,6 +833,52 @@ app.post('/api/messages/send', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Update the drivers fetch to include messages and proper mapping
+app.get('/api/drivers', async (req, res) => {
+    try {
+        const result = await queryWithRetry(`
+            SELECT 
+                d.id,
+                d.phone_number as "phoneNumber",
+                d.name,
+                d.source,
+                d.status,
+                d.last_message as "lastMessage",
+                d.last_message_time as "lastMessageTime",
+                COALESCE(d.documents, ARRAY[]::text[]) as documents, 
+                d.onboarding_step as "onboardingStep",
+                d.vehicle_registration as "vehicleRegistration",
+                d.availability,
+                d.qualification_checks as "qualificationChecks",
+                d.current_bot_step_id as "currentBotStepId",
+                d.is_bot_active as "isBotActive",
+                COALESCE(
+                    (
+                        SELECT JSON_AGG(
+                            JSON_BUILD_OBJECT(
+                                'id', m.id,
+                                'sender', m.sender,
+                                'text', m.text,
+                                'imageUrl', m.image_url,
+                                'timestamp', m.timestamp,
+                                'type', m.type,
+                                'options', m.options
+                            ) ORDER BY m.timestamp ASC
+                        )
+                        FROM messages m
+                        WHERE m.driver_id = d.id
+                    ),
+                    '[]'::json
+                ) as messages
+            FROM drivers d 
+            ORDER BY d.last_message_time DESC
+        `);
+        res.json(result.rows);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // ... Existing Routes ...
 app.post('/api/admin/audit-flow', async (req, res) => {
     try {
@@ -804,7 +898,6 @@ app.post('/api/admin/audit-flow', async (req, res) => {
 });
 
 app.get('/api/health', async (req, res) => { try { await queryWithRetry('SELECT 1'); res.json({ status: 'healthy' }); } catch (e) { res.status(500).json({ error: e.message }); } });
-app.get('/api/drivers', async (req, res) => { try { const result = await queryWithRetry(`SELECT * FROM drivers ORDER BY last_message_time DESC`); res.json(result.rows); } catch (e) { res.status(500).json({ error: e.message }); } });
 app.get('/api/bot-settings', async (req, res) => { try { const result = await queryWithRetry('SELECT * FROM bot_settings WHERE id = 1'); res.json(result.rows[0]?.settings || DEFAULT_BOT_SETTINGS); } catch (e) { res.status(500).json({ error: e.message }); } });
 app.post('/api/bot-settings', async (req, res) => { try { let settings = req.body; if (settings.steps && Array.isArray(settings.steps)) { settings.steps = settings.steps.map(step => cleanStep(step)); } await queryWithRetry(`UPDATE bot_settings SET settings = $1 WHERE id = 1`, [JSON.stringify(settings)]); res.json({ success: true }); } catch (e) { res.status(500).json({ error: e.message }); } });
 

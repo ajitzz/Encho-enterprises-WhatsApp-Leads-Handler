@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, LeadStatus, OnboardingStep } from '../types';
 import { X, Send, Image as ImageIcon, Video, CheckCircle, AlertTriangle, UserX, Car, Clock, ShieldCheck, ChevronRight, Facebook, Globe } from 'lucide-react';
@@ -13,11 +14,15 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [replyText, setReplyText] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Safe accessors for array properties
+  const messages = driver && Array.isArray(driver.messages) ? driver.messages : [];
+  const documents = driver && Array.isArray(driver.documents) ? driver.documents : [];
+
   useEffect(() => {
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [driver?.messages]);
+  }, [messages]);
 
   if (!driver) return null;
 
@@ -41,7 +46,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
   const steps = [
     { label: 'Welcome', done: true },
-    { label: 'Documents', done: driver.documents.length > 0 },
+    { label: 'Documents', done: documents.length > 0 },
     { label: 'Vehicle', done: !!driver.vehicleRegistration },
     { label: 'Availability', done: !!driver.availability },
     { label: 'Qualified', done: driver.status === LeadStatus.QUALIFIED }
@@ -99,30 +104,36 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             {/* Left: Chat History */}
             <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px]">
               <div className="flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4">
-                {driver.messages.map((msg) => (
-                  <div 
-                    key={msg.id} 
-                    className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}
-                  >
+                {messages.length > 0 ? (
+                    messages.map((msg) => (
                     <div 
-                      className={`max-w-[80%] rounded-2xl px-4 py-3 shadow-sm ${
-                        msg.sender === 'driver' 
-                          ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' 
-                          : 'bg-blue-600 text-white rounded-tr-none'
-                      }`}
+                        key={msg.id} 
+                        className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}
                     >
-                      {msg.type === 'image' && msg.imageUrl && (
-                         <div className="mb-2 rounded-lg overflow-hidden border border-gray-200/20">
-                           <img src={msg.imageUrl} alt="Attachment" className="w-full h-full object-cover max-h-60" />
-                         </div>
-                      )}
-                      {msg.text && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
-                      <div className={`text-[10px] mt-1 text-right ${msg.sender === 'driver' ? 'text-gray-400' : 'text-blue-200'}`}>
-                        {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                      </div>
+                        <div 
+                        className={`max-w-[80%] rounded-2xl px-4 py-3 shadow-sm ${
+                            msg.sender === 'driver' 
+                            ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' 
+                            : 'bg-blue-600 text-white rounded-tr-none'
+                        }`}
+                        >
+                        {msg.type === 'image' && msg.imageUrl && (
+                            <div className="mb-2 rounded-lg overflow-hidden border border-gray-200/20">
+                            <img src={msg.imageUrl} alt="Attachment" className="w-full h-full object-cover max-h-60" />
+                            </div>
+                        )}
+                        {msg.text && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
+                        <div className={`text-[10px] mt-1 text-right ${msg.sender === 'driver' ? 'text-gray-400' : 'text-blue-200'}`}>
+                            {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                        </div>
+                        </div>
                     </div>
-                  </div>
-                ))}
+                    ))
+                ) : (
+                    <div className="h-full flex items-center justify-center text-gray-400 text-sm">
+                        No messages yet
+                    </div>
+                )}
                 <div ref={messagesEndRef} />
               </div>
 
@@ -259,9 +270,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                 {/* Documents */}
                 <section>
                    <h3 className="font-semibold text-gray-900 mb-4 text-sm">Documents</h3>
-                   {driver.documents.length > 0 ? (
+                   {documents.length > 0 ? (
                      <div className="grid grid-cols-2 gap-3">
-                       {driver.documents.map((doc, idx) => (
+                       {documents.map((doc, idx) => (
                          <a key={idx} href={doc} target="_blank" rel="noreferrer" className="block relative aspect-video rounded-lg overflow-hidden border border-gray-200 group hover:shadow-md transition-shadow">
                            <img src={doc} alt={`Doc ${idx}`} className="w-full h-full object-cover" />
                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white text-xs font-medium">

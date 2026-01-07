@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2 } from 'lucide-react';
+import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface MediaFile {
@@ -19,7 +19,8 @@ interface MediaFolder {
 export const MediaLibrary = () => {
     const [files, setFiles] = useState<MediaFile[]>([]);
     const [folders, setFolders] = useState<MediaFolder[]>([]);
-    const [uploading, setUploading] = useState(false);
+    const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'error'>('idle');
+    const [uploadError, setUploadError] = useState('');
     const [isLoadingContent, setIsLoadingContent] = useState(false);
     const [copiedId, setCopiedId] = useState<string | null>(null);
     const [isDeleting, setIsDeleting] = useState<string | null>(null);
@@ -52,15 +53,19 @@ export const MediaLibrary = () => {
     const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         if (!e.target.files || e.target.files.length === 0) return;
         const file = e.target.files[0];
-        setUploading(true);
+        
+        setUploadStatus('uploading');
+        setUploadError('');
 
         try {
             await liveApiService.uploadMedia(file, currentPath);
+            setUploadStatus('idle');
             await loadMedia(currentPath); // Refresh
-        } catch (e) {
-            alert("Upload failed. Ensure AWS Keys are set in .env");
-        } finally {
-            setUploading(false);
+        } catch (e: any) {
+            console.error("Upload Error:", e);
+            setUploadStatus('error');
+            setUploadError(e.message || "Failed to upload file");
+            setTimeout(() => setUploadStatus('idle'), 5000);
         }
     };
 
@@ -178,11 +183,18 @@ export const MediaLibrary = () => {
                     <p className="text-gray-500 text-sm mt-1">Organize and upload approved assets for use in chat.</p>
                 </div>
                 
-                <div className="flex gap-3">
+                <div className="flex gap-3 items-center">
+                     {uploadStatus === 'error' && (
+                         <div className="text-xs text-red-600 font-bold bg-red-50 px-3 py-2 rounded-lg border border-red-100 flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
+                             <AlertCircle size={14} />
+                             {uploadError}
+                         </div>
+                     )}
+
                      <button 
                         onClick={() => setShowCreateFolder(true)}
-                        className="flex items-center gap-2 px-4 py-3 rounded-lg text-gray-700 bg-white border border-gray-300 font-bold hover:bg-gray-50 transition-all shadow-sm"
-                        disabled={uploading || isCreatingFolder}
+                        className="flex items-center gap-2 px-4 py-3 rounded-lg text-gray-700 bg-white border border-gray-300 font-bold hover:bg-gray-50 transition-all shadow-sm disabled:opacity-50"
+                        disabled={uploadStatus === 'uploading' || isCreatingFolder}
                     >
                         <FolderPlus size={18} />
                         New Folder
@@ -195,14 +207,14 @@ export const MediaLibrary = () => {
                             className="hidden" 
                             onChange={handleUpload} 
                             accept="image/*,video/*,application/pdf"
-                            disabled={uploading}
+                            disabled={uploadStatus === 'uploading'}
                         />
                         <label 
                             htmlFor="file-upload"
-                            className={`flex items-center gap-2 px-6 py-3 rounded-lg text-white font-bold cursor-pointer transition-all ${uploading ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 shadow-lg hover:-translate-y-1'}`}
+                            className={`flex items-center gap-2 px-6 py-3 rounded-lg text-white font-bold cursor-pointer transition-all ${uploadStatus === 'uploading' ? 'bg-blue-800 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 shadow-lg hover:-translate-y-1'}`}
                         >
-                            {uploading ? (
-                                <><Loader2 size={18} className="animate-spin" /> Uploading...</>
+                            {uploadStatus === 'uploading' ? (
+                                <><Loader2 size={18} className="animate-spin" /> Uploading to S3...</>
                             ) : (
                                 <>
                                     <Upload size={18} />
@@ -265,7 +277,9 @@ export const MediaLibrary = () => {
                                     ) : file.type === 'image' ? (
                                         <img src={file.url} alt={file.filename} className="w-full h-full object-cover" />
                                     ) : (
-                                        <File size={32} className="text-gray-400" />
+                                        <div className="flex flex-col items-center justify-center h-full text-gray-400">
+                                            <File size={32} />
+                                        </div>
                                     )}
                                     
                                     <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">

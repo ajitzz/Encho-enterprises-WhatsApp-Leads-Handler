@@ -110,18 +110,54 @@ export const liveApiService = {
       return await response.json();
   },
 
-  // --- S3 MEDIA UPLOAD ---
+  // --- S3 MEDIA UPLOAD (ROBUST PRESIGNED FLOW) ---
   uploadMedia: async (file: File, folderPath: string = '/') => {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('folderPath', folderPath);
-
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/upload`, {
+      // 1. Request Presigned URL
+      const presignResponse = await fetchWithRetry(`${API_BASE_URL}/api/s3/presign`, {
           method: 'POST',
-          body: formData
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+              filename: file.name,
+              fileType: file.type,
+              folderPath
+          })
       });
-      if (!response.ok) throw new Error('Upload Failed');
-      return await response.json(); // Returns { url: string, type: string }
+      
+      if (!presignResponse.ok) throw new Error('Failed to get upload permission');
+      const { uploadUrl, key, publicUrl } = await presignResponse.json();
+
+      // 2. Upload Direct to S3
+      // Note: We do not use fetchWithRetry here because S3 might reject retries with the same URL if strict,
+      // and we want strict error reporting for network fails during big uploads.
+      const uploadResponse = await fetch(uploadUrl, {
+          method: 'PUT',
+          body: file,
+          headers: {
+              'Content-Type': file.type
+          }
+      });
+
+      if (!uploadResponse.ok) {
+          console.error("S3 Upload Failed", await uploadResponse.text());
+          throw new Error(`Upload failed: ${uploadResponse.statusText}`);
+      }
+
+      // 3. Register File in DB
+      const fileType = file.type.split('/')[0];
+      const registerResponse = await fetchWithRetry(`${API_BASE_URL}/api/files/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+              key,
+              url: publicUrl,
+              filename: file.name,
+              type: fileType,
+              folderPath
+          })
+      });
+
+      if (!registerResponse.ok) throw new Error('Failed to register file');
+      return { url: publicUrl, type: fileType };
   },
 
   getMediaLibrary: async (path: string = '/') => {
