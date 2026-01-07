@@ -1,5 +1,4 @@
 
-
 import React, { useState, useEffect } from 'react';
 import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
@@ -385,7 +384,7 @@ export const MediaLibrary = () => {
                             <button onClick={() => setShowCorsHelp(false)}><X size={20} className="text-gray-400" /></button>
                         </div>
                         <div className="p-6 overflow-y-auto">
-                            <p className="text-sm text-gray-600 mb-4">Your browser blocked the upload because the S3 Bucket does not allow cross-origin requests. <br /><strong>Paste this JSON into your AWS S3 Permissions > CORS.</strong></p>
+                            <p className="text-sm text-gray-600 mb-4">Your browser blocked the upload because the S3 Bucket does not allow cross-origin requests. <br /><strong>Paste this JSON into your AWS S3 Permissions &gt; CORS.</strong></p>
                             <div className="bg-gray-900 text-gray-100 p-4 rounded-lg font-mono text-xs relative overflow-auto">
 <pre>{`[
     {
