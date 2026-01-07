@@ -1,3 +1,4 @@
+
 import { GoogleGenAI, Type } from "@google/genai";
 import { LeadStatus, AuditReport, AuditIssue } from "../types";
 
@@ -98,9 +99,79 @@ export const analyzeMessage = async (text: string, imageUrl?: string, systemInst
   }
 };
 
+// --- CLIENT-SIDE HEURISTIC FALLBACK ---
+const runLocalAudit = (nodes: any[]): AuditReport => {
+    console.warn("⚠️ API Quota Exceeded / Offline. Running Local Heuristic Audit.");
+    const issues: AuditIssue[] = [];
+    
+    // Regex matches: "replace this sample message", "enter your message", etc.
+    const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
+
+    nodes.forEach(node => {
+        if (node.id === 'start' || node.type === 'start' || node.data?.type === 'start') return;
+        const data = node.data || {};
+
+        // 1. Placeholder Text
+        if (data.message && BLOCKED_REGEX.test(data.message)) {
+             issues.push({ 
+                 nodeId: node.id, 
+                 severity: 'CRITICAL', 
+                 issue: 'Placeholder Text Detected', 
+                 suggestion: 'You are using default text. Please write a real message.', 
+                 autoFixValue: 'Please reply.' 
+             });
+        }
+        // 2. Empty Text
+        else if ((data.label === 'Text' || data.inputType === 'text') && (!data.message || !data.message.trim())) {
+            issues.push({ 
+                nodeId: node.id, 
+                severity: 'CRITICAL', 
+                issue: 'Empty Message', 
+                suggestion: 'This message bubble is empty.', 
+                autoFixValue: 'Hello!' 
+            });
+        }
+        // 3. Missing Media
+        else if (['Image', 'Video'].includes(data.label)) {
+            if (!data.mediaUrl || !data.mediaUrl.trim()) {
+                 issues.push({ 
+                     nodeId: node.id, 
+                     severity: 'CRITICAL', 
+                     issue: 'Missing Media URL', 
+                     suggestion: 'This media node has no file link. Please add a URL.', 
+                     autoFixValue: null 
+                 });
+            }
+        }
+        // 4. Empty Options
+        else if (data.inputType === 'option') {
+            if (!data.options || data.options.length === 0) {
+                 issues.push({
+                     nodeId: node.id,
+                     severity: 'CRITICAL',
+                     issue: 'No Options',
+                     suggestion: 'Add at least one button option.',
+                     autoFixValue: ['Yes', 'No']
+                 });
+            } else if (data.options.some((o: string) => !o || !o.trim())) {
+                 issues.push({
+                     nodeId: node.id,
+                     severity: 'WARNING',
+                     issue: 'Empty Option Label',
+                     suggestion: 'One or more buttons have no text.',
+                     autoFixValue: data.options.filter((o: string) => o && o.trim())
+                 });
+            }
+        }
+    });
+
+    return { isValid: issues.length === 0, issues };
+};
+
 // --- SYSTEM AUDITOR (JSON CONFIG) ---
 export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
-    if (!apiKey) return { isValid: true, issues: [] };
+    // If no key, fallback immediately
+    if (!apiKey) return runLocalAudit(nodes);
 
     try {
         const model = "gemini-3-flash-preview";
@@ -115,7 +186,6 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
         2. "Empty Options": An Options node where the 'options' array is empty OR contains empty strings.
         3. "Empty Text": A Text node with an empty or whitespace-only message.
         4. "Missing Media": A Media node (Image/Video) with no URL.
-        5. "Redundant Node": A node with no connections and empty content.
 
         INPUT DATA:
         ${JSON.stringify(nodes.map(n => ({ id: n.id, type: n.data.label, message: n.data.message, options: n.data.options, mediaUrl: n.data.mediaUrl })))}
@@ -159,8 +229,15 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
         const report = JSON.parse(cleanJSON(response.text || '{"isValid": true, "issues": []}'));
         return report;
 
-    } catch (e) {
-        console.error("Audit failed", e);
+    } catch (e: any) {
+        console.error("Gemini Audit failed", e);
+        
+        // --- 429 HANDLING ---
+        // If Quota Exceeded or any API error, fallback to local heuristics
+        if (e.message?.includes('429') || e.status === 429 || e.message?.includes('Quota')) {
+            return runLocalAudit(nodes);
+        }
+        
         return { isValid: true, issues: [] };
     }
 };

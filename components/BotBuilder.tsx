@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useEffect } from 'react';
 import { 
   ReactFlow, 
@@ -511,7 +512,15 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const runAIAudit = async () => {
       setIsAuditing(true);
       try {
-          const report = await auditBotFlow(nodes);
+          let report;
+          // USE BACKEND IF LIVE MODE (Avoids 429)
+          if (isLiveMode) {
+              report = await liveApiService.auditFlow(nodes);
+          } else {
+              // Client Side (Simulator)
+              report = await auditBotFlow(nodes);
+          }
+          
           setAuditReport(report);
           
           if (report.issues.length > 0) {
@@ -533,7 +542,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
               setNodes(newNodes);
           }
       } catch (e) {
-          alert("AI Audit Failed");
+          alert("AI Audit Failed. Please ensure server is running.");
       } finally {
           setIsAuditing(false);
       }
