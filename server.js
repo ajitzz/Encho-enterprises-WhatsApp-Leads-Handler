@@ -742,15 +742,24 @@ router.get('/public/showcase', async (req, res) => {
         let folderPath = '/';
         
         if (!folderName) {
-            const activeRes = await queryWithRetry('SELECT name FROM media_folders WHERE is_public_showcase = TRUE ORDER BY id DESC LIMIT 1', []);
+            // FIX: Retrieve full path context for active folder
+            const activeRes = await queryWithRetry('SELECT name, parent_path FROM media_folders WHERE is_public_showcase = TRUE ORDER BY id DESC LIMIT 1', []);
             if (activeRes.rows.length > 0) {
-                folderName = activeRes.rows[0].name;
+                const f = activeRes.rows[0];
+                folderName = f.name;
+                // Construct full path properly
+                folderPath = f.parent_path === '/' ? `/${f.name}` : `${f.parent_path}/${f.name}`;
             } else {
                 return res.json({ title: 'Showcase', items: [] });
             }
+        } else {
+             // If manual folder name provided (e.g. from URL), assume it is the full relative path
+             folderPath = '/' + folderName; 
         }
         
-        folderPath = '/' + folderName; 
+        // Clean path (remove double slashes if any)
+        folderPath = folderPath.replace('//', '/');
+
         const filesRes = await queryWithRetry('SELECT id, url, type, filename FROM media_files WHERE folder_path = $1', [folderPath]);
         res.json({ title: folderName || 'Showcase', items: filesRes.rows });
     } catch (e) { res.status(500).json({ error: e.message }); }

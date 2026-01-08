@@ -107,11 +107,10 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                 // 2. Fetch Fresh Data (Background)
                 const data = await liveApiService.getPublicShowcase(folderName);
                 
-                // If successful, update state and cache
-                if (data && data.items && data.items.length > 0) {
-                    setItems(data.items);
-                    setTitle(data.title);
-                    setLoading(false);
+                // CRITICAL FIX: Always update state if data exists, even if empty
+                if (data) {
+                    setItems(data.items || []);
+                    setTitle(data.title || 'Showcase');
                     setIsOfflineMode(false); // We are online
                     
                     // Update Cache
@@ -119,11 +118,10 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                 }
             } catch (e) {
                 console.error("Failed to load showcase from server", e);
-                // If API fails but we have cache, do nothing (keep showing cache).
-                // If no cache, stop loading so we can show the "Offline/Empty" screen.
-                if (!hasCachedData) {
-                    setLoading(false);
-                }
+                // If we have cache, we stay in offline mode (isOfflineMode=true from above)
+            } finally {
+                // CRITICAL FIX: Ensure loading spinner stops regardless of success/fail/empty
+                setLoading(false);
             }
         };
         
