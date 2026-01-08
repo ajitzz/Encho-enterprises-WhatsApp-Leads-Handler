@@ -219,7 +219,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
   
   mediaType = mediaType || 'image';
   if (mediaUrl) {
-      // ... (Media Logic remains same) ...
+      // ... (Media Logic - abbreviated for brevity) ...
   }
 
   let payload = { messaging_product: 'whatsapp', to: to };
@@ -230,9 +230,8 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
     payload.template = { name: templateName, language: { code: language } };
   } else {
       if (mediaUrl) {
-          // ... (Media Logic remains same) ...
           payload.type = mediaType;
-          payload[mediaType] = { link: mediaUrl }; // Simplified for brevity in this block
+          payload[mediaType] = { link: mediaUrl }; 
           if (body) payload[mediaType].caption = body;
       } else if (options && options.length > 0) {
         const validOptions = options.filter(o => o && o.trim().length > 0);
@@ -294,7 +293,6 @@ const analyzeWithAI = async (text, currentNotes, systemInstruction) => {
     const result = JSON.parse(response.text);
     return result;
   } catch (e) { 
-      console.error("AI Error", e);
       return { reply: "Thanks for contacting Uber Fleet.", updatedNotes: currentNotes }; 
   }
 };
@@ -310,14 +308,68 @@ const logSystemMessage = async (driverId, text, type = 'text', options = null, i
     } catch (e) { console.error("Log failed (Non-Critical)", e.message); }
 };
 
+// --- DATA MAPPERS ---
+
+const mapDriverToFrontend = (row) => ({
+    id: row.id,
+    phoneNumber: row.phone_number,
+    name: row.name,
+    source: row.source,
+    status: row.status,
+    lastMessage: row.last_message,
+    lastMessageTime: parseInt(row.last_message_time || '0'),
+    // Note: Messages are populated via JOIN in GET /api/drivers
+    messages: [], 
+    documents: row.documents || [],
+    notes: row.notes || '',
+    onboardingStep: row.onboarding_step || 0,
+    vehicleRegistration: row.vehicle_registration,
+    availability: row.availability,
+    qualificationChecks: row.qualification_checks || { 
+        hasValidLicense: false, 
+        hasVehicle: false, 
+        isLocallyAvailable: true 
+    },
+    currentBotStepId: row.current_bot_step_id,
+    isBotActive: row.is_bot_active,
+    isHumanMode: row.is_human_mode
+});
+
+// Map incoming Frontend updates to DB Column names
+const mapUpdateKeys = (updates) => {
+    const map = {
+        'isHumanMode': 'is_human_mode',
+        'qualificationChecks': 'qualification_checks',
+        'vehicleRegistration': 'vehicle_registration',
+        'currentBotStepId': 'current_bot_step_id',
+        'isBotActive': 'is_bot_active',
+        'lastMessage': 'last_message',
+        'lastMessageTime': 'last_message_time',
+        'phoneNumber': 'phone_number',
+        // Identity mappings
+        'notes': 'notes',
+        'status': 'status',
+        'name': 'name',
+        'availability': 'availability',
+        'source': 'source'
+    };
+    
+    const dbUpdates = {};
+    for (const [key, value] of Object.entries(updates)) {
+        if (map[key]) {
+            dbUpdates[map[key]] = value;
+        }
+    }
+    return dbUpdates;
+};
+
 // --- CRITICAL: RESILIENT MESSAGE PROCESSOR ---
 const processIncomingMessage = async (from, name, msgBody, msgType = 'text', timestamp = Date.now()) => {
     // 1. FAIL-SAFE SETTINGS FETCH
     let botSettings = CACHED_BOT_SETTINGS;
     try {
-        // Try to refresh settings if cache is stale (> 5 mins)
         if (Date.now() - LAST_SETTINGS_FETCH > 300000) {
-            const settingsRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1', [], 1); // 1 retry only for speed
+            const settingsRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1', [], 1);
             if (settingsRes.rows.length > 0) {
                 CACHED_BOT_SETTINGS = cleanBotSettings(settingsRes.rows[0].settings);
                 botSettings = CACHED_BOT_SETTINGS;
@@ -329,7 +381,15 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
     const routingStrategy = botSettings.routingStrategy || 'HYBRID_BOT_FIRST';
     const entryPointId = botSettings.entryPointId || botSettings.steps?.[0]?.id;
 
-    let driver = { id: 'temp_' + from, phone_number: from, name: name, is_bot_active: true, is_human_mode: false, notes: '' };
+    // Default driver object for logic before DB sync
+    let driver = { 
+        id: 'temp_' + from, 
+        phone_number: from, 
+        name: name, 
+        is_bot_active: true, 
+        is_human_mode: false, 
+        notes: '' 
+    };
     
     // 2. DRIVER STATE SYNC (TOLERANT TO FAILURE)
     const client = await pool.connect();
@@ -360,7 +420,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
     } catch (err) {
         await client.query('ROLLBACK');
         console.error("DB Sync Failed - Proceeding with In-Memory Driver State", err.code);
-        // We continue even if DB save failed, to ensure we reply to the user.
     } finally { client.release(); }
 
     // 3. LOGIC ENGINE
@@ -372,7 +431,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
     if (botSettings.isEnabled && routingStrategy === 'AI_ONLY') { shouldCallAI = true; } 
     else if (botSettings.isEnabled) {
          if (!driver.is_bot_active && routingStrategy === 'BOT_ONLY') {
-             // Reactivate bot if it was off but strategy is BOT_ONLY
              driver.is_bot_active = true;
              driver.current_bot_step_id = entryPointId;
              updatesToSave.is_bot_active = true;
@@ -388,7 +446,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
          if (driver.is_bot_active && driver.current_bot_step_id) {
              let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
              
-             // Recovery if step deleted
              if (!currentStep && botSettings.steps.length > 0) {
                  const firstId = entryPointId || botSettings.steps[0].id;
                  driver.current_bot_step_id = firstId;
@@ -397,10 +454,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
              }
 
              if (currentStep) {
-                 // Check if we need to advance (Answer vs Question)
-                 // Simple logic: If we just sent a question (in previous turn), now we process answer.
-                 // Ideally we track 'waiting_for_input'. Here we assume every user msg answers the current step.
-                 
                  // SAVE DATA
                  if (currentStep.saveToField) {
                      updatesToSave[currentStep.saveToField] = msgBody;
@@ -429,7 +482,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
          } else if (driver.is_bot_active && routingStrategy === 'HYBRID_BOT_FIRST') shouldCallAI = true;
     }
 
-    // 4. EXECUTE REPLY (PRIORITY HIGH)
+    // 4. EXECUTE REPLY
     let sent = false;
     if (replyTemplate || replyText || replyMedia) {
         if (replyTemplate) {
@@ -449,11 +502,9 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
     } 
     
     if (!sent && shouldCallAI) {
-        // AI Logic: Returns { reply, updatedNotes }
         const aiResult = await analyzeWithAI(msgBody, driver.notes, botSettings.systemInstruction);
         const aiReply = aiResult.reply;
         
-        // Update Notes
         if (aiResult.updatedNotes && aiResult.updatedNotes !== driver.notes) {
             updatesToSave.notes = aiResult.updatedNotes;
         }
@@ -464,20 +515,92 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         }
     }
 
-    // 5. ASYNC STATE SAVE (PRIORITY LOW)
+    // 5. ASYNC STATE SAVE
     if (Object.keys(updatesToSave).length > 0 && !driver.id.startsWith('temp_')) {
         try {
-            const keys = Object.keys(updatesToSave);
-            const setClause = keys.map((k, i) => k === 'vehicleRegistration' ? `vehicle_registration = $${i+2}` : `${k} = $${i+2}`).join(', ');
-            const values = keys.map(k => updatesToSave[k]);
+            const mappedUpdates = mapUpdateKeys(updatesToSave);
+            const keys = Object.keys(mappedUpdates);
+            const setClause = keys.map((k, i) => `${k} = $${i+2}`).join(', ');
+            const values = keys.map(k => typeof mappedUpdates[k] === 'object' ? JSON.stringify(mappedUpdates[k]) : mappedUpdates[k]);
+            
             await queryWithRetry(`UPDATE drivers SET ${setClause} WHERE id = $1`, [driver.id, ...values]);
         } catch(e) { console.warn("Failed to save state updates:", e.message); }
     }
 };
 
-// ... (Rest of Routes remain same) ...
+// ... (Rest of Routes) ...
+
+// PATCH DRIVER UPDATES (From Frontend)
+app.patch('/api/drivers/:id', async (req, res) => { 
+    try {
+        const updates = req.body;
+        const dbUpdates = mapUpdateKeys(updates);
+        
+        if (Object.keys(dbUpdates).length === 0) return res.json({ success: true, message: 'No valid fields to update' });
+
+        const keys = Object.keys(dbUpdates);
+        const setClause = keys.map((k, i) => `${k} = $${i + 2}`).join(', ');
+        const values = keys.map(k => typeof dbUpdates[k] === 'object' ? JSON.stringify(dbUpdates[k]) : dbUpdates[k]);
+        
+        await queryWithRetry(`UPDATE drivers SET ${setClause} WHERE id = $1`, [req.params.id, ...values]);
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET DRIVERS (Populate Dashboard)
+app.get('/api/drivers', async (req, res) => { 
+    try {
+        const client = await pool.connect();
+        try {
+            // Get Drivers
+            const driversRes = await client.query('SELECT * FROM drivers ORDER BY last_message_time DESC LIMIT 100');
+            const drivers = driversRes.rows;
+
+            if (drivers.length === 0) {
+                res.json([]);
+                return;
+            }
+
+            const driverIds = drivers.map(d => d.id);
+            
+            // Get Messages for these drivers (Last 50 per driver would be better in prod, here we fetch all for small set)
+            const messagesRes = await client.query(`
+                SELECT * FROM messages 
+                WHERE driver_id = ANY($1) 
+                ORDER BY timestamp ASC
+            `, [driverIds]);
+
+            const messagesByDriver = {};
+            messagesRes.rows.forEach(msg => {
+                if (!messagesByDriver[msg.driver_id]) messagesByDriver[msg.driver_id] = [];
+                messagesByDriver[msg.driver_id].push({
+                    id: msg.id,
+                    sender: msg.sender,
+                    text: msg.text,
+                    imageUrl: msg.image_url,
+                    timestamp: parseInt(msg.timestamp),
+                    type: msg.type,
+                    options: msg.options
+                });
+            });
+
+            // Map to Frontend Format
+            const mappedDrivers = drivers.map(row => {
+                const d = mapDriverToFrontend(row);
+                d.messages = messagesByDriver[row.id] || [];
+                return d;
+            });
+
+            res.json(mappedDrivers);
+        } finally {
+            client.release();
+        }
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 // [Rest of existing endpoints unchanged]
+// ... (public showcase, files, bot-settings, etc) ...
+
 app.get('/api/public/showcase', async (req, res) => {
     try {
         let query = 'SELECT id, name, parent_path FROM media_folders WHERE is_public_showcase = TRUE';
@@ -519,8 +642,6 @@ app.get('/api/public/showcase', async (req, res) => {
         res.json({ title: folder.name, items });
     } catch (e) { res.status(500).json({ error: "Failed to load showcase" }); }
 });
-
-// ... (Keep all other endpoints as is) ...
 
 app.get('/api/public/status', async (req, res) => {
     try {
@@ -572,7 +693,6 @@ app.get('/api/media', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// NEW: Create Folder with Strict Duplicate Check
 app.post('/api/folders', async (req, res) => { 
     try {
         const { name, parentPath } = req.body;
@@ -669,24 +789,6 @@ app.post('/api/messages/send', async (req, res) => {
         if (!success) return res.status(500).json({ error: 'Meta API Failed' });
         await logSystemMessage(req.body.driverId, req.body.text, 'text');
         res.json({ success: true });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.patch('/api/drivers/:id', async (req, res) => { 
-    try {
-        const updates = req.body;
-        const keys = Object.keys(updates).filter(k => k !== 'id');
-        const setClause = keys.map((k, i) => `${k} = $${i + 2}`).join(', ');
-        const values = keys.map(k => typeof updates[k] === 'object' ? JSON.stringify(updates[k]) : updates[k]);
-        await queryWithRetry(`UPDATE drivers SET ${setClause} WHERE id = $1`, [req.params.id, ...values]);
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/drivers', async (req, res) => { 
-    try {
-        const resDb = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC LIMIT 100', []);
-        res.json(resDb.rows);
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

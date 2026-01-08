@@ -295,8 +295,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                       <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-100">
                         <span className="text-sm text-gray-600">Valid Driving License</span>
                         <button 
-                          onClick={() => handleUpdateDetails({ qualificationChecks: { ...driver.qualificationChecks, hasValidLicense: !driver.qualificationChecks.hasValidLicense } })}
-                          className={`p-1 rounded-full ${driver.qualificationChecks.hasValidLicense ? 'text-green-500 bg-green-100' : 'text-gray-300 bg-gray-200'}`}
+                          onClick={() => handleUpdateDetails({ qualificationChecks: { ...driver.qualificationChecks, hasValidLicense: !driver.qualificationChecks?.hasValidLicense } })}
+                          className={`p-1 rounded-full ${driver.qualificationChecks?.hasValidLicense ? 'text-green-500 bg-green-100' : 'text-gray-300 bg-gray-200'}`}
                         >
                           <CheckCircle size={20} />
                         </button>
@@ -304,8 +304,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                       <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-100">
                         <span className="text-sm text-gray-600">Local Availability</span>
                         <button 
-                          onClick={() => handleUpdateDetails({ qualificationChecks: { ...driver.qualificationChecks, isLocallyAvailable: !driver.qualificationChecks.isLocallyAvailable } })}
-                          className={`p-1 rounded-full ${driver.qualificationChecks.isLocallyAvailable ? 'text-green-500 bg-green-100' : 'text-gray-300 bg-gray-200'}`}
+                          onClick={() => handleUpdateDetails({ qualificationChecks: { ...driver.qualificationChecks, isLocallyAvailable: !driver.qualificationChecks?.isLocallyAvailable } })}
+                          className={`p-1 rounded-full ${driver.qualificationChecks?.isLocallyAvailable ? 'text-green-500 bg-green-100' : 'text-gray-300 bg-gray-200'}`}
                         >
                           <CheckCircle size={20} />
                         </button>
@@ -398,7 +398,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                 <div className="pt-4 border-t border-gray-100">
                   <button 
                     onClick={() => {
-                      if (driver.qualificationChecks.hasValidLicense) {
+                      if (driver.qualificationChecks?.hasValidLicense) {
                         onUpdateDriver(driver.id, { status: LeadStatus.QUALIFIED });
                       } else {
                         alert("Cannot qualify driver without a valid license check.");
