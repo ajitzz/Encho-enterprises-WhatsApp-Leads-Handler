@@ -171,6 +171,8 @@ const ensureDatabaseInitialized = async (client) => {
         await client.query(SCHEMA_SQL);
         // Self-Heal
         await client.query(`ALTER TABLE whatsapp_media_cache ADD COLUMN IF NOT EXISTS expires_at BIGINT`);
+        await client.query(`ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS is_public_showcase BOOLEAN DEFAULT FALSE`);
+        
         const settingsRes = await client.query('SELECT * FROM bot_settings WHERE id = 1');
         if (settingsRes.rows.length === 0) {
             await client.query('INSERT INTO bot_settings (id, settings) VALUES (1, $1)', [JSON.stringify(CACHED_BOT_SETTINGS)]);
@@ -291,11 +293,10 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
 const analyzeWithAI = async (text, currentNotes, systemInstruction) => {
   if (!GEMINI_API_KEY) return { reply: "Thank you for your message.", updatedNotes: currentNotes };
   
-  // 1. Determine Model based on Cool-Down
   if (Date.now() < AI_FALLBACK_UNTIL) {
-      CURRENT_AI_MODEL = "gemini-1.5-flash"; // Force cheaper model during cool-down
+      CURRENT_AI_MODEL = "gemini-1.5-flash"; 
   } else {
-      CURRENT_AI_MODEL = "gemini-3-flash-preview"; // Try best model
+      CURRENT_AI_MODEL = "gemini-3-flash-preview"; 
   }
 
   const performAnalysis = async (modelToUse) => {
@@ -311,7 +312,6 @@ const analyzeWithAI = async (text, currentNotes, systemInstruction) => {
         contents: prompt,
         config: { responseMimeType: "application/json" }
       });
-      // Simple mock credit tracking
       AI_CREDITS_ESTIMATED = Math.max(0, AI_CREDITS_ESTIMATED - 0.5); 
       return JSON.parse(response.text);
   };
@@ -319,10 +319,9 @@ const analyzeWithAI = async (text, currentNotes, systemInstruction) => {
   try {
       return await performAnalysis(CURRENT_AI_MODEL);
   } catch (e) {
-      // 2. Handle Quota/Load Errors
       if ((e.message.includes("429") || e.message.includes("Quota")) && CURRENT_AI_MODEL !== "gemini-1.5-flash") {
           console.warn("AI Quota Exceeded. Switching to fallback model for 60s.");
-          AI_FALLBACK_UNTIL = Date.now() + 60000; // 60s Cool-down
+          AI_FALLBACK_UNTIL = Date.now() + 60000; 
           CURRENT_AI_MODEL = "gemini-1.5-flash"; 
           try {
               return await performAnalysis(CURRENT_AI_MODEL);
@@ -525,7 +524,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         try {
             const keys = Object.keys(updatesToSave);
             const mappedUpdates = {};
-            // Simple mapping for demonstration - ensure strict mapping in prod
             keys.forEach(k => {
                 if (k === 'isBotActive') mappedUpdates['is_bot_active'] = updatesToSave[k];
                 else if (k === 'currentBotStepId') mappedUpdates['current_bot_step_id'] = updatesToSave[k];
@@ -544,6 +542,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
 // --- API ROUTES (ROUTER) ---
 
+// Drivers
 router.get('/drivers', async (req, res) => { 
     try {
         const client = await pool.connect();
@@ -560,7 +559,6 @@ router.get('/drivers', async (req, res) => {
                     id: msg.id, sender: msg.sender, text: msg.text, imageUrl: msg.image_url, timestamp: parseInt(msg.timestamp), type: msg.type, options: msg.options
                 });
             });
-            // Simple mapper
             const mappedDrivers = drivers.map(row => ({
                 id: row.id,
                 phoneNumber: row.phone_number,
@@ -587,10 +585,8 @@ router.get('/drivers', async (req, res) => {
 
 router.patch('/drivers/:id', async (req, res) => { 
     try {
-        // ... (Update logic same as before, simplified for XML length) ...
-        // Ensure mapUpdateKeys is used (inline or imported)
         const updates = req.body;
-        const map = { 'isHumanMode': 'is_human_mode', 'notes': 'notes', 'status': 'status' }; // Abbreviated
+        const map = { 'isHumanMode': 'is_human_mode', 'notes': 'notes', 'status': 'status', 'qualificationChecks': 'qualification_checks', 'vehicleRegistration': 'vehicle_registration', 'availability': 'availability' }; 
         const dbUpdates = {};
         for(let k in updates) if(map[k]) dbUpdates[map[k]] = updates[k];
         
@@ -604,6 +600,7 @@ router.patch('/drivers/:id', async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Messages
 router.post('/messages/send', async (req, res) => { 
     try {
         const driverRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [req.body.driverId]);
@@ -615,6 +612,7 @@ router.post('/messages/send', async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Bot Settings
 router.get('/bot-settings', async (req, res) => { 
     try {
         const resDb = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1', []);
@@ -671,7 +669,94 @@ router.post('/files/:id/sync', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// SYSTEM MONITOR
+// --- NEW ROUTES: FOLDER MANAGEMENT & PUBLIC SHOWCASE ---
+
+router.post('/folders', async (req, res) => {
+    try {
+        const { name, parentPath } = req.body;
+        const id = Date.now().toString();
+        const existing = await queryWithRetry('SELECT id FROM media_folders WHERE name = $1 AND parent_path = $2', [name, parentPath]);
+        if (existing.rows.length > 0) return res.status(409).json({ error: 'Folder name already exists' });
+        await queryWithRetry('INSERT INTO media_folders (id, name, parent_path) VALUES ($1, $2, $3)', [id, name, parentPath]);
+        res.json({ success: true, id });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/folders/:id', async (req, res) => {
+    try {
+        const { name } = req.body;
+        const folderRes = await queryWithRetry('SELECT parent_path FROM media_folders WHERE id = $1', [req.params.id]);
+        if (folderRes.rows.length === 0) return res.status(404).json({ error: 'Folder not found' });
+        
+        const parentPath = folderRes.rows[0].parent_path;
+        const existing = await queryWithRetry('SELECT id FROM media_folders WHERE name = $1 AND parent_path = $2 AND id != $3', [name, parentPath, req.params.id]);
+        if (existing.rows.length > 0) return res.status(409).json({ error: 'Folder name already exists' });
+
+        await queryWithRetry('UPDATE media_folders SET name = $1 WHERE id = $2', [name, req.params.id]);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/folders/:id', async (req, res) => {
+    try {
+        await queryWithRetry('DELETE FROM media_folders WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/files/:id', async (req, res) => {
+    try {
+        await queryWithRetry('DELETE FROM media_files WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/folders/:id/public', async (req, res) => {
+    try {
+        await queryWithRetry('UPDATE media_folders SET is_public_showcase = TRUE WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/folders/:id/public', async (req, res) => {
+    try {
+        await queryWithRetry('UPDATE media_folders SET is_public_showcase = FALSE WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/public/status', async (req, res) => {
+    try {
+        const resDb = await queryWithRetry('SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE ORDER BY id DESC LIMIT 1', []);
+        if (resDb.rows.length > 0) {
+            res.json({ active: true, folderName: resDb.rows[0].name, folderId: resDb.rows[0].id });
+        } else {
+            res.json({ active: false });
+        }
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/public/showcase', async (req, res) => {
+    try {
+        let folderName = req.query.folder;
+        let folderPath = '/';
+        
+        if (!folderName) {
+            const activeRes = await queryWithRetry('SELECT name FROM media_folders WHERE is_public_showcase = TRUE ORDER BY id DESC LIMIT 1', []);
+            if (activeRes.rows.length > 0) {
+                folderName = activeRes.rows[0].name;
+            } else {
+                return res.json({ title: 'Showcase', items: [] });
+            }
+        }
+        
+        folderPath = '/' + folderName; 
+        const filesRes = await queryWithRetry('SELECT id, url, type, filename FROM media_files WHERE folder_path = $1', [folderPath]);
+        res.json({ title: folderName || 'Showcase', items: filesRes.rows });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// System Monitor
 router.get('/system/stats', async (req, res) => {
     const start = Date.now();
     let dbLatency = 0;
@@ -680,11 +765,10 @@ router.get('/system/stats', async (req, res) => {
         dbLatency = Date.now() - start;
     } catch(e) { dbLatency = -1; }
 
-    // Calculate Load % based on active uploads (Max 10 = 100%)
     const mediaLoad = Math.min(ACTIVE_UPLOADS * 10, 100);
 
     res.json({
-        serverLoad: Math.floor(Math.random() * 20) + 10, // Simulated CPU
+        serverLoad: Math.floor(Math.random() * 20) + 10, 
         dbLatency: dbLatency,
         aiCredits: Math.floor(AI_CREDITS_ESTIMATED),
         aiModel: CURRENT_AI_MODEL,
@@ -696,10 +780,10 @@ router.get('/system/stats', async (req, res) => {
 });
 
 // --- MOUNT ROUTER (Fixes 404 on Vercel) ---
-app.use('/api', router); // Main entry
-app.use('/', router);    // Fallback if Vercel strips /api
+app.use('/api', router); 
+app.use('/', router);    
 
-// Webhook must be on app root usually for Meta
+// Webhook
 app.get('/webhook', (req, res) => { res.send(req.query['hub.challenge']); });
 app.post('/webhook', async (req, res) => { 
     try {
