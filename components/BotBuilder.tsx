@@ -16,8 +16,7 @@ import {
   Edge,
   useNodesState,
   useEdgesState,
-  addEdge,
-  useEdges
+  addEdge
 } from '@xyflow/react';
 import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
@@ -70,8 +69,6 @@ const getIconForLabel = (label: string) => {
 
 // --- NODE PREVIEW CARD ---
 const NodePreviewCard = ({ data, id, selected }: any) => {
-  const edges = useEdges(); // Hook to check connections
-  
   const isInputType = ['Text', 'Number', 'Email', 'Website', 'Date', 'Time'].includes(data.label);
   const isMediaType = ['Image', 'Video', 'File', 'Audio'].includes(data.label);
   const isOptionType = ['Quick Reply', 'List', 'Question'].includes(data.label) || data.inputType === 'option';
@@ -93,12 +90,6 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
 
   if (selected) borderColor = 'border-blue-500 ring-2 ring-blue-100 shadow-md';
   if (isDanger) borderColor = 'border-red-500 ring-2 ring-red-100';
-
-  // Helper to check if a specific option handle is connected
-  const isOptionConnected = (idx: number) => {
-      const handleId = `option-${idx}`;
-      return edges.some(edge => edge.source === id && edge.sourceHandle === handleId);
-  };
 
   if (data.type === 'start') {
       return (
@@ -155,38 +146,26 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
                         </div>
                         <span className="text-[9px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">Connect each option</span>
                     </div>
-                    {data.options?.map((opt: string, i: number) => {
-                        const connected = isOptionConnected(i);
-                        return (
-                            <div key={i} className={`relative flex items-center justify-between bg-white border-2 px-3 py-3 rounded-lg shadow-sm transition-all group/opt ${connected ? 'border-gray-100 hover:border-violet-300' : 'border-red-100 bg-red-50/30'}`}>
-                                <span className={`text-xs font-bold truncate max-w-[200px] ${connected ? 'text-gray-700' : 'text-red-600'}`} title={opt}>
-                                    {opt || '(Empty)'}
-                                </span>
-                                
-                                {/* Connector Line */}
-                                <div className={`h-[2px] flex-1 mx-3 transition-colors ${connected ? 'bg-gray-100 group-hover/opt:bg-violet-100' : 'bg-red-200'}`}></div>
-                                
-                                {/* Handle Anchor */}
-                                <div className="relative flex items-center">
-                                    {!connected && (
-                                        <span title="Not connected">
-                                            <AlertTriangle size={10} className="text-red-500 mr-2 animate-pulse" />
-                                        </span>
-                                    )}
-                                    <span className={`text-[9px] mr-2 uppercase font-mono font-bold tracking-tight ${connected ? 'text-gray-400 group-hover/opt:text-violet-600' : 'text-red-400'}`}>
-                                        {connected ? 'Next' : 'Link'}
-                                    </span>
-                                    <ArrowRight size={12} className={`mr-1 ${connected ? 'text-gray-300 group-hover/opt:text-violet-400' : 'text-red-300'}`} />
-                                    <Handle 
-                                        type="source" 
-                                        position={Position.Right} 
-                                        id={`option-${i}`} 
-                                        style={{...OPTION_HANDLE_STYLE, background: connected ? '#8b5cf6' : '#ef4444', borderColor: connected ? 'white' : '#fecaca'}} 
-                                    />
-                                </div>
+                    {data.options?.map((opt: string, i: number) => (
+                        <div key={i} className="relative flex items-center justify-between bg-white border-2 border-gray-100 hover:border-violet-300 px-3 py-3 rounded-lg shadow-sm transition-all group/opt">
+                            <span className="text-xs font-bold text-gray-700 truncate max-w-[200px]" title={opt}>{opt || '(Empty)'}</span>
+                            
+                            {/* Connector Line */}
+                            <div className="h-[2px] bg-gray-100 flex-1 mx-3 group-hover/opt:bg-violet-100 transition-colors"></div>
+                            
+                            {/* Handle Anchor - Properly Positioned */}
+                            <div className="relative flex items-center">
+                                <span className="text-[9px] text-gray-400 mr-2 uppercase font-mono group-hover/opt:text-violet-600 font-bold tracking-tight">Next</span>
+                                <ArrowRight size={12} className="text-gray-300 mr-1 group-hover/opt:text-violet-400" />
+                                <Handle 
+                                    type="source" 
+                                    position={Position.Right} 
+                                    id={`option-${i}`} 
+                                    style={OPTION_HANDLE_STYLE} 
+                                />
                             </div>
-                        );
-                    })}
+                        </div>
+                    ))}
                     {isEmptyOptions && (
                         <div className="text-[10px] text-red-500 font-medium flex items-center gap-2 p-2 bg-red-50 rounded border border-red-100">
                             <AlertTriangle size={12} /> No options defined. Flow will stop here.
@@ -262,9 +241,6 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                             <span>Answer Options</span>
                             <span className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded text-[10px]">{localData.options?.length || 0} / 10</span>
                         </label>
-                        <div className="bg-blue-50 text-blue-700 p-2 rounded text-[10px] border border-blue-100 mb-2">
-                            <strong>Note:</strong> Options limited to 24 chars to prevent WhatsApp truncation errors.
-                        </div>
                         <div className="space-y-2">
                             {(localData.options || []).map((opt: string, idx: number) => (
                                 <div key={idx} className="flex gap-2 group">
@@ -272,14 +248,13 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                                         <span className="w-8 h-full bg-gray-50 flex items-center justify-center text-[10px] font-mono text-gray-400 border-r border-gray-100">{idx + 1}</span>
                                         <input 
                                             value={opt}
-                                            maxLength={24} // STRICT WHATSAPP LIMIT
                                             onChange={(e) => {
                                                 const newOpts = [...localData.options];
                                                 newOpts[idx] = e.target.value;
                                                 update('options', newOpts);
                                             }}
                                             className="flex-1 px-3 py-2 text-xs outline-none text-gray-700 font-medium"
-                                            placeholder="Option Label (Max 24)"
+                                            placeholder="Option Label"
                                         />
                                     </div>
                                     <button 
@@ -342,7 +317,7 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
     );
 };
 
-// ... (Rest of existing DraggableSidebarItem and BotBuilder wrapper remains unchanged) ...
+// --- DRAGGABLE SIDEBAR ---
 const DraggableSidebarItem = ({ type, inputType, label, icon }: any) => {
     const onDragStart = (event: React.DragEvent) => {
       event.dataTransfer.setData('application/reactflow/type', type);
@@ -366,6 +341,7 @@ const DraggableSidebarItem = ({ type, inputType, label, icon }: any) => {
     );
 };
 
+// --- MAIN COMPONENT ---
 export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
     return (
         <ReactFlowProvider>
@@ -383,6 +359,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
     const [isSaving, setIsSaving] = useState(false);
     
+    // Load
     useEffect(() => {
         const load = async () => {
             const settings = isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
@@ -399,6 +376,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         load();
     }, [isLiveMode, setNodes, setEdges]);
 
+    // Drag Drop
     const onDragOver = useCallback((event: React.DragEvent) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }, []);
     const onDrop = useCallback((event: React.DragEvent) => {
         event.preventDefault();
@@ -425,12 +403,16 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         setSelectedNodeId(newNode.id);
     }, [addNode]);
 
+    // --- COMPILER LOGIC (Fixed for Production) ---
     const handleSave = async () => {
         setIsSaving(true);
         const compiledSteps: BotStep[] = [];
+        
+        // 1. Identify Entry Point
         const startEdge = edges.find(e => e.source === 'start');
         let entryPointId = startEdge?.target;
         
+        // 2. Iterate Nodes to Build Steps
         nodes.forEach(node => {
             const data = node.data as any;
             if (data.type === 'start') return;
@@ -439,22 +421,30 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             let nextStepId: string | undefined = 'END'; 
             let routes: Record<string, string> = {};
 
+            // A. Check for DEFAULT connection (Main Handle)
+            // Note: Option nodes might NOT have this if strictly routed
             const mainEdge = outgoingEdges.find(e => e.sourceHandle === 'main' || !e.sourceHandle);
             if (mainEdge) nextStepId = mainEdge.target;
 
+            // B. Check for SPECIFIC OPTION connections
             if (data.options && data.options.length > 0) {
+                // IMPORTANT: We map based on the *current* options array index
                 data.options.forEach((optText: string, idx: number) => {
+                     // Look for edge connected to 'option-0', 'option-1', etc.
                      const handleId = `option-${idx}`;
                      const edge = outgoingEdges.find(e => e.sourceHandle === handleId);
-                     // SAVE CLEANSED TEXT to align with backend fuzzy match expectations
+                     
                      if (edge && optText && optText.trim()) {
+                         // The key is the text user sees (e.g. "Yes"). The value is the Next Node ID.
                          routes[optText.trim()] = edge.target;
                      }
                 });
             }
             
+            // C. Sanitize Data
             const { icon, ...cleanData } = data;
             
+            // D. Construct Step
             compiledSteps.push({
                 id: node.id,
                 title: cleanData.label,
@@ -470,10 +460,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             });
         });
 
+        // 3. Fallback Entry Point
         if (!entryPointId && compiledSteps.length > 0) {
             entryPointId = compiledSteps[0].id;
         }
 
+        // 4. Save
         const newSettings: BotSettings = {
             ...(isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings()),
             steps: compiledSteps,

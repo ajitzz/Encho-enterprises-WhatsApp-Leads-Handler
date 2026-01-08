@@ -15,7 +15,7 @@ export enum OnboardingStep {
   READY_FOR_REVIEW = 4
 }
 
-export type LeadSource = 'Organic' | 'Meta Ad' | 'Referral' | 'Manual' | 'WhatsApp';
+export type LeadSource = 'Organic' | 'Meta Ad' | 'Referral' | 'Manual';
 
 export interface Message {
   id: string;
@@ -55,6 +55,12 @@ export interface Driver {
   
   // Human Handover
   isHumanMode?: boolean;
+}
+
+export interface MetaTemplate {
+  name: string;
+  language: string;
+  components: any[];
 }
 
 export interface AppNotification {
@@ -103,15 +109,17 @@ export interface BotSettings {
   };
 }
 
+// --- AI AUDIT TYPES ---
 export interface AuditIssue {
   nodeId: string;
   severity: 'CRITICAL' | 'WARNING';
-  issue: string;
-  suggestion: string;
-  autoFixValue: string | string[] | null;
+  issue: string; // "Placeholder text detected"
+  suggestion: string; // "Change to 'Please reply...'"
+  autoFixValue?: any; // The sanitized value
 }
 
 export interface AuditReport {
   isValid: boolean;
   issues: AuditIssue[];
+  fixedNodes?: any[]; // The auto-healed node list
 }

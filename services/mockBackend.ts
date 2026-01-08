@@ -1,7 +1,7 @@
 
 import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, BotStep } from '../types';
 
-// Initial Bot Config (Single Tenant)
+// Initial Bot Config
 const DEFAULT_BOT_SETTINGS: BotSettings = {
   isEnabled: true,
   routingStrategy: 'HYBRID_BOT_FIRST',
@@ -44,6 +44,7 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
   entryPointId: 'step_1'
 };
 
+// FIREWALL REGEX
 const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
 
 // Initial Mock Data
@@ -266,6 +267,7 @@ class MockBackendService {
               if (currentStep.saveToField === 'document' && imageUrl) driver.documents.push(imageUrl);
               if (currentStep.saveToField === 'vehicleRegistration') driver.vehicleRegistration = text;
               
+              // MOCK AI NOTE EXTRACTION FOR BOT STEPS
               if (currentStep.saveToField) {
                   const newNote = `[Bot] Captured ${currentStep.saveToField}: ${text}`;
                   driver.notes = driver.notes ? `${driver.notes}\n${newNote}` : newNote;
@@ -273,16 +275,15 @@ class MockBackendService {
 
               let nextId = currentStep.nextStepId;
 
+              // --- MOCK BRANCHING LOGIC ---
               if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
                   const cleanInput = text.trim().toLowerCase();
-                  const routeKey = Object.keys(currentStep.routes).find(k => {
-                      const cleanKey = k.toLowerCase();
-                      return cleanKey === cleanInput || cleanKey.startsWith(cleanInput) || cleanInput.startsWith(cleanKey);
-                  });
+                  const routeKey = Object.keys(currentStep.routes).find(k => k.toLowerCase() === cleanInput);
                   
                   if (routeKey) {
                       nextId = currentStep.routes[routeKey];
                   } else {
+                      // INVALID OPTION => Re-ask the question without moving forward
                       const botMsg: Message = {
                           id: Date.now().toString() + '_bot',
                           sender: 'system',
@@ -324,6 +325,7 @@ class MockBackendService {
           if (nextStep) {
               const safeText = nextStep.message || (nextStep.options?.length ? "Select Option:" : "");
               if (!safeText && !nextStep.mediaUrl && !nextStep.templateName) {
+                  // If safeText is still empty and no media/template, block.
                   return { driver, actionNeeded: 'NONE' };
               }
 
@@ -381,6 +383,7 @@ class MockBackendService {
                 const isTemplate = !!firstStep.templateName;
                 const safeText = firstStep.message || (firstStep.options?.length ? "Select Option:" : "");
                 
+                // Firewall check for ad lead start
                 if (!safeText && !firstStep.mediaUrl && !isTemplate) return;
 
                 this.addMessage(driver!.id, {
