@@ -236,18 +236,19 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
             {/* Interactive Options - CUSTOM ROUTING UI */}
             {isOptionType && (
                 <div className="mt-4 space-y-2">
-                    <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Branches</div>
+                    <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-1">
+                        <Split size={10} /> Branches
+                    </div>
                     {data.options?.map((opt: string, i: number) => (
-                        <div key={i} className="relative flex items-center justify-between bg-white border border-gray-200 px-3 py-2 rounded-lg shadow-sm transition-all hover:border-purple-300 group-hover:shadow-md">
-                            <span className="text-xs font-medium text-gray-700 truncate max-w-[200px]">{opt || '(Empty)'}</span>
+                        <div key={i} className="relative flex items-center justify-between bg-white border border-gray-200 px-3 py-2 rounded-lg shadow-sm group/opt hover:border-purple-300 transition-colors">
+                            <span className="text-xs font-medium text-gray-700 truncate max-w-[180px]" title={opt}>{opt || '(Empty)'}</span>
                             
-                            {/* Visual connector line */}
-                            <div className="h-[1px] bg-gray-200 flex-1 mx-2"></div>
+                            {/* Connector Line */}
+                            <div className="h-[1px] bg-gray-100 flex-1 mx-2"></div>
                             
-                            {/* The Handle is now aligned with the option row */}
+                            {/* Handle Anchor - Properly Positioned */}
                             <div className="relative w-4 h-4 flex items-center justify-center">
-                                <div className="w-2 h-2 rounded-full bg-purple-500"></div>
-                                {/* Use index as handle ID to map in compiler */}
+                                <div className="w-2 h-2 rounded-full bg-purple-500 ring-2 ring-purple-100"></div>
                                 <Handle 
                                     type="source" 
                                     position={Position.Right} 
