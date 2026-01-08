@@ -26,7 +26,7 @@ import {
   MessageSquare, Image as ImageIcon, Video, List, Type, Hash, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, ShieldAlert, 
   GripVertical, MousePointerClick, FileCode, Brush, Eye, 
-  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle, Split, GitBranch, ArrowRight, AlertTriangle
+  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle, Split, GitBranch, ArrowRight, AlertTriangle, File
 } from 'lucide-react';
 
 // --- STYLES ---
@@ -43,17 +43,6 @@ const OPTION_HANDLE_STYLE = {
     boxShadow: '0 0 0 2px rgba(139, 92, 246, 0.2)'
 };
 
-// --- CONSTANTS ---
-const SYSTEM_TEMPLATES = [
-    'hello_world',
-    'sample_shipping_confirmation',
-    'sample_movie_ticket_confirmation',
-    'sample_purchase_feedback',
-    'sample_issue_resolution',
-    'sample_flight_confirmation',
-    'sample_happy_hour_announcement'
-];
-
 const getIconForLabel = (label: string) => {
     switch(label) {
         case 'Image': return <ImageIcon size={14} />;
@@ -67,10 +56,75 @@ const getIconForLabel = (label: string) => {
     }
 };
 
+// --- MEDIA SELECTOR MODAL ---
+const MediaSelectorModal = ({ isOpen, onClose, onSelect, allowedType }: any) => {
+    const [files, setFiles] = useState<any[]>([]);
+    const [loading, setLoading] = useState(false);
+
+    useEffect(() => {
+        if (isOpen) {
+            setLoading(true);
+            liveApiService.getMediaLibrary('/')
+                .then(data => {
+                    const filtered = data.files.filter((f: any) => 
+                        allowedType === 'Video' ? f.type === 'video' : f.type === 'image'
+                    );
+                    setFiles(filtered);
+                })
+                .catch(console.error)
+                .finally(() => setLoading(false));
+        }
+    }, [isOpen, allowedType]);
+
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed inset-0 bg-black/50 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl h-[80vh] flex flex-col animate-in fade-in zoom-in-95">
+                <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50 rounded-t-xl">
+                    <h3 className="font-bold text-gray-900 flex items-center gap-2">
+                        <Cloud size={18} className="text-blue-600" /> 
+                        Select {allowedType} from S3
+                    </h3>
+                    <button onClick={onClose}><X size={20} className="text-gray-400" /></button>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto p-4 bg-slate-50">
+                    {loading ? (
+                        <div className="flex justify-center p-10"><span className="animate-spin mr-2">⏳</span> Loading Library...</div>
+                    ) : files.length === 0 ? (
+                        <div className="text-center text-gray-400 py-10">
+                            No {allowedType}s found in S3 Library. <br/> Upload files in the Media Library tab first.
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-3 gap-4">
+                            {files.map((file) => (
+                                <div 
+                                    key={file.id}
+                                    onClick={() => onSelect(file.url)}
+                                    className="bg-white rounded-lg border border-gray-200 p-2 cursor-pointer hover:border-blue-500 hover:ring-2 hover:ring-blue-200 transition-all group"
+                                >
+                                    <div className="aspect-video bg-gray-100 rounded overflow-hidden mb-2 relative flex items-center justify-center">
+                                        {file.type === 'image' ? (
+                                            <img src={file.url} className="w-full h-full object-cover" alt="prev" />
+                                        ) : (
+                                            <Video size={24} className="text-gray-400" />
+                                        )}
+                                    </div>
+                                    <div className="text-xs font-medium text-gray-700 truncate">{file.filename}</div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+};
+
 // --- NODE PREVIEW CARD ---
 const NodePreviewCard = ({ data, id, selected }: any) => {
-  const isInputType = ['Text', 'Number', 'Email', 'Website', 'Date', 'Time'].includes(data.label);
-  const isMediaType = ['Image', 'Video', 'File', 'Audio'].includes(data.label);
+  const isMediaType = ['Image', 'Video'].includes(data.label);
   const isOptionType = ['Quick Reply', 'List', 'Question'].includes(data.label) || data.inputType === 'option';
   const isLinkType = data.label === 'Link';
   
@@ -119,20 +173,33 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
 
         {/* Body */}
         <div className="p-4">
-            {/* Message Text */}
-            <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 mb-3 relative">
-                <p className={`text-xs leading-relaxed font-medium ${hasPlaceholder ? 'text-red-600' : 'text-gray-700'}`}>
-                    {data.message || <span className="italic text-gray-300">No message text...</span>}
-                </p>
-            </div>
+            
+            {/* Link Label Preview */}
+            {isLinkType && data.linkLabel && (
+                 <div className="mb-2 text-xs font-bold text-gray-900 bg-sky-50 px-2 py-1 rounded border border-sky-100">
+                    {data.linkLabel}
+                 </div>
+            )}
+
+            {/* Message Text (or URL for Link) */}
+            {data.label !== 'Image' && data.label !== 'Video' && (
+                <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 mb-3 relative overflow-hidden">
+                    <p className={`text-xs leading-relaxed font-medium truncate ${hasPlaceholder ? 'text-red-600' : 'text-gray-700'}`}>
+                        {data.message || <span className="italic text-gray-300">No content...</span>}
+                    </p>
+                </div>
+            )}
 
             {/* Media Preview */}
             {isMediaType && (
-                <div className="mb-3 rounded-lg bg-gray-100 border border-gray-200 aspect-video overflow-hidden flex items-center justify-center relative">
+                <div className="mb-3 rounded-lg bg-gray-100 border border-gray-200 aspect-video overflow-hidden flex items-center justify-center relative group/media">
                     {data.mediaUrl ? (
                         data.label === 'Video' ? <video src={data.mediaUrl} className="w-full h-full object-cover" /> : <img src={data.mediaUrl} className="w-full h-full object-cover" alt="preview" />
                     ) : (
-                        <span className="text-[10px] text-gray-400 font-medium flex items-center gap-1"><ImageIcon size={12} /> No Asset Selected</span>
+                        <div className="text-center p-4">
+                             <Cloud size={24} className="mx-auto text-gray-300 mb-1" />
+                             <span className="text-[10px] text-gray-400 font-medium">Select {data.label} from S3</span>
+                        </div>
                     )}
                 </div>
             )}
@@ -144,33 +211,18 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
                         <div className="text-[10px] font-bold text-violet-500 uppercase tracking-wider flex items-center gap-1">
                             <GitBranch size={12} /> Routes
                         </div>
-                        <span className="text-[9px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">Connect each option</span>
                     </div>
                     {data.options?.map((opt: string, i: number) => (
                         <div key={i} className="relative flex items-center justify-between bg-white border-2 border-gray-100 hover:border-violet-300 px-3 py-3 rounded-lg shadow-sm transition-all group/opt">
                             <span className="text-xs font-bold text-gray-700 truncate max-w-[200px]" title={opt}>{opt || '(Empty)'}</span>
-                            
-                            {/* Connector Line */}
                             <div className="h-[2px] bg-gray-100 flex-1 mx-3 group-hover/opt:bg-violet-100 transition-colors"></div>
-                            
-                            {/* Handle Anchor - Properly Positioned */}
                             <div className="relative flex items-center">
                                 <span className="text-[9px] text-gray-400 mr-2 uppercase font-mono group-hover/opt:text-violet-600 font-bold tracking-tight">Next</span>
                                 <ArrowRight size={12} className="text-gray-300 mr-1 group-hover/opt:text-violet-400" />
-                                <Handle 
-                                    type="source" 
-                                    position={Position.Right} 
-                                    id={`option-${i}`} 
-                                    style={OPTION_HANDLE_STYLE} 
-                                />
+                                <Handle type="source" position={Position.Right} id={`option-${i}`} style={OPTION_HANDLE_STYLE} />
                             </div>
                         </div>
                     ))}
-                    {isEmptyOptions && (
-                        <div className="text-[10px] text-red-500 font-medium flex items-center gap-2 p-2 bg-red-50 rounded border border-red-100">
-                            <AlertTriangle size={12} /> No options defined. Flow will stop here.
-                        </div>
-                    )}
                 </div>
             )}
             
@@ -198,12 +250,13 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
 // --- PROPERTY INSPECTOR ---
 const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onChange: (id: string, data: any) => void }) => {
     const [localData, setLocalData] = useState<any>(selectedNode.data);
+    const [showMediaPicker, setShowMediaPicker] = useState(false);
 
     useEffect(() => { setLocalData(selectedNode.data); }, [selectedNode]);
 
     const update = (field: string, value: any) => {
         const newData = { ...localData, [field]: value };
-        if (newData.icon) delete newData.icon; // Cleanup
+        if (newData.icon) delete newData.icon; 
         setLocalData(newData);
         onChange(selectedNode.id, newData);
     };
@@ -223,23 +276,73 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
 
             <div className="flex-1 overflow-y-auto p-5 space-y-6">
                 
-                {/* Message Input */}
-                <div className="space-y-2">
-                    <label className="text-xs font-bold text-gray-500 uppercase">Message Text</label>
-                    <textarea 
-                        className="w-full h-32 p-3 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-shadow shadow-sm"
-                        placeholder="Type what the bot should say..."
-                        value={localData.message || ''}
-                        onChange={(e) => update('message', e.target.value)}
-                    />
-                </div>
+                {/* Link Label Input */}
+                {isLinkType && (
+                     <div className="space-y-2">
+                        <label className="text-xs font-bold text-sky-600 uppercase">Link Label</label>
+                        <input 
+                            className="w-full p-2 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-sky-500 outline-none"
+                            placeholder="e.g. Visit Our Website"
+                            value={localData.linkLabel || ''}
+                            onChange={(e) => update('linkLabel', e.target.value)}
+                        />
+                        <p className="text-[10px] text-gray-400">Displayed above the link URL.</p>
+                     </div>
+                )}
+
+                {/* Message / URL Input */}
+                {!isMediaType && (
+                    <div className="space-y-2">
+                        <label className="text-xs font-bold text-gray-500 uppercase">
+                            {isLinkType ? 'Link URL' : 'Message Text'}
+                        </label>
+                        <textarea 
+                            className="w-full h-32 p-3 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-shadow shadow-sm"
+                            placeholder={isLinkType ? "https://..." : "Type what the bot should say..."}
+                            value={localData.message || ''}
+                            onChange={(e) => update('message', e.target.value)}
+                        />
+                    </div>
+                )}
+
+                {/* Media Selector */}
+                {isMediaType && (
+                    <div className="space-y-4">
+                        <label className="text-xs font-bold text-amber-600 uppercase">Selected Asset</label>
+                        
+                        <div className="bg-gray-100 rounded-lg aspect-video flex items-center justify-center border border-gray-200 overflow-hidden relative group">
+                            {localData.mediaUrl ? (
+                                localData.label === 'Video' ? <video src={localData.mediaUrl} className="w-full h-full object-cover" /> : <img src={localData.mediaUrl} className="w-full h-full object-cover" alt="prev" />
+                            ) : (
+                                <div className="text-center p-2">
+                                    <Cloud size={24} className="mx-auto text-gray-400 mb-1" />
+                                    <span className="text-[10px] text-gray-500">No Asset</span>
+                                </div>
+                            )}
+                            {localData.mediaUrl && (
+                                <button 
+                                    onClick={() => update('mediaUrl', '')}
+                                    className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded shadow hover:bg-red-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                                >
+                                    <Trash2 size={12} />
+                                </button>
+                            )}
+                        </div>
+
+                        <button 
+                            onClick={() => setShowMediaPicker(true)}
+                            className="w-full py-2.5 bg-amber-100 text-amber-700 font-bold rounded-lg text-xs hover:bg-amber-200 transition-colors flex items-center justify-center gap-2 border border-amber-200"
+                        >
+                            <Cloud size={14} /> Select from S3 Library
+                        </button>
+                    </div>
+                )}
 
                 {/* Options Manager */}
                 {isOptionType && (
                     <div className="space-y-3">
                         <label className="text-xs font-bold text-gray-500 uppercase flex justify-between items-center">
                             <span>Answer Options</span>
-                            <span className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded text-[10px]">{localData.options?.length || 0} / 10</span>
                         </label>
                         <div className="space-y-2">
                             {(localData.options || []).map((opt: string, idx: number) => (
@@ -298,21 +401,14 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                         </select>
                     </div>
                 )}
-                
-                {/* Media URL */}
-                {isMediaType && (
-                    <div className="space-y-2 pt-4 border-t border-gray-100">
-                        <label className="text-xs font-bold text-amber-800 uppercase">Media URL</label>
-                        <input 
-                            type="text"
-                            value={localData.mediaUrl || ''}
-                            onChange={(e) => update('mediaUrl', e.target.value)}
-                            className="w-full bg-white border border-gray-200 text-gray-700 text-xs rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-500 outline-none"
-                            placeholder="https://..."
-                        />
-                    </div>
-                )}
             </div>
+            
+            <MediaSelectorModal 
+                isOpen={showMediaPicker} 
+                onClose={() => setShowMediaPicker(false)}
+                onSelect={(url: string) => { update('mediaUrl', url); setShowMediaPicker(false); }}
+                allowedType={localData.label}
+            />
         </div>
     );
 };
@@ -396,7 +492,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 message: '', 
                 inputType,
                 options: inputType === 'option' ? ['Yes', 'No'] : undefined,
-                mediaUrl: ''
+                mediaUrl: '',
+                linkLabel: ''
             },
         };
         addNode(newNode);
@@ -422,20 +519,15 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             let routes: Record<string, string> = {};
 
             // A. Check for DEFAULT connection (Main Handle)
-            // Note: Option nodes might NOT have this if strictly routed
             const mainEdge = outgoingEdges.find(e => e.sourceHandle === 'main' || !e.sourceHandle);
             if (mainEdge) nextStepId = mainEdge.target;
 
             // B. Check for SPECIFIC OPTION connections
             if (data.options && data.options.length > 0) {
-                // IMPORTANT: We map based on the *current* options array index
                 data.options.forEach((optText: string, idx: number) => {
-                     // Look for edge connected to 'option-0', 'option-1', etc.
                      const handleId = `option-${idx}`;
                      const edge = outgoingEdges.find(e => e.sourceHandle === handleId);
-                     
                      if (edge && optText && optText.trim()) {
-                         // The key is the text user sees (e.g. "Yes"). The value is the Next Node ID.
                          routes[optText.trim()] = edge.target;
                      }
                 });
@@ -456,7 +548,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 routes: Object.keys(routes).length > 0 ? routes : undefined, 
                 mediaUrl: cleanData.mediaUrl,
                 templateName: cleanData.templateName,
-                mediaType: ['Video', 'Image', 'File'].includes(cleanData.label) ? cleanData.label.toLowerCase() : undefined
+                mediaType: ['Video', 'Image', 'File'].includes(cleanData.label) ? cleanData.label.toLowerCase() : undefined,
+                linkLabel: cleanData.linkLabel // Capture new field
             });
         });
 

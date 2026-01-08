@@ -171,18 +171,6 @@ class MockBackendService {
     let isNew = false;
     let settings = this.botSettings;
 
-    // --- MOCK SANITIZATION ---
-    if (settings.steps) {
-        settings.steps = settings.steps.map(s => {
-             const m = s.message || "";
-             if (BLOCKED_REGEX.test(m)) {
-                 if (s.options && s.options.length > 0) s.message = "Please select an option:";
-                 else s.message = ""; 
-             }
-             return s;
-        });
-    }
-
     const entryPointId = settings.entryPointId || settings.steps?.[0]?.id;
 
     if (!driver) {
@@ -237,7 +225,7 @@ class MockBackendService {
                   const maintenanceMsg: Message = {
                       id: Date.now().toString() + '_maint',
                       sender: 'system',
-                      text: "Our automated system is currently being configured. Please check back later.",
+                      text: "System is initializing. Please wait.",
                       timestamp: Date.now() + 500,
                       type: 'text'
                   };
@@ -268,7 +256,6 @@ class MockBackendService {
               if (currentStep.saveToField === 'document' && imageUrl) driver.documents.push(imageUrl);
               if (currentStep.saveToField === 'vehicleRegistration') driver.vehicleRegistration = text;
               
-              // MOCK AI NOTE EXTRACTION FOR BOT STEPS
               if (currentStep.saveToField) {
                   const newNote = `[Bot] Captured ${currentStep.saveToField}: ${text}`;
                   driver.notes = driver.notes ? `${driver.notes}\n${newNote}` : newNote;
@@ -278,7 +265,6 @@ class MockBackendService {
 
               // --- MOCK BRANCHING LOGIC ---
               if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
-                  // ROBUST MATCHING (Sync with Server.js)
                   const normalize = (str: string) => str.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
                   const cleanInput = normalize(text);
                   
@@ -295,7 +281,6 @@ class MockBackendService {
                   if (routeKey) {
                       nextId = currentStep.routes[routeKey];
                   } else {
-                      // INVALID OPTION => Re-ask the question without moving forward
                       const botMsg: Message = {
                           id: Date.now().toString() + '_bot',
                           sender: 'system',
@@ -335,9 +320,14 @@ class MockBackendService {
 
           const nextStep = settings.steps.find(s => s.id === driver.currentBotStepId);
           if (nextStep) {
-              const safeText = nextStep.message || (nextStep.options?.length ? "Select Option:" : "");
+              let safeText = nextStep.message || (nextStep.options?.length ? "Select Option:" : "");
+              
+              // LINK LABEL SUPPORT
+              if (nextStep.linkLabel && nextStep.message) {
+                  safeText = `${nextStep.linkLabel}\n${nextStep.message}`;
+              }
+
               if (!safeText && !nextStep.mediaUrl && !nextStep.templateName) {
-                  // If safeText is still empty and no media/template, block.
                   return { driver, actionNeeded: 'NONE' };
               }
 
@@ -354,7 +344,6 @@ class MockBackendService {
               this.persist();
               return { driver, reply: botMsg, actionNeeded: 'NONE' };
           } else {
-              // BROKEN LINK FALLBACK
                const errorMsg: Message = {
                   id: Date.now().toString() + '_err',
                   sender: 'system',
@@ -406,9 +395,12 @@ class MockBackendService {
         if (firstStep) {
             setTimeout(() => {
                 const isTemplate = !!firstStep.templateName;
-                const safeText = firstStep.message || (firstStep.options?.length ? "Select Option:" : "");
+                let safeText = firstStep.message || (firstStep.options?.length ? "Select Option:" : "");
                 
-                // Firewall check for ad lead start
+                if (firstStep.linkLabel && firstStep.message) {
+                    safeText = `${firstStep.linkLabel}\n${firstStep.message}`;
+                }
+                
                 if (!safeText && !firstStep.mediaUrl && !isTemplate) return;
 
                 this.addMessage(driver!.id, {

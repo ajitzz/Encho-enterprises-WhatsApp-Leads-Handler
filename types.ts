@@ -1,4 +1,5 @@
 
+
 export enum LeadStatus {
   NEW = 'New',
   QUALIFIED = 'Qualified',
@@ -94,6 +95,9 @@ export interface BotStep {
   // Rich Media
   mediaUrl?: string;
   mediaType?: 'image' | 'video' | 'document'; // Explicit type
+  
+  // Link Node Specific
+  linkLabel?: string;
 }
 
 export interface BotSettings {
