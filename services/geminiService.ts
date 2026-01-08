@@ -41,12 +41,29 @@ export const analyzeMessage = async (text: string, imageUrl?: string, systemInst
 
   try {
     const model = "gemini-3-flash-preview";
-    const persona = systemInstruction || `You are an AI recruiter for Uber Fleet. Your goal is to be helpful, professional, and encourage drivers to apply.`;
+    
+    // ENCHO CABS SPECIFIC FALLBACK PERSONA
+    const defaultPersona = `
+    Role: WhatsApp Executive for **Encho Cabs** (Uber/Ola fleet).
+    Language: **Malayalam + Simple English (Manglish)**. 
+    Tone: Friendly, human-like, short (2-4 lines).
+
+    KEY FACTS:
+    - Vehicle: WagonR CNG (Manual).
+    - Accommodation: ₹5000 deposit (refundable), full facilities (AC/Fridge/Kitchen).
+    - Rent: ₹600/day (10 trips target). Performance bonus available (Rent reduces to ₹450).
+    - Earnings: ₹18k - ₹23k/week. NO COMMISSION from us.
+    - **Software:** We provide a Company App for 100% transparency. Drivers can see calculations & download weekly bills.
+    
+    GOAL: Answer questions & get them to visit.
+    `;
+
+    const persona = systemInstruction || defaultPersona;
 
     let prompt = `Analyze the driver's message.
     Message: "${text}"
     Has Image Attachment: ${imageUrl ? 'Yes' : 'No'}
-    Tasks: 1. Reply to the user. 2. Extract data. 3. Determine status.`;
+    Tasks: 1. Reply to the user (in Manglish/Malayalam unless they used English). 2. Extract data. 3. Determine status.`;
 
     const response = await ai.models.generateContent({
       model,
@@ -93,7 +110,7 @@ export const analyzeMessage = async (text: string, imageUrl?: string, systemInst
       intent: "Analysis Failed",
       isInterested: false,
       containsDocument: !!imageUrl,
-      suggestedReply: "Could you please repeat that?",
+      suggestedReply: "ക്ഷമിക്കണം, എനിക്ക് മനസ്സിലായില്ല. ഒന്ന് കൂടി പറയാമോ?",
       recommendedStatus: LeadStatus.NEW
     };
   }

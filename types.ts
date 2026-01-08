@@ -10,7 +10,7 @@ export enum LeadStatus {
 export enum OnboardingStep {
   WELCOME_SENT = 0,
   DOCUMENTS_RECEIVED = 1,
-  DETAILS_COLLECTED = 2, // Renamed from VEHICLE_DETAILS
+  DETAILS_COLLECTED = 2,
   AVAILABILITY_SET = 3,
   READY_FOR_REVIEW = 4
 }
@@ -27,10 +27,10 @@ export interface Message {
   options?: string[]; // For buttons
 }
 
-// Renamed Driver to Lead to be generic (Driver OR Traveler)
+// Enterprise Update: Renamed Driver to Lead to support generic business types (Travelers, Candidates, etc.)
 export interface Lead {
   id: string;
-  companyId: string; // Multi-tenant key
+  companyId: string; // Enterprise Multi-Tenant Key
   phoneNumber: string;
   name: string;
   source: LeadSource;
@@ -43,14 +43,14 @@ export interface Lead {
   
   onboardingStep: OnboardingStep;
   
-  // Generic Data Fields (Mapped based on Company Type)
-  customField1?: string; // e.g., Vehicle Registration OR Travel Date
-  customField2?: string; // e.g., Availability OR Group Size
+  // Generic Data Fields (Mapped based on Company Terminology)
+  customField1?: string; // e.g. Vehicle Registration OR Travel Date
+  customField2?: string; // e.g. Availability OR Destination
   
   qualificationChecks: {
-    check1: boolean; // e.g. Valid License OR Valid ID
-    check2: boolean; // e.g. Has Vehicle OR Paid Deposit
-    check3: boolean; // e.g. Local OR Visa Cleared
+    check1: boolean; // e.g. Valid License OR Valid Visa
+    check2: boolean; // e.g. Has Vehicle OR Deposit Paid
+    check3: boolean; // e.g. Local OR Vaccinated
   };
   
   currentBotStepId?: string; 
@@ -61,14 +61,17 @@ export interface Lead {
 export interface Company {
   id: string;
   name: string;
-  type: 'logistics' | 'travel' | 'retail';
+  type: 'logistics' | 'travel' | 'retail' | 'real_estate';
   terminology: {
-    singular: string; // "Driver" or "Traveler"
-    plural: string;   // "Drivers" or "Travelers"
-    field1Label: string; // "Vehicle Number" or "Travel Date"
-    field2Label: string; // "Availability" or "Destination"
+    singular: string;    // "Driver" or "Traveler"
+    plural: string;      // "Drivers" or "Travelers"
+    field1Label: string; // "Vehicle Number" or "Travel Dates"
+    field2Label: string; // "Availability" or "Group Size"
+    check1Label: string; // "Valid License" or "Valid ID"
+    check2Label: string; // "Has Vehicle" or "Deposit Paid"
+    check3Label: string; // "Local" or "Visa Cleared"
   };
-  themeColor: string; // hex code
+  themeColor: string;
 }
 
 export interface AppNotification {
@@ -78,8 +81,6 @@ export interface AppNotification {
   message: string;
 }
 
-// --- BOT BUILDER TYPES ---
-
 export type InputType = 'text' | 'image' | 'option' | 'location';
 
 export interface BotStep {
@@ -88,7 +89,7 @@ export interface BotStep {
   message: string;
   inputType: InputType;
   options?: string[];
-  // Updated save fields to be generic
+  // Generic save fields
   saveToField?: 'name' | 'customField1' | 'customField2' | 'document' | 'email'; 
   nextStepId?: string | 'END' | 'AI_HANDOFF';
   routes?: Record<string, string>; 
@@ -99,7 +100,7 @@ export interface BotStep {
 }
 
 export interface BotSettings {
-  companyId: string; // Settings per company
+  companyId: string;
   isEnabled: boolean;
   routingStrategy: 'BOT_ONLY' | 'AI_ONLY' | 'HYBRID_BOT_FIRST';
   systemInstruction: string;
@@ -111,7 +112,6 @@ export interface BotSettings {
   };
 }
 
-// --- AI AUDIT TYPES ---
 export interface AuditIssue {
   nodeId: string;
   severity: 'CRITICAL' | 'WARNING';

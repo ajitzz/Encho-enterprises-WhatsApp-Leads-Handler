@@ -1,9 +1,11 @@
+
 import React, { useState } from 'react';
-import { Lead, LeadStatus } from '../types';
-import { MessageCircle, Check, X, AlertCircle, Youtube, Search, Filter } from 'lucide-react';
+import { Lead, LeadStatus, Company } from '../types';
+import { MessageCircle, Youtube, Search, Filter } from 'lucide-react';
 
 interface LeadTableProps {
-  drivers: Lead[]; // Kept prop name as drivers to avoid breaking parent usage
+  drivers: Lead[]; 
+  company: Company;
   onSelectDriver: (driver: Lead) => void;
   onSendWelcome: (driver: Lead) => void;
   onBulkSelect: (ids: string[]) => void;
@@ -12,6 +14,7 @@ interface LeadTableProps {
 
 export const LeadTable: React.FC<LeadTableProps> = ({ 
   drivers, 
+  company,
   onSelectDriver, 
   onSendWelcome,
   onBulkSelect,
@@ -45,77 +48,39 @@ export const LeadTable: React.FC<LeadTableProps> = ({
     }
   };
 
-  const handleSelectOne = (id: string) => {
-    if (selectedIds.includes(id)) {
-      onBulkSelect(selectedIds.filter(sid => sid !== id));
-    } else {
-      onBulkSelect([...selectedIds, id]);
-    }
-  };
-
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col h-full">
-      {/* Header / Toolbar */}
       <div className="p-4 border-b border-gray-100 flex items-center justify-between gap-4 flex-wrap">
         <div className="flex items-center gap-2 bg-gray-50 px-3 py-2 rounded-lg border border-gray-200 flex-1 max-w-md">
           <Search size={18} className="text-gray-400" />
           <input 
             type="text" 
-            placeholder="Search name or phone..." 
+            placeholder={`Search ${company.terminology.plural}...`}
             className="bg-transparent border-none outline-none w-full text-sm"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
         </div>
-        
-        <div className="flex items-center gap-2">
-          <Filter size={18} className="text-gray-400" />
-          <select 
-            className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm outline-none cursor-pointer"
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
-          >
-            <option value="All">All Statuses</option>
-            {Object.values(LeadStatus).map(s => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
-        </div>
       </div>
 
-      {/* Table */}
       <div className="overflow-auto flex-1">
         <table className="w-full text-left border-collapse">
           <thead className="bg-gray-50 sticky top-0 z-10">
             <tr>
               <th className="p-4 border-b border-gray-200 w-10">
-                <input 
-                  type="checkbox" 
-                  className="rounded border-gray-300"
-                  checked={selectedIds.length === filteredDrivers.length && filteredDrivers.length > 0}
-                  onChange={handleSelectAll}
-                />
+                <input type="checkbox" className="rounded border-gray-300" checked={selectedIds.length === filteredDrivers.length && filteredDrivers.length > 0} onChange={handleSelectAll} />
               </th>
-              <th className="p-4 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wider">Driver Details</th>
+              <th className="p-4 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wider">{company.terminology.singular} Details</th>
               <th className="p-4 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
-              <th className="p-4 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wider">Last Message</th>
+              <th className="p-4 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wider">{company.terminology.field1Label}</th>
               <th className="p-4 border-b border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {filteredDrivers.map((driver) => (
-              <tr 
-                key={driver.id} 
-                className="hover:bg-blue-50/30 transition-colors cursor-pointer group"
-                onClick={() => onSelectDriver(driver)}
-              >
+              <tr key={driver.id} className="hover:bg-blue-50/30 transition-colors cursor-pointer group" onClick={() => onSelectDriver(driver)}>
                 <td className="p-4" onClick={(e) => e.stopPropagation()}>
-                  <input 
-                    type="checkbox" 
-                    className="rounded border-gray-300"
-                    checked={selectedIds.includes(driver.id)}
-                    onChange={() => handleSelectOne(driver.id)}
-                  />
+                  <input type="checkbox" className="rounded border-gray-300" checked={selectedIds.includes(driver.id)} onChange={() => {}} />
                 </td>
                 <td className="p-4">
                   <div className="flex flex-col">
@@ -124,50 +89,20 @@ export const LeadTable: React.FC<LeadTableProps> = ({
                   </div>
                 </td>
                 <td className="p-4">
-                  <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${getStatusColor(driver.status)}`}>
-                    {driver.status}
-                  </span>
+                  <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${getStatusColor(driver.status)}`}>{driver.status}</span>
                 </td>
                 <td className="p-4">
-                  <div className="max-w-xs truncate text-sm text-gray-700 font-medium">
-                    {driver.lastMessage}
-                  </div>
-                  <div className="text-[11px] text-gray-400 mt-1 font-mono">
-                    {new Date(driver.lastMessageTime).toLocaleString([], { 
-                        year: 'numeric', month: 'short', day: 'numeric', 
-                        hour: '2-digit', minute: '2-digit' 
-                    })}
-                  </div>
+                  <span className="text-sm text-gray-600">{driver.customField1 || '-'}</span>
                 </td>
                 <td className="p-4 text-right">
-                  <div className="flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
-                    <button 
-                      onClick={() => onSendWelcome(driver)}
-                      className="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors tooltip"
-                      title="Send Welcome Video"
-                    >
-                      <Youtube size={18} />
-                    </button>
-                    <button 
-                      onClick={() => onSelectDriver(driver)}
-                      className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                      title="Open Chat"
-                    >
-                      <MessageCircle size={18} />
-                    </button>
+                  <div className="flex items-center justify-end gap-2">
+                    <button onClick={() => onSelectDriver(driver)} className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg"><MessageCircle size={18} /></button>
                   </div>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
-        
-        {filteredDrivers.length === 0 && (
-          <div className="flex flex-col items-center justify-center p-12 text-gray-400">
-            <Search size={48} className="mb-4 opacity-20" />
-            <p>No drivers found matching your criteria.</p>
-          </div>
-        )}
       </div>
     </div>
   );
