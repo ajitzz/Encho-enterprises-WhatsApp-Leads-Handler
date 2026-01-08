@@ -1,5 +1,4 @@
 
-
 import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, BotStep } from '../types';
 
 // Initial Bot Config
@@ -268,7 +267,8 @@ class MockBackendService {
                   const normalize = (str: string) => str.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
                   const cleanInput = normalize(text);
                   
-                  const routeKey = Object.keys(currentStep.routes).find(k => {
+                  // FIX: Sort keys by length descending to check specific (longer) matches first
+                  const routeKey = Object.keys(currentStep.routes).sort((a, b) => b.length - a.length).find(k => {
                       const cleanKey = normalize(k);
                       if (cleanKey === cleanInput) return true;
                       if (cleanKey.length > 3 && cleanInput.length > 3) {
@@ -406,7 +406,7 @@ class MockBackendService {
                 this.addMessage(driver!.id, {
                     id: Date.now().toString() + '_auto',
                     sender: 'system',
-                    text: isTemplate ? `[Template: ${firstStep.templateName}] Hi ${name}!` : `Hi ${name}! ${safeText}`,
+                    text: isTemplate ? `[Template: ${firstStep.templateName}] ${name}!` : `Hi ${name}! ${safeText}`,
                     type: isTemplate ? 'template' : (firstStep.options && firstStep.options.length > 0 ? 'options' : (firstStep.mediaUrl ? 'image' : 'text')),
                     options: firstStep.options,
                     imageUrl: firstStep.mediaUrl,

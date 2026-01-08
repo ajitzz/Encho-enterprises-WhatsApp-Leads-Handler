@@ -446,7 +446,10 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
                         const normalize = (str) => str.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
                         const cleanInput = normalize(msgBody);
-                        const routeKey = Object.keys(currentStep.routes).find(k => {
+                        
+                        // FIX: Sort keys by length descending to match longest possible option first
+                        // e.g. Match "Not Interested" (longer) before "Interested" (shorter/substring)
+                        const routeKey = Object.keys(currentStep.routes).sort((a, b) => b.length - a.length).find(k => {
                             const cleanKey = normalize(k);
                             if (cleanKey === cleanInput) return true;
                             if (cleanKey.length > 3 && cleanInput.length > 3) {
