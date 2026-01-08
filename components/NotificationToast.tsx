@@ -1,9 +1,10 @@
+
 import React, { useEffect } from 'react';
 import { X, CheckCircle, AlertCircle, Info } from 'lucide-react';
-import { Notification } from '../types';
+import { AppNotification } from '../types';
 
 interface NotificationToastProps {
-  notifications: Notification[];
+  notifications: AppNotification[];
   onDismiss: (id: string) => void;
 }
 

@@ -1,11 +1,12 @@
+
 import React, { useState } from 'react';
 import { mockBackend } from '../services/mockBackend';
 import { analyzeMessage } from '../services/geminiService';
 import { MessageSquare, Upload, Smartphone, Facebook } from 'lucide-react';
-import { Notification } from '../types';
+import { AppNotification } from '../types';
 
 interface SimulatorProps {
-  onNotify: (n: Omit<Notification, 'id'>) => void;
+  onNotify: (n: Omit<AppNotification, 'id'>) => void;
 }
 
 export const Simulator: React.FC<SimulatorProps> = ({ onNotify }) => {

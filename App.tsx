@@ -13,7 +13,7 @@ import { MediaLibrary } from './components/MediaLibrary';
 import { PublicShowcase } from './components/PublicShowcase'; // New Import
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
-import { Driver, LeadStatus, Notification, BotSettings, Message } from './types';
+import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split, Bot } from 'lucide-react';
 
 export default function App() {
@@ -43,7 +43,7 @@ export default function App() {
   const [selectedBulkIds, setSelectedBulkIds] = useState<string[]>([]);
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [showWebhookModal, setShowWebhookModal] = useState(false);
-  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
   
   // Data Source Toggle: 'mock' or 'live'
   const [dataSource, setDataSource] = useState<'mock' | 'live'>('mock');
@@ -120,7 +120,7 @@ export default function App() {
   }, [drivers, selectedDriver, dataSource]);
 
   // Notification Handler
-  const addNotification = (notif: Omit<Notification, 'id'>) => {
+  const addNotification = (notif: Omit<AppNotification, 'id'>) => {
     const newNotif = { ...notif, id: Date.now().toString() + Math.random() };
     setNotifications(prev => [newNotif, ...prev]);
     

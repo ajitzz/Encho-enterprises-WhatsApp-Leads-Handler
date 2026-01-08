@@ -63,7 +63,7 @@ export interface MetaTemplate {
   components: any[];
 }
 
-export interface Notification {
+export interface AppNotification {
   id: string;
   type: 'info' | 'warning' | 'success';
   title: string;
@@ -80,7 +80,7 @@ export interface BotStep {
   message: string; // What the bot says (Fallback text if template used)
   inputType: InputType; // What the user should reply with
   options?: string[]; // If inputType is 'option'
-  saveToField?: 'name' | 'vehicleRegistration' | 'availability' | 'document'; // Where to save the data
+  saveToField?: 'name' | 'vehicleRegistration' | 'availability' | 'document' | 'email'; // Where to save the data
   nextStepId?: string | 'END' | 'AI_HANDOFF';
   
   // Template Integration
