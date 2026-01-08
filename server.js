@@ -369,7 +369,8 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
     // 1. FAIL-SAFE SETTINGS FETCH
     let botSettings = CACHED_BOT_SETTINGS;
     try {
-        if (Date.now() - LAST_SETTINGS_FETCH > 300000) {
+        // Fetch if cache is older than 1 second (Almost real-time)
+        if (Date.now() - LAST_SETTINGS_FETCH > 1000) {
             const settingsRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1', [], 1);
             if (settingsRes.rows.length > 0) {
                 CACHED_BOT_SETTINGS = cleanBotSettings(settingsRes.rows[0].settings);
@@ -488,15 +489,28 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      }
 
                      // 2. DETERMINE NEXT STEP (Branching Logic)
-                     let nextId = currentStep.nextStepId; // Default Next ID
+                     let nextId = currentStep.nextStepId; // Default Next ID (from main handle)
 
                      // BRANCHING CHECK: Does this step have specific routes for options?
                      if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
-                        // Check if user message matches a route key exactly
-                        // NOTE: WhatsApp button replies send the exact button text back.
-                        // We also support case-insensitive typing.
-                        const cleanInput = msgBody.trim().toLowerCase();
-                        const routeKey = Object.keys(currentStep.routes).find(k => k.toLowerCase() === cleanInput);
+                        // ROBUST FUZZY MATCHING (Fix for blocking issue)
+                        // Normalizer: trim, lowercase, remove punctuation
+                        const normalize = (str) => str.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+                        const cleanInput = normalize(msgBody);
+                        
+                        const routeKey = Object.keys(currentStep.routes).find(k => {
+                            const cleanKey = normalize(k);
+                            // A: Exact Match
+                            if (cleanKey === cleanInput) return true;
+                            // B: Button truncation (Key starts with Input or Input starts with Key)
+                            if (cleanKey.length > 3 && cleanInput.length > 3) {
+                                if (cleanKey.startsWith(cleanInput) || cleanInput.startsWith(cleanKey)) return true;
+                            }
+                            // C: Sentence inclusion ("I want option A")
+                            if (cleanInput.includes(cleanKey) && cleanKey.length > 2) return true;
+                            
+                            return false;
+                        });
                         
                         if (routeKey) {
                             nextId = currentStep.routes[routeKey];
@@ -537,6 +551,12 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                              replyMedia = nextStep.mediaUrl;
                              replyMediaType = nextStep.mediaType || (nextStep.mediaUrl ? 'image' : undefined);
                              replyOptions = nextStep.options;
+                         } else {
+                             // ERROR: BROKEN LINK (Step deleted)
+                             console.error("Critical: Next Step ID not found in settings:", nextId);
+                             replyText = "Configuration Error: Next step is missing. Connecting you to an agent.";
+                             updatesToSave.isBotActive = false;
+                             shouldCallAI = false; // Fallback to silence or specific error
                          }
                      }
                  }

@@ -1,4 +1,5 @@
 
+
 import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, BotStep } from '../types';
 
 // Initial Bot Config
@@ -277,8 +278,19 @@ class MockBackendService {
 
               // --- MOCK BRANCHING LOGIC ---
               if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
-                  const cleanInput = text.trim().toLowerCase();
-                  const routeKey = Object.keys(currentStep.routes).find(k => k.toLowerCase() === cleanInput);
+                  // ROBUST MATCHING (Sync with Server.js)
+                  const normalize = (str: string) => str.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+                  const cleanInput = normalize(text);
+                  
+                  const routeKey = Object.keys(currentStep.routes).find(k => {
+                      const cleanKey = normalize(k);
+                      if (cleanKey === cleanInput) return true;
+                      if (cleanKey.length > 3 && cleanInput.length > 3) {
+                          if (cleanKey.startsWith(cleanInput) || cleanInput.startsWith(cleanKey)) return true;
+                      }
+                      if (cleanInput.includes(cleanKey) && cleanKey.length > 2) return true;
+                      return false;
+                  });
                   
                   if (routeKey) {
                       nextId = currentStep.routes[routeKey];
@@ -341,6 +353,19 @@ class MockBackendService {
               this.addMessage(driver.id, botMsg);
               this.persist();
               return { driver, reply: botMsg, actionNeeded: 'NONE' };
+          } else {
+              // BROKEN LINK FALLBACK
+               const errorMsg: Message = {
+                  id: Date.now().toString() + '_err',
+                  sender: 'system',
+                  text: "Configuration Error: Next step is missing.",
+                  timestamp: Date.now() + 500,
+                  type: 'text'
+              };
+              this.addMessage(driver.id, errorMsg);
+              driver.isBotActive = false;
+              this.persist();
+              return { driver, reply: errorMsg, actionNeeded: 'NONE' };
           }
         }
       }
