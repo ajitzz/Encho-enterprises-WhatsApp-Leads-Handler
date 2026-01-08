@@ -391,7 +391,8 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         is_human_mode: false, 
         notes: '' 
     };
-    let isNewDriver = false;
+    
+    let isFlowStart = false; // Tracks if we are entering the bot flow this turn
     
     // 2. DRIVER STATE SYNC (TOLERANT TO FAILURE)
     const client = await pool.connect();
@@ -400,7 +401,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         let driverRes = await client.query('SELECT * FROM drivers WHERE phone_number = $1', [from]);
         
         if (driverRes.rows.length === 0) {
-             isNewDriver = true;
              const shouldActivateBot = botSettings.isEnabled && routingStrategy !== 'AI_ONLY';
              const insertRes = await client.query(
                 `INSERT INTO drivers (id, phone_number, name, source, status, last_message, last_message_time, current_bot_step_id, is_bot_active, is_human_mode)
@@ -408,6 +408,8 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                 [timestamp.toString(), from, name, 'WhatsApp', 'New', msgBody, timestamp, entryPointId, shouldActivateBot, false]
             );
             driver = insertRes.rows[0];
+            // If we just created the driver and bot is active, this is the start of flow.
+            if (shouldActivateBot) isFlowStart = true;
         } else {
             driver = driverRes.rows[0];
             await client.query('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [msgBody, timestamp, driver.id]);
@@ -433,43 +435,52 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
     if (botSettings.isEnabled && routingStrategy === 'AI_ONLY') { shouldCallAI = true; } 
     else if (botSettings.isEnabled) {
+         
+         // A. ACTIVATION LOGIC
          if (!driver.is_bot_active && routingStrategy === 'BOT_ONLY') {
              driver.is_bot_active = true;
              driver.current_bot_step_id = entryPointId;
-             updatesToSave.is_bot_active = true;
-             updatesToSave.current_bot_step_id = entryPointId;
+             // IMPORTANT: Use camelCase keys for mapUpdateKeys compatibility!
+             updatesToSave.isBotActive = true; 
+             updatesToSave.currentBotStepId = entryPointId;
+             isFlowStart = true; // We just started/restarted the bot
          }
 
+         // B. RECOVERY LOGIC (If active but lost step)
          if (driver.is_bot_active && !driver.current_bot_step_id && botSettings.steps.length > 0) {
               const firstId = entryPointId || botSettings.steps[0].id;
               driver.current_bot_step_id = firstId;
-              updatesToSave.current_bot_step_id = firstId;
+              updatesToSave.currentBotStepId = firstId;
+              isFlowStart = true; // Recovered to start
          }
 
+         // C. STEP PROCESSING
          if (driver.is_bot_active && driver.current_bot_step_id) {
              let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
              
+             // Fallback for deleted steps
              if (!currentStep && botSettings.steps.length > 0) {
                  const firstId = entryPointId || botSettings.steps[0].id;
                  driver.current_bot_step_id = firstId;
                  currentStep = botSettings.steps.find(s => s.id === firstId);
-                 updatesToSave.current_bot_step_id = firstId;
+                 updatesToSave.currentBotStepId = firstId;
+                 isFlowStart = true;
              }
 
              if (currentStep) {
-                 if (isNewDriver) {
-                     // FIRST MESSAGE LOGIC:
-                     // The user just sent "Hi" (or similar). This is the TRIGGER, not the ANSWER.
-                     // We should reply with the CURRENT step's message, not advance.
+                 // CASE 1: START OF FLOW (User sent "Hi", we just activated)
+                 // ACTION: Send the question/link of the FIRST step. Do not process "Hi" as an answer.
+                 if (isFlowStart) {
                      replyText = currentStep.message;
                      replyTemplate = currentStep.templateName;
                      replyMedia = currentStep.mediaUrl;
                      replyMediaType = currentStep.mediaType || (currentStep.mediaUrl ? 'image' : undefined);
                      replyOptions = currentStep.options;
                      
-                     // Do NOT update current_bot_step_id, so the next message is treated as the answer.
-                 } else {
-                     // STANDARD LOGIC (User is answering):
+                     // DO NOT Advance step. We want to wait for answer to THIS step.
+                 } 
+                 // CASE 2: USER IS ANSWERING (Flow is already running)
+                 else {
                      // 1. Save Data
                      if (currentStep.saveToField) {
                          updatesToSave[currentStep.saveToField] = msgBody;
@@ -479,13 +490,14 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      // 2. Advance to Next Step
                      let nextId = currentStep.nextStepId;
                      if (nextId === 'AI_HANDOFF' || nextId === 'END' || !nextId) {
-                         updatesToSave.is_bot_active = false;
-                         updatesToSave.current_bot_step_id = null;
+                         updatesToSave.isBotActive = false; // CamelCase!
+                         updatesToSave.currentBotStepId = null; // CamelCase!
                          
                          if (routingStrategy === 'HYBRID_BOT_FIRST' && nextId === 'AI_HANDOFF') shouldCallAI = true;
                          else if (routingStrategy === 'BOT_ONLY') replyText = "Details saved. Thank you.";
                      } else {
-                         updatesToSave.current_bot_step_id = nextId;
+                         // PREPARE NEXT STEP
+                         updatesToSave.currentBotStepId = nextId; // CamelCase!
                          const nextStep = botSettings.steps.find(s => s.id === nextId);
                          if (nextStep) {
                              replyText = nextStep.message;
@@ -539,10 +551,14 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         try {
             const mappedUpdates = mapUpdateKeys(updatesToSave);
             const keys = Object.keys(mappedUpdates);
-            const setClause = keys.map((k, i) => `${k} = $${i+2}`).join(', ');
-            const values = keys.map(k => typeof mappedUpdates[k] === 'object' ? JSON.stringify(mappedUpdates[k]) : mappedUpdates[k]);
             
-            await queryWithRetry(`UPDATE drivers SET ${setClause} WHERE id = $1`, [driver.id, ...values]);
+            // Only update if we have valid mapped keys
+            if (keys.length > 0) {
+                const setClause = keys.map((k, i) => `${k} = $${i+2}`).join(', ');
+                const values = keys.map(k => typeof mappedUpdates[k] === 'object' ? JSON.stringify(mappedUpdates[k]) : mappedUpdates[k]);
+                
+                await queryWithRetry(`UPDATE drivers SET ${setClause} WHERE id = $1`, [driver.id, ...values]);
+            }
         } catch(e) { console.warn("Failed to save state updates:", e.message); }
     }
 };
