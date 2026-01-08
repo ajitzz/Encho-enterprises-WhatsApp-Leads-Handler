@@ -22,25 +22,25 @@ import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
 import { useFlowStore } from '../services/flowStore'; 
-import { auditBotFlow, analyzeSystemCode } from '../services/geminiService';
 import { 
   MessageSquare, Image as ImageIcon, Video, List, Type, Hash, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, ShieldAlert, 
   GripVertical, MousePointerClick, FileCode, Brush, Eye, 
-  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle, Split, GitBranch, ArrowRight
+  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle, Split, GitBranch, ArrowRight, AlertTriangle
 } from 'lucide-react';
 
 // --- STYLES ---
-const HANDLE_STYLE = { width: 8, height: 8, background: '#94a3b8', border: '2px solid white', zIndex: 50 };
-const ACTIVE_HANDLE_STYLE = { width: 10, height: 10, background: '#3b82f6', border: '2px solid white', zIndex: 50 };
+const HANDLE_STYLE_COMMON = { width: 10, height: 10, border: '2px solid white', zIndex: 50 };
+const INPUT_HANDLE_STYLE = { ...HANDLE_STYLE_COMMON, background: '#94a3b8', left: -5 };
+const OUTPUT_HANDLE_STYLE = { ...HANDLE_STYLE_COMMON, background: '#3b82f6', right: -5 };
 const OPTION_HANDLE_STYLE = { 
+    ...HANDLE_STYLE_COMMON,
     width: 14, 
     height: 14, 
     background: '#8b5cf6', // Violet
-    border: '3px solid white', 
-    zIndex: 50,
-    right: -8,
-    boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+    right: -7,
+    borderRadius: '50%',
+    boxShadow: '0 0 0 2px rgba(139, 92, 246, 0.2)'
 };
 
 // --- CONSTANTS ---
@@ -54,7 +54,6 @@ const SYSTEM_TEMPLATES = [
     'sample_happy_hour_announcement'
 ];
 
-// --- HELPER: GET ICON ---
 const getIconForLabel = (label: string) => {
     switch(label) {
         case 'Image': return <ImageIcon size={14} />;
@@ -68,112 +67,18 @@ const getIconForLabel = (label: string) => {
     }
 };
 
-// --- MEDIA PICKER COMPONENT ---
-interface MediaPickerProps {
-    onSelect: (url: string) => void;
-    onClose: () => void;
-    type: 'image' | 'video' | 'file';
-}
-
-const MediaPicker: React.FC<MediaPickerProps> = ({ onSelect, onClose, type }) => {
-    const [folders, setFolders] = useState<any[]>([]);
-    const [files, setFiles] = useState<any[]>([]);
-    const [currentPath, setCurrentPath] = useState('/');
-    const [loading, setLoading] = useState(false);
-
-    useEffect(() => {
-        loadMedia(currentPath);
-    }, [currentPath]);
-
-    const loadMedia = async (path: string) => {
-        setLoading(true);
-        try {
-            // Check if live mode available, else fallback to empty or mock
-            const data = await liveApiService.getMediaLibrary(path);
-            setFolders(data.folders);
-            setFiles(data.files.filter((f: any) => type === 'file' ? true : f.type === type));
-        } catch (e) {
-            console.error("Media load failed", e);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const navigateUp = () => {
-        if (currentPath === '/') return;
-        const parts = currentPath.split('/').filter(Boolean);
-        parts.pop();
-        setCurrentPath(parts.length === 0 ? '/' : '/' + parts.join('/'));
-    };
-
-    return (
-        <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center p-6">
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl h-[600px] flex flex-col overflow-hidden animate-in zoom-in-95">
-                <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
-                    <div className="flex items-center gap-3">
-                        <button onClick={onClose} className="p-1 hover:bg-gray-200 rounded-full"><X size={20} /></button>
-                        <h3 className="font-bold text-gray-800 flex items-center gap-2">
-                            <Cloud size={18} className="text-blue-600" /> Select {type === 'image' ? 'Image' : 'Video'}
-                        </h3>
-                    </div>
-                </div>
-                
-                {/* Breadcrumb */}
-                <div className="px-4 py-2 bg-white border-b border-gray-100 flex items-center gap-2 text-sm text-gray-600">
-                    <button onClick={navigateUp} disabled={currentPath === '/'} className="p-1 hover:bg-gray-100 rounded disabled:opacity-30">
-                        <ArrowLeft size={14} />
-                    </button>
-                    <span className="font-mono bg-gray-100 px-2 py-0.5 rounded">{currentPath}</span>
-                </div>
-
-                <div className="flex-1 overflow-y-auto p-4 bg-gray-50/50">
-                    {loading ? (
-                        <div className="h-full flex items-center justify-center"><div className="animate-spin w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full"></div></div>
-                    ) : (
-                        <div className="grid grid-cols-4 gap-4">
-                            {/* Folders */}
-                            {folders.map(f => (
-                                <button key={f.id} onClick={() => setCurrentPath(currentPath === '/' ? `/${f.name}` : `${currentPath}/${f.name}`)} className="flex flex-col items-center justify-center p-4 bg-white border border-gray-200 rounded-xl hover:border-blue-400 hover:shadow-sm transition-all h-32">
-                                    <Folder size={32} className="text-yellow-400 fill-yellow-100 mb-2" />
-                                    <span className="text-xs font-medium text-gray-700 truncate w-full text-center">{f.name}</span>
-                                </button>
-                            ))}
-                            
-                            {/* Files */}
-                            {files.map(f => (
-                                <button key={f.id} onClick={() => { onSelect(f.url); onClose(); }} className="relative group flex flex-col bg-white border border-gray-200 rounded-xl hover:border-blue-500 hover:ring-2 hover:ring-blue-100 transition-all overflow-hidden h-32">
-                                    {type === 'image' ? (
-                                        <img src={f.url} className="w-full h-full object-cover" alt={f.filename} />
-                                    ) : (
-                                        <div className="w-full h-full flex items-center justify-center bg-gray-900"><Video className="text-white" size={24} /></div>
-                                    )}
-                                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-end p-2">
-                                        <span className="text-[10px] text-white bg-black/50 px-2 py-0.5 rounded truncate w-full">{f.filename}</span>
-                                    </div>
-                                </button>
-                            ))}
-                        </div>
-                    )}
-                    {!loading && folders.length === 0 && files.length === 0 && (
-                        <div className="h-full flex flex-col items-center justify-center text-gray-400">
-                            <Folder size={48} className="mb-2 opacity-20" />
-                            <p>Folder is empty</p>
-                        </div>
-                    )}
-                </div>
-            </div>
-        </div>
-    );
-};
-
-// --- NODE PREVIEW CARD (THE CANVAS NODE) ---
+// --- NODE PREVIEW CARD ---
 const NodePreviewCard = ({ data, id, selected }: any) => {
   const isInputType = ['Text', 'Number', 'Email', 'Website', 'Date', 'Time'].includes(data.label);
   const isMediaType = ['Image', 'Video', 'File', 'Audio'].includes(data.label);
-  const isOptionType = ['Quick Reply', 'List', 'Question'].includes(data.label);
+  const isOptionType = ['Quick Reply', 'List', 'Question'].includes(data.label) || data.inputType === 'option';
   const isLinkType = data.label === 'Link';
-  const hasPlaceholder = data.message && /replace\s+this|enter\s+your/i.test(data.message);
   
+  // Validation Checks
+  const hasPlaceholder = data.message && /replace\s+this|enter\s+your/i.test(data.message);
+  const isEmptyOptions = isOptionType && (!data.options || data.options.length === 0);
+  const isDanger = hasPlaceholder || isEmptyOptions;
+
   let borderColor = 'border-gray-200';
   let accentColor = 'bg-gray-50';
   let iconColor = 'text-gray-500';
@@ -184,7 +89,7 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
   else if (data.label === 'Text Message') { borderColor = 'border-blue-200'; accentColor = 'bg-blue-50'; iconColor = 'text-blue-600'; }
 
   if (selected) borderColor = 'border-blue-500 ring-2 ring-blue-100 shadow-md';
-  if (hasPlaceholder) borderColor = 'border-red-500 ring-2 ring-red-100';
+  if (isDanger) borderColor = 'border-red-500 ring-2 ring-red-100';
 
   if (data.type === 'start') {
       return (
@@ -194,29 +99,33 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
                 <span className="text-xs font-bold text-green-800 uppercase">Entry Point</span>
             </div>
             <div className="p-4 text-center text-xs text-gray-500">Flow starts here</div>
-            <Handle type="source" position={Position.Right} style={ACTIVE_HANDLE_STYLE} className="-right-3" />
+            <Handle type="source" position={Position.Right} style={OUTPUT_HANDLE_STYLE} />
         </div>
       );
   }
 
-  // Derive icon to avoid JSON Error #31
-  const icon = getIconForLabel(data.label);
-
   return (
     <div className={`w-[340px] bg-white rounded-xl shadow-lg border-2 transition-all group ${borderColor}`}>
-        <Handle type="target" position={Position.Left} style={HANDLE_STYLE} className="-left-3" />
+        <Handle type="target" position={Position.Left} style={INPUT_HANDLE_STYLE} />
         
         {/* Header */}
         <div className={`px-4 py-3 border-b flex items-center justify-between rounded-t-lg ${accentColor} ${borderColor}`}>
             <div className="flex items-center gap-2">
-                <div className={`p-1.5 rounded-md ${iconColor} bg-white shadow-sm border border-black/5`}>{icon}</div>
+                <div className={`p-1.5 rounded-md ${iconColor} bg-white shadow-sm border border-black/5`}>{getIconForLabel(data.label)}</div>
                 <span className={`text-xs font-bold uppercase tracking-wide ${iconColor}`}>{data.label}</span>
             </div>
-            {hasPlaceholder && <ShieldAlert size={16} className="text-red-500 animate-pulse" />}
+            {isDanger && <ShieldAlert size={16} className="text-red-500 animate-pulse" />}
         </div>
 
         {/* Body */}
         <div className="p-4">
+            {/* Message Text */}
+            <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 mb-3 relative">
+                <p className={`text-xs leading-relaxed font-medium ${hasPlaceholder ? 'text-red-600' : 'text-gray-700'}`}>
+                    {data.message || <span className="italic text-gray-300">No message text...</span>}
+                </p>
+            </div>
+
             {/* Media Preview */}
             {isMediaType && (
                 <div className="mb-3 rounded-lg bg-gray-100 border border-gray-200 aspect-video overflow-hidden flex items-center justify-center relative">
@@ -228,22 +137,7 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
                 </div>
             )}
 
-            {/* Message Text */}
-            <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 mb-3">
-                <p className={`text-xs leading-relaxed font-medium ${hasPlaceholder ? 'text-red-600' : 'text-gray-700'}`}>
-                    {data.message || <span className="italic text-gray-300">No message text...</span>}
-                </p>
-            </div>
-
-            {/* Link Preview */}
-            {isLinkType && (
-                <div className="mb-2 p-2 bg-sky-50 border border-sky-100 rounded text-xs text-sky-700 break-all flex items-center gap-2">
-                    <Link size={12} className="shrink-0" />
-                    {data.linkUrl ? <span className="truncate">{data.linkUrl}</span> : <span className="opacity-50">No URL set</span>}
-                </div>
-            )}
-
-            {/* Interactive Options - CUSTOM ROUTING UI */}
+            {/* Options Routing UI */}
             {isOptionType && (
                 <div className="mt-4 space-y-3">
                     <div className="flex items-center justify-between mb-2">
@@ -261,7 +155,7 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
                             
                             {/* Handle Anchor - Properly Positioned */}
                             <div className="relative flex items-center">
-                                <span className="text-[9px] text-gray-400 mr-2 uppercase font-mono group-hover/opt:text-violet-600 font-bold tracking-tight">Next Step</span>
+                                <span className="text-[9px] text-gray-400 mr-2 uppercase font-mono group-hover/opt:text-violet-600 font-bold tracking-tight">Next</span>
                                 <ArrowRight size={12} className="text-gray-300 mr-1 group-hover/opt:text-violet-400" />
                                 <Handle 
                                     type="source" 
@@ -272,9 +166,9 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
                             </div>
                         </div>
                     ))}
-                    {(!data.options || data.options.length === 0) && (
-                        <div className="text-[10px] text-red-400 italic text-center p-3 border border-dashed border-red-200 rounded bg-red-50">
-                            No options defined. Add options in the sidebar properties.
+                    {isEmptyOptions && (
+                        <div className="text-[10px] text-red-500 font-medium flex items-center gap-2 p-2 bg-red-50 rounded border border-red-100">
+                            <AlertTriangle size={12} /> No options defined. Flow will stop here.
                         </div>
                     )}
                 </div>
@@ -291,34 +185,25 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
             )}
         </div>
 
-        {/* Output Handles - Standard (Only if NOT option type) */}
+        {/* Fallback Main Output (Only if NOT option type) */}
         {!isOptionType && (
             <div className="absolute -right-3 top-1/2 transform -translate-y-1/2">
-                <Handle type="source" position={Position.Right} id="main" style={ACTIVE_HANDLE_STYLE} />
+                <Handle type="source" position={Position.Right} id="main" style={OUTPUT_HANDLE_STYLE} />
             </div>
         )}
     </div>
   );
 };
 
-// --- PROPERTY INSPECTOR (RIGHT SIDEBAR) ---
+// --- PROPERTY INSPECTOR ---
 const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onChange: (id: string, data: any) => void }) => {
     const [localData, setLocalData] = useState<any>(selectedNode.data);
-    const [showMediaPicker, setShowMediaPicker] = useState(false);
 
     useEffect(() => { setLocalData(selectedNode.data); }, [selectedNode]);
 
     const update = (field: string, value: any) => {
         const newData = { ...localData, [field]: value };
-        // Clean out any icon if it exists to prevent saving bad data
-        if (newData.icon) delete newData.icon;
-        
-        // Sanitize template name (prevent invalid values that break backend)
-        if (field === 'templateName' && value) {
-             const cleanVal = value.replace(/[^a-zA-Z0-9_]/g, '');
-             newData[field] = cleanVal;
-        }
-
+        if (newData.icon) delete newData.icon; // Cleanup
         setLocalData(newData);
         onChange(selectedNode.id, newData);
     };
@@ -326,113 +211,40 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
     if (localData.type === 'start') return <div className="p-6 text-center text-gray-400 text-sm">Start Node has no properties.</div>;
 
     const isMediaType = ['Image', 'Video'].includes(localData.label);
-    const isOptionType = ['Quick Reply', 'List', 'Question'].includes(localData.label);
+    const isOptionType = ['Quick Reply', 'List', 'Question'].includes(localData.label) || localData.inputType === 'option';
     const isLinkType = localData.label === 'Link';
     const isInputType = ['Text', 'Number'].includes(localData.label) || localData.inputType === 'text';
-    const icon = getIconForLabel(localData.label);
 
     return (
         <div className="w-80 bg-white border-l border-gray-200 flex flex-col h-full shadow-xl z-20">
-            {/* Header */}
             <div className="px-5 py-4 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                    <div className="p-1.5 bg-white border border-gray-200 rounded-md shadow-sm">{icon}</div>
-                    <h3 className="font-bold text-gray-800">{localData.label}</h3>
-                </div>
-                <div className="px-2 py-0.5 bg-blue-100 text-blue-700 text-[10px] rounded font-bold uppercase tracking-wider">Node #{selectedNode.id.split('_')[1] || '01'}</div>
+                <h3 className="font-bold text-gray-800">{localData.label} Properties</h3>
             </div>
 
             <div className="flex-1 overflow-y-auto p-5 space-y-6">
                 
-                {/* 1. MESSAGE TEXT */}
+                {/* Message Input */}
                 <div className="space-y-2">
-                    <label className="text-xs font-bold text-gray-500 uppercase flex justify-between">
-                        {isLinkType ? 'Link Description' : 'Message Body'}
-                        <span className="text-gray-300 font-normal">{localData.message?.length || 0} chars</span>
-                    </label>
+                    <label className="text-xs font-bold text-gray-500 uppercase">Message Text</label>
                     <textarea 
                         className="w-full h-32 p-3 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-shadow shadow-sm"
-                        placeholder={isLinkType ? "Click the link below to..." : "Type the message sent to the user..."}
-                        value={localData.message}
+                        placeholder="Type what the bot should say..."
+                        value={localData.message || ''}
                         onChange={(e) => update('message', e.target.value)}
                     />
-                    <p className="text-[10px] text-gray-400">Supports emojis and basic formatting.</p>
                 </div>
 
-                {/* 2. LINK CONFIGURATION (NEW) */}
-                {isLinkType && (
-                    <div className="space-y-2 p-4 bg-sky-50 rounded-xl border border-sky-100">
-                        <label className="text-xs font-bold text-sky-800 uppercase flex items-center gap-2">
-                            <Link size={12} /> Destination URL
-                        </label>
-                        <input 
-                            type="url"
-                            className="w-full p-2 text-xs border border-sky-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-500"
-                            placeholder="https://example.com/calendar"
-                            value={localData.linkUrl || ''}
-                            onChange={(e) => update('linkUrl', e.target.value)}
-                        />
-                        <p className="text-[10px] text-sky-600">This URL will be sent with a preview.</p>
-                    </div>
-                )}
-
-                {/* 3. MEDIA CONFIGURATION */}
-                {isMediaType && (
-                    <div className="space-y-3 p-4 bg-amber-50 rounded-xl border border-amber-100">
-                        <label className="text-xs font-bold text-amber-800 uppercase flex items-center gap-2">
-                            <ImageIcon size={12} /> {localData.label} Source
-                        </label>
-                        
-                        {localData.mediaUrl ? (
-                             <div className="relative group rounded-lg overflow-hidden border border-amber-200 bg-white aspect-video">
-                                {localData.label === 'Video' ? <video src={localData.mediaUrl} className="w-full h-full object-cover" /> : <img src={localData.mediaUrl} className="w-full h-full object-cover" alt="Selected" />}
-                                <button 
-                                    onClick={() => update('mediaUrl', '')}
-                                    className="absolute top-2 right-2 bg-red-600 text-white p-1.5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
-                                >
-                                    <Trash2 size={12} />
-                                </button>
-                             </div>
-                        ) : (
-                            <div className="text-center p-4 border-2 border-dashed border-amber-200 rounded-lg bg-white/50">
-                                <p className="text-xs text-amber-600 mb-2">No asset selected</p>
-                            </div>
-                        )}
-
-                        <div className="flex gap-2">
-                            <button 
-                                onClick={() => setShowMediaPicker(true)}
-                                className="flex-1 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-2 shadow-sm"
-                            >
-                                <Cloud size={14} /> Library
-                            </button>
-                        </div>
-                        
-                        <div className="relative">
-                            <input 
-                                type="text" 
-                                className="w-full pl-7 pr-3 py-2 text-xs border border-amber-200 rounded-lg focus:outline-none focus:border-amber-500"
-                                placeholder="Or paste URL..."
-                                value={localData.mediaUrl || ''}
-                                onChange={(e) => update('mediaUrl', e.target.value)}
-                            />
-                            <div className="absolute left-2.5 top-2.5 text-amber-400"><Search size={12} /></div>
-                        </div>
-                    </div>
-                )}
-
-                {/* 4. OPTIONS / BUTTONS */}
+                {/* Options Manager */}
                 {isOptionType && (
                     <div className="space-y-3">
                         <label className="text-xs font-bold text-gray-500 uppercase flex justify-between items-center">
                             <span>Answer Options</span>
                             <span className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded text-[10px]">{localData.options?.length || 0} / 10</span>
                         </label>
-                        
                         <div className="space-y-2">
                             {(localData.options || []).map((opt: string, idx: number) => (
-                                <div key={idx} className="flex gap-2 group animate-in slide-in-from-left-2 fade-in duration-200">
-                                    <div className="flex-1 flex items-center bg-white border border-gray-200 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-purple-100 focus-within:border-purple-300 transition-all">
+                                <div key={idx} className="flex gap-2 group">
+                                    <div className="flex-1 flex items-center bg-white border border-gray-200 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-violet-100 focus-within:border-violet-300">
                                         <span className="w-8 h-full bg-gray-50 flex items-center justify-center text-[10px] font-mono text-gray-400 border-r border-gray-100">{idx + 1}</span>
                                         <input 
                                             value={opt}
@@ -442,7 +254,7 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                                                 update('options', newOpts);
                                             }}
                                             className="flex-1 px-3 py-2 text-xs outline-none text-gray-700 font-medium"
-                                            placeholder={idx === 0 ? "e.g. Yes" : idx === 1 ? "e.g. No" : "Option Label"}
+                                            placeholder="Option Label"
                                         />
                                     </div>
                                     <button 
@@ -457,7 +269,6 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                                 </div>
                             ))}
                         </div>
-
                         <button 
                             onClick={() => update('options', [...(localData.options || []), `Option ${(localData.options?.length || 0) + 1}`])}
                             className="w-full py-2 border border-dashed border-gray-300 rounded-lg text-xs font-bold text-gray-500 hover:text-violet-600 hover:border-violet-300 hover:bg-violet-50 transition-all flex items-center justify-center gap-2"
@@ -467,82 +278,49 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                     </div>
                 )}
 
-                {/* 5. VARIABLE STORAGE */}
+                {/* Variable Saving */}
                 {isInputType && (
-                    <div className="p-4 bg-purple-50 rounded-xl border border-purple-100 space-y-2">
-                        {/* HELPER TEXT FOR COLLECT TEXT */}
-                        <div className="bg-white/60 p-2 rounded-lg border border-purple-100 mb-2 flex gap-2">
-                            <HelpCircle size={14} className="text-purple-500 shrink-0 mt-0.5" />
-                            <p className="text-[10px] text-purple-700 leading-snug">
-                                <strong>Waits for Input:</strong> Use this node to ask a question. The bot will pause and wait for the user to type a text reply.
-                            </p>
-                        </div>
-
+                    <div className="space-y-2 pt-4 border-t border-gray-100">
                         <label className="text-xs font-bold text-purple-800 uppercase flex items-center gap-2">
-                            <Hash size={12} /> Save Response To
+                            <Hash size={12} /> Save User Reply To
                         </label>
                         <select 
                             value={localData.saveToField || ''}
                             onChange={(e) => update('saveToField', e.target.value)}
-                            className="w-full bg-white border border-purple-200 text-purple-900 text-xs font-medium rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-purple-500 outline-none cursor-pointer"
+                            className="w-full bg-white border border-gray-200 text-gray-700 text-xs rounded-lg px-3 py-2 focus:ring-2 focus:ring-purple-500 outline-none"
                         >
-                            <option value="">-- Don't Save --</option>
+                            <option value="">-- Do Not Save --</option>
                             <option value="name">user_name</option>
                             <option value="vehicleRegistration">vehicle_number</option>
                             <option value="availability">availability_status</option>
                             <option value="document">document_url</option>
                             <option value="email">email_address</option>
                         </select>
-                        <p className="text-[10px] text-purple-600/80">Captured value will update the driver profile.</p>
                     </div>
                 )}
-
-                {/* 6. TEMPLATE OVERRIDE (MODIFIED to Select Only) */}
-                <div className="pt-4 border-t border-gray-100">
-                    <div className="flex items-center justify-between mb-2">
-                         <label className="text-xs font-bold text-gray-500 uppercase flex items-center gap-1">
-                             <FileCode size={12} /> Meta Template ID
-                         </label>
+                
+                {/* Media URL */}
+                {isMediaType && (
+                    <div className="space-y-2 pt-4 border-t border-gray-100">
+                        <label className="text-xs font-bold text-amber-800 uppercase">Media URL</label>
+                        <input 
+                            type="text"
+                            value={localData.mediaUrl || ''}
+                            onChange={(e) => update('mediaUrl', e.target.value)}
+                            className="w-full bg-white border border-gray-200 text-gray-700 text-xs rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-500 outline-none"
+                            placeholder="https://..."
+                        />
                     </div>
-                    <select 
-                         value={localData.templateName || ''}
-                         onChange={(e) => update('templateName', e.target.value)}
-                         className="w-full bg-gray-50 border border-gray-200 text-gray-600 text-xs font-mono rounded-lg px-3 py-2 focus:ring-2 focus:ring-gray-300 outline-none"
-                    >
-                        <option value="">-- Select System Template --</option>
-                        {SYSTEM_TEMPLATES.map(t => (
-                            <option key={t} value={t}>{t}</option>
-                        ))}
-                    </select>
-                    <p className="text-[10px] text-gray-400 mt-1">
-                        Use only pre-approved Meta System Templates.
-                    </p>
-                </div>
-
+                )}
             </div>
-            
-            <div className="p-4 border-t border-gray-200 bg-gray-50 text-center text-[10px] text-gray-400">
-                Changes autosave to canvas
-            </div>
-
-            {/* Media Picker Modal */}
-            {showMediaPicker && (
-                <MediaPicker 
-                    type={localData.label === 'Video' ? 'video' : 'image'} 
-                    onClose={() => setShowMediaPicker(false)} 
-                    onSelect={(url) => update('mediaUrl', url)} 
-                />
-            )}
         </div>
     );
 };
 
-const nodeTypes = { custom: NodePreviewCard };
-
+// --- DRAGGABLE SIDEBAR ---
 const DraggableSidebarItem = ({ type, inputType, label, icon }: any) => {
     const onDragStart = (event: React.DragEvent) => {
       event.dataTransfer.setData('application/reactflow/type', type);
-      // Ensure inputType is defined or defaults to 'text'
       event.dataTransfer.setData('application/reactflow/inputType', inputType || 'text');
       event.dataTransfer.setData('application/reactflow/label', label);
       event.dataTransfer.effectAllowed = 'move';
@@ -563,7 +341,7 @@ const DraggableSidebarItem = ({ type, inputType, label, icon }: any) => {
     );
 };
 
-// --- MAIN WRAPPER ---
+// --- MAIN COMPONENT ---
 export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
     return (
         <ReactFlowProvider>
@@ -581,19 +359,16 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
     const [isSaving, setIsSaving] = useState(false);
     
-    // Initial Load & Sanitization
+    // Load
     useEffect(() => {
         const load = async () => {
             const settings = isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
             if (settings.flowData && settings.flowData.nodes.length > 0) {
-                // SANITIZATION: Remove any legacy 'icon' properties from JSON to prevent React Crash
                 const cleanNodes = settings.flowData.nodes.map((n: any) => {
                     const { icon, ...cleanData } = n.data || {};
-                    // Ensure inputType isn't the string "undefined"
                     if (cleanData.inputType === "undefined") cleanData.inputType = "text";
                     return { ...n, data: cleanData };
                 });
-                
                 setNodes(cleanNodes);
                 setEdges(settings.flowData.edges);
             }
@@ -601,7 +376,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         load();
     }, [isLiveMode, setNodes, setEdges]);
 
-    // Drag & Drop
+    // Drag Drop
     const onDragOver = useCallback((event: React.DragEvent) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }, []);
     const onDrop = useCallback((event: React.DragEvent) => {
         event.preventDefault();
@@ -609,13 +384,9 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         let inputType = event.dataTransfer.getData('application/reactflow/inputType');
         const label = event.dataTransfer.getData('application/reactflow/label');
         if (!type) return;
-
-        // Fix potential string "undefined"
         if (!inputType || inputType === "undefined") inputType = "text";
 
-        const position = { x: event.clientX - 300, y: event.clientY }; // Adjust for sidebar offset approximation
-
-        // NOTE: We do NOT store 'icon' in data anymore to prevent JSON serialization crashes
+        const position = { x: event.clientX - 300, y: event.clientY };
         const newNode: Node = {
             id: `node_${Date.now()}`,
             type: 'custom',
@@ -625,104 +396,81 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 message: '', 
                 inputType,
                 options: inputType === 'option' ? ['Yes', 'No'] : undefined,
-                mediaUrl: '',
-                linkUrl: ''
+                mediaUrl: ''
             },
         };
         addNode(newNode);
-        setSelectedNodeId(newNode.id); // Auto-select new node
+        setSelectedNodeId(newNode.id);
     }, [addNode]);
 
+    // --- COMPILER LOGIC (Fixed for Production) ---
     const handleSave = async () => {
         setIsSaving(true);
         const compiledSteps: BotStep[] = [];
         
-        // Find Entry Point from the edge connected to 'start' source
+        // 1. Identify Entry Point
         const startEdge = edges.find(e => e.source === 'start');
         let entryPointId = startEdge?.target;
         
-        // Compile logical steps for backend
+        // 2. Iterate Nodes to Build Steps
         nodes.forEach(node => {
-            const data = node.data as any; // Cast to any to bypass type issues with Record<string, unknown>
-
+            const data = node.data as any;
             if (data.type === 'start') return;
             
-            // ROUTING COMPILATION:
-            // Find ALL outgoing edges from this node
             const outgoingEdges = edges.filter(e => e.source === node.id);
-            
-            let nextStepId = 'END'; // Default fallback
+            let nextStepId: string | undefined = 'END'; 
             let routes: Record<string, string> = {};
 
-            // 1. Check for Main Output (Default Path)
+            // A. Check for DEFAULT connection (Main Handle)
+            // Note: Option nodes might NOT have this if strictly routed
             const mainEdge = outgoingEdges.find(e => e.sourceHandle === 'main' || !e.sourceHandle);
             if (mainEdge) nextStepId = mainEdge.target;
 
-            // 2. Check for Branching Outputs (Options)
+            // B. Check for SPECIFIC OPTION connections
             if (data.options && data.options.length > 0) {
-                // Map the Handle ID (e.g., 'option-0') to the Option Text (e.g., 'Yes')
-                data.options.forEach((opt: string, idx: number) => {
+                // IMPORTANT: We map based on the *current* options array index
+                data.options.forEach((optText: string, idx: number) => {
+                     // Look for edge connected to 'option-0', 'option-1', etc.
                      const handleId = `option-${idx}`;
                      const edge = outgoingEdges.find(e => e.sourceHandle === handleId);
-                     if (edge) {
-                         routes[opt] = edge.target;
+                     
+                     if (edge && optText && optText.trim()) {
+                         // The key is the text user sees (e.g. "Yes"). The value is the Next Node ID.
+                         routes[optText.trim()] = edge.target;
                      }
                 });
             }
             
-            // Clean data before saving (double check)
+            // C. Sanitize Data
             const { icon, ...cleanData } = data;
-
-            // Sanitize template name
-            let templateName = cleanData.templateName;
-            if (templateName && (templateName.includes(':') || templateName.includes(' '))) {
-                templateName = undefined;
-            }
-
-            // LINK LOGIC COMPILATION: Append URL to message so backend sends as one text block
-            let finalMessage = cleanData.message || "";
-            if (cleanData.label === 'Link' && cleanData.linkUrl) {
-                // Ensure a space separation
-                finalMessage = finalMessage.trim() ? `${finalMessage} ${cleanData.linkUrl}` : cleanData.linkUrl;
-            }
-
-            // EXPLICIT MEDIA TYPE INFERENCE FOR ROBUST BACKEND HANDLING
-            let inferredMediaType: 'image' | 'video' | 'document' | undefined = undefined;
-            if (cleanData.label === 'Video') inferredMediaType = 'video';
-            else if (cleanData.label === 'Image') inferredMediaType = 'image';
-            else if (cleanData.label === 'File') inferredMediaType = 'document';
-
+            
+            // D. Construct Step
             compiledSteps.push({
                 id: node.id,
                 title: cleanData.label,
-                message: finalMessage,
+                message: cleanData.message || "",
                 inputType: cleanData.inputType,
                 options: cleanData.options,
                 saveToField: cleanData.saveToField,
                 nextStepId, 
-                routes: Object.keys(routes).length > 0 ? routes : undefined, // Include routes map
+                routes: Object.keys(routes).length > 0 ? routes : undefined, 
                 mediaUrl: cleanData.mediaUrl,
-                templateName: templateName,
-                mediaType: inferredMediaType // NEW: Store explicit type
+                templateName: cleanData.templateName,
+                mediaType: ['Video', 'Image', 'File'].includes(cleanData.label) ? cleanData.label.toLowerCase() : undefined
             });
         });
 
-        // Fallback: If no explicit connection from Start, assume the first added node is the entry (backward compatibility)
+        // 3. Fallback Entry Point
         if (!entryPointId && compiledSteps.length > 0) {
             entryPointId = compiledSteps[0].id;
         }
 
-        // Clean nodes for storage (remove any runtime props)
-        const storageNodes = nodes.map(n => {
-            const { icon, ...cleanData } = n.data as any;
-            return { ...n, data: cleanData };
-        });
-
+        // 4. Save
         const newSettings: BotSettings = {
             ...(isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings()),
             steps: compiledSteps,
             entryPointId,
-            flowData: { nodes: storageNodes, edges }
+            flowData: { nodes: nodes.map(n => ({...n, data: { ...n.data, icon: undefined }})), edges }
         };
 
         try {
@@ -736,13 +484,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
     return (
         <div className="flex h-full bg-slate-50 font-sans relative overflow-hidden">
-            {/* LEFT TOOLBAR */}
             <div className="w-64 bg-white border-r border-gray-200 flex flex-col z-10 shadow-lg">
                 <div className="p-5 border-b border-gray-100">
                     <h2 className="font-bold text-gray-900 flex items-center gap-2 text-lg">
                         <Zap className="text-yellow-500 fill-yellow-500" size={20} /> Bot Studio
                     </h2>
-                    <p className="text-xs text-gray-500 mt-1">Drag blocks to build flow</p>
+                    <p className="text-xs text-gray-500 mt-1">Production Flow Builder</p>
                 </div>
                 <div className="flex-1 overflow-y-auto p-4 space-y-6">
                     <div>
@@ -764,7 +511,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 </div>
             </div>
 
-            {/* CANVAS AREA */}
             <div className="flex-1 relative h-full flex flex-col">
                 <div className="absolute top-4 right-4 z-20 flex gap-2">
                     <button onClick={handleSave} disabled={isSaving} className="bg-black text-white px-5 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-gray-800 transition-all flex items-center gap-2">
@@ -794,7 +540,6 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 </div>
             </div>
 
-            {/* RIGHT PROPERTY INSPECTOR */}
             {selectedNode && (
                 <PropertyInspector 
                     selectedNode={selectedNode} 
