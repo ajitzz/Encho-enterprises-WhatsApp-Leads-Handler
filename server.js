@@ -1,7 +1,7 @@
 
 /**
  * UBER FLEET RECRUITER - SINGLE TENANT BACKEND
- * Restored to original functional state.
+ * Fixed: Webhook parsing, Media Sending, DB Revert
  */
 
 const express = require('express');
@@ -11,7 +11,6 @@ const { Pool } = require('pg');
 const { GoogleGenAI } = require('@google/genai');
 const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
-const multer = require('multer');
 require('dotenv').config();
 
 const app = express();
@@ -74,8 +73,20 @@ const queryWithRetry = async (text, params, retries = 3) => {
     }
 };
 
-// --- SINGLE TENANT SCHEMA ---
-const SCHEMA_SQL = `
+// --- SINGLE TENANT SCHEMA RESTORATION ---
+const REVERT_AND_INIT_SQL = `
+    BEGIN;
+    
+    -- 1. CLEANUP ENTERPRISE FEATURES (Revert to Single Tenant)
+    DROP TABLE IF EXISTS companies CASCADE;
+    ALTER TABLE drivers DROP COLUMN IF EXISTS company_id;
+    ALTER TABLE drivers DROP CONSTRAINT IF EXISTS drivers_company_id_phone_number_key;
+    ALTER TABLE drivers DROP CONSTRAINT IF EXISTS drivers_phone_number_key;
+    ALTER TABLE drivers ADD CONSTRAINT drivers_phone_number_key UNIQUE (phone_number);
+    ALTER TABLE media_folders DROP COLUMN IF EXISTS company_id;
+    ALTER TABLE media_files DROP COLUMN IF EXISTS company_id;
+
+    -- 2. ENSURE TABLES EXIST
     CREATE TABLE IF NOT EXISTS drivers (
         id VARCHAR(255) PRIMARY KEY,
         phone_number VARCHAR(50),
@@ -129,12 +140,13 @@ const SCHEMA_SQL = `
         uploaded_at BIGINT,
         folder_path VARCHAR(255) DEFAULT '/'
     );
+
+    COMMIT;
 `;
 
 const ensureDatabaseInitialized = async (client) => {
     try {
-        await client.query('BEGIN');
-        await client.query(SCHEMA_SQL);
+        await client.query(REVERT_AND_INIT_SQL);
         // Default Bot Settings
         const defaultSettings = {
             isEnabled: true,
@@ -143,7 +155,7 @@ const ensureDatabaseInitialized = async (client) => {
             steps: []
         };
         await client.query(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT (id) DO NOTHING`, [JSON.stringify(defaultSettings)]);
-        await client.query('COMMIT');
+        console.log("Database initialized and reverted to Single-Tenant.");
     } catch (e) {
         await client.query('ROLLBACK');
         console.error("Schema Init Failed:", e);
@@ -153,26 +165,42 @@ const ensureDatabaseInitialized = async (client) => {
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // --- WHATSAPP API WRAPPER ---
-const sendWhatsAppMessage = async (to, body, options = null) => {
+const sendWhatsAppMessage = async (to, body, options = null, mediaUrl = null, mediaType = 'image') => {
     if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
         console.log("Mock Send:", to, body);
         return true;
     }
 
     try {
-        const payload = {
+        let payload = {
             messaging_product: "whatsapp",
             to: to,
             type: "text",
-            text: { body: body }
+            text: { body: body || " " } // Fallback for empty body
         };
 
+        // Handle Media
+        if (mediaUrl) {
+            payload.type = mediaType; // 'image' or 'video'
+            payload[mediaType] = { link: mediaUrl };
+            if (body) payload[mediaType].caption = body; // Add caption if text exists
+            delete payload.text; // Remove text object
+        }
+
+        // Handle Buttons (Interactive)
+        // Note: Cannot mix Media and Buttons easily in simple API messages without Templates.
+        // Priority: Buttons > Media > Text
         if (options && options.length > 0) {
             payload.type = "interactive";
             delete payload.text;
+            delete payload[mediaType]; // Reset if it was set
+            
+            // If we have media AND buttons, WhatsApp requires a "header" type which is complex.
+            // For simplicity, we send TEXT + BUTTONS. If media is needed, it should be a separate step.
+            
             payload.interactive = {
                 type: "button",
-                body: { text: body },
+                body: { text: body || "Please select an option:" },
                 action: {
                     buttons: options.slice(0, 3).map(opt => ({
                         type: "reply",
@@ -288,10 +316,30 @@ const processIncomingMessage = async (from, text, imageId = null) => {
             // B. Determine Next Step
             let nextStepId = currentStep.nextStepId;
             
-            if (currentStep.routes) {
+            // Branching Logic
+            if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
                 const cleanInput = text.trim().toLowerCase();
-                const matchedKey = Object.keys(currentStep.routes).find(k => k.toLowerCase().includes(cleanInput) || cleanInput.includes(k.toLowerCase()));
-                if (matchedKey) nextStepId = currentStep.routes[matchedKey];
+                // Loose fuzzy matching: check both ways (input in key OR key in input)
+                const matchedKey = Object.keys(currentStep.routes).find(k => {
+                    const cleanKey = k.toLowerCase();
+                    return cleanKey === cleanInput || cleanKey.includes(cleanInput) || cleanInput.includes(cleanKey);
+                });
+                
+                if (matchedKey) {
+                    nextStepId = currentStep.routes[matchedKey];
+                } else {
+                    // BLOCKING FIX: If user input matches NO option, do not advance. 
+                    // Re-send the options so the flow doesn't hang.
+                    const options = currentStep.options || [];
+                    const errorMsg = "Please select one of the valid options:";
+                    
+                    await sendWhatsAppMessage(from, errorMsg, options);
+                    await queryWithRetry(
+                        `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, options) VALUES ($1, $2, 'system', $3, $4, 'text', $5)`,
+                        [Date.now().toString() + '_retry', driver.id, errorMsg, Date.now(), options]
+                    );
+                    return; // EXIT and wait for new input
+                }
             }
 
             // C. Execute Next Step
@@ -311,12 +359,26 @@ const processIncomingMessage = async (from, text, imageId = null) => {
                     
                     const msgText = nextStep.message;
                     const options = nextStep.options || [];
-                    
-                    await sendWhatsAppMessage(from, msgText, options);
+                    const mediaUrl = nextStep.mediaUrl;
+                    const mediaType = nextStep.mediaType || 'image'; // 'image' or 'video'
+
+                    // Send the message (Text/Buttons OR Media)
+                    await sendWhatsAppMessage(from, msgText, options, mediaUrl, mediaType);
+
                     await queryWithRetry(
-                        `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, options) VALUES ($1, $2, 'system', $3, $4, 'text', $5)`,
-                        [Date.now().toString() + '_bot', driver.id, msgText, Date.now(), options]
+                        `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, options, image_url) VALUES ($1, $2, 'system', $3, $4, $5, $6, $7)`,
+                        [
+                            Date.now().toString() + '_bot', 
+                            driver.id, 
+                            msgText || (mediaUrl ? `[${mediaType}]` : " "), 
+                            Date.now(), 
+                            mediaUrl ? mediaType : 'text', 
+                            options,
+                            mediaUrl
+                        ]
                     );
+                } else {
+                    console.error("Next Step ID found but Step Object missing:", nextStepId);
                 }
             }
         }
@@ -436,7 +498,24 @@ app.post('/webhook', async (req, res) => {
             if (body.entry && body.entry[0].changes && body.entry[0].changes[0].value.messages && body.entry[0].changes[0].value.messages[0]) {
                 const msg = body.entry[0].changes[0].value.messages[0];
                 const from = msg.from;
-                const text = msg.text ? msg.text.body : (msg.type === 'interactive' ? msg.interactive.button_reply.id : '[Media]');
+                
+                // ROBUST EXTRACTION: Handle Text, Button Reply, List Reply, or Media fallback
+                let text = '';
+                if (msg.type === 'text') {
+                    text = msg.text.body;
+                } else if (msg.type === 'interactive') {
+                    if (msg.interactive.type === 'button_reply') {
+                        text = msg.interactive.button_reply.title; // USE TITLE for matching
+                    } else if (msg.interactive.type === 'list_reply') {
+                        text = msg.interactive.list_reply.title;
+                    } else {
+                        text = '[Interactive Message]';
+                    }
+                } else if (msg.type === 'image' || msg.type === 'video' || msg.type === 'document') {
+                    text = `[${msg.type}]`; // Treat media as a generic input to advance flow if waiting
+                } else {
+                    text = '[Unknown Type]';
+                }
                 
                 console.log(`Received from ${from}: ${text}`);
                 await processIncomingMessage(from, text);
