@@ -27,7 +27,7 @@ import {
   MessageSquare, Image as ImageIcon, Video, List, Type, Hash, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, ShieldAlert, 
   GripVertical, MousePointerClick, FileCode, Brush, Eye, 
-  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle
+  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle, Split
 } from 'lucide-react';
 
 // --- STYLES ---
@@ -53,7 +53,7 @@ const getIconForLabel = (label: string) => {
         case 'Video': return <Video size={14} />;
         case 'Question':
         case 'Quick Reply': 
-        case 'List': return <List size={14} />;
+        case 'List': return <Split size={14} />;
         case 'Collect Text': return <Type size={14} />;
         case 'Link': return <Link size={14} />;
         default: return <MessageSquare size={14} />;
@@ -195,7 +195,7 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
   const icon = getIconForLabel(data.label);
 
   return (
-    <div className={`w-[280px] bg-white rounded-xl shadow-lg border-2 transition-all group ${borderColor}`}>
+    <div className={`w-[320px] bg-white rounded-xl shadow-lg border-2 transition-all group ${borderColor}`}>
         <Handle type="target" position={Position.Left} style={HANDLE_STYLE} className="-left-3" />
         
         {/* Header */}
@@ -233,13 +233,35 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
                 </div>
             )}
 
-            {/* Interactive Options */}
+            {/* Interactive Options - CUSTOM ROUTING UI */}
             {isOptionType && (
-                <div className="flex flex-col gap-1.5">
+                <div className="mt-4 space-y-2">
+                    <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Branches</div>
                     {data.options?.map((opt: string, i: number) => (
-                        <div key={i} className="flex items-center justify-between bg-gray-50 border border-gray-200 px-2 py-1.5 rounded text-[10px] font-medium text-gray-600">
-                            <span>{opt || '(Empty)'}</span>
-                            <div className="w-1.5 h-1.5 rounded-full bg-purple-400"></div>
+                        <div key={i} className="relative flex items-center justify-between bg-white border border-gray-200 px-3 py-2 rounded-lg shadow-sm transition-all hover:border-purple-300 group-hover:shadow-md">
+                            <span className="text-xs font-medium text-gray-700 truncate max-w-[200px]">{opt || '(Empty)'}</span>
+                            
+                            {/* Visual connector line */}
+                            <div className="h-[1px] bg-gray-200 flex-1 mx-2"></div>
+                            
+                            {/* The Handle is now aligned with the option row */}
+                            <div className="relative w-4 h-4 flex items-center justify-center">
+                                <div className="w-2 h-2 rounded-full bg-purple-500"></div>
+                                {/* Use index as handle ID to map in compiler */}
+                                <Handle 
+                                    type="source" 
+                                    position={Position.Right} 
+                                    id={`option-${i}`} 
+                                    style={{
+                                        ...ACTIVE_HANDLE_STYLE, 
+                                        right: -24, 
+                                        top: '50%',
+                                        transform: 'translateY(-50%)',
+                                        background: '#a855f7', // Purple
+                                        border: '2px solid white'
+                                    }} 
+                                />
+                            </div>
                         </div>
                     ))}
                 </div>
@@ -254,14 +276,8 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
             )}
         </div>
 
-        {/* Output Handles */}
-        {isOptionType ? (
-            <div className="absolute -right-3 top-[80px] bottom-4 flex flex-col justify-end gap-[18px]">
-               {data.options?.map((_: any, i: number) => (
-                   <Handle key={i} type="source" position={Position.Right} id={`opt_${i}`} style={{...ACTIVE_HANDLE_STYLE, position: 'relative', right: 0, transform: 'none'}} />
-               ))}
-            </div>
-        ) : (
+        {/* Output Handles - Standard (Only if NOT option type) */}
+        {!isOptionType && (
             <Handle type="source" position={Position.Right} id="main" style={ACTIVE_HANDLE_STYLE} className="-right-3" />
         )}
     </div>
@@ -613,9 +629,29 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             const data = node.data as any; // Cast to any to bypass type issues with Record<string, unknown>
 
             if (data.type === 'start') return;
+            
+            // ROUTING COMPILATION:
+            // Find ALL outgoing edges from this node
             const outgoingEdges = edges.filter(e => e.source === node.id);
-            let nextStepId = 'END';
-            if (outgoingEdges.length > 0) nextStepId = outgoingEdges[0].target; // Default next
+            
+            let nextStepId = 'END'; // Default fallback
+            let routes: Record<string, string> = {};
+
+            // 1. Check for Main Output (Default Path)
+            const mainEdge = outgoingEdges.find(e => e.sourceHandle === 'main' || !e.sourceHandle);
+            if (mainEdge) nextStepId = mainEdge.target;
+
+            // 2. Check for Branching Outputs (Options)
+            if (data.options && data.options.length > 0) {
+                // Map the Handle ID (e.g., 'option-0') to the Option Text (e.g., 'Yes')
+                data.options.forEach((opt: string, idx: number) => {
+                     const handleId = `option-${idx}`;
+                     const edge = outgoingEdges.find(e => e.sourceHandle === handleId);
+                     if (edge) {
+                         routes[opt] = edge.target;
+                     }
+                });
+            }
             
             // Clean data before saving (double check)
             const { icon, ...cleanData } = data;
@@ -647,6 +683,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 options: cleanData.options,
                 saveToField: cleanData.saveToField,
                 nextStepId, 
+                routes: Object.keys(routes).length > 0 ? routes : undefined, // Include routes map
                 mediaUrl: cleanData.mediaUrl,
                 templateName: templateName,
                 mediaType: inferredMediaType // NEW: Store explicit type

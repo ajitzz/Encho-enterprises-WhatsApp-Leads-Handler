@@ -487,8 +487,19 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                          if(currentStep.saveToField === 'name') updatesToSave.name = msgBody;
                      }
 
-                     // 2. Advance to Next Step
-                     let nextId = currentStep.nextStepId;
+                     // 2. DETERMINE NEXT STEP (Branching Logic)
+                     let nextId = currentStep.nextStepId; // Default Next ID
+
+                     // BRANCHING CHECK: Does this step have specific routes for options?
+                     if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
+                        // Check if user message matches a route key exactly
+                        // NOTE: WhatsApp button replies send the exact button text back
+                        const matchedRoute = currentStep.routes[msgBody.trim()];
+                        if (matchedRoute) {
+                            nextId = matchedRoute;
+                        }
+                     }
+
                      if (nextId === 'AI_HANDOFF' || nextId === 'END' || !nextId) {
                          updatesToSave.isBotActive = false; // CamelCase!
                          updatesToSave.currentBotStepId = null; // CamelCase!

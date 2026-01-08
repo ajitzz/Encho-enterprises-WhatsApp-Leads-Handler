@@ -83,6 +83,10 @@ export interface BotStep {
   saveToField?: 'name' | 'vehicleRegistration' | 'availability' | 'document' | 'email'; // Where to save the data
   nextStepId?: string | 'END' | 'AI_HANDOFF';
   
+  // Branching Logic: Maps an Option Text to a Step ID
+  // Example: { "Yes": "step_5", "No": "step_9" }
+  routes?: Record<string, string>; 
+  
   // Template Integration
   templateName?: string; // The ID/Name of the template in Meta
   templateLanguage?: string; // e.g. en_US, ml_IN
