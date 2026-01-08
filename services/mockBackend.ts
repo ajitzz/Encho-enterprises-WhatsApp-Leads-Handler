@@ -275,10 +275,15 @@ class MockBackendService {
 
               let nextId = currentStep.nextStepId;
 
-              // --- MOCK BRANCHING LOGIC ---
+              // --- MOCK BRANCHING LOGIC (ROBUST FUZZY MATCHING) ---
               if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
                   const cleanInput = text.trim().toLowerCase();
-                  const routeKey = Object.keys(currentStep.routes).find(k => k.toLowerCase() === cleanInput);
+                  
+                  // Use same logic as server.js: Exact match OR StartsWith (for truncated buttons)
+                  const routeKey = Object.keys(currentStep.routes).find(k => {
+                      const cleanKey = k.toLowerCase();
+                      return cleanKey === cleanInput || cleanKey.startsWith(cleanInput) || cleanInput.startsWith(cleanKey);
+                  });
                   
                   if (routeKey) {
                       nextId = currentStep.routes[routeKey];

@@ -492,15 +492,26 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
                      // BRANCHING CHECK: Does this step have specific routes for options?
                      if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
-                        // Check if user message matches a route key exactly
-                        // NOTE: WhatsApp button replies send the exact button text back.
-                        // We also support case-insensitive typing.
+                        // Check if user message matches a route key exactly OR fuzzy match
                         const cleanInput = msgBody.trim().toLowerCase();
-                        const routeKey = Object.keys(currentStep.routes).find(k => k.toLowerCase() === cleanInput);
+                        
+                        console.log(`[ROUTER] Checking input "${cleanInput}" against keys:`, Object.keys(currentStep.routes));
+
+                        // FUZZY MATCHER for truncated buttons & typos
+                        const routeKey = Object.keys(currentStep.routes).find(k => {
+                            const cleanKey = k.toLowerCase();
+                            // Expanded fuzzy matching: 
+                            // 1. Exact match
+                            // 2. Starts with (Truncated button)
+                            // 3. Includes (User typed a sentence containing the option)
+                            return cleanKey === cleanInput || cleanKey.startsWith(cleanInput) || cleanInput.startsWith(cleanKey) || cleanInput.includes(cleanKey);
+                        });
                         
                         if (routeKey) {
+                            console.log(`[ROUTER] Match found: "${routeKey}" -> ${currentStep.routes[routeKey]}`);
                             nextId = currentStep.routes[routeKey];
                         } else {
+                            console.log(`[ROUTER] No match found. Sending invalid option fallback.`);
                             // INVALID OPTION SELECTED
                             // If user types something that isn't an option, we should re-ask the question 
                             // instead of proceeding to a broken state or ending the flow.
