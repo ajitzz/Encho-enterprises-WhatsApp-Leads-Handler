@@ -52,7 +52,7 @@ export const analyzeMessage = async (text: string, imageUrl?: string, systemInst
       model,
       contents: prompt,
       config: {
-        systemInstruction: persona,
+        systemInstruction: persona, // Updated to use systemInstruction config
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,

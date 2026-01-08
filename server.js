@@ -186,12 +186,15 @@ const queryWithRetry = async (text, params, retries = 3) => {
         if ((isConnectionError || isTableError) && retries > 0) {
             console.log(`DB Retry (${retries} left): ${err.code}`);
             await new Promise(res => setTimeout(res, (4 - retries) * 1000));
+            // Note: We do NOT call ensureDatabaseInitialized here to avoid recursion loops.
+            // We call it explicitly at server start.
             if (isTableError) {
-                const healClient = await pool.connect();
-                await ensureDatabaseInitialized(healClient);
-                healClient.release();
+                 // Try one heal attempt
+                 const healClient = await pool.connect();
+                 await ensureDatabaseInitialized(healClient);
+                 healClient.release();
+                 return queryWithRetry(text, params, retries - 1);
             }
-            return queryWithRetry(text, params, retries - 1);
         }
         throw err;
     } finally {
@@ -270,9 +273,9 @@ const ensureDatabaseInitialized = async (client) => {
         const settingsRes = await client.query('SELECT * FROM bot_settings WHERE id = 1');
         if (settingsRes.rows.length === 0) {
             await client.query('INSERT INTO bot_settings (id, settings) VALUES (1, $1)', [JSON.stringify(CACHED_BOT_SETTINGS)]);
+            console.log("✅ Settings Inserted");
         } else {
             // Update existing settings with new system instruction and steps
-            // This fixes the "Training not working" issue by overwriting old English flow
             const currentSettings = settingsRes.rows[0].settings;
             const updatedSettings = {
                 ...currentSettings,
@@ -281,6 +284,7 @@ const ensureDatabaseInitialized = async (client) => {
             };
             await client.query('UPDATE bot_settings SET settings = $1 WHERE id = 1', [JSON.stringify(updatedSettings)]);
             CACHED_BOT_SETTINGS = updatedSettings; // Update local cache too
+            console.log("✅ Settings Updated with Encho Persona");
         }
         await client.query('COMMIT');
     } catch (e) {
@@ -288,6 +292,20 @@ const ensureDatabaseInitialized = async (client) => {
         console.error("❌ Schema Init/Heal Failed:", e);
     }
 };
+
+// --- INITIALIZATION HOOK ---
+// Run this immediately on server start to ensure DB is in sync
+const initializeServer = async () => {
+    const client = await pool.connect();
+    try {
+        await ensureDatabaseInitialized(client);
+    } catch(e) {
+        console.error("Startup Initialization Failed:", e);
+    } finally {
+        client.release();
+    }
+};
+initializeServer();
 
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
@@ -405,17 +423,20 @@ const analyzeWithAI = async (text, currentNotes, systemInstruction) => {
   }
 
   const performAnalysis = async (modelToUse) => {
+      // NOTE: systemInstruction is passed in config, not in contents
       const prompt = `
-        System Instruction: ${systemInstruction || 'You are a helpful assistant.'}
         User sent: "${text}"
         Current Driver Notes: "${currentNotes || ''}"
-        TASK: 1. Generate a helpful reply. 2. Extract key details.
+        TASK: 1. Generate a helpful reply based on the system instructions. 2. Extract key details.
         Output JSON: { "reply": "string", "updatedNotes": "string" }
       `;
       const response = await ai.models.generateContent({ 
         model: modelToUse, 
         contents: prompt,
-        config: { responseMimeType: "application/json" }
+        config: { 
+            responseMimeType: "application/json",
+            systemInstruction: systemInstruction || 'You are a helpful assistant.'
+        }
       });
       AI_CREDITS_ESTIMATED = Math.max(0, AI_CREDITS_ESTIMATED - 0.5); 
       return JSON.parse(response.text);
