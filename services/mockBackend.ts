@@ -273,7 +273,29 @@ class MockBackendService {
                   driver.notes = driver.notes ? `${driver.notes}\n${newNote}` : newNote;
               }
 
-              const nextId = currentStep.nextStepId;
+              let nextId = currentStep.nextStepId;
+
+              // --- MOCK BRANCHING LOGIC ---
+              if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
+                  const cleanInput = text.trim().toLowerCase();
+                  const routeKey = Object.keys(currentStep.routes).find(k => k.toLowerCase() === cleanInput);
+                  
+                  if (routeKey) {
+                      nextId = currentStep.routes[routeKey];
+                  } else {
+                      // INVALID OPTION => Re-ask the question without moving forward
+                      const botMsg: Message = {
+                          id: Date.now().toString() + '_bot',
+                          sender: 'system',
+                          text: "Please select one of the valid options below:",
+                          timestamp: Date.now() + 500,
+                          type: 'options',
+                          options: currentStep.options
+                      };
+                      this.addMessage(driver.id, botMsg);
+                      return { driver, reply: botMsg, actionNeeded: 'NONE' };
+                  }
+              }
 
               if (nextId === 'END' || nextId === 'AI_HANDOFF' || !nextId) {
                   driver.isBotActive = false;

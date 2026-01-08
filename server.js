@@ -493,10 +493,31 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                      // BRANCHING CHECK: Does this step have specific routes for options?
                      if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
                         // Check if user message matches a route key exactly
-                        // NOTE: WhatsApp button replies send the exact button text back
-                        const matchedRoute = currentStep.routes[msgBody.trim()];
-                        if (matchedRoute) {
-                            nextId = matchedRoute;
+                        // NOTE: WhatsApp button replies send the exact button text back.
+                        // We also support case-insensitive typing.
+                        const cleanInput = msgBody.trim().toLowerCase();
+                        const routeKey = Object.keys(currentStep.routes).find(k => k.toLowerCase() === cleanInput);
+                        
+                        if (routeKey) {
+                            nextId = currentStep.routes[routeKey];
+                        } else {
+                            // INVALID OPTION SELECTED
+                            // If user types something that isn't an option, we should re-ask the question 
+                            // instead of proceeding to a broken state or ending the flow.
+                            
+                            // Send error message + original options
+                            replyText = "Please select one of the valid options below:";
+                            replyOptions = currentStep.options; 
+                            
+                            // Do NOT update currentBotStepId (Stay on current step)
+                            // We return early to send this reply and exit.
+                            updatesToSave = {}; // Clear updates to avoid moving state
+                            
+                            const sent = await sendWhatsAppMessage(from, replyText, replyOptions);
+                            if (sent && !driver.id.startsWith('temp_')) {
+                                await logSystemMessage(driver.id, replyText, 'text');
+                            }
+                            return; 
                         }
                      }
 
@@ -854,12 +875,42 @@ app.post('/api/bot-settings', async (req, res) => {
 });
 
 app.get('/webhook', (req, res) => { res.send(req.query['hub.challenge']); });
+
 app.post('/webhook', async (req, res) => { 
-    if (req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
-        const msg = req.body.entry[0].changes[0].value.messages[0];
-        await processIncomingMessage(msg.from, 'Unknown', msg.text?.body || '[Media]');
+    try {
+        if (req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
+            const msg = req.body.entry[0].changes[0].value.messages[0];
+            
+            // Extract meaningful content from message (Text, Button, List)
+            let msgBody = '';
+            let msgType = 'text';
+
+            if (msg.type === 'text') {
+                msgBody = msg.text.body;
+            } else if (msg.type === 'interactive') {
+                const interactive = msg.interactive;
+                if (interactive.type === 'button_reply') {
+                    msgBody = interactive.button_reply.title; // Use the button label text
+                    msgType = 'button_reply';
+                } else if (interactive.type === 'list_reply') {
+                    msgBody = interactive.list_reply.title; // Use list option title
+                    msgType = 'list_reply';
+                }
+            } else if (msg.type === 'image') {
+                msgBody = '[Image]';
+                msgType = 'image';
+            } else {
+                msgBody = '[Media]';
+                msgType = 'unknown';
+            }
+
+            await processIncomingMessage(msg.from, 'Unknown', msgBody, msgType);
+        }
+        res.sendStatus(200);
+    } catch(e) {
+        console.error("Webhook Error:", e);
+        res.sendStatus(500);
     }
-    res.sendStatus(200); 
 });
 
 module.exports = app;

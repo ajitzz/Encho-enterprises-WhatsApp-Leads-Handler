@@ -27,12 +27,21 @@ import {
   MessageSquare, Image as ImageIcon, Video, List, Type, Hash, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, ShieldAlert, 
   GripVertical, MousePointerClick, FileCode, Brush, Eye, 
-  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle, Split
+  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle, Split, GitBranch, ArrowRight
 } from 'lucide-react';
 
 // --- STYLES ---
 const HANDLE_STYLE = { width: 8, height: 8, background: '#94a3b8', border: '2px solid white', zIndex: 50 };
 const ACTIVE_HANDLE_STYLE = { width: 10, height: 10, background: '#3b82f6', border: '2px solid white', zIndex: 50 };
+const OPTION_HANDLE_STYLE = { 
+    width: 14, 
+    height: 14, 
+    background: '#8b5cf6', // Violet
+    border: '3px solid white', 
+    zIndex: 50,
+    right: -8,
+    boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+};
 
 // --- CONSTANTS ---
 const SYSTEM_TEMPLATES = [
@@ -46,14 +55,13 @@ const SYSTEM_TEMPLATES = [
 ];
 
 // --- HELPER: GET ICON ---
-// Prevents storing React Elements in Node Data (Causes JSON Error #31)
 const getIconForLabel = (label: string) => {
     switch(label) {
         case 'Image': return <ImageIcon size={14} />;
         case 'Video': return <Video size={14} />;
         case 'Question':
         case 'Quick Reply': 
-        case 'List': return <Split size={14} />;
+        case 'List': return <GitBranch size={14} />;
         case 'Collect Text': return <Type size={14} />;
         case 'Link': return <Link size={14} />;
         default: return <MessageSquare size={14} />;
@@ -171,16 +179,16 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
   let iconColor = 'text-gray-500';
 
   if (isMediaType) { borderColor = 'border-amber-200'; accentColor = 'bg-amber-50'; iconColor = 'text-amber-600'; }
-  else if (isOptionType) { borderColor = 'border-purple-200'; accentColor = 'bg-purple-50'; iconColor = 'text-purple-600'; }
+  else if (isOptionType) { borderColor = 'border-violet-300'; accentColor = 'bg-violet-50'; iconColor = 'text-violet-600'; }
   else if (isLinkType) { borderColor = 'border-sky-200'; accentColor = 'bg-sky-50'; iconColor = 'text-sky-600'; }
   else if (data.label === 'Text Message') { borderColor = 'border-blue-200'; accentColor = 'bg-blue-50'; iconColor = 'text-blue-600'; }
 
-  if (selected) borderColor = 'border-blue-500 ring-2 ring-blue-100';
+  if (selected) borderColor = 'border-blue-500 ring-2 ring-blue-100 shadow-md';
   if (hasPlaceholder) borderColor = 'border-red-500 ring-2 ring-red-100';
 
   if (data.type === 'start') {
       return (
-        <div className={`w-[240px] shadow-sm rounded-xl bg-white border-2 transition-all ${selected ? 'border-green-500' : 'border-gray-100'}`}>
+        <div className={`w-[240px] shadow-md rounded-xl bg-white border-2 transition-all ${selected ? 'border-green-500 ring-4 ring-green-50' : 'border-gray-100'}`}>
             <div className="bg-green-50 px-4 py-3 rounded-t-lg border-b border-green-100 flex items-center gap-2">
                 <Flag size={16} className="text-green-600" />
                 <span className="text-xs font-bold text-green-800 uppercase">Entry Point</span>
@@ -195,20 +203,20 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
   const icon = getIconForLabel(data.label);
 
   return (
-    <div className={`w-[320px] bg-white rounded-xl shadow-lg border-2 transition-all group ${borderColor}`}>
+    <div className={`w-[340px] bg-white rounded-xl shadow-lg border-2 transition-all group ${borderColor}`}>
         <Handle type="target" position={Position.Left} style={HANDLE_STYLE} className="-left-3" />
         
         {/* Header */}
-        <div className={`px-4 py-2.5 border-b flex items-center justify-between rounded-t-lg ${accentColor} ${borderColor}`}>
+        <div className={`px-4 py-3 border-b flex items-center justify-between rounded-t-lg ${accentColor} ${borderColor}`}>
             <div className="flex items-center gap-2">
-                <div className={`p-1 rounded ${iconColor} bg-white/50`}>{icon}</div>
-                <span className={`text-xs font-bold uppercase ${iconColor}`}>{data.label}</span>
+                <div className={`p-1.5 rounded-md ${iconColor} bg-white shadow-sm border border-black/5`}>{icon}</div>
+                <span className={`text-xs font-bold uppercase tracking-wide ${iconColor}`}>{data.label}</span>
             </div>
-            {hasPlaceholder && <ShieldAlert size={14} className="text-red-500 animate-pulse" />}
+            {hasPlaceholder && <ShieldAlert size={16} className="text-red-500 animate-pulse" />}
         </div>
 
         {/* Body */}
-        <div className="p-3">
+        <div className="p-4">
             {/* Media Preview */}
             {isMediaType && (
                 <div className="mb-3 rounded-lg bg-gray-100 border border-gray-200 aspect-video overflow-hidden flex items-center justify-center relative">
@@ -221,9 +229,11 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
             )}
 
             {/* Message Text */}
-            <p className={`text-xs line-clamp-3 mb-3 font-medium ${hasPlaceholder ? 'text-red-600' : 'text-gray-700'}`}>
-                {data.message || <span className="italic text-gray-300">No message text...</span>}
-            </p>
+            <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 mb-3">
+                <p className={`text-xs leading-relaxed font-medium ${hasPlaceholder ? 'text-red-600' : 'text-gray-700'}`}>
+                    {data.message || <span className="italic text-gray-300">No message text...</span>}
+                </p>
+            </div>
 
             {/* Link Preview */}
             {isLinkType && (
@@ -235,51 +245,57 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
 
             {/* Interactive Options - CUSTOM ROUTING UI */}
             {isOptionType && (
-                <div className="mt-4 space-y-2">
-                    <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-1">
-                        <Split size={10} /> Branches
+                <div className="mt-4 space-y-3">
+                    <div className="flex items-center justify-between mb-2">
+                        <div className="text-[10px] font-bold text-violet-500 uppercase tracking-wider flex items-center gap-1">
+                            <GitBranch size={12} /> Routes
+                        </div>
+                        <span className="text-[9px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">Connect each option</span>
                     </div>
                     {data.options?.map((opt: string, i: number) => (
-                        <div key={i} className="relative flex items-center justify-between bg-white border border-gray-200 px-3 py-2 rounded-lg shadow-sm group/opt hover:border-purple-300 transition-colors">
-                            <span className="text-xs font-medium text-gray-700 truncate max-w-[180px]" title={opt}>{opt || '(Empty)'}</span>
+                        <div key={i} className="relative flex items-center justify-between bg-white border-2 border-gray-100 hover:border-violet-300 px-3 py-3 rounded-lg shadow-sm transition-all group/opt">
+                            <span className="text-xs font-bold text-gray-700 truncate max-w-[200px]" title={opt}>{opt || '(Empty)'}</span>
                             
                             {/* Connector Line */}
-                            <div className="h-[1px] bg-gray-100 flex-1 mx-2"></div>
+                            <div className="h-[2px] bg-gray-100 flex-1 mx-3 group-hover/opt:bg-violet-100 transition-colors"></div>
                             
                             {/* Handle Anchor - Properly Positioned */}
-                            <div className="relative w-4 h-4 flex items-center justify-center">
-                                <div className="w-2 h-2 rounded-full bg-purple-500 ring-2 ring-purple-100"></div>
+                            <div className="relative flex items-center">
+                                <span className="text-[9px] text-gray-400 mr-2 uppercase font-mono group-hover/opt:text-violet-600 font-bold tracking-tight">Next Step</span>
+                                <ArrowRight size={12} className="text-gray-300 mr-1 group-hover/opt:text-violet-400" />
                                 <Handle 
                                     type="source" 
                                     position={Position.Right} 
                                     id={`option-${i}`} 
-                                    style={{
-                                        ...ACTIVE_HANDLE_STYLE, 
-                                        right: -24, 
-                                        top: '50%',
-                                        transform: 'translateY(-50%)',
-                                        background: '#a855f7', // Purple
-                                        border: '2px solid white'
-                                    }} 
+                                    style={OPTION_HANDLE_STYLE} 
                                 />
                             </div>
                         </div>
                     ))}
+                    {(!data.options || data.options.length === 0) && (
+                        <div className="text-[10px] text-red-400 italic text-center p-3 border border-dashed border-red-200 rounded bg-red-50">
+                            No options defined. Add options in the sidebar properties.
+                        </div>
+                    )}
                 </div>
             )}
             
             {/* Variable Save Indicator */}
             {data.saveToField && (
-                <div className="mt-2 pt-2 border-t border-gray-100 flex items-center gap-1 text-[10px] text-purple-600 font-mono">
-                    <Hash size={10} />
-                    <span>Saves to: <strong>{data.saveToField}</strong></span>
+                <div className="mt-3 pt-3 border-t border-gray-100 flex items-center justify-between text-[10px]">
+                    <span className="text-gray-400 font-medium">Saves to variable</span>
+                    <span className="text-purple-700 font-mono bg-purple-50 px-2 py-0.5 rounded border border-purple-100 flex items-center gap-1">
+                        <Hash size={8} /> {data.saveToField}
+                    </span>
                 </div>
             )}
         </div>
 
         {/* Output Handles - Standard (Only if NOT option type) */}
         {!isOptionType && (
-            <Handle type="source" position={Position.Right} id="main" style={ACTIVE_HANDLE_STYLE} className="-right-3" />
+            <div className="absolute -right-3 top-1/2 transform -translate-y-1/2">
+                <Handle type="source" position={Position.Right} id="main" style={ACTIVE_HANDLE_STYLE} />
+            </div>
         )}
     </div>
   );
@@ -426,7 +442,7 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                                                 update('options', newOpts);
                                             }}
                                             className="flex-1 px-3 py-2 text-xs outline-none text-gray-700 font-medium"
-                                            placeholder={idx === 0 ? "e.g. 10-20" : idx === 1 ? "e.g. 20-30" : "Option Label"}
+                                            placeholder={idx === 0 ? "e.g. Yes" : idx === 1 ? "e.g. No" : "Option Label"}
                                         />
                                     </div>
                                     <button 
@@ -444,7 +460,7 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
 
                         <button 
                             onClick={() => update('options', [...(localData.options || []), `Option ${(localData.options?.length || 0) + 1}`])}
-                            className="w-full py-2 border border-dashed border-gray-300 rounded-lg text-xs font-bold text-gray-500 hover:text-purple-600 hover:border-purple-300 hover:bg-purple-50 transition-all flex items-center justify-center gap-2"
+                            className="w-full py-2 border border-dashed border-gray-300 rounded-lg text-xs font-bold text-gray-500 hover:text-violet-600 hover:border-violet-300 hover:bg-violet-50 transition-all flex items-center justify-center gap-2"
                         >
                             <Plus size={14} /> Add Option
                         </button>
@@ -458,7 +474,7 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                         <div className="bg-white/60 p-2 rounded-lg border border-purple-100 mb-2 flex gap-2">
                             <HelpCircle size={14} className="text-purple-500 shrink-0 mt-0.5" />
                             <p className="text-[10px] text-purple-700 leading-snug">
-                                <strong>Waits for Input:</strong> Use this node to ask a question (e.g., "What is your name?"). The bot will pause and wait for the user to type a text reply.
+                                <strong>Waits for Input:</strong> Use this node to ask a question. The bot will pause and wait for the user to type a text reply.
                             </p>
                         </div>
 
@@ -741,7 +757,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     <div>
                         <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-3 tracking-wider">Interaction</h4>
                         <div className="space-y-2">
-                            <DraggableSidebarItem type="option" inputType="option" label="Question" icon={<List size={16} />} />
+                            <DraggableSidebarItem type="option" inputType="option" label="Question" icon={<GitBranch size={16} />} />
                             <DraggableSidebarItem type="input" inputType="text" label="Collect Text" icon={<Type size={16} />} />
                         </div>
                     </div>
