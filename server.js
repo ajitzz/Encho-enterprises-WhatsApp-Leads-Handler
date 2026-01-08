@@ -738,31 +738,61 @@ router.get('/public/status', async (req, res) => {
 
 router.get('/public/showcase', async (req, res) => {
     try {
-        let folderName = req.query.folder;
-        let folderPath = '/';
-        
-        if (!folderName) {
-            // FIX: Retrieve full path context for active folder
-            const activeRes = await queryWithRetry('SELECT name, parent_path FROM media_folders WHERE is_public_showcase = TRUE ORDER BY id DESC LIMIT 1', []);
-            if (activeRes.rows.length > 0) {
-                const f = activeRes.rows[0];
-                folderName = f.name;
-                // Construct full path properly
+        let targetFolderName = req.query.folder;
+        let folderPath = '';
+        let displayTitle = 'Showcase';
+
+        if (targetFolderName) {
+            targetFolderName = decodeURIComponent(targetFolderName);
+            
+            // 1. Try to find folder by name (Case Insensitive)
+            // We prioritize public folders, then just matching names
+            const folderRes = await queryWithRetry(
+                `SELECT name, parent_path FROM media_folders 
+                 WHERE LOWER(name) = LOWER($1) 
+                 ORDER BY is_public_showcase DESC, id DESC LIMIT 1`,
+                [targetFolderName]
+            );
+
+            if (folderRes.rows.length > 0) {
+                const f = folderRes.rows[0];
+                displayTitle = f.name;
+                // Construct path
                 folderPath = f.parent_path === '/' ? `/${f.name}` : `${f.parent_path}/${f.name}`;
             } else {
-                return res.json({ title: 'Showcase', items: [] });
+                // Fallback: Assume root level if not found in DB (maybe legacy file)
+                folderPath = '/' + targetFolderName;
+                displayTitle = targetFolderName;
             }
         } else {
-             // If manual folder name provided (e.g. from URL), assume it is the full relative path
-             folderPath = '/' + folderName; 
+            // 2. No specific folder -> Get Active Public Showcase
+            const activeRes = await queryWithRetry(
+                'SELECT name, parent_path FROM media_folders WHERE is_public_showcase = TRUE ORDER BY id DESC LIMIT 1',
+                []
+            );
+            if (activeRes.rows.length > 0) {
+                const f = activeRes.rows[0];
+                displayTitle = f.name;
+                folderPath = f.parent_path === '/' ? `/${f.name}` : `${f.parent_path}/${f.name}`;
+            } else {
+                // No active showcase
+                return res.json({ title: 'Showcase', items: [] });
+            }
         }
         
-        // Clean path (remove double slashes if any)
-        folderPath = folderPath.replace('//', '/');
+        // Normalize path
+        folderPath = folderPath.replace(/\/\//g, '/');
 
-        const filesRes = await queryWithRetry('SELECT id, url, type, filename FROM media_files WHERE folder_path = $1', [folderPath]);
-        res.json({ title: folderName || 'Showcase', items: filesRes.rows });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+        // 3. Get Files
+        const filesRes = await queryWithRetry(
+            'SELECT id, url, type, filename FROM media_files WHERE folder_path = $1 ORDER BY uploaded_at DESC', 
+            [folderPath]
+        );
+
+        res.json({ title: displayTitle, items: filesRes.rows });
+    } catch (e) { 
+        res.status(500).json({ error: e.message }); 
+    }
 });
 
 // System Monitor
