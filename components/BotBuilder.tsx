@@ -629,7 +629,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             // LINK LOGIC COMPILATION: Append URL to message so backend sends as one text block
             let finalMessage = cleanData.message || "";
             if (cleanData.label === 'Link' && cleanData.linkUrl) {
-                finalMessage = `${finalMessage} ${cleanData.linkUrl}`;
+                // Ensure a space separation
+                finalMessage = finalMessage.trim() ? `${finalMessage} ${cleanData.linkUrl}` : cleanData.linkUrl;
             }
 
             // EXPLICIT MEDIA TYPE INFERENCE FOR ROBUST BACKEND HANDLING

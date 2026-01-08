@@ -68,7 +68,8 @@ const cleanBotSettings = (settings) => {
     if (settings.steps && Array.isArray(settings.steps)) {
         settings.steps = settings.steps.map(step => {
             const msg = step.message || "";
-            if (BLOCKED_REGEX.test(msg)) {
+            // Relaxed regex check to allow valid messages that might accidentally trigger partial matches
+            if (BLOCKED_REGEX.test(msg) && msg.length < 50) {
                 step.message = step.options && step.options.length > 0 ? "Please select an option:" : "";
             }
             if (step.templateName && (step.templateName.includes(' ') || step.templateName.includes(':') || step.templateName.length < 3)) {
@@ -390,6 +391,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         is_human_mode: false, 
         notes: '' 
     };
+    let isNewDriver = false;
     
     // 2. DRIVER STATE SYNC (TOLERANT TO FAILURE)
     const client = await pool.connect();
@@ -398,6 +400,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         let driverRes = await client.query('SELECT * FROM drivers WHERE phone_number = $1', [from]);
         
         if (driverRes.rows.length === 0) {
+             isNewDriver = true;
              const shouldActivateBot = botSettings.isEnabled && routingStrategy !== 'AI_ONLY';
              const insertRes = await client.query(
                 `INSERT INTO drivers (id, phone_number, name, source, status, last_message, last_message_time, current_bot_step_id, is_bot_active, is_human_mode)
@@ -454,28 +457,43 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
              }
 
              if (currentStep) {
-                 // SAVE DATA
-                 if (currentStep.saveToField) {
-                     updatesToSave[currentStep.saveToField] = msgBody;
-                     if(currentStep.saveToField === 'name') updatesToSave.name = msgBody;
-                 }
-
-                 let nextId = currentStep.nextStepId;
-                 if (nextId === 'AI_HANDOFF' || nextId === 'END' || !nextId) {
-                     updatesToSave.is_bot_active = false;
-                     updatesToSave.current_bot_step_id = null;
+                 if (isNewDriver) {
+                     // FIRST MESSAGE LOGIC:
+                     // The user just sent "Hi" (or similar). This is the TRIGGER, not the ANSWER.
+                     // We should reply with the CURRENT step's message, not advance.
+                     replyText = currentStep.message;
+                     replyTemplate = currentStep.templateName;
+                     replyMedia = currentStep.mediaUrl;
+                     replyMediaType = currentStep.mediaType || (currentStep.mediaUrl ? 'image' : undefined);
+                     replyOptions = currentStep.options;
                      
-                     if (routingStrategy === 'HYBRID_BOT_FIRST' && nextId === 'AI_HANDOFF') shouldCallAI = true;
-                     else if (routingStrategy === 'BOT_ONLY') replyText = "Details saved. Thank you.";
+                     // Do NOT update current_bot_step_id, so the next message is treated as the answer.
                  } else {
-                     updatesToSave.current_bot_step_id = nextId;
-                     const nextStep = botSettings.steps.find(s => s.id === nextId);
-                     if (nextStep) {
-                         replyText = nextStep.message;
-                         replyTemplate = nextStep.templateName;
-                         replyMedia = nextStep.mediaUrl;
-                         replyMediaType = nextStep.mediaType || (nextStep.mediaUrl ? 'image' : undefined);
-                         replyOptions = nextStep.options;
+                     // STANDARD LOGIC (User is answering):
+                     // 1. Save Data
+                     if (currentStep.saveToField) {
+                         updatesToSave[currentStep.saveToField] = msgBody;
+                         if(currentStep.saveToField === 'name') updatesToSave.name = msgBody;
+                     }
+
+                     // 2. Advance to Next Step
+                     let nextId = currentStep.nextStepId;
+                     if (nextId === 'AI_HANDOFF' || nextId === 'END' || !nextId) {
+                         updatesToSave.is_bot_active = false;
+                         updatesToSave.current_bot_step_id = null;
+                         
+                         if (routingStrategy === 'HYBRID_BOT_FIRST' && nextId === 'AI_HANDOFF') shouldCallAI = true;
+                         else if (routingStrategy === 'BOT_ONLY') replyText = "Details saved. Thank you.";
+                     } else {
+                         updatesToSave.current_bot_step_id = nextId;
+                         const nextStep = botSettings.steps.find(s => s.id === nextId);
+                         if (nextStep) {
+                             replyText = nextStep.message;
+                             replyTemplate = nextStep.templateName;
+                             replyMedia = nextStep.mediaUrl;
+                             replyMediaType = nextStep.mediaType || (nextStep.mediaUrl ? 'image' : undefined);
+                             replyOptions = nextStep.options;
+                         }
                      }
                  }
              }
@@ -490,6 +508,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
         } 
         if (!sent) {
             let caption = replyText || "";
+            // Use text body fallback if media fails or just text
             if (replyMedia) {
                 sent = await sendWhatsAppMessage(from, caption, null, null, 'en_US', replyMedia, replyMediaType);
             } else {
