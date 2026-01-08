@@ -11,6 +11,7 @@ import { AITraining } from './components/AITraining';
 import { AssistantChat } from './components/AssistantChat';
 import { MediaLibrary } from './components/MediaLibrary';
 import { PublicShowcase } from './components/PublicShowcase'; // New Import
+import { SystemMonitor } from './components/SystemMonitor'; // NEW
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
@@ -480,6 +481,9 @@ export default function App() {
         
         {/* NEW: Fleet Commander Assistant (Jarvis) */}
         {dataSource === 'live' && <AssistantChat />}
+        
+        {/* NEW: System Monitor */}
+        {dataSource === 'live' && <SystemMonitor />}
         
         <NotificationToast notifications={notifications} onDismiss={removeNotification} />
       </Layout>

@@ -1,5 +1,4 @@
 
-
 export enum LeadStatus {
   NEW = 'New',
   QUALIFIED = 'Qualified',
@@ -111,6 +110,17 @@ export interface BotSettings {
     nodes: any[];
     edges: any[];
   };
+}
+
+// --- SYSTEM MONITOR ---
+export interface SystemStats {
+    serverLoad: number; // 0-100
+    dbLatency: number; // ms
+    aiCredits: number; // 0-100 (estimated remaining)
+    aiModel: string; // 'gemini-3-flash' | 'gemini-1.5-flash'
+    s3Status: 'ok' | 'error';
+    whatsappStatus: 'ok' | 'latency' | 'error';
+    activeUploads: number;
 }
 
 // --- AI AUDIT TYPES ---
