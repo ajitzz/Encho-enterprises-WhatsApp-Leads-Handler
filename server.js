@@ -108,11 +108,48 @@ Goal: Explain benefits, answer queries, get name/phone number.
 "Vehicle + accommodation one place. Rent reduces on good performance. No commission. Plus, transparent Software for all accounts."
 `;
 
+// Define the steps separately to use in cache initialization
+const ENCHO_STEPS = [
+    {
+      id: 'step_1',
+      title: 'Welcome & Name',
+      message: 'നമസ്കാരം! Encho Cabs-ലേക്ക് സ്വാഗതം. നിങ്ങളുടെ പേര് പറയാമോ?',
+      inputType: 'text',
+      saveToField: 'name',
+      nextStepId: 'step_2'
+    },
+    {
+      id: 'step_2',
+      title: 'License Check',
+      message: 'നന്ദി! നിങ്ങളുടെ കൈയ്യിൽ valid ആയ Commercial Driving License ഉണ്ടോ?',
+      inputType: 'option',
+      options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'],
+      nextStepId: 'step_3',
+    },
+    {
+      id: 'step_3',
+      title: 'Upload License',
+      message: 'Verification-ന് വേണ്ടി License-ന്റെ ഒരു ഫോട്ടോ അയച്ചുതരൂ.',
+      inputType: 'image',
+      saveToField: 'document',
+      nextStepId: 'step_4'
+    },
+    {
+      id: 'step_4',
+      title: 'Availability',
+      message: 'എപ്പോഴാണ് ഡ്രൈവ് ചെയ്യാൻ താല്പര്യം? (Full-time / Part-time)',
+      inputType: 'option',
+      options: ['Full-time', 'Part-time', 'Weekends'],
+      saveToField: 'availability',
+      nextStepId: 'AI_HANDOFF' 
+    }
+];
+
 let CACHED_BOT_SETTINGS = {
   isEnabled: true,
   routingStrategy: 'HYBRID_BOT_FIRST',
   systemInstruction: ENCHO_SYSTEM_INSTRUCTION,
-  steps: []
+  steps: ENCHO_STEPS
 };
 let LAST_SETTINGS_FETCH = 0;
 
@@ -229,9 +266,21 @@ const ensureDatabaseInitialized = async (client) => {
         await client.query(`ALTER TABLE whatsapp_media_cache ADD COLUMN IF NOT EXISTS expires_at BIGINT`);
         await client.query(`ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS is_public_showcase BOOLEAN DEFAULT FALSE`);
         
+        // FORCE UPDATE SETTINGS: To ensure the AI Training persists over old data
         const settingsRes = await client.query('SELECT * FROM bot_settings WHERE id = 1');
         if (settingsRes.rows.length === 0) {
             await client.query('INSERT INTO bot_settings (id, settings) VALUES (1, $1)', [JSON.stringify(CACHED_BOT_SETTINGS)]);
+        } else {
+            // Update existing settings with new system instruction and steps
+            // This fixes the "Training not working" issue by overwriting old English flow
+            const currentSettings = settingsRes.rows[0].settings;
+            const updatedSettings = {
+                ...currentSettings,
+                systemInstruction: ENCHO_SYSTEM_INSTRUCTION,
+                steps: ENCHO_STEPS // Enforce the Malayalam steps
+            };
+            await client.query('UPDATE bot_settings SET settings = $1 WHERE id = 1', [JSON.stringify(updatedSettings)]);
+            CACHED_BOT_SETTINGS = updatedSettings; // Update local cache too
         }
         await client.query('COMMIT');
     } catch (e) {
