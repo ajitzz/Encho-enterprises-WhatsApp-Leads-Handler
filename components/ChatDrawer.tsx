@@ -15,7 +15,10 @@ import {
   Facebook, 
   Globe, 
   Headset, 
-  MicOff 
+  MicOff,
+  Phone,
+  FileText,
+  Sparkles
 } from 'lucide-react';
 
 interface ChatDrawerProps {
@@ -27,6 +30,7 @@ interface ChatDrawerProps {
 
 export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver }) => {
   const [replyText, setReplyText] = useState('');
+  const [localNotes, setLocalNotes] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Safe accessors for array properties
@@ -38,6 +42,13 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages]);
+
+  // Sync local notes with driver notes
+  useEffect(() => {
+    if (driver) {
+        setLocalNotes(driver.notes || '');
+    }
+  }, [driver]);
 
   if (!driver) return null;
 
@@ -58,6 +69,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const handleUpdateDetails = (updates: Partial<Driver>) => {
     onUpdateDriver(driver.id, updates);
   };
+
+  const handleSaveNotes = () => {
+      onUpdateDriver(driver.id, { notes: localNotes });
+  };
   
   const toggleHumanMode = () => {
       const newState = !driver.isHumanMode;
@@ -68,6 +83,18 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       if (newState) {
           onSendMessage("Now our executive on the line to connect");
       }
+  };
+
+  const handleVoiceCall = () => {
+      // Simulate Voice Call - Since we can't real VoIP to WhatsApp, we send a link or notification
+      onSendMessage("📞 Uber Fleet: Incoming Voice Call Request. Please click here to join: https://meet.google.com/call-voice-mock");
+      alert("Voice Call Request Sent to Driver's WhatsApp");
+  };
+
+  const handleVideoCall = () => {
+      // Simulate Video Call
+      onSendMessage("📹 Uber Fleet: Incoming Video Call Request. Please click here to join: https://meet.google.com/call-video-mock");
+      alert("Video Call Request Sent to Driver's WhatsApp");
   };
 
   const steps = [
@@ -110,6 +137,16 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             </div>
             
             <div className="flex items-center gap-4">
+               {/* Call Buttons */}
+               <div className="flex items-center gap-1 bg-gray-800 rounded-lg p-1 border border-gray-700 mr-2">
+                   <button onClick={handleVoiceCall} className="p-2 text-gray-300 hover:text-white hover:bg-gray-700 rounded transition-colors" title="Voice Call">
+                       <Phone size={18} />
+                   </button>
+                   <button onClick={handleVideoCall} className="p-2 text-gray-300 hover:text-white hover:bg-gray-700 rounded transition-colors" title="Video Call">
+                       <Video size={18} />
+                   </button>
+               </div>
+
                {/* Human Agent Toggle */}
                <div className="flex items-center gap-2 bg-gray-900 rounded-lg p-1 border border-gray-800">
                     <button 
@@ -227,6 +264,27 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
               <div className="p-6 space-y-8">
                 
+                {/* SMART NOTES */}
+                <section>
+                    <h3 className="font-semibold text-gray-900 mb-2 flex items-center gap-2">
+                         <FileText size={18} className="text-purple-600" /> 
+                         Smart Notes
+                         <Sparkles size={12} className="text-purple-400 animate-pulse" />
+                    </h3>
+                    <div className="relative group">
+                        <textarea 
+                            value={localNotes}
+                            onChange={(e) => setLocalNotes(e.target.value)}
+                            onBlur={handleSaveNotes}
+                            className="w-full h-32 p-3 text-sm bg-yellow-50/50 border border-yellow-200 rounded-lg focus:ring-2 focus:ring-yellow-400 focus:border-yellow-400 outline-none resize-none"
+                            placeholder="AI will auto-fill details here based on the conversation..."
+                        />
+                        <div className="absolute bottom-2 right-2 text-[10px] text-gray-400 bg-white/50 px-1 rounded">
+                            Auto-saves
+                        </div>
+                    </div>
+                </section>
+
                 {/* Qualification Checklist */}
                 <section>
                    <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">

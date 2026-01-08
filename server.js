@@ -141,7 +141,8 @@ const SCHEMA_SQL = `
         onboarding_step INTEGER DEFAULT 0,
         vehicle_registration TEXT,
         availability TEXT,
-        is_human_mode BOOLEAN DEFAULT FALSE
+        is_human_mode BOOLEAN DEFAULT FALSE,
+        notes TEXT
     );
     CREATE TABLE IF NOT EXISTS messages (
         id VARCHAR(255) PRIMARY KEY,
@@ -193,6 +194,7 @@ const ensureDatabaseInitialized = async (client) => {
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS current_bot_step_id TEXT;
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_bot_active BOOLEAN DEFAULT FALSE;
             ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;
+            ALTER TABLE drivers ADD COLUMN IF NOT EXISTS notes TEXT;
             ALTER TABLE media_files ADD COLUMN IF NOT EXISTS folder_path VARCHAR(255) DEFAULT '/';
             ALTER TABLE whatsapp_media_cache ADD COLUMN IF NOT EXISTS expires_at BIGINT;
             ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS is_public_showcase BOOLEAN DEFAULT FALSE;
@@ -262,16 +264,39 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
   } catch (error) { return false; }
 };
 
-const analyzeWithAI = async (text, systemInstruction) => {
-  if (!GEMINI_API_KEY) return "Thank you for your message.";
+const analyzeWithAI = async (text, currentNotes, systemInstruction) => {
+  if (!GEMINI_API_KEY) return { reply: "Thank you for your message.", updatedNotes: currentNotes };
   try {
+    const prompt = `
+    System Instruction: ${systemInstruction || 'You are a helpful assistant.'}
+    
+    User sent: "${text}"
+    Current Driver Notes: "${currentNotes || ''}"
+    
+    TASK:
+    1. Generate a helpful reply to the user.
+    2. Extract key details (Name, Location, Vehicle, Intent, Availability) and summarize them into the notes.
+    3. Keep notes concise and professional.
+    
+    Output JSON format:
+    {
+      "reply": "string",
+      "updatedNotes": "string"
+    }
+    `;
+
     const response = await ai.models.generateContent({ 
       model: "gemini-3-flash-preview", 
-      contents: text,
-      config: { systemInstruction, maxOutputTokens: 150 }
+      contents: prompt,
+      config: { responseMimeType: "application/json" }
     });
-    return response.text;
-  } catch (e) { return "Thanks for contacting Uber Fleet."; }
+    
+    const result = JSON.parse(response.text);
+    return result;
+  } catch (e) { 
+      console.error("AI Error", e);
+      return { reply: "Thanks for contacting Uber Fleet.", updatedNotes: currentNotes }; 
+  }
 };
 
 const logSystemMessage = async (driverId, text, type = 'text', options = null, imageUrl = null) => {
@@ -304,7 +329,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
     const routingStrategy = botSettings.routingStrategy || 'HYBRID_BOT_FIRST';
     const entryPointId = botSettings.entryPointId || botSettings.steps?.[0]?.id;
 
-    let driver = { id: 'temp_' + from, phone_number: from, name: name, is_bot_active: true, is_human_mode: false };
+    let driver = { id: 'temp_' + from, phone_number: from, name: name, is_bot_active: true, is_human_mode: false, notes: '' };
     
     // 2. DRIVER STATE SYNC (TOLERANT TO FAILURE)
     const client = await pool.connect();
@@ -424,7 +449,15 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
     } 
     
     if (!sent && shouldCallAI) {
-        const aiReply = await analyzeWithAI(msgBody, botSettings.systemInstruction);
+        // AI Logic: Returns { reply, updatedNotes }
+        const aiResult = await analyzeWithAI(msgBody, driver.notes, botSettings.systemInstruction);
+        const aiReply = aiResult.reply;
+        
+        // Update Notes
+        if (aiResult.updatedNotes && aiResult.updatedNotes !== driver.notes) {
+            updatesToSave.notes = aiResult.updatedNotes;
+        }
+
         if (aiReply && aiReply.trim()) {
             sent = await sendWhatsAppMessage(from, aiReply);
             if (sent && !driver.id.startsWith('temp_')) await logSystemMessage(driver.id, aiReply, 'text');

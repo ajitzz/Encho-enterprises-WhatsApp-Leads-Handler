@@ -1,6 +1,4 @@
 
-
-
 import React, { useState, useEffect } from 'react';
 import { Layout } from './components/Layout';
 import { LeadTable } from './components/LeadTable';
@@ -31,6 +29,11 @@ export default function App() {
           if (parts.length > 1 && parts[1].trim() !== '') {
               setShowcaseFolderName(decodeURIComponent(parts[1]));
           }
+      }
+      
+      // Request Notification Permission
+      if ("Notification" in window) {
+          Notification.requestPermission();
       }
   }, []);
 
@@ -120,6 +123,19 @@ export default function App() {
   const addNotification = (notif: Omit<Notification, 'id'>) => {
     const newNotif = { ...notif, id: Date.now().toString() + Math.random() };
     setNotifications(prev => [newNotif, ...prev]);
+    
+    // Browser Notification Support
+    if (notif.title.includes('Incoming') || notif.title.includes('Call')) {
+         if ("Notification" in window && Notification.permission === "granted") {
+             new Notification(notif.title, { body: notif.message });
+         }
+         // Play Sound (Simple Beep Simulation)
+         try {
+             const audio = new Audio('https://codeskulptor-demos.commondatastorage.googleapis.com/pang/pop.mp3');
+             audio.play();
+         } catch(e) {}
+    }
+
     setTimeout(() => {
       setNotifications(prev => prev.filter(n => n.id !== newNotif.id));
     }, 5000);

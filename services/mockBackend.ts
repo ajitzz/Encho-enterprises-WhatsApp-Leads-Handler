@@ -73,7 +73,8 @@ const MOCK_DRIVERS: Driver[] = [
       hasVehicle: false,
       isLocallyAvailable: true
     },
-    isBotActive: false
+    isBotActive: false,
+    notes: 'Initial inquiry via WhatsApp.'
   }
 ];
 
@@ -199,7 +200,8 @@ class MockBackendService {
         onboardingStep: OnboardingStep.WELCOME_SENT,
         qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
         isBotActive: shouldActivateBot,
-        currentBotStepId: entryPointId
+        currentBotStepId: entryPointId,
+        notes: ''
       };
       this.drivers.push(driver);
     }
@@ -265,6 +267,12 @@ class MockBackendService {
               if (currentStep.saveToField === 'document' && imageUrl) driver.documents.push(imageUrl);
               if (currentStep.saveToField === 'vehicleRegistration') driver.vehicleRegistration = text;
               
+              // MOCK AI NOTE EXTRACTION FOR BOT STEPS
+              if (currentStep.saveToField) {
+                  const newNote = `[Bot] Captured ${currentStep.saveToField}: ${text}`;
+                  driver.notes = driver.notes ? `${driver.notes}\n${newNote}` : newNote;
+              }
+
               const nextId = currentStep.nextStepId;
 
               if (nextId === 'END' || nextId === 'AI_HANDOFF' || !nextId) {
@@ -339,7 +347,8 @@ class MockBackendService {
       onboardingStep: OnboardingStep.WELCOME_SENT,
       qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
       isBotActive: shouldActivateBot,
-      currentBotStepId: entryPointId
+      currentBotStepId: entryPointId,
+      notes: 'Captured via Meta Ad Form.'
     };
     
     this.drivers.push(driver);

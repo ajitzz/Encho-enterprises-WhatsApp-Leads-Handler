@@ -1,3 +1,4 @@
+
 import React, { useState } from 'react';
 import { Driver, LeadStatus } from '../types';
 import { MessageCircle, Check, X, AlertCircle, Youtube, Search, Filter } from 'lucide-react';
@@ -120,7 +121,7 @@ export const LeadTable: React.FC<LeadTableProps> = ({
                 <td className="p-4">
                   <div className="flex flex-col">
                     <span className="font-medium text-gray-900">{driver.name}</span>
-                    <span className="text-sm text-gray-500 font-mono">{driver.phoneNumber}</span>
+                    <span className="text-xs text-gray-400 font-mono mt-0.5">{driver.phoneNumber}</span>
                   </div>
                 </td>
                 <td className="p-4">
@@ -129,11 +130,14 @@ export const LeadTable: React.FC<LeadTableProps> = ({
                   </span>
                 </td>
                 <td className="p-4">
-                  <div className="max-w-xs truncate text-sm text-gray-600">
+                  <div className="max-w-xs truncate text-sm text-gray-700 font-medium">
                     {driver.lastMessage}
                   </div>
-                  <div className="text-xs text-gray-400 mt-1">
-                    {new Date(driver.lastMessageTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  <div className="text-[11px] text-gray-400 mt-1 font-mono">
+                    {new Date(driver.lastMessageTime).toLocaleString([], { 
+                        year: 'numeric', month: 'short', day: 'numeric', 
+                        hour: '2-digit', minute: '2-digit' 
+                    })}
                   </div>
                 </td>
                 <td className="p-4 text-right">
