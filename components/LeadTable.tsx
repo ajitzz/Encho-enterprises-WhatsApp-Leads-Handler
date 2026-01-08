@@ -1,12 +1,11 @@
-
 import React, { useState } from 'react';
-import { Driver, LeadStatus } from '../types';
+import { Lead, LeadStatus } from '../types';
 import { MessageCircle, Check, X, AlertCircle, Youtube, Search, Filter } from 'lucide-react';
 
 interface LeadTableProps {
-  drivers: Driver[];
-  onSelectDriver: (driver: Driver) => void;
-  onSendWelcome: (driver: Driver) => void;
+  drivers: Lead[]; // Kept prop name as drivers to avoid breaking parent usage
+  onSelectDriver: (driver: Lead) => void;
+  onSendWelcome: (driver: Lead) => void;
   onBulkSelect: (ids: string[]) => void;
   selectedIds: string[];
 }

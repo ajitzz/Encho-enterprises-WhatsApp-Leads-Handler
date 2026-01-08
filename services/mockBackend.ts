@@ -1,5 +1,4 @@
-
-import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, BotStep } from '../types';
+import { Lead, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, BotStep } from '../types';
 
 // Initial Bot Config
 const DEFAULT_BOT_SETTINGS: BotSettings = {
@@ -37,7 +36,7 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
       message: 'എപ്പോഴാണ് ഡ്രൈവ് ചെയ്യാൻ താല്പര്യം? (Full-time / Part-time)',
       inputType: 'option',
       options: ['Full-time', 'Part-time', 'Weekends'],
-      saveToField: 'availability',
+      saveToField: 'customField2', // Previously 'availability'
       nextStepId: 'AI_HANDOFF' 
     }
   ],
@@ -48,7 +47,7 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
 const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
 
 // Initial Mock Data
-const MOCK_DRIVERS: Driver[] = [
+const MOCK_LEADS: Lead[] = [
   {
     id: '1',
     phoneNumber: '+91 98765 43210',
@@ -69,9 +68,9 @@ const MOCK_DRIVERS: Driver[] = [
     documents: [],
     onboardingStep: OnboardingStep.WELCOME_SENT,
     qualificationChecks: {
-      hasValidLicense: false,
-      hasVehicle: false,
-      isLocallyAvailable: true
+      check1: false, // hasValidLicense
+      check2: false, // hasVehicle
+      check3: true   // isLocallyAvailable
     },
     isBotActive: false,
     notes: 'Initial inquiry via WhatsApp.'
@@ -79,7 +78,7 @@ const MOCK_DRIVERS: Driver[] = [
 ];
 
 class MockBackendService {
-  private drivers: Driver[] = [...MOCK_DRIVERS];
+  private leads: Lead[] = [...MOCK_LEADS];
   private botSettings: BotSettings = { ...DEFAULT_BOT_SETTINGS };
   private listeners: (() => void)[] = [];
 
@@ -88,7 +87,7 @@ class MockBackendService {
     const savedBot = localStorage.getItem('uber_fleet_bot_settings');
     
     if (savedDrivers) {
-      try { this.drivers = JSON.parse(savedDrivers); } catch (e) {}
+      try { this.leads = JSON.parse(savedDrivers); } catch (e) {}
     }
     if (savedBot) {
       try { this.botSettings = JSON.parse(savedBot); } catch (e) {}
@@ -96,7 +95,7 @@ class MockBackendService {
   }
 
   private persist() {
-    localStorage.setItem('uber_fleet_drivers', JSON.stringify(this.drivers));
+    localStorage.setItem('uber_fleet_drivers', JSON.stringify(this.leads));
     localStorage.setItem('uber_fleet_bot_settings', JSON.stringify(this.botSettings));
     this.notify();
   }
@@ -112,8 +111,8 @@ class MockBackendService {
     };
   }
 
-  getDrivers(): Driver[] {
-    return this.drivers.sort((a, b) => b.lastMessageTime - a.lastMessageTime);
+  getDrivers(): Lead[] {
+    return this.leads.sort((a, b) => b.lastMessageTime - a.lastMessageTime);
   }
 
   getBotSettings(): BotSettings {
@@ -125,14 +124,14 @@ class MockBackendService {
     this.persist();
   }
 
-  getDriver(id: string): Driver | undefined {
-    return this.drivers.find((d) => d.id === id);
+  getDriver(id: string): Lead | undefined {
+    return this.leads.find((d) => d.id === id);
   }
 
   addMessage(driverId: string, message: Message) {
-    const driverIndex = this.drivers.findIndex((d) => d.id === driverId);
+    const driverIndex = this.leads.findIndex((d) => d.id === driverId);
     if (driverIndex > -1) {
-      const driver = this.drivers[driverIndex];
+      const driver = this.leads[driverIndex];
       driver.messages.push(message);
       driver.lastMessage = message.type === 'image' ? '[Image Sent]' : (message.text || 'Media');
       driver.lastMessageTime = message.timestamp;
@@ -142,21 +141,21 @@ class MockBackendService {
          driver.onboardingStep = Math.max(driver.onboardingStep, OnboardingStep.DOCUMENTS_RECEIVED);
       }
 
-      this.drivers[driverIndex] = { ...driver };
+      this.leads[driverIndex] = { ...driver };
       this.persist();
     }
   }
 
-  updateDriverDetails(driverId: string, updates: Partial<Driver>) {
-    const driverIndex = this.drivers.findIndex((d) => d.id === driverId);
+  updateDriverDetails(driverId: string, updates: Partial<Lead>) {
+    const driverIndex = this.leads.findIndex((d) => d.id === driverId);
     if (driverIndex > -1) {
-      this.drivers[driverIndex] = { ...this.drivers[driverIndex], ...updates };
+      this.leads[driverIndex] = { ...this.leads[driverIndex], ...updates };
       this.persist();
     }
   }
 
   updateDriverStatus(driverId: string, status: LeadStatus) {
-    const driver = this.drivers.find((d) => d.id === driverId);
+    const driver = this.leads.find((d) => d.id === driverId);
     if (driver) {
       driver.status = status;
       this.persist();
@@ -165,8 +164,8 @@ class MockBackendService {
 
   // --- BOT ENGINE ---
 
-  processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Driver, reply?: Message, actionNeeded: 'NONE' | 'AI_REPLY' } {
-    let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
+  processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Lead, reply?: Message, actionNeeded: 'NONE' | 'AI_REPLY' } {
+    let driver = this.leads.find((d) => d.phoneNumber === phoneNumber);
     let isNew = false;
     let settings = this.botSettings;
 
@@ -198,12 +197,12 @@ class MockBackendService {
         messages: [],
         documents: [],
         onboardingStep: OnboardingStep.WELCOME_SENT,
-        qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
+        qualificationChecks: { check1: false, check2: false, check3: true },
         isBotActive: shouldActivateBot,
         currentBotStepId: entryPointId,
         notes: ''
       };
-      this.drivers.push(driver);
+      this.leads.push(driver);
     }
 
     const userMsg: Message = {
@@ -263,9 +262,9 @@ class MockBackendService {
         if (currentStep) {
           if (!isNew) { 
               if (currentStep.saveToField === 'name') driver.name = text;
-              if (currentStep.saveToField === 'availability') driver.availability = text as any;
+              if (currentStep.saveToField === 'customField2') driver.customField2 = text;
               if (currentStep.saveToField === 'document' && imageUrl) driver.documents.push(imageUrl);
-              if (currentStep.saveToField === 'vehicleRegistration') driver.vehicleRegistration = text;
+              if (currentStep.saveToField === 'customField1') driver.customField1 = text;
               
               // MOCK AI NOTE EXTRACTION FOR BOT STEPS
               if (currentStep.saveToField) {
@@ -354,8 +353,8 @@ class MockBackendService {
     return { driver, actionNeeded: 'NONE' };
   }
 
-  createAdLead(name: string, phoneNumber: string): Driver {
-    let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
+  createAdLead(name: string, phoneNumber: string): Lead {
+    let driver = this.leads.find((d) => d.phoneNumber === phoneNumber);
     if (driver) return driver;
     const settings = this.botSettings;
     const shouldActivateBot = settings.isEnabled && settings.routingStrategy !== 'AI_ONLY';
@@ -372,13 +371,13 @@ class MockBackendService {
       messages: [],
       documents: [],
       onboardingStep: OnboardingStep.WELCOME_SENT,
-      qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
+      qualificationChecks: { check1: false, check2: false, check3: true },
       isBotActive: shouldActivateBot,
       currentBotStepId: entryPointId,
       notes: 'Captured via Meta Ad Form.'
     };
     
-    this.drivers.push(driver);
+    this.leads.push(driver);
     this.persist();
     
     if (shouldActivateBot) {

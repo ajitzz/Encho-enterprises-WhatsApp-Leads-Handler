@@ -10,7 +10,7 @@ export enum LeadStatus {
 export enum OnboardingStep {
   WELCOME_SENT = 0,
   DOCUMENTS_RECEIVED = 1,
-  VEHICLE_DETAILS = 2,
+  DETAILS_COLLECTED = 2, // Renamed from VEHICLE_DETAILS
   AVAILABILITY_SET = 3,
   READY_FOR_REVIEW = 4
 }
@@ -27,40 +27,48 @@ export interface Message {
   options?: string[]; // For buttons
 }
 
-export interface Driver {
+// Renamed Driver to Lead to be generic (Driver OR Traveler)
+export interface Lead {
   id: string;
+  companyId: string; // Multi-tenant key
   phoneNumber: string;
   name: string;
-  source: LeadSource; // Track where the lead came from
+  source: LeadSource;
   status: LeadStatus;
   lastMessage: string;
   lastMessageTime: number;
   messages: Message[];
-  documents: string[]; // URLs to documents
+  documents: string[];
   notes?: string;
   
-  // New Onboarding Fields
   onboardingStep: OnboardingStep;
-  vehicleRegistration?: string;
-  availability?: 'Full-time' | 'Part-time' | 'Weekends';
+  
+  // Generic Data Fields (Mapped based on Company Type)
+  customField1?: string; // e.g., Vehicle Registration OR Travel Date
+  customField2?: string; // e.g., Availability OR Group Size
+  
   qualificationChecks: {
-    hasValidLicense: boolean;
-    hasVehicle: boolean;
-    isLocallyAvailable: boolean;
+    check1: boolean; // e.g. Valid License OR Valid ID
+    check2: boolean; // e.g. Has Vehicle OR Paid Deposit
+    check3: boolean; // e.g. Local OR Visa Cleared
   };
   
-  // Bot State Tracking
   currentBotStepId?: string; 
   isBotActive: boolean;
-  
-  // Human Handover
   isHumanMode?: boolean;
 }
 
-export interface MetaTemplate {
+export interface Company {
+  id: string;
   name: string;
-  language: string;
-  components: any[];
+  type: 'logistics' | 'travel' | 'retail';
+  terminology: {
+    singular: string; // "Driver" or "Traveler"
+    plural: string;   // "Drivers" or "Travelers"
+    field1Label: string; // "Vehicle Number" or "Travel Date"
+    field2Label: string; // "Availability" or "Destination"
+  };
+  themeColor: string; // hex code
 }
 
 export interface AppNotification {
@@ -77,32 +85,26 @@ export type InputType = 'text' | 'image' | 'option' | 'location';
 export interface BotStep {
   id: string;
   title: string;
-  message: string; // What the bot says (Fallback text if template used)
-  inputType: InputType; // What the user should reply with
-  options?: string[]; // If inputType is 'option'
-  saveToField?: 'name' | 'vehicleRegistration' | 'availability' | 'document' | 'email'; // Where to save the data
+  message: string;
+  inputType: InputType;
+  options?: string[];
+  // Updated save fields to be generic
+  saveToField?: 'name' | 'customField1' | 'customField2' | 'document' | 'email'; 
   nextStepId?: string | 'END' | 'AI_HANDOFF';
-  
-  // Branching Logic: Maps an Option Text to a Step ID
-  // Example: { "Yes": "step_5", "No": "step_9" }
   routes?: Record<string, string>; 
-  
-  // Template Integration
-  templateName?: string; // The ID/Name of the template in Meta
-  templateLanguage?: string; // e.g. en_US, ml_IN
-  
-  // Rich Media
+  templateName?: string;
+  templateLanguage?: string;
   mediaUrl?: string;
-  mediaType?: 'image' | 'video' | 'document'; // Explicit type
+  mediaType?: 'image' | 'video' | 'document';
 }
 
 export interface BotSettings {
+  companyId: string; // Settings per company
   isEnabled: boolean;
   routingStrategy: 'BOT_ONLY' | 'AI_ONLY' | 'HYBRID_BOT_FIRST';
-  systemInstruction: string; // The "Training" for Gemini
+  systemInstruction: string;
   steps: BotStep[];
-  entryPointId?: string; // The ID of the first step connected to Start
-  // New Visual Flow Data
+  entryPointId?: string;
   flowData?: {
     nodes: any[];
     edges: any[];
@@ -113,13 +115,13 @@ export interface BotSettings {
 export interface AuditIssue {
   nodeId: string;
   severity: 'CRITICAL' | 'WARNING';
-  issue: string; // "Placeholder text detected"
-  suggestion: string; // "Change to 'Please reply...'"
-  autoFixValue?: any; // The sanitized value
+  issue: string;
+  suggestion: string;
+  autoFixValue?: any;
 }
 
 export interface AuditReport {
   isValid: boolean;
   issues: AuditIssue[];
-  fixedNodes?: any[]; // The auto-healed node list
+  fixedNodes?: any[];
 }

@@ -1,6 +1,5 @@
-
 import React, { useState, useEffect, useRef } from 'react';
-import { Driver, Message, LeadStatus, OnboardingStep } from '../types';
+import { Lead, Message, LeadStatus, OnboardingStep } from '../types';
 import { 
   X, 
   Send, 
@@ -22,10 +21,10 @@ import {
 } from 'lucide-react';
 
 interface ChatDrawerProps {
-  driver: Driver | null;
+  driver: Lead | null;
   onClose: () => void;
   onSendMessage: (text: string) => void;
-  onUpdateDriver: (id: string, updates: Partial<Driver>) => void;
+  onUpdateDriver: (id: string, updates: Partial<Lead>) => void;
 }
 
 export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver }) => {
@@ -66,7 +65,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   };
 
   // Helper to update specific driver fields
-  const handleUpdateDetails = (updates: Partial<Driver>) => {
+  const handleUpdateDetails = (updates: Partial<Lead>) => {
     onUpdateDriver(driver.id, updates);
   };
 
@@ -100,8 +99,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const steps = [
     { label: 'Welcome', done: true },
     { label: 'Documents', done: documents.length > 0 },
-    { label: 'Vehicle', done: !!driver.vehicleRegistration },
-    { label: 'Availability', done: !!driver.availability },
+    { label: 'Vehicle', done: !!driver.customField1 }, // Updated to generic
+    { label: 'Availability', done: !!driver.customField2 }, // Updated to generic
     { label: 'Qualified', done: driver.status === LeadStatus.QUALIFIED }
   ];
 
@@ -295,8 +294,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                       <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-100">
                         <span className="text-sm text-gray-600">Valid Driving License</span>
                         <button 
-                          onClick={() => handleUpdateDetails({ qualificationChecks: { ...driver.qualificationChecks, hasValidLicense: !driver.qualificationChecks?.hasValidLicense } })}
-                          className={`p-1 rounded-full ${driver.qualificationChecks?.hasValidLicense ? 'text-green-500 bg-green-100' : 'text-gray-300 bg-gray-200'}`}
+                          onClick={() => handleUpdateDetails({ qualificationChecks: { ...driver.qualificationChecks, check1: !driver.qualificationChecks?.check1 } })}
+                          className={`p-1 rounded-full ${driver.qualificationChecks?.check1 ? 'text-green-500 bg-green-100' : 'text-gray-300 bg-gray-200'}`}
                         >
                           <CheckCircle size={20} />
                         </button>
@@ -304,8 +303,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                       <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-100">
                         <span className="text-sm text-gray-600">Local Availability</span>
                         <button 
-                          onClick={() => handleUpdateDetails({ qualificationChecks: { ...driver.qualificationChecks, isLocallyAvailable: !driver.qualificationChecks?.isLocallyAvailable } })}
-                          className={`p-1 rounded-full ${driver.qualificationChecks?.isLocallyAvailable ? 'text-green-500 bg-green-100' : 'text-gray-300 bg-gray-200'}`}
+                          onClick={() => handleUpdateDetails({ qualificationChecks: { ...driver.qualificationChecks, check3: !driver.qualificationChecks?.check3 } })}
+                          className={`p-1 rounded-full ${driver.qualificationChecks?.check3 ? 'text-green-500 bg-green-100' : 'text-gray-300 bg-gray-200'}`}
                         >
                           <CheckCircle size={20} />
                         </button>
@@ -329,8 +328,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                        <div className="flex gap-2">
                          <input 
                            type="text" 
-                           value={driver.vehicleRegistration || ''} 
-                           onChange={(e) => handleUpdateDetails({ vehicleRegistration: e.target.value })}
+                           value={driver.customField1 || ''} 
+                           onChange={(e) => handleUpdateDetails({ customField1: e.target.value })}
                            placeholder="MH 02 AB 1234"
                            className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
                          />
@@ -357,8 +356,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                         {['Full-time', 'Part-time', 'Weekends'].map((opt) => (
                           <button
                             key={opt}
-                            onClick={() => handleUpdateDetails({ availability: opt as any })}
-                            className={`px-3 py-2 text-xs font-medium rounded-lg border transition-all ${driver.availability === opt ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}
+                            onClick={() => handleUpdateDetails({ customField2: opt as any })}
+                            className={`px-3 py-2 text-xs font-medium rounded-lg border transition-all ${driver.customField2 === opt ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}
                           >
                             {opt}
                           </button>
@@ -398,7 +397,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                 <div className="pt-4 border-t border-gray-100">
                   <button 
                     onClick={() => {
-                      if (driver.qualificationChecks?.hasValidLicense) {
+                      if (driver.qualificationChecks?.check1) {
                         onUpdateDriver(driver.id, { status: LeadStatus.QUALIFIED });
                       } else {
                         alert("Cannot qualify driver without a valid license check.");

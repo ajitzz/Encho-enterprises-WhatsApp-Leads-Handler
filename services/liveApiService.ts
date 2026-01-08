@@ -1,25 +1,24 @@
 
-
-import { Driver, BotSettings } from '../types';
+import { Lead, BotSettings, Company } from '../types';
 
 const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
 const API_BASE_URL = isLocal ? 'http://localhost:3001' : ''; 
 
+let CURRENT_COMPANY_ID = '1'; // Default
+
 // ENTERPRISE RESILIENCE: Retry wrapper for Fetch
 const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, delay = 500): Promise<Response> => {
+    // Inject Company ID into headers
+    const headers = new Headers(options?.headers || {});
+    headers.set('x-company-id', CURRENT_COMPANY_ID);
+    
+    const newOptions = { ...options, headers };
+
     try {
-        const response = await fetch(url, options);
+        const response = await fetch(url, newOptions);
         if (!response.ok) {
              // If server error (500-599), retry
              if (response.status >= 500) {
-                 const clone = response.clone();
-                 try {
-                    const errorBody = await clone.json();
-                    console.error("SERVER ERROR DETAILS:", errorBody);
-                 } catch(e) {
-                    console.error("SERVER ERROR (Text):", await clone.text());
-                 }
-                 
                  if (retries > 0) throw new Error('Server Error');
              }
              return response;
@@ -35,10 +34,24 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
 };
 
 export const liveApiService = {
-  // Fetch drivers with retry logic
-  getDrivers: async (): Promise<Driver[]> => {
+  setCompanyId: (id: string) => {
+      CURRENT_COMPANY_ID = id;
+  },
+
+  getCompanies: async (): Promise<Company[]> => {
+      try {
+          const response = await fetchWithRetry(`${API_BASE_URL}/api/companies`);
+          if (!response.ok) throw new Error('Failed to fetch companies');
+          return await response.json();
+      } catch (e) {
+          return [];
+      }
+  },
+
+  // Fetch leads (generic)
+  getLeads: async (): Promise<Lead[]> => {
     try {
-      const url = `${API_BASE_URL}/api/drivers`;
+      const url = `${API_BASE_URL}/api/leads`;
       const response = await fetchWithRetry(url);
       if (!response.ok) throw new Error('API Error');
       return await response.json();
@@ -70,6 +83,7 @@ export const liveApiService = {
     } catch (error) {
       console.warn("Could not fetch live bot settings, using default");
       return { 
+          companyId: CURRENT_COMPANY_ID,
           isEnabled: true, 
           routingStrategy: 'HYBRID_BOT_FIRST', 
           systemInstruction: '', 
@@ -90,23 +104,23 @@ export const liveApiService = {
 
   // --- ACTIONS ---
 
-  sendMessage: async (driverId: string, text: string) => {
+  sendMessage: async (leadId: string, text: string) => {
     const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ driverId, text })
+      body: JSON.stringify({ leadId, text })
     });
     if (!response.ok) throw new Error('Failed to send message');
     return await response.json();
   },
 
-  updateDriver: async (driverId: string, updates: Partial<Driver>) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}`, {
+  updateLead: async (leadId: string, updates: Partial<Lead>) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/leads/${leadId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(updates)
       });
-      if (!response.ok) throw new Error('Failed to update driver');
+      if (!response.ok) throw new Error('Failed to update lead');
       return await response.json();
   },
 
@@ -176,10 +190,11 @@ export const liveApiService = {
   },
 
   getPublicShowcase: async (folderName?: string) => {
+      // Public showcase is generic but usually filtered by folder name which is company specific
       const url = folderName 
         ? `${API_BASE_URL}/api/public/showcase?folder=${encodeURIComponent(folderName)}`
         : `${API_BASE_URL}/api/public/showcase`;
-      const response = await fetchWithRetry(url);
+      const response = await fetch(url); // Public doesn't need headers
       if (!response.ok) throw new Error('Failed to fetch showcase');
       return await response.json();
   },
@@ -220,7 +235,6 @@ export const liveApiService = {
       return await response.json();
   },
 
-  // NEW: Rename Folder
   renameFolder: async (id: string, newName: string) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${id}`, {
           method: 'PUT',
@@ -250,8 +264,6 @@ export const liveApiService = {
       return await response.json();
   },
 
-  // --- CONFIG ---
-
   configureWebhook: async (config: any) => {
     const response = await fetchWithRetry(`${API_BASE_URL}/api/configure-webhook`, {
       method: 'POST',
@@ -269,43 +281,7 @@ export const liveApiService = {
     });
     return await response.json();
   },
-
-  // --- SYSTEM DOCTOR (ADMIN) ---
   
-  getProjectContext: async (): Promise<{files: Array<{path: string, content: string}>}> => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/project-context`);
-      if (!response.ok) throw new Error('Failed to read project context');
-      return await response.json();
-  },
-
-  getSourceCode: async (): Promise<{code: string}> => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/source-code`);
-      if (!response.ok) throw new Error('Failed to read source code');
-      return await response.json();
-  },
-
-  applySystemPatch: async (changes: Array<{filePath: string, content: string}>): Promise<{success: boolean, message: string}> => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/write-files`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ changes })
-      });
-      if (!response.ok) throw new Error('Failed to patch system');
-      return await response.json();
-  },
-  
-  // --- AI AUDIT ---
-  auditFlow: async (nodes: any[]) => {
-    const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/audit-flow`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nodes })
-    });
-    if (!response.ok) throw new Error('Audit Failed');
-    return await response.json();
-  },
-
-  // --- AI ASSISTANT (JARVIS) ---
   sendAssistantMessage: async (message: string, history: any[]) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/assistant/chat`, {
           method: 'POST',
