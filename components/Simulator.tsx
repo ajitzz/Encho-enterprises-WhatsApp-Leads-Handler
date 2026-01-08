@@ -52,11 +52,11 @@ export const Simulator: React.FC<SimulatorProps> = ({ onNotify }) => {
           
           if (aiResult.extractedData) {
              mockBackend.updateDriverDetails(driver.id, {
-                customField1: aiResult.extractedData.vehicleRegistration || driver.customField1,
-                customField2: (aiResult.extractedData.availability as any) || driver.customField2,
+                vehicleRegistration: aiResult.extractedData.vehicleRegistration || driver.vehicleRegistration,
+                availability: (aiResult.extractedData.availability as any) || driver.availability,
                 qualificationChecks: {
                   ...driver.qualificationChecks,
-                  check1: aiResult.extractedData.isLicenseValid || driver.qualificationChecks.check1
+                  hasValidLicense: aiResult.extractedData.isLicenseValid || driver.qualificationChecks.hasValidLicense
                 }
              });
           }

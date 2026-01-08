@@ -1,66 +1,16 @@
 
-import { Lead, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, BotStep } from '../types';
+import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, BotStep } from '../types';
 
-// --- PERSONA 1: ENCHO CABS (Malayalam/Manglish) ---
-const ENCHO_CABS_SYSTEM_INSTRUCTION = `
-Role:
-You are a WhatsApp Customer Support Executive for **Encho Cabs** (Uber + Ola connected fleet).
-You must respond in **Malayalam + simple English (mixed/Manglish)**.
-Keep responses short (2-4 lines), friendly, and human-like.
-If the driver speaks Tamil/Hindi/English, switch language immediately.
-
-**CORE GOAL:** Explain benefits clearly and get their Name & Phone Number for a visit.
-
-✅ **COMPANY FACTS (Encho Cabs):**
-- **Company:** Encho Cabs (Uber + Ola connected).
-- **Vehicle:** WagonR CNG (latest manual). Safe & Well-maintained.
-- **Accommodation:** ₹5000 refundable deposit (after 4 months). Includes Kitchen, Bed, Mattress, Heater, Vessels, Fridge, Washing Machine.
-- **Rent:** ₹600/day for 10 trips. (Weekly target 70 trips).
-- **Performance Bonus:** Good performance → Rent reduces to ₹550 → ₹500 → ₹450.
-- **Earnings:** Week 1 avg ₹18,000. Experienced: ₹23,000/week.
-- **Commissions:** We take **NO commission** from earnings. Only daily rent.
-- **Expenses:** CNG (~₹650/day). Uber fee (~₹400 per ₹3000 earning).
-- **Leave:** Mondays only. Inform 10 days before.
-- **Software (New):** We provide a Company App for drivers. All payments, trip calculations, and weekly bills are visible there. 100% Transparency. You can download bills directly. No cheating, fully digital trust.
-
-✅ **RESPONSE RULES:**
-1. Default length: 2–4 lines.
-2. If asked "Details?", reply 6–10 lines max.
-3. Always ask **one question** at the end (e.g., "Interested ആണോ?", "പേര് പറയാമോ?").
-`;
-
-// --- PERSONA 2: ENCHO TRAVEL (English/Professional) ---
-const ENCHO_TRAVEL_SYSTEM_INSTRUCTION = `
-Role:
-You are a Travel Consultant for **Encho Travels** (Luxury & Outstation Packages).
-You must respond in **Professional English**.
-Tone: Exciting, Helpful, Polite.
-
-**CORE GOAL:** Help customers plan trips and book packages.
-
-✅ **COMPANY FACTS (Encho Travel):**
-- **Services:** Outstation trips, Weekend Getaways, Airport Transfers, Pilgrimage Packages.
-- **Vehicles:** Innova Crysta, Tempo Traveller, Urbania.
-- **Drivers:** Verified, Uniformed, Multilingual.
-- **Safety:** GPS Tracking, 24/7 Support.
-- **Pricing:** Transparent per/km pricing. No hidden driver batta charges.
-
-✅ **RESPONSE RULES:**
-1. Be polite and professional.
-2. Ask for: Destination, Dates, and Group Size.
-`;
-
-// --- DEFAULT SETTINGS MAP ---
-const SETTINGS_CABS: BotSettings = {
-  companyId: '1',
+// Initial Bot Config (Single Tenant)
+const DEFAULT_BOT_SETTINGS: BotSettings = {
   isEnabled: true,
   routingStrategy: 'HYBRID_BOT_FIRST',
-  systemInstruction: ENCHO_CABS_SYSTEM_INSTRUCTION,
+  systemInstruction: `You are a friendly and persuasive recruiter for Uber Fleet in Kerala.`,
   steps: [
     {
       id: 'step_1',
-      title: 'Welcome & Intro',
-      message: 'നമസ്കാരം 👋 Encho Cabs-ലേക്ക് സ്വാഗതം! \nഞങ്ങൾ Uber/Ola connected fleet ആണ്. \n\nWagonR CNG വണ്ടിയും താമസസൗകര്യവും (Accommodation) ഞങ്ങൾ നൽകുന്നുണ്ട്. \n\nതാങ്കളുടെ പേര് ഒന്ന് പറയാമോ?',
+      title: 'Welcome & Name',
+      message: 'നമസ്കാരം! Uber Fleet-ലേക്ക് സ്വാഗതം. നിങ്ങളുടെ പേര് പറയാമോ?',
       inputType: 'text',
       saveToField: 'name',
       nextStepId: 'step_2'
@@ -68,116 +18,85 @@ const SETTINGS_CABS: BotSettings = {
     {
       id: 'step_2',
       title: 'License Check',
-      message: 'നന്ദി! താങ്കളുടെ കൈയ്യിൽ valid ആയ Driving License (Badge) ഉണ്ടോ?',
+      message: 'നന്ദി! നിങ്ങളുടെ കൈയ്യിൽ valid ആയ Commercial Driving License ഉണ്ടോ?',
       inputType: 'option',
-      options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)', 'Expired'],
+      options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'],
       nextStepId: 'step_3',
-      routes: { 'ഇല്ല (No)': 'END', 'Expired': 'END' }
     },
     {
       id: 'step_3',
-      title: 'Software & Rent',
-      message: 'Great. Rent ₹600/day (10 trips). \n\nഞങ്ങൾക്ക് സ്വന്തമായി **Driver App** ഉണ്ട്. Payment, calculations എല്ലാം അതിൽ കൃത്യമായി കാണാം (100% Transparency). \n\nVisit ചെയ്യാൻ താല്പര്യമുണ്ടോ?',
+      title: 'Upload License',
+      message: 'Verification-ന് വേണ്ടി License-ന്റെ ഒരു ഫോട്ടോ അയച്ചുതരൂ.',
+      inputType: 'image',
+      saveToField: 'document',
+      nextStepId: 'step_4'
+    },
+    {
+      id: 'step_4',
+      title: 'Availability',
+      message: 'എപ്പോഴാണ് ഡ്രൈവ് ചെയ്യാൻ താല്പര്യം? (Full-time / Part-time)',
       inputType: 'option',
-      options: ['Yes, Visit', 'More Details'],
+      options: ['Full-time', 'Part-time', 'Weekends'],
+      saveToField: 'availability',
       nextStepId: 'AI_HANDOFF' 
     }
   ],
   entryPointId: 'step_1'
 };
 
-const SETTINGS_TRAVEL: BotSettings = {
-  companyId: '2',
-  isEnabled: true,
-  routingStrategy: 'AI_ONLY', // Travel implies complex queries
-  systemInstruction: ENCHO_TRAVEL_SYSTEM_INSTRUCTION,
-  steps: [], // AI handle it
-  entryPointId: 'step_1'
-};
-
-// FIREWALL REGEX
 const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
 
 // Initial Mock Data
-const MOCK_LEADS: Lead[] = [
+const MOCK_DRIVERS: Driver[] = [
   {
     id: '1',
-    companyId: '1',
     phoneNumber: '+91 98765 43210',
     name: 'Rajesh Kumar',
     source: 'Organic',
     status: LeadStatus.NEW,
-    lastMessage: 'Details please?',
+    lastMessage: 'Hi, I want to join Uber fleet.',
     lastMessageTime: Date.now() - 1000 * 60 * 60 * 2,
     messages: [
-      { id: 'msg_1', sender: 'driver', text: 'Details please?', timestamp: Date.now() - 1000 * 60 * 60 * 2, type: 'text' },
+      {
+        id: 'msg_1',
+        sender: 'driver',
+        text: 'Hi, I want to join Uber fleet.',
+        timestamp: Date.now() - 1000 * 60 * 60 * 2,
+        type: 'text',
+      },
     ],
     documents: [],
     onboardingStep: OnboardingStep.WELCOME_SENT,
-    qualificationChecks: { check1: false, check2: false, check3: true },
+    qualificationChecks: {
+      hasValidLicense: false,
+      hasVehicle: false,
+      isLocallyAvailable: true
+    },
     isBotActive: false,
-    notes: 'Asked about rent details.'
-  },
-  {
-    id: '2',
-    companyId: '2',
-    phoneNumber: '+91 99999 88888',
-    name: 'Sarah Jones',
-    source: 'Meta Ad',
-    status: LeadStatus.NEW,
-    lastMessage: 'Looking for Munnar trip',
-    lastMessageTime: Date.now() - 1000 * 60 * 30,
-    messages: [
-      { id: 'msg_2', sender: 'driver', text: 'Looking for Munnar trip for 3 days.', timestamp: Date.now() - 1000 * 60 * 30, type: 'text' },
-    ],
-    documents: [],
-    onboardingStep: OnboardingStep.WELCOME_SENT,
-    qualificationChecks: { check1: false, check2: false, check3: false },
-    isBotActive: true,
-    notes: 'Potential high value customer'
+    notes: 'Initial inquiry via WhatsApp.'
   }
 ];
 
 class MockBackendService {
-  private leads: Lead[] = [...MOCK_LEADS];
-  private currentCompanyId = '1';
-  private settingsMap: Record<string, BotSettings> = {};
+  private drivers: Driver[] = [...MOCK_DRIVERS];
+  private botSettings: BotSettings = { ...DEFAULT_BOT_SETTINGS };
   private listeners: (() => void)[] = [];
 
   constructor() {
-    // Initialize Defaults
-    this.settingsMap['1'] = { ...SETTINGS_CABS };
-    this.settingsMap['2'] = { ...SETTINGS_TRAVEL };
-
-    // Load Persistence
-    const savedDrivers = localStorage.getItem('uber_fleet_drivers_v2');
-    const savedSettings = localStorage.getItem('uber_fleet_bot_settings_v2');
+    const savedDrivers = localStorage.getItem('uber_fleet_drivers');
+    const savedBot = localStorage.getItem('uber_fleet_bot_settings');
     
     if (savedDrivers) {
-      try { this.leads = JSON.parse(savedDrivers); } catch (e) {}
+      try { this.drivers = JSON.parse(savedDrivers); } catch (e) {}
     }
-    if (savedSettings) {
-      try { 
-          const parsed = JSON.parse(savedSettings);
-          // Merge saved with defaults (to ensure instructions update if code changes)
-          this.settingsMap = { ...this.settingsMap, ...parsed };
-          
-          // Force update instructions from code to apply new prompt updates
-          if (this.settingsMap['1']) this.settingsMap['1'].systemInstruction = ENCHO_CABS_SYSTEM_INSTRUCTION;
-          if (this.settingsMap['2']) this.settingsMap['2'].systemInstruction = ENCHO_TRAVEL_SYSTEM_INSTRUCTION;
-
-      } catch (e) {}
+    if (savedBot) {
+      try { this.botSettings = JSON.parse(savedBot); } catch (e) {}
     }
-  }
-
-  setCompanyId(id: string) {
-      this.currentCompanyId = id;
-      this.notify();
   }
 
   private persist() {
-    localStorage.setItem('uber_fleet_drivers_v2', JSON.stringify(this.leads));
-    localStorage.setItem('uber_fleet_bot_settings_v2', JSON.stringify(this.settingsMap));
+    localStorage.setItem('uber_fleet_drivers', JSON.stringify(this.drivers));
+    localStorage.setItem('uber_fleet_bot_settings', JSON.stringify(this.botSettings));
     this.notify();
   }
 
@@ -192,40 +111,27 @@ class MockBackendService {
     };
   }
 
-  getDrivers(): Lead[] {
-    // MULTI-TENANT FILTER
-    return this.leads
-        .filter(d => d.companyId === this.currentCompanyId)
-        .sort((a, b) => b.lastMessageTime - a.lastMessageTime);
+  getDrivers(): Driver[] {
+    return this.drivers.sort((a, b) => b.lastMessageTime - a.lastMessageTime);
   }
 
   getBotSettings(): BotSettings {
-    if (!this.settingsMap[this.currentCompanyId]) {
-        // Create generic default for unknown companies
-        this.settingsMap[this.currentCompanyId] = {
-            companyId: this.currentCompanyId,
-            isEnabled: true,
-            routingStrategy: 'AI_ONLY',
-            systemInstruction: 'You are a helpful assistant.',
-            steps: []
-        };
-    }
-    return this.settingsMap[this.currentCompanyId];
+    return this.botSettings;
   }
 
   updateBotSettings(settings: BotSettings) {
-    this.settingsMap[this.currentCompanyId] = settings;
+    this.botSettings = settings;
     this.persist();
   }
 
-  getDriver(id: string): Lead | undefined {
-    return this.leads.find((d) => d.id === id); // ID is unique globally
+  getDriver(id: string): Driver | undefined {
+    return this.drivers.find((d) => d.id === id);
   }
 
   addMessage(driverId: string, message: Message) {
-    const driverIndex = this.leads.findIndex((d) => d.id === driverId);
+    const driverIndex = this.drivers.findIndex((d) => d.id === driverId);
     if (driverIndex > -1) {
-      const driver = this.leads[driverIndex];
+      const driver = this.drivers[driverIndex];
       driver.messages.push(message);
       driver.lastMessage = message.type === 'image' ? '[Image Sent]' : (message.text || 'Media');
       driver.lastMessageTime = message.timestamp;
@@ -235,21 +141,21 @@ class MockBackendService {
          driver.onboardingStep = Math.max(driver.onboardingStep, OnboardingStep.DOCUMENTS_RECEIVED);
       }
 
-      this.leads[driverIndex] = { ...driver };
+      this.drivers[driverIndex] = { ...driver };
       this.persist();
     }
   }
 
-  updateDriverDetails(driverId: string, updates: Partial<Lead>) {
-    const driverIndex = this.leads.findIndex((d) => d.id === driverId);
+  updateDriverDetails(driverId: string, updates: Partial<Driver>) {
+    const driverIndex = this.drivers.findIndex((d) => d.id === driverId);
     if (driverIndex > -1) {
-      this.leads[driverIndex] = { ...this.leads[driverIndex], ...updates };
+      this.drivers[driverIndex] = { ...this.drivers[driverIndex], ...updates };
       this.persist();
     }
   }
 
   updateDriverStatus(driverId: string, status: LeadStatus) {
-    const driver = this.leads.find((d) => d.id === driverId);
+    const driver = this.drivers.find((d) => d.id === driverId);
     if (driver) {
       driver.status = status;
       this.persist();
@@ -258,11 +164,10 @@ class MockBackendService {
 
   // --- BOT ENGINE ---
 
-  processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Lead, reply?: Message, actionNeeded: 'NONE' | 'AI_REPLY' } {
-    // Find driver ONLY in current company
-    let driver = this.leads.find((d) => d.phoneNumber === phoneNumber && d.companyId === this.currentCompanyId);
+  processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Driver, reply?: Message, actionNeeded: 'NONE' | 'AI_REPLY' } {
+    let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
     let isNew = false;
-    let settings = this.getBotSettings();
+    let settings = this.botSettings;
 
     // --- MOCK SANITIZATION ---
     if (settings.steps) {
@@ -283,9 +188,8 @@ class MockBackendService {
       const shouldActivateBot = settings.isEnabled && settings.routingStrategy !== 'AI_ONLY';
       driver = {
         id: Date.now().toString(),
-        companyId: this.currentCompanyId, // Strict Tenant ID
         phoneNumber,
-        name: 'Unknown User',
+        name: 'Unknown Driver',
         source: 'Organic',
         status: LeadStatus.NEW,
         lastMessage: '',
@@ -293,12 +197,12 @@ class MockBackendService {
         messages: [],
         documents: [],
         onboardingStep: OnboardingStep.WELCOME_SENT,
-        qualificationChecks: { check1: false, check2: false, check3: true },
+        qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
         isBotActive: shouldActivateBot,
         currentBotStepId: entryPointId,
         notes: ''
       };
-      this.leads.push(driver);
+      this.drivers.push(driver);
     }
 
     const userMsg: Message = {
@@ -331,7 +235,7 @@ class MockBackendService {
                   const maintenanceMsg: Message = {
                       id: Date.now().toString() + '_maint',
                       sender: 'system',
-                      text: "ഞങ്ങളുടെ സിസ്റ്റം അപ്ഡേറ്റ് ചെയ്യുകയാണ്. ദയവായി അല്പസമയം കഴിഞ്ഞ് മെസ്സേജ് അയക്കുക.",
+                      text: "Our automated system is currently being configured. Please check back later.",
                       timestamp: Date.now() + 500,
                       type: 'text'
                   };
@@ -358,9 +262,9 @@ class MockBackendService {
         if (currentStep) {
           if (!isNew) { 
               if (currentStep.saveToField === 'name') driver.name = text;
-              if (currentStep.saveToField === 'customField2') driver.customField2 = text;
+              if (currentStep.saveToField === 'availability') driver.availability = text as any;
               if (currentStep.saveToField === 'document' && imageUrl) driver.documents.push(imageUrl);
-              if (currentStep.saveToField === 'customField1') driver.customField1 = text;
+              if (currentStep.saveToField === 'vehicleRegistration') driver.vehicleRegistration = text;
               
               if (currentStep.saveToField) {
                   const newNote = `[Bot] Captured ${currentStep.saveToField}: ${text}`;
@@ -369,7 +273,6 @@ class MockBackendService {
 
               let nextId = currentStep.nextStepId;
 
-              // --- MOCK BRANCHING LOGIC ---
               if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
                   const cleanInput = text.trim().toLowerCase();
                   const routeKey = Object.keys(currentStep.routes).find(k => {
@@ -383,7 +286,7 @@ class MockBackendService {
                       const botMsg: Message = {
                           id: Date.now().toString() + '_bot',
                           sender: 'system',
-                          text: "ദയവായി താഴെയുള്ള ഓപ്ഷനുകളിൽ ഒന്ന് തിരഞ്ഞെടുക്കുക:",
+                          text: "Please select one of the valid options below:",
                           timestamp: Date.now() + 500,
                           type: 'options',
                           options: currentStep.options
@@ -405,7 +308,7 @@ class MockBackendService {
                   const endMsg: Message = {
                       id: Date.now().toString() + '_end',
                       sender: 'system',
-                      text: nextId === 'AI_HANDOFF' ? "നന്ദി. കൂടുതൽ വിവരങ്ങൾക്കായി ഞാൻ ഇപ്പോൾ കണക്ട് ചെയ്യാം." : "നന്ദി! വിവരങ്ങൾ ലഭിച്ചു. ഞങ്ങൾ ഉടൻ ബന്ധപ്പെടാം.",
+                      text: nextId === 'AI_HANDOFF' ? "Thank you. We will contact you soon." : "Thank you! We have received your details.",
                       timestamp: Date.now() + 500,
                       type: 'text'
                   };
@@ -444,18 +347,15 @@ class MockBackendService {
     return { driver, actionNeeded: 'NONE' };
   }
 
-  createAdLead(name: string, phoneNumber: string): Lead {
-    // Check in CURRENT company
-    let driver = this.leads.find((d) => d.phoneNumber === phoneNumber && d.companyId === this.currentCompanyId);
+  createAdLead(name: string, phoneNumber: string): Driver {
+    let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
     if (driver) return driver;
-    
-    const settings = this.getBotSettings();
+    const settings = this.botSettings;
     const shouldActivateBot = settings.isEnabled && settings.routingStrategy !== 'AI_ONLY';
     const entryPointId = settings.entryPointId || settings.steps?.[0]?.id;
 
     driver = {
       id: Date.now().toString(),
-      companyId: this.currentCompanyId,
       phoneNumber,
       name,
       source: 'Meta Ad',
@@ -465,13 +365,13 @@ class MockBackendService {
       messages: [],
       documents: [],
       onboardingStep: OnboardingStep.WELCOME_SENT,
-      qualificationChecks: { check1: false, check2: false, check3: true },
+      qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
       isBotActive: shouldActivateBot,
       currentBotStepId: entryPointId,
       notes: 'Captured via Meta Ad Form.'
     };
     
-    this.leads.push(driver);
+    this.drivers.push(driver);
     this.persist();
     
     if (shouldActivateBot) {
