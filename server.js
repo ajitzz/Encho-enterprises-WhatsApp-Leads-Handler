@@ -74,7 +74,7 @@ Goal: Explain benefits, answer queries, get name/phone number.
    - We provide a dedicated Company Software for every driver.
    - All payments and calculations are visible there.
    - Drivers can download Weekly Bills directly. 
-   - Ensures 100% transparency and trust.
+   - This software ensures 100% transparency and builds trust.
 6. Leave: Monday only. Inform 10 days prior. Return date required.
 7. Future: Encho Travels collaboration coming soon (Outstation trips up to 1 week).
 
@@ -734,8 +734,9 @@ router.post('/folders', async (req, res) => {
     try {
         const { name, parentPath } = req.body;
         const id = Date.now().toString();
-        const existing = await queryWithRetry('SELECT id FROM media_folders WHERE name = $1 AND parent_path = $2', [name, parentPath]);
-        if (existing.rows.length > 0) return res.status(409).json({ error: 'Folder name already exists' });
+        // GLOBAL UNIQUENESS CHECK
+        const existing = await queryWithRetry('SELECT id FROM media_folders WHERE name = $1', [name]);
+        if (existing.rows.length > 0) return res.status(409).json({ error: 'Folder name already exists globally' });
         await queryWithRetry('INSERT INTO media_folders (id, name, parent_path) VALUES ($1, $2, $3)', [id, name, parentPath]);
         res.json({ success: true, id });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -744,12 +745,12 @@ router.post('/folders', async (req, res) => {
 router.put('/folders/:id', async (req, res) => {
     try {
         const { name } = req.body;
-        const folderRes = await queryWithRetry('SELECT parent_path FROM media_folders WHERE id = $1', [req.params.id]);
+        const folderRes = await queryWithRetry('SELECT id FROM media_folders WHERE id = $1', [req.params.id]);
         if (folderRes.rows.length === 0) return res.status(404).json({ error: 'Folder not found' });
         
-        const parentPath = folderRes.rows[0].parent_path;
-        const existing = await queryWithRetry('SELECT id FROM media_folders WHERE name = $1 AND parent_path = $2 AND id != $3', [name, parentPath, req.params.id]);
-        if (existing.rows.length > 0) return res.status(409).json({ error: 'Folder name already exists' });
+        // GLOBAL UNIQUENESS CHECK (Excluding self)
+        const existing = await queryWithRetry('SELECT id FROM media_folders WHERE name = $1 AND id != $2', [name, req.params.id]);
+        if (existing.rows.length > 0) return res.status(409).json({ error: 'Folder name already exists globally' });
 
         await queryWithRetry('UPDATE media_folders SET name = $1 WHERE id = $2', [name, req.params.id]);
         res.json({ success: true });

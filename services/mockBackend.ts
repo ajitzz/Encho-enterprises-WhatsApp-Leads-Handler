@@ -23,7 +23,7 @@ Goal: Explain benefits, answer queries, get name/phone number.
    - We provide a dedicated Company Software for every driver.
    - All payments and calculations are visible there.
    - Drivers can download Weekly Bills directly. 
-   - Ensures 100% transparency and trust.
+   - This software ensures 100% transparency and builds trust.
 6. Leave: Monday only. Inform 10 days prior. Return date required.
 7. Future: Encho Travels collaboration coming soon (Outstation trips up to 1 week).
 
