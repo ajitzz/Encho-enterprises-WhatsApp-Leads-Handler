@@ -8,16 +8,14 @@ import {
   BackgroundVariant,
   Handle, 
   Position,
-  Node,
   ReactFlowProvider,
   useReactFlow,
   Panel,
-  Connection,
-  Edge,
   useNodesState,
   useEdgesState,
   addEdge
 } from '@xyflow/react';
+import type { Node, Connection, Edge } from '@xyflow/react';
 import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
@@ -59,22 +57,44 @@ const getIconForLabel = (label: string) => {
 // --- MEDIA SELECTOR MODAL ---
 const MediaSelectorModal = ({ isOpen, onClose, onSelect, allowedType }: any) => {
     const [files, setFiles] = useState<any[]>([]);
+    const [folders, setFolders] = useState<any[]>([]);
+    const [currentPath, setCurrentPath] = useState('/');
     const [loading, setLoading] = useState(false);
 
     useEffect(() => {
         if (isOpen) {
-            setLoading(true);
-            liveApiService.getMediaLibrary('/')
-                .then(data => {
-                    const filtered = data.files.filter((f: any) => 
-                        allowedType === 'Video' ? f.type === 'video' : f.type === 'image'
-                    );
-                    setFiles(filtered);
-                })
-                .catch(console.error)
-                .finally(() => setLoading(false));
+            loadMedia(currentPath);
+        } else {
+            setCurrentPath('/'); // Reset to root on close
         }
-    }, [isOpen, allowedType]);
+    }, [isOpen, currentPath]);
+
+    const loadMedia = (path: string) => {
+        setLoading(true);
+        liveApiService.getMediaLibrary(path)
+            .then(data => {
+                setFolders(data.folders);
+                const filtered = data.files.filter((f: any) => 
+                    allowedType === 'Video' ? f.type === 'video' : f.type === 'image'
+                );
+                setFiles(filtered);
+            })
+            .catch(console.error)
+            .finally(() => setLoading(false));
+    };
+
+    const handleFolderClick = (folderName: string) => {
+        const newPath = currentPath === '/' ? `/${folderName}` : `${currentPath}/${folderName}`;
+        setCurrentPath(newPath);
+    };
+
+    const handleBackClick = () => {
+         if (currentPath === '/') return;
+         const parts = currentPath.split('/').filter(Boolean);
+         parts.pop();
+         const newPath = parts.length === 0 ? '/' : `/${parts.join('/')}`;
+         setCurrentPath(newPath);
+    };
 
     if (!isOpen) return null;
 
@@ -89,32 +109,73 @@ const MediaSelectorModal = ({ isOpen, onClose, onSelect, allowedType }: any) => 
                     <button onClick={onClose}><X size={20} className="text-gray-400" /></button>
                 </div>
                 
+                <div className="bg-white px-4 py-2 border-b border-gray-100 text-xs text-gray-500 flex items-center gap-2">
+                    <span className="font-bold text-gray-700">Path:</span> 
+                    <span className="font-mono bg-gray-100 px-1 rounded">{currentPath}</span>
+                </div>
+
                 <div className="flex-1 overflow-y-auto p-4 bg-slate-50">
                     {loading ? (
                         <div className="flex justify-center p-10"><span className="animate-spin mr-2">⏳</span> Loading Library...</div>
-                    ) : files.length === 0 ? (
-                        <div className="text-center text-gray-400 py-10">
-                            No {allowedType}s found in S3 Library. <br/> Upload files in the Media Library tab first.
-                        </div>
                     ) : (
-                        <div className="grid grid-cols-3 gap-4">
-                            {files.map((file) => (
-                                <div 
-                                    key={file.id}
-                                    onClick={() => onSelect(file.url)}
-                                    className="bg-white rounded-lg border border-gray-200 p-2 cursor-pointer hover:border-blue-500 hover:ring-2 hover:ring-blue-200 transition-all group"
+                        <>
+                            {currentPath !== '/' && (
+                                <button 
+                                    onClick={handleBackClick} 
+                                    className="flex items-center gap-2 text-sm text-gray-600 mb-4 hover:text-blue-600 font-medium px-2 py-1 rounded hover:bg-white"
                                 >
-                                    <div className="aspect-video bg-gray-100 rounded overflow-hidden mb-2 relative flex items-center justify-center">
-                                        {file.type === 'image' ? (
-                                            <img src={file.url} className="w-full h-full object-cover" alt="prev" />
-                                        ) : (
-                                            <Video size={24} className="text-gray-400" />
-                                        )}
+                                    <ArrowLeft size={16} /> Back to parent
+                                </button>
+                            )}
+
+                            {/* Folders */}
+                            {folders.length > 0 && (
+                                <div className="mb-6">
+                                    <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-2 tracking-wider">Folders</h4>
+                                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+                                        {folders.map(folder => (
+                                            <div 
+                                                key={folder.id} 
+                                                onClick={() => handleFolderClick(folder.name)}
+                                                className="bg-white p-3 rounded-lg border border-gray-200 cursor-pointer hover:border-blue-400 hover:shadow-sm flex flex-col items-center gap-2 transition-all"
+                                            >
+                                                <Folder size={28} className="text-yellow-400 fill-yellow-100" />
+                                                <span className="text-xs font-medium text-gray-700 truncate w-full text-center">{folder.name}</span>
+                                            </div>
+                                        ))}
                                     </div>
-                                    <div className="text-xs font-medium text-gray-700 truncate">{file.filename}</div>
                                 </div>
-                            ))}
-                        </div>
+                            )}
+
+                            {/* Files */}
+                            <div>
+                                <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-2 tracking-wider">Files</h4>
+                                {files.length === 0 ? (
+                                    <div className="text-center py-8 text-gray-400 text-sm italic border-2 border-dashed border-gray-200 rounded-lg">
+                                        No matching {allowedType.toLowerCase()}s found in this folder.
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                                        {files.map((file) => (
+                                            <div 
+                                                key={file.id}
+                                                onClick={() => onSelect(file.url)}
+                                                className="bg-white rounded-lg border border-gray-200 p-2 cursor-pointer hover:border-blue-500 hover:ring-2 hover:ring-blue-200 transition-all group"
+                                            >
+                                                <div className="aspect-video bg-gray-100 rounded overflow-hidden mb-2 relative flex items-center justify-center">
+                                                    {file.type === 'image' ? (
+                                                        <img src={file.url} className="w-full h-full object-cover" alt="prev" />
+                                                    ) : (
+                                                        <Video size={24} className="text-gray-400" />
+                                                    )}
+                                                </div>
+                                                <div className="text-xs font-medium text-gray-700 truncate px-1" title={file.filename}>{file.filename}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </>
                     )}
                 </div>
             </div>

@@ -1,16 +1,19 @@
+
 import { create } from 'zustand';
 import {
+  addEdge,
+  applyNodeChanges,
+  applyEdgeChanges,
+} from '@xyflow/react';
+import type {
   Connection,
   Edge,
   EdgeChange,
   Node,
   NodeChange,
-  addEdge,
   OnNodesChange,
   OnEdgesChange,
   OnConnect,
-  applyNodeChanges,
-  applyEdgeChanges,
 } from '@xyflow/react';
 import { BotSettings, BotStep } from '../types';
 
