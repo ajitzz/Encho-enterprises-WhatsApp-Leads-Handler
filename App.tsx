@@ -10,17 +10,17 @@ import { BotBuilder } from './components/BotBuilder';
 import { AITraining } from './components/AITraining';
 import { AssistantChat } from './components/AssistantChat';
 import { MediaLibrary } from './components/MediaLibrary';
-import { PublicShowcase } from './components/PublicShowcase'; 
-import { SystemMonitor } from './components/SystemMonitor'; 
+import { PublicShowcase } from './components/PublicShowcase'; // New Import
+import { SystemMonitor } from './components/SystemMonitor'; // NEW
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
-import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split, Bot, Key } from 'lucide-react';
+import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Split, Bot } from 'lucide-react';
 
 export default function App() {
+  // ROUTING CHECK: Supports /showcase and /showcase/:folderName
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
   const [showcaseFolderName, setShowcaseFolderName] = useState<string | undefined>(undefined);
-  const [hasApiKey, setHasApiKey] = useState(true);
 
   useEffect(() => {
       const path = window.location.pathname;
@@ -32,26 +32,11 @@ export default function App() {
           }
       }
       
+      // Request Notification Permission
       if ("Notification" in window) {
           Notification.requestPermission();
       }
-
-      // Check for API Key in browser environment
-      const checkKey = async () => {
-          if (window.aistudio && typeof window.aistudio.hasSelectedApiKey === 'function') {
-              const has = await window.aistudio.hasSelectedApiKey();
-              setHasApiKey(has);
-          }
-      };
-      checkKey();
   }, []);
-
-  const handleOpenKeySelector = async () => {
-    if (window.aistudio && typeof window.aistudio.openSelectKey === 'function') {
-        await window.aistudio.openSelectKey();
-        setHasApiKey(true);
-    }
-  };
 
   const [activeTab, setActiveTab] = useState('dashboard');
   const [drivers, setDrivers] = useState<Driver[]>([]);
@@ -61,11 +46,15 @@ export default function App() {
   const [showWebhookModal, setShowWebhookModal] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   
+  // Data Source Toggle: 'mock' or 'live'
   const [dataSource, setDataSource] = useState<'mock' | 'live'>('mock');
+
+  // Bot Strategy for Dashboard
   const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
 
+  // Sync with backend (Mock or Live)
   useEffect(() => {
-    if (isShowcaseMode) return; 
+    if (isShowcaseMode) return; // Don't fetch admin data in showcase mode
 
     let unsubscribe: () => void = () => {};
 
@@ -76,23 +65,28 @@ export default function App() {
          unsubscribe = mockBackend.subscribe(() => {
              setDrivers(mockBackend.getDrivers());
              setBotSettings(mockBackend.getBotSettings());
+             // Update selected driver if open
              if (selectedDriver) {
                 const updated = mockBackend.getDriver(selectedDriver.id);
                 if (updated) setSelectedDriver(updated);
              }
          });
       } else {
+         // Live Mode: Poll the real server
          try {
            const data = await liveApiService.getDrivers();
            setDrivers(data);
            const settings = await liveApiService.getBotSettings();
            setBotSettings(settings);
 
+           // Subscribe triggers polling internally (now every 2s)
            unsubscribe = liveApiService.subscribeToUpdates(async () => {
                try {
                    const updated = await liveApiService.getDrivers();
                    setDrivers(updated);
-               } catch (e) {}
+               } catch (e) {
+                   // Silent fail on poll error to avoid spamming console
+               }
            });
            
            addNotification({
@@ -114,23 +108,29 @@ export default function App() {
     return () => unsubscribe();
   }, [dataSource, activeTab, isShowcaseMode]); 
 
+  // Auto-sync Chat Drawer when polling updates the drivers list
   useEffect(() => {
     if (selectedDriver && dataSource === 'live') {
       const updated = drivers.find(d => d.id === selectedDriver.id);
+      // If we found the driver in the new list, update the selectedDriver state
+      // to reflect new messages/status
       if (updated && updated !== selectedDriver) {
         setSelectedDriver(updated);
       }
     }
   }, [drivers, selectedDriver, dataSource]);
 
+  // Notification Handler
   const addNotification = (notif: Omit<AppNotification, 'id'>) => {
     const newNotif = { ...notif, id: Date.now().toString() + Math.random() };
     setNotifications(prev => [newNotif, ...prev]);
     
+    // Browser Notification Support
     if (notif.title.includes('Incoming') || notif.title.includes('Call')) {
          if ("Notification" in window && Notification.permission === "granted") {
              new Notification(notif.title, { body: notif.message });
          }
+         // Play Sound (Simple Beep Simulation)
          try {
              const audio = new Audio('https://codeskulptor-demos.commondatastorage.googleapis.com/pang/pop.mp3');
              audio.play();
@@ -146,6 +146,7 @@ export default function App() {
     setNotifications(prev => prev.filter(n => n.id !== id));
   };
 
+  // Handlers
   const handleUpdateDriver = async (id: string, updates: Partial<Driver>) => {
     if (dataSource === 'mock') {
         if (updates.status) mockBackend.updateDriverStatus(id, updates.status);
@@ -153,6 +154,7 @@ export default function App() {
     } else {
         try {
             await liveApiService.updateDriver(id, updates);
+            // Optimistic update
             const updated = drivers.map(d => d.id === id ? { ...d, ...updates } : d);
             setDrivers(updated);
             if (selectedDriver && selectedDriver.id === id) {
@@ -179,6 +181,7 @@ export default function App() {
     } else {
         try {
             await liveApiService.sendMessage(selectedDriver.id, text);
+            // Optimistic update for immediate feedback
             const msg: Message = {
                 id: Date.now().toString(),
                 sender: 'agent',
@@ -201,6 +204,7 @@ export default function App() {
   };
 
   const handleSendWelcome = (driver: Driver) => {
+    // S3 URL PLACEHOLDER - In a real scenario, this would come from the Media Library
     const welcomeVideoUrl = "https://your-s3-bucket.s3.amazonaws.com/welcome-video.mp4"; 
     
     if (dataSource === 'mock') {
@@ -255,6 +259,7 @@ export default function App() {
       if (!botSettings) return;
       const newSettings = { ...botSettings, routingStrategy: strategy };
       
+      // Optimistic Update
       setBotSettings(newSettings);
 
       if (dataSource === 'mock') {
@@ -268,6 +273,7 @@ export default function App() {
       }
   };
 
+  // Derived Stats
   const stats = {
     total: drivers.length,
     flagged: drivers.filter(d => d.status === LeadStatus.FLAGGED_FOR_REVIEW).length,
@@ -275,38 +281,21 @@ export default function App() {
     new: drivers.filter(d => d.status === LeadStatus.NEW).length
   };
 
+  // RENDER: PUBLIC SHOWCASE MODE
   if (isShowcaseMode) {
       return <PublicShowcase folderName={showcaseFolderName} />;
   }
 
+  // RENDER: ADMIN APP
   return (
     <>
-      {!hasApiKey && (
-        <div className="fixed inset-0 z-[200] bg-black/80 backdrop-blur-md flex items-center justify-center p-4 text-center">
-            <div className="bg-white rounded-2xl p-8 max-w-md shadow-2xl">
-                <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-6">
-                    <Key size={32} />
-                </div>
-                <h2 className="text-2xl font-bold mb-2">AI Activation Required</h2>
-                <p className="text-gray-600 mb-8">
-                    To use AI recruitment features in the browser, you must select your Google Gemini API key.
-                </p>
-                <button 
-                    onClick={handleOpenKeySelector}
-                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition-all shadow-lg"
-                >
-                    Select API Key
-                </button>
-                <p className="mt-4 text-xs text-gray-400 leading-relaxed">
-                    Note: Billing documentation available at <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" className="underline">ai.google.dev/gemini-api/docs/billing</a>
-                </p>
-            </div>
-        </div>
-      )}
-
       <Layout activeTab={activeTab} onTabChange={setActiveTab}>
+        
+        {/* VIEW: DASHBOARD & LEADS */}
         {(activeTab === 'dashboard' || activeTab === 'leads') && (
         <div className="p-8 max-w-7xl mx-auto space-y-8">
+          
+          {/* Header & Stats (Dashboard Only) */}
           {activeTab === 'dashboard' && (
             <>
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -316,6 +305,7 @@ export default function App() {
                  </div>
                  
                  <div className="flex items-center gap-2">
+                   {/* Routing Strategy Widget */}
                    {botSettings && (
                      <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg p-1 shadow-sm mr-2">
                          <button 
@@ -413,6 +403,7 @@ export default function App() {
             </>
           )}
 
+          {/* Table Area */}
           <div className="h-[600px] flex flex-col">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-bold text-gray-900">
@@ -446,10 +437,16 @@ export default function App() {
         </div>
         )}
 
+        {/* VIEW: MEDIA LIBRARY (New) */}
         {activeTab === 'media-library' && <MediaLibrary />}
+
+        {/* VIEW: BOT STUDIO */}
         {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
+
+        {/* VIEW: AI TRAINING */}
         {activeTab === 'ai-training' && <AITraining isLiveMode={dataSource === 'live'} />}
 
+        {/* Modals & Drawers */}
         {showWebhookModal && (
           <WebhookConfigModal 
             onClose={() => setShowWebhookModal(false)}
@@ -482,10 +479,16 @@ export default function App() {
           onUpdateDriver={handleUpdateDriver}
         />
         
+        {/* NEW: Fleet Commander Assistant (Jarvis) */}
         {dataSource === 'live' && <AssistantChat />}
+        
+        {/* NEW: System Monitor */}
         {dataSource === 'live' && <SystemMonitor />}
+        
         <NotificationToast notifications={notifications} onDismiss={removeNotification} />
       </Layout>
+      
+      {/* Simulator: Updated to use new Bot Logic */}
       {dataSource === 'mock' && <Simulator onNotify={addNotification} />}
     </>
   );

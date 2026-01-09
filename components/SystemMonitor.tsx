@@ -1,5 +1,7 @@
 
-import { Activity, Database, Brain, Cloud, Wifi, ArrowUpCircle, Clock, AlertCircle } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { liveApiService } from '../services/liveApiService';
+import { Activity, Database, Brain, Cloud, Wifi, ArrowUpCircle, Clock } from 'lucide-react';
 import { SystemStats } from '../types';
 
 interface ExtendedSystemStats extends SystemStats {
@@ -30,22 +32,13 @@ export const SystemMonitor = () => {
         return `${h}h ${m}m`;
     };
 
-    const getAIStatusColor = (model: string) => {
-        if (model.includes('3-flash')) return 'text-purple-400';
-        if (model.includes('lite')) return 'text-amber-400';
-        if (model.includes('heuristic')) return 'text-red-400';
-        return 'text-gray-400';
-    };
-
     if (!stats) return null;
-
-    const isFallback = stats.aiModel.includes('lite') || stats.aiModel.includes('heuristic');
 
     return (
         <div className={`fixed bottom-0 left-0 right-0 z-40 transition-transform duration-300 ${isOpen ? 'translate-y-0' : 'translate-y-[calc(100%-4px)]'}`}>
             {/* Minimal Strip (Always Visible) */}
             <div 
-                className={`h-1 bg-gradient-to-r ${isFallback ? 'from-amber-500 to-red-500' : 'from-green-500 via-blue-500 to-purple-500'} cursor-pointer hover:h-2 transition-all`}
+                className="h-1 bg-gradient-to-r from-green-500 via-blue-500 to-purple-500 cursor-pointer hover:h-2 transition-all"
                 onClick={() => setIsOpen(!isOpen)}
                 title="System Monitor"
             />
@@ -66,21 +59,12 @@ export const SystemMonitor = () => {
                     </div>
 
                     <div className="flex items-center gap-2" title="Active AI Model & Credits">
-                        <Brain size={14} className={getAIStatusColor(stats.aiModel)} />
+                        <Brain size={14} className="text-purple-400" />
                         <span className="text-gray-400">AI:</span>
-                        <div className="flex flex-col">
-                            <span className={`font-bold ${getAIStatusColor(stats.aiModel)}`}>
-                                {stats.aiModel.includes('heuristic') ? 'LOCAL' : stats.aiModel.split('-').slice(1).join('-').toUpperCase()}
-                            </span>
-                            {isFallback && (
-                                <span className="text-[8px] text-amber-500 flex items-center gap-0.5 animate-pulse">
-                                    <AlertCircle size={8} /> QUOTA FALLBACK
-                                </span>
-                            )}
-                        </div>
+                        <span className="font-bold">{stats.aiModel.split('-')[1]}</span>
                         <div className="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden ml-1">
                             <div 
-                                className={`h-full ${isFallback ? 'bg-amber-500' : 'bg-purple-500'} transition-all duration-500`} 
+                                className="h-full bg-purple-500 transition-all duration-500" 
                                 style={{ width: `${stats.aiCredits}%` }}
                             />
                         </div>
@@ -103,15 +87,15 @@ export const SystemMonitor = () => {
 
                     <div className="flex items-center gap-2">
                         <span className={`w-2 h-2 rounded-full ${stats.s3Status === 'ok' ? 'bg-green-500' : 'bg-red-500'}`} />
-                        <span className="text-gray-400">S3</span>
+                        <span className="text-gray-500">S3</span>
                     </div>
 
                     <div className="flex items-center gap-2">
                         <span className={`w-2 h-2 rounded-full ${stats.whatsappStatus === 'ok' ? 'bg-green-500' : 'bg-amber-500'}`} />
-                        <span className="text-gray-400">WA</span>
+                        <span className="text-gray-500">WhatsApp</span>
                     </div>
                     
-                    <button onClick={() => setIsOpen(false)} className="text-gray-500 hover:text-white ml-2">
+                    <button onClick={() => setIsOpen(false)} className="text-gray-500 hover:text-white">
                         <ArrowUpCircle size={14} className="rotate-180" />
                     </button>
                 </div>
@@ -119,4 +103,3 @@ export const SystemMonitor = () => {
         </div>
     );
 };
-import React, { useEffect, useState } from 'react';
