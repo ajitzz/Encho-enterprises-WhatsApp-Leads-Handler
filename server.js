@@ -224,6 +224,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
            }
        } catch(e) {}
 
+       // CRITICAL FIX: Use provided mediaType (video/image) or default to image
        const type = mediaType || 'image';
        payload.type = type;
        
@@ -679,7 +680,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
     if (driver.is_human_mode) return;
 
     // 3. LOGIC ENGINE
-    let replyText = null; let replyOptions = null; let replyMedia = null; 
+    let replyText = null; let replyOptions = null; let replyMedia = null; let replyMediaType = null;
     let updates = {};
 
     // Allow processing if: Bot Enabled GLOBALLY AND (Driver is Active OR Repeat Mode is ON)
@@ -705,6 +706,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
                 if (entryStep.linkLabel && entryStep.message) replyText = `${entryStep.linkLabel}\n${entryStep.message}`;
                 replyOptions = entryStep.options;
                 replyMedia = entryStep.mediaUrl;
+                replyMediaType = entryStep.mediaType; // CRITICAL: Extract media type (video/image)
                 // We stop here. The user's input "Hello" woke up the bot. 
             }
         } 
@@ -736,6 +738,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
                     if (nextStep.linkLabel && nextStep.message) replyText = `${nextStep.linkLabel}\n${nextStep.message}`;
                     replyOptions = nextStep.options;
                     replyMedia = nextStep.mediaUrl;
+                    replyMediaType = nextStep.mediaType; // CRITICAL: Extract media type (video/image)
                 }
             } else if (nextId === 'END' || nextId === 'AI_HANDOFF') {
                 if (botSettings.shouldRepeat) {
@@ -753,8 +756,9 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
     } 
 
     if (replyText || replyMedia) {
-        const sent = await sendWhatsAppMessage(from, replyText, replyOptions, null, 'en_US', replyMedia);
-        if (sent) await logSystemMessage(driver.id, replyText || '[Media]', 'text');
+        // PASS MEDIA TYPE TO HELPER
+        const sent = await sendWhatsAppMessage(from, replyText, replyOptions, null, 'en_US', replyMedia, replyMediaType);
+        if (sent) await logSystemMessage(driver.id, replyText || `[Media: ${replyMediaType || 'image'}]`, 'text');
     }
 
     if (Object.keys(updates).length > 0) {

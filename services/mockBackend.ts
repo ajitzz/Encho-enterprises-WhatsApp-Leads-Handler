@@ -144,12 +144,19 @@ class MockBackendService {
                  driver.currentBotStepId = entryStep.id;
                  driver.isBotActive = true; // Reactivate
                  
+                 // Determine correct message type for simulator
+                 let msgType: any = entryStep.options ? 'options' : 'text';
+                 if (entryStep.mediaUrl) {
+                    if (entryStep.mediaType === 'video') msgType = 'video_link'; // Use video_link type for videos
+                    else msgType = 'image';
+                 }
+
                  replyMsg = {
                     id: Date.now().toString() + '_bot',
                     sender: 'system',
                     text: entryStep.message,
                     timestamp: Date.now() + 500,
-                    type: entryStep.options ? 'options' : 'text',
+                    type: msgType,
                     options: entryStep.options,
                     imageUrl: entryStep.mediaUrl
                 };
@@ -191,12 +198,19 @@ class MockBackendService {
                 driver.currentBotStepId = nextId;
                 const nextStep = settings.steps.find(s => s.id === nextId);
                 if (nextStep) {
+                     // Determine correct message type for simulator
+                     let msgType: any = nextStep.options ? 'options' : 'text';
+                     if (nextStep.mediaUrl) {
+                        if (nextStep.mediaType === 'video') msgType = 'video_link'; // Use video_link type for videos
+                        else msgType = 'image';
+                     }
+
                      replyMsg = {
                         id: Date.now().toString() + '_bot',
                         sender: 'system',
                         text: nextStep.message,
                         timestamp: Date.now() + 500,
-                        type: nextStep.options ? 'options' : 'text',
+                        type: msgType,
                         options: nextStep.options,
                         imageUrl: nextStep.mediaUrl
                     };
