@@ -80,8 +80,12 @@ const queryWithRetry = async (text, params, retries = 3) => {
     }
 };
 
-// --- INIT DB ---
+// --- INIT DB (LAZY LOADING) ---
+// We track initialization to avoid hitting the DB with CREATE TABLE on every request
+let isDbInitialized = false;
+
 const initDB = async () => {
+    if (isDbInitialized) return;
     try {
         await queryWithRetry(`
             CREATE TABLE IF NOT EXISTS drivers (
@@ -130,12 +134,21 @@ const initDB = async () => {
         `);
         // Insert default settings if not exists
         await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT DO NOTHING`, [JSON.stringify({ isEnabled: true, steps: [] })]);
-        console.log("Database initialized");
+        isDbInitialized = true;
+        console.log("Database initialized (Lazy)");
     } catch (e) {
         console.error("DB Init Failed:", e);
+        // Do not block execution, allow retry on next request
     }
 };
-initDB();
+
+// Middleware to ensure DB is ready before handling request
+const ensureDbReady = async (req, res, next) => {
+    await initDB();
+    next();
+};
+
+app.use('/api', ensureDbReady);
 
 // --- HELPER FUNCTIONS ---
 const isContentSafe = (text) => {
@@ -325,10 +338,16 @@ router.get('/media', async (req, res) => {
     try {
         const { path } = req.query;
         const safePath = path || '/';
+        
+        // Debug Log
+        console.log(`[Media] Fetching for path: ${safePath}`);
+
         const filesRes = await queryWithRetry('SELECT * FROM files WHERE folder_path = $1', [safePath]);
         const foldersRes = await queryWithRetry('SELECT * FROM folders WHERE parent_path = $1', [safePath]);
+        
         res.json({ files: filesRes.rows, folders: foldersRes.rows });
     } catch (e) {
+        console.error("Media Error:", e);
         res.status(500).json({ error: e.message });
     }
 });

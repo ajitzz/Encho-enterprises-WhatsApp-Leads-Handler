@@ -30,6 +30,7 @@ export const MediaLibrary = () => {
     const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'error'>('idle');
     const [uploadError, setUploadError] = useState('');
     const [isLoadingContent, setIsLoadingContent] = useState(false);
+    const [loadingError, setLoadingError] = useState(''); // New: Track fetch errors
     const [copiedId, setCopiedId] = useState<string | null>(null);
     const [isDeleting, setIsDeleting] = useState<string | null>(null);
     const [isSyncing, setIsSyncing] = useState<string | null>(null);
@@ -72,12 +73,20 @@ export const MediaLibrary = () => {
 
     const loadMedia = async (path: string) => {
         setIsLoadingContent(true);
+        setLoadingError('');
         try {
             const data = await liveApiService.getMediaLibrary(path);
-            setFiles(data.files);
-            setFolders(data.folders);
-        } catch (e) {
-            console.error("Failed to load media library");
+            if (data) {
+                setFiles(data.files || []);
+                setFolders(data.folders || []);
+            } else {
+                throw new Error("Invalid response");
+            }
+        } catch (e: any) {
+            console.error("Failed to load media library", e);
+            setLoadingError("Could not connect to Media Server. Please check your connection.");
+            setFiles([]);
+            setFolders([]);
         } finally {
             setIsLoadingContent(false);
         }
@@ -379,6 +388,16 @@ export const MediaLibrary = () => {
                 </div>
 
                 <div className="mb-6 shrink-0">{renderBreadcrumbs()}</div>
+                
+                {loadingError && (
+                    <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between">
+                         <div className="flex items-center gap-2 text-red-700">
+                             <AlertTriangle size={20} />
+                             <span className="font-medium text-sm">{loadingError}</span>
+                         </div>
+                         <button onClick={() => loadMedia(currentPath)} className="text-xs bg-white border border-red-200 px-3 py-1.5 rounded-lg text-red-700 font-bold hover:bg-red-100">Retry Connection</button>
+                    </div>
+                )}
 
                 <div className="flex-1 overflow-y-auto pb-20">
                     {isLoadingContent ? renderSkeletons() : (

@@ -85,8 +85,10 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
     const [isMuted, setIsMuted] = useState(true); // Default muted for auto-play compatibility
     const [isOfflineMode, setIsOfflineMode] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
+    const isMounted = useRef(true);
 
     useEffect(() => {
+        isMounted.current = true;
         const loadShowcase = async () => {
             const cacheKey = `showcase_v1_${folderName || 'root'}`;
             let loadedFromCache = false;
@@ -98,10 +100,12 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                 try {
                     const parsed = JSON.parse(cachedData);
                     if (parsed.items && parsed.items.length > 0) {
-                        setItems(parsed.items);
-                        setTitle(parsed.title);
-                        setLoading(false); // Render immediately
-                        loadedFromCache = true;
+                        if(isMounted.current) {
+                            setItems(parsed.items);
+                            setTitle(parsed.title);
+                            setLoading(false); 
+                            loadedFromCache = true;
+                        }
                     }
                 } catch(e) { console.error("Cache parse error", e); }
             }
@@ -110,7 +114,7 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                 // 2. Fetch Fresh Data (API Strategy)
                 const data = await liveApiService.getPublicShowcase(folderName);
                 
-                if (data && data.items) {
+                if (isMounted.current && data && data.items) {
                     setItems(data.items);
                     setTitle(data.title || 'Showcase');
                     setIsOfflineMode(false); // We are online
@@ -129,11 +133,13 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                     const s3Res = await fetch(s3Url);
                     if (s3Res.ok) {
                         const s3Data = await s3Res.json();
-                        setItems(s3Data.items || []);
-                        setTitle(s3Data.title || 'Showcase (Archive)');
-                        setIsOfflineMode(true);
-                        // Update cache with S3 data
-                        localStorage.setItem(cacheKey, JSON.stringify(s3Data));
+                        if(isMounted.current) {
+                            setItems(s3Data.items || []);
+                            setTitle(s3Data.title || 'Showcase (Archive)');
+                            setIsOfflineMode(true);
+                            // Update cache with S3 data
+                            localStorage.setItem(cacheKey, JSON.stringify(s3Data));
+                        }
                     } else {
                         // If both API and S3 fail, stick with cache if we have it
                         if (!loadedFromCache) throw new Error("S3 Manifest not found");
@@ -144,11 +150,12 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                     // If no cache, we show empty state.
                 }
             } finally {
-                setLoading(false);
+                if(isMounted.current) setLoading(false);
             }
         };
         
         loadShowcase();
+        return () => { isMounted.current = false; };
     }, [folderName]);
 
     const handleScroll = () => {
