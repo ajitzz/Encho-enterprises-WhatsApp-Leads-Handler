@@ -106,7 +106,7 @@ class MockBackendService {
         onboardingStep: OnboardingStep.WELCOME_SENT,
         qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
         isBotActive: shouldActivateBot,
-        currentBotStepId: entryPointId,
+        currentBotStepId: undefined, // Start with UNDEFINED to trigger wake-up
         isHumanMode: false,
         notes: ''
       };
@@ -134,7 +134,7 @@ class MockBackendService {
     if (settings.isEnabled && driver.isBotActive) {
         let currentStep = settings.steps.find(s => s.id === driver.currentBotStepId);
         
-        // CASE 1: RESTART / WAKE UP
+        // CASE 1: RESTART / WAKE UP / INITIALIZE
         if (!currentStep && settings.steps.length > 0) {
             const entryStep = settings.steps.find(s => s.id === entryPointId) || settings.steps[0];
             if (entryStep) {
@@ -200,7 +200,7 @@ class MockBackendService {
                     }
                     this.addMessage(driver.id, replyMsg);
                 }
-            } else {
+            } else if (nextId === 'END' || nextId === 'AI_HANDOFF') {
                 // End of Flow - Logic Update for Repeat
                 if (settings.shouldRepeat) {
                     // Loop enabled: Keep active, reset step to null

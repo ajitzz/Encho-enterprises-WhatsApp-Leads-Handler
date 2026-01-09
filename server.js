@@ -661,7 +661,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
             const iRes = await client.query(
                 `INSERT INTO drivers (id, phone_number, name, source, status, last_message, last_message_time, current_bot_step_id, is_bot_active, is_human_mode)
                 VALUES ($1, $2, $3, 'WhatsApp', 'New', $4, $5, $6, $7, false) RETURNING *`,
-                [Date.now().toString(), from, name, msgBody, Date.now(), entryPointId, isActive]
+                [Date.now().toString(), from, name, msgBody, Date.now(), null, isActive]
             );
             driver = iRes.rows[0];
         } else {
@@ -684,8 +684,8 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
     if (driver.is_bot_active && botSettings.isEnabled) {
         let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
         
-        // CASE 1: RESTART / WAKE UP FROM LOOP
-        // If current step is NULL, it means the bot finished a loop and is waiting.
+        // CASE 1: RESTART / WAKE UP FROM LOOP / NEW USER
+        // If current step is NULL, it means the bot finished a loop or is new.
         // The incoming message (e.g., "Hello") triggers the Welcome message.
         if (!currentStep && botSettings.steps.length > 0) {
             const entryStep = botSettings.steps.find(s => s.id === botSettings.entryPointId) || botSettings.steps[0];
@@ -699,7 +699,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
                 replyOptions = entryStep.options;
                 replyMedia = entryStep.mediaUrl;
                 // We stop here. The user's input "Hello" woke up the bot. 
-                // We do NOT treat "Hello" as the answer to the first question yet.
             }
         } 
         // CASE 2: NORMAL FLOW
