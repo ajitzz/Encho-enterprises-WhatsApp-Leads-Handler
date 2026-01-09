@@ -199,45 +199,59 @@ const logSystemMessage = async (driverId, text, type = 'text') => {
  */
 const uploadShowcaseManifest = async (folderIdOrPath) => {
     try {
-        if (!folderIdOrPath || folderIdOrPath === '/') return; // Cannot showcase root
+        let manifestItems = [];
+        let manifestTitle = "Showcase";
+        let manifestName = "";
+        
+        // --- CASE 1: ROOT FOLDER (Main Library) ---
+        if (!folderIdOrPath || folderIdOrPath === '/') {
+            // We treat root as the default "latest" or "root" showcase
+            manifestTitle = "Main Library";
+            manifestName = "root";
+            const filesRes = await queryWithRetry('SELECT id, url, type, filename FROM files WHERE folder_path = $1', ['/']);
+            manifestItems = filesRes.rows;
+        } 
+        // --- CASE 2: SUB-FOLDER ---
+        else {
+            let folder;
+            
+            // Resolve folder by ID or Path
+            if (folderIdOrPath.startsWith('fold_') || !folderIdOrPath.includes('/')) {
+                 const fRes = await queryWithRetry('SELECT * FROM folders WHERE id = $1', [folderIdOrPath]);
+                 folder = fRes.rows[0];
+            } else {
+                 const parts = folderIdOrPath.split('/').filter(Boolean);
+                 const name = parts.pop();
+                 const parent = parts.length > 0 ? `/${parts.join('/')}` : '/';
+                 const fRes = await queryWithRetry('SELECT * FROM folders WHERE name = $1 AND parent_path = $2', [name, parent]);
+                 folder = fRes.rows[0];
+            }
 
-        let folder;
-        // Determine if ID or Path
-        if (folderIdOrPath.includes('/')) {
-             const parts = folderIdOrPath.split('/').filter(Boolean);
-             if (parts.length === 0) return;
-             
-             const name = parts.pop();
-             const parent = parts.length > 0 ? `/${parts.join('/')}` : '/';
-             const fRes = await queryWithRetry('SELECT * FROM folders WHERE name = $1 AND parent_path = $2', [name, parent]);
-             folder = fRes.rows[0];
-        } else {
-             const fRes = await queryWithRetry('SELECT * FROM folders WHERE id = $1', [folderIdOrPath]);
-             folder = fRes.rows[0];
+            if (!folder || !folder.is_public_showcase) return; // Skip if not found or not public
+
+            manifestTitle = folder.name;
+            manifestName = folder.name;
+            const path = folder.parent_path === '/' ? `/${folder.name}` : `${folder.parent_path}/${folder.name}`;
+            const filesRes = await queryWithRetry('SELECT id, url, type, filename FROM files WHERE folder_path = $1', [path]);
+            manifestItems = filesRes.rows;
         }
 
-        if (!folder || !folder.is_public_showcase) return;
-
-        const path = folder.parent_path === '/' ? `/${folder.name}` : `${folder.parent_path}/${folder.name}`;
-        const filesRes = await queryWithRetry('SELECT id, url, type, filename FROM files WHERE folder_path = $1', [path]);
-
         const manifest = {
-            title: folder.name,
+            title: manifestTitle,
             lastUpdated: Date.now(),
-            items: filesRes.rows
+            items: manifestItems
         };
 
-        const key = `manifests/${folder.name}.json`;
-        
+        // Upload specific manifest (e.g., "root.json" or "Marketing.json")
         await s3Client.send(new PutObjectCommand({
             Bucket: BUCKET_NAME,
-            Key: key,
+            Key: `manifests/${manifestName}.json`,
             Body: JSON.stringify(manifest),
             ContentType: "application/json",
             CacheControl: "no-cache, no-store, must-revalidate"
         }));
 
-        // Also update 'latest.json' pointer
+        // Upload "latest.json" (Pointer to most recently updated)
         await s3Client.send(new PutObjectCommand({
             Bucket: BUCKET_NAME,
             Key: `manifests/latest.json`,
@@ -246,7 +260,7 @@ const uploadShowcaseManifest = async (folderIdOrPath) => {
             CacheControl: "no-cache, no-store, must-revalidate"
         }));
         
-        console.log(`[Manifest] Updated for ${folder.name}`);
+        console.log(`[Manifest] Updated: manifests/${manifestName}.json`);
     } catch(e) {
         console.error("Manifest Update Failed:", e.message);
     }
@@ -378,10 +392,8 @@ router.post('/files/register', async (req, res) => {
         await queryWithRetry(`INSERT INTO files (id, filename, url, type, folder_path) VALUES ($1, $2, $3, $4, $5)`, [id, filename, url, type, folderPath]);
         
         // --- MANIFEST UPDATE ---
-        // Only update manifest if not root, or if logic allows.
-        if (folderPath && folderPath !== '/') {
-            uploadShowcaseManifest(folderPath).catch(console.error);
-        }
+        // Always attempt manifest update, even for root
+        uploadShowcaseManifest(folderPath).catch(console.error);
         
         res.json({ success: true, id });
     } catch (e) {
@@ -396,7 +408,7 @@ router.delete('/files/:id', async (req, res) => {
         
         await queryWithRetry('DELETE FROM files WHERE id = $1', [req.params.id]);
         
-        if (fRes.rows.length > 0 && fRes.rows[0].folder_path !== '/') {
+        if (fRes.rows.length > 0) {
              uploadShowcaseManifest(fRes.rows[0].folder_path).catch(console.error);
         }
 
@@ -456,7 +468,14 @@ router.get('/public/showcase', async (req, res) => {
         }
         
         const fRes = await queryWithRetry(query, params);
-        if (fRes.rows.length === 0) return res.json({ title: 'Showcase', items: [] });
+        
+        // If not looking for a specific folder and none are marked public, 
+        // fall back to showing root items (if intended).
+        // But strictly for showcase logic, if user provided a folder and it's missing, return empty.
+        
+        if (fRes.rows.length === 0) {
+            return res.json({ title: 'Showcase', items: [] });
+        }
         
         const targetFolder = fRes.rows[0];
         const path = targetFolder.parent_path === '/' ? `/${targetFolder.name}` : `${targetFolder.parent_path}/${targetFolder.name}`;

@@ -114,18 +114,23 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                 // 2. Fetch Fresh Data (API Strategy)
                 const data = await liveApiService.getPublicShowcase(folderName);
                 
-                if (isMounted.current && data && data.items) {
+                if (isMounted.current && data && data.items && data.items.length > 0) {
                     setItems(data.items);
                     setTitle(data.title || 'Showcase');
                     setIsOfflineMode(false); // We are online
                     localStorage.setItem(cacheKey, JSON.stringify(data));
+                } else if (data && (!data.items || data.items.length === 0)) {
+                    // API returned empty items, likely meaning no live data found.
+                    // Throw error to trigger S3 fallback if available.
+                    throw new Error("Empty API Response");
                 }
             } catch (e) {
-                console.warn("Primary API Failed. Attempting S3 Manifest Fallback...", e);
+                console.warn("Primary API Failed or Empty. Attempting S3 Manifest Fallback...", e);
                 
                 // 3. FALLBACK STRATEGY: Fetch Static JSON from S3
-                // If API is down, we try to get the manifest directly from the bucket
-                const manifestName = folderName ? `${encodeURIComponent(folderName)}.json` : `latest.json`;
+                // If API is down or empty, we try to get the manifest directly from the bucket
+                // If folderName is missing, default to 'root.json' to show the main library
+                const manifestName = folderName ? `${encodeURIComponent(folderName)}.json` : `root.json`;
                 // Add timestamp to bust browser cache for S3 objects
                 const s3Url = `${FALLBACK_BUCKET_URL}/manifests/${manifestName}?t=${Date.now()}`;
 

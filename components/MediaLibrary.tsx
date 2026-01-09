@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye, Link as LinkIcon, ExternalLink, Share2, Power, Edit2, Pencil, AlertTriangle } from 'lucide-react';
+import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye, Link as LinkIcon, ExternalLink, Share2, Power, Edit2, Pencil, AlertTriangle, RefreshCcw } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface MediaFile {
@@ -350,6 +350,14 @@ export const MediaLibrary = () => {
                     </div>
                     
                     <div className="flex gap-3 items-center">
+                        <button 
+                            onClick={() => loadMedia(currentPath)}
+                            className="p-3 rounded-lg border border-gray-200 text-gray-500 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                            title="Refresh List"
+                        >
+                            <RefreshCcw size={18} className={isLoadingContent ? 'animate-spin' : ''} />
+                        </button>
+
                         {uploadStatus === 'error' && (
                             <div className="flex items-center gap-2">
                                 <div className="text-xs text-red-600 font-bold bg-red-50 px-3 py-2 rounded-lg border border-red-100 flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
@@ -401,6 +409,13 @@ export const MediaLibrary = () => {
 
                 <div className="flex-1 overflow-y-auto pb-20">
                     {isLoadingContent ? renderSkeletons() : (
+                        files.length === 0 && folders.length === 0 ? (
+                            <div className="flex flex-col items-center justify-center h-64 border-2 border-dashed border-gray-200 rounded-xl bg-gray-50/50">
+                                <Cloud size={48} className="text-gray-300 mb-3" />
+                                <p className="text-gray-500 font-medium text-sm">Folder is empty</p>
+                                <p className="text-gray-400 text-xs">Upload files to see them here.</p>
+                            </div>
+                        ) : (
                         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
                             {/* Folders */}
                             {folders.map(folder => (
@@ -514,6 +529,7 @@ export const MediaLibrary = () => {
                                 </div>
                             ))}
                         </div>
+                        )
                     )}
                 </div>
                 
