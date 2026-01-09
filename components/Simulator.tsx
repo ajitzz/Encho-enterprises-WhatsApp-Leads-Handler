@@ -1,7 +1,6 @@
 
 import React, { useState } from 'react';
 import { mockBackend } from '../services/mockBackend';
-import { analyzeMessage } from '../services/geminiService';
 import { MessageSquare, Upload, Smartphone, Facebook } from 'lucide-react';
 import { AppNotification } from '../types';
 
@@ -12,12 +11,10 @@ interface SimulatorProps {
 export const Simulator: React.FC<SimulatorProps> = ({ onNotify }) => {
   const [mode, setMode] = useState<'whatsapp' | 'ad'>('whatsapp');
   
-  // WhatsApp State
   const [phone, setPhone] = useState('+91 98765 43210');
   const [message, setMessage] = useState('');
   const [hasImage, setHasImage] = useState(false);
   
-  // Ad State
   const [adName, setAdName] = useState('Rahul Verma');
   const [adPhone, setAdPhone] = useState('+91 91234 56789');
 
@@ -35,54 +32,13 @@ export const Simulator: React.FC<SimulatorProps> = ({ onNotify }) => {
 
       // 1. Send Message to Backend (Bot Engine)
       const result = mockBackend.processIncomingMessage(phone, text, imageUrl);
-      const { driver, actionNeeded } = result;
+      const { driver } = result;
       
       onNotify({
         type: 'info',
         title: 'New Message',
         message: `Message received from ${driver.name}`
       });
-
-      // 2. If Bot didn't handle it, or Bot requested AI Handoff
-      if (actionNeeded === 'AI_REPLY') {
-          // Get current system instruction from settings
-          const settings = mockBackend.getBotSettings();
-          
-          const aiResult = await analyzeMessage(text, imageUrl, settings.systemInstruction);
-          
-          if (aiResult.extractedData) {
-             mockBackend.updateDriverDetails(driver.id, {
-                vehicleRegistration: aiResult.extractedData.vehicleRegistration || driver.vehicleRegistration,
-                availability: (aiResult.extractedData.availability as any) || driver.availability,
-                qualificationChecks: {
-                  ...driver.qualificationChecks,
-                  hasValidLicense: aiResult.extractedData.isLicenseValid || driver.qualificationChecks.hasValidLicense
-                }
-             });
-          }
-
-          if (aiResult.recommendedStatus && aiResult.recommendedStatus !== driver.status) {
-             mockBackend.updateDriverStatus(driver.id, aiResult.recommendedStatus);
-             if (aiResult.recommendedStatus === 'Flagged') {
-                onNotify({
-                  type: 'warning',
-                  title: 'AI Alert: Review Needed',
-                  message: `AI flagged ${driver.name} for manual review.`
-                });
-             }
-          }
-          
-          // Send AI Reply
-          setTimeout(() => {
-            mockBackend.addMessage(driver.id, {
-              id: Date.now().toString(),
-              sender: 'system',
-              text: `[AI]: ${aiResult.suggestedReply}`,
-              timestamp: Date.now(),
-              type: 'text'
-            });
-          }, 1000);
-      }
 
       setMessage('');
       setHasImage(false);
@@ -142,7 +98,6 @@ export const Simulator: React.FC<SimulatorProps> = ({ onNotify }) => {
         </button>
       </div>
 
-      {/* Tabs */}
       <div className="flex border-b border-gray-200">
         <button 
             onClick={() => setMode('whatsapp')}

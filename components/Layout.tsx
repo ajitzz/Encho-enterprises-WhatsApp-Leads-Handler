@@ -8,7 +8,6 @@ import {
   Car,
   Users,
   Bot,
-  Sparkles,
   Cloud
 } from 'lucide-react';
 
@@ -84,18 +83,6 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
           >
             <Bot size={20} />
             Bot Studio
-          </button>
-
-          <button
-            onClick={() => onTabChange('ai-training')}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${
-              activeTab === 'ai-training' 
-                ? 'bg-white text-black font-medium' 
-                : 'text-gray-400 hover:bg-gray-900 hover:text-white'
-            }`}
-          >
-            <Sparkles size={20} />
-            AI Training
           </button>
         </nav>
 

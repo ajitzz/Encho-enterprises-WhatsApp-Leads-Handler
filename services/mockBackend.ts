@@ -3,8 +3,8 @@ import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, B
 
 const DEFAULT_BOT_SETTINGS: BotSettings = {
   isEnabled: true,
-  routingStrategy: 'HYBRID_BOT_FIRST',
-  systemInstruction: "You are a helpful assistant.",
+  routingStrategy: 'BOT_ONLY', // Enforced
+  systemInstruction: "",
   steps: [
     {
       id: 'step_1',
@@ -84,14 +84,14 @@ class MockBackendService {
   }
 
   // --- STRICT BOT ENGINE (SIMULATOR) ---
-  processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Driver, reply?: Message, actionNeeded: 'NONE' | 'AI_REPLY' } {
+  processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Driver, reply?: Message, actionNeeded: 'NONE' } {
     let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
     let settings = this.botSettings;
     const entryPointId = settings.entryPointId || settings.steps?.[0]?.id;
 
     // 1. New Driver Creation
     if (!driver) {
-      const shouldActivateBot = settings.isEnabled && settings.routingStrategy !== 'AI_ONLY';
+      const shouldActivateBot = settings.isEnabled;
       driver = {
         id: Date.now().toString(),
         phoneNumber,
@@ -127,15 +127,12 @@ class MockBackendService {
 
     if (driver.isHumanMode) return { driver, actionNeeded: 'NONE' };
 
-    // 2. Bot Logic
+    // 2. Bot Logic (NO AI)
     let replyMsg: Message | undefined;
-    let actionNeeded: 'NONE' | 'AI_REPLY' = 'NONE';
 
-    // Strict Check: If bot active, ONLY do bot stuff
     if (settings.isEnabled && driver.isBotActive) {
         let currentStep = settings.steps.find(s => s.id === driver.currentBotStepId);
         
-        // Recover step
         if (!currentStep && settings.steps.length > 0) {
             driver.currentBotStepId = entryPointId;
             currentStep = settings.steps.find(s => s.id === entryPointId);
@@ -144,14 +141,12 @@ class MockBackendService {
         if (currentStep) {
             let nextId = currentStep.nextStepId;
 
-            // Route Check
             if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
                 const input = text.toLowerCase();
                 const matched = Object.keys(currentStep.routes).find(k => input.includes(k.toLowerCase()));
                 if (matched) {
                     nextId = currentStep.routes[matched];
                 } else {
-                    // Invalid input, stay on step, ask again
                     replyMsg = {
                         id: Date.now().toString() + '_bot',
                         sender: 'system',
@@ -165,13 +160,8 @@ class MockBackendService {
                 }
             }
             
-            // Save Data
-            if (currentStep.saveToField) {
-                 if (currentStep.saveToField === 'name') driver.name = text;
-                 // ... other fields
-            }
+            if (currentStep.saveToField && currentStep.saveToField === 'name') driver.name = text;
 
-            // Transition
             if (nextId && nextId !== 'END' && nextId !== 'AI_HANDOFF') {
                 driver.currentBotStepId = nextId;
                 const nextStep = settings.steps.find(s => s.id === nextId);
@@ -191,38 +181,26 @@ class MockBackendService {
                     this.addMessage(driver.id, replyMsg);
                 }
             } else {
-                // End of Flow
+                // End of Flow - Static Message
                 driver.isBotActive = false;
                 driver.currentBotStepId = undefined;
                 
-                if (nextId === 'AI_HANDOFF' && settings.routingStrategy === 'HYBRID_BOT_FIRST') {
-                    actionNeeded = 'AI_REPLY';
-                } else if (settings.routingStrategy === 'BOT_ONLY') {
-                    // Do nothing or send generic close
-                    replyMsg = {
-                        id: Date.now().toString() + '_end',
-                        sender: 'system',
-                        text: "Thank you.",
-                        timestamp: Date.now() + 500,
-                        type: 'text'
-                    };
-                    this.addMessage(driver.id, replyMsg);
-                }
+                replyMsg = {
+                    id: Date.now().toString() + '_end',
+                    sender: 'system',
+                    text: "Thank you! We have received your details. Our team will verify them and contact you shortly.",
+                    timestamp: Date.now() + 500,
+                    type: 'text'
+                };
+                this.addMessage(driver.id, replyMsg);
             }
         }
     } 
-    // If bot not active, check strategy
-    else if (!driver.isBotActive && settings.isEnabled) {
-        if (settings.routingStrategy !== 'BOT_ONLY') {
-            actionNeeded = 'AI_REPLY';
-        }
-    }
 
     this.persist();
-    return { driver, reply: replyMsg, actionNeeded };
+    return { driver, reply: replyMsg, actionNeeded: 'NONE' };
   }
   
-  // (Other methods kept minimal for brevity, assume unchanged)
   createAdLead(name: string, phoneNumber: string): Driver { return this.drivers[0]; } // Stub
 }
 
