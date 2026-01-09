@@ -156,6 +156,12 @@ export const liveApiService = {
       return { url: publicUrl, type: fileType };
   },
 
+  syncFromS3: async () => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/media/sync`, { method: 'POST' });
+      if (!response.ok) throw new Error('Failed to sync S3');
+      return await response.json();
+  },
+
   setPublicFolder: async (folderId: string) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${folderId}/public`, { method: 'POST' });
       if (!response.ok) throw new Error('Failed to set public folder');

@@ -10,7 +10,7 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const { Pool } = require('pg'); 
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 require('dotenv').config();
 
@@ -397,6 +397,65 @@ router.post('/files/register', async (req, res) => {
         
         res.json({ success: true, id });
     } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+router.post('/media/sync', async (req, res) => {
+    try {
+        const command = new ListObjectsV2Command({ Bucket: BUCKET_NAME });
+        const s3Res = await s3Client.send(command);
+        const s3Objects = s3Res.Contents || [];
+        
+        let addedCount = 0;
+
+        for (const obj of s3Objects) {
+            const key = obj.Key;
+            if (key.endsWith('/')) continue; // Skip explicit folder keys
+            if (key.startsWith('manifests/')) continue; // Skip system manifests
+
+            // Check if exists
+            const publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${key}`;
+            const exists = await queryWithRetry('SELECT id FROM files WHERE url = $1', [publicUrl]);
+            if (exists.rows.length > 0) continue;
+
+            // Determine Folder Structure
+            const parts = key.split('/');
+            const filename = parts.pop();
+            const folderPath = parts.length > 0 ? `/${parts.join('/')}` : '/';
+
+            // Ensure Folders Exist in DB (Sync Folders)
+            if (folderPath !== '/') {
+                let currentParent = '/';
+                for (const part of parts) {
+                    const checkFolder = await queryWithRetry('SELECT id FROM folders WHERE name = $1 AND parent_path = $2', [part, currentParent]);
+                    if (checkFolder.rows.length === 0) {
+                        const newFolderId = `fold_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+                        await queryWithRetry('INSERT INTO folders (id, name, parent_path) VALUES ($1, $2, $3)', [newFolderId, part, currentParent]);
+                    }
+                    currentParent = currentParent === '/' ? `/${part}` : `${currentParent}/${part}`;
+                }
+            }
+
+            // Insert File
+            const type = filename.match(/\.(mp4|mov|webm)$/i) ? 'video' : 'image';
+            const fileId = `file_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+            
+            await queryWithRetry(
+                `INSERT INTO files (id, filename, url, type, folder_path) VALUES ($1, $2, $3, $4, $5)`,
+                [fileId, filename, publicUrl, type, folderPath]
+            );
+            addedCount++;
+        }
+        
+        // If we added files, update the root manifest
+        if (addedCount > 0) {
+            uploadShowcaseManifest('/').catch(console.error);
+        }
+        
+        res.json({ success: true, added: addedCount });
+    } catch(e) {
+        console.error("Sync Error:", e);
         res.status(500).json({ error: e.message });
     }
 });

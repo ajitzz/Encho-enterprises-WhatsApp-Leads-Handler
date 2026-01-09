@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye, Link as LinkIcon, ExternalLink, Share2, Power, Edit2, Pencil, AlertTriangle, RefreshCcw } from 'lucide-react';
+import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye, Link as LinkIcon, ExternalLink, Share2, Power, Edit2, Pencil, AlertTriangle, RefreshCcw, DownloadCloud } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface MediaFile {
@@ -27,10 +27,10 @@ interface ShowcaseStatus {
 export const MediaLibrary = () => {
     const [files, setFiles] = useState<MediaFile[]>([]);
     const [folders, setFolders] = useState<MediaFolder[]>([]);
-    const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'error'>('idle');
+    const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'error' | 'syncing'>('idle');
     const [uploadError, setUploadError] = useState('');
     const [isLoadingContent, setIsLoadingContent] = useState(false);
-    const [loadingError, setLoadingError] = useState(''); // New: Track fetch errors
+    const [loadingError, setLoadingError] = useState(''); 
     const [copiedId, setCopiedId] = useState<string | null>(null);
     const [isDeleting, setIsDeleting] = useState<string | null>(null);
     const [isSyncing, setIsSyncing] = useState<string | null>(null);
@@ -136,6 +136,19 @@ export const MediaLibrary = () => {
             alert("Failed to sync media to WhatsApp. Check console.");
         } finally {
             setIsSyncing(null);
+        }
+    };
+    
+    const handleS3Sync = async () => {
+        setUploadStatus('syncing');
+        try {
+            const res = await liveApiService.syncFromS3();
+            alert(`Sync Complete! ${res.added} items added from S3.`);
+            await loadMedia(currentPath);
+        } catch (e) {
+            alert("Sync Failed: Check server logs.");
+        } finally {
+            setUploadStatus('idle');
         }
     };
 
@@ -351,6 +364,16 @@ export const MediaLibrary = () => {
                     
                     <div className="flex gap-3 items-center">
                         <button 
+                            onClick={handleS3Sync}
+                            className="flex items-center gap-2 px-4 py-3 rounded-lg text-gray-700 bg-white border border-gray-300 font-bold hover:bg-purple-50 hover:text-purple-700 hover:border-purple-200 transition-all shadow-sm"
+                            title="Scan Bucket for missing files"
+                            disabled={uploadStatus === 'syncing'}
+                        >
+                            {uploadStatus === 'syncing' ? <Loader2 size={18} className="animate-spin" /> : <DownloadCloud size={18} />}
+                            Sync from S3
+                        </button>
+
+                        <button 
                             onClick={() => loadMedia(currentPath)}
                             className="p-3 rounded-lg border border-gray-200 text-gray-500 hover:text-blue-600 hover:bg-blue-50 transition-colors"
                             title="Refresh List"
@@ -413,7 +436,7 @@ export const MediaLibrary = () => {
                             <div className="flex flex-col items-center justify-center h-64 border-2 border-dashed border-gray-200 rounded-xl bg-gray-50/50">
                                 <Cloud size={48} className="text-gray-300 mb-3" />
                                 <p className="text-gray-500 font-medium text-sm">Folder is empty</p>
-                                <p className="text-gray-400 text-xs">Upload files to see them here.</p>
+                                <p className="text-gray-400 text-xs">Upload files or Click "Sync from S3" to recover missing files.</p>
                             </div>
                         ) : (
                         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
