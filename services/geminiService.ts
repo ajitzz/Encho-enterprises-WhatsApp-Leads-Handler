@@ -2,10 +2,8 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { LeadStatus, AuditReport, AuditIssue } from "../types";
 
-// NOTE: In a real production app, this key should be in process.env and calls proxied through a backend.
-const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0"; 
-
-const ai = new GoogleGenAI({ apiKey });
+// Always use process.env.API_KEY for initialization as per guidelines
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 const cleanJSON = (text: string) => {
   if (!text) return "{}";
@@ -27,18 +25,6 @@ export interface AIAnalysisResult {
 }
 
 export const analyzeMessage = async (text: string, imageUrl?: string, systemInstruction?: string): Promise<AIAnalysisResult> => {
-  if (!apiKey) {
-    console.warn("No API Key provided for Gemini. Returning mock AI response.");
-    return {
-      intent: "Inquiry about joining",
-      isInterested: true,
-      containsDocument: !!imageUrl,
-      suggestedReply: "Thanks! We've received your info.",
-      recommendedStatus: LeadStatus.NEW,
-      extractedData: {}
-    };
-  }
-
   try {
     const model = "gemini-3-flash-preview";
     const persona = systemInstruction || `You are an AI recruiter for Uber Fleet. Your goal is to be helpful, professional, and encourage drivers to apply.`;
@@ -48,11 +34,12 @@ export const analyzeMessage = async (text: string, imageUrl?: string, systemInst
     Has Image Attachment: ${imageUrl ? 'Yes' : 'No'}
     Tasks: 1. Reply to the user. 2. Extract data. 3. Determine status.`;
 
+    // Updated generateContent call to follow the latest SDK pattern
     const response = await ai.models.generateContent({
       model,
       contents: prompt,
       config: {
-        systemInstruction: persona, // Updated to use systemInstruction config
+        systemInstruction: persona, 
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
@@ -70,11 +57,13 @@ export const analyzeMessage = async (text: string, imageUrl?: string, systemInst
                  isLicenseValid: { type: Type.BOOLEAN }
               }
             }
-          }
+          },
+          propertyOrdering: ["intent", "isInterested", "containsDocument", "suggestedReply", "recommendedStatus", "extractedData"],
         }
       }
     });
 
+    // Directly access .text property from response object as per guidelines
     const result = JSON.parse(cleanJSON(response.text || '{}'));
     let status = LeadStatus.NEW;
     switch(result.recommendedStatus) {
@@ -170,9 +159,6 @@ const runLocalAudit = (nodes: any[]): AuditReport => {
 
 // --- SYSTEM AUDITOR (JSON CONFIG) ---
 export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
-    // If no key, fallback immediately
-    if (!apiKey) return runLocalAudit(nodes);
-
     try {
         const model = "gemini-3-flash-preview";
         
@@ -221,11 +207,13 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
                                 }
                             }
                         }
-                    }
+                    },
+                    propertyOrdering: ["isValid", "issues"],
                 }
             }
         });
 
+        // Directly access .text property as per guidelines
         const report = JSON.parse(cleanJSON(response.text || '{"isValid": true, "issues": []}'));
         return report;
 
@@ -238,9 +226,7 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
 
 // --- SYSTEM DOCTOR (FULL PROJECT ANALYSIS) ---
 export const analyzeSystemCode = async (files: Array<{path: string, content: string}>, issueDescription: string): Promise<{ diagnosis: string, changes: Array<{filePath: string, content: string, explanation: string}> }> => {
-    if (!apiKey) throw new Error("No API Key");
-
-    const model = "gemini-3-pro-preview"; // Use PRO for complex code analysis
+    const model = "gemini-3-pro-preview"; // Correctly using gemini-3-pro-preview for complex tasks
 
     // Create a compact representation of the files
     const fileContext = files.map(f => `
@@ -289,10 +275,12 @@ export const analyzeSystemCode = async (files: Array<{path: string, content: str
                             }
                         }
                     }
-                }
+                },
+                propertyOrdering: ["diagnosis", "changes"],
             }
         }
     });
 
+    // Directly access .text property from response object as per guidelines
     return JSON.parse(cleanJSON(response.text || '{}'));
 }
