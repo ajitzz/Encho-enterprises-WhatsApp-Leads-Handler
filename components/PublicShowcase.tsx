@@ -89,6 +89,7 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
     useEffect(() => {
         const loadShowcase = async () => {
             const cacheKey = `showcase_v1_${folderName || 'root'}`;
+            let loadedFromCache = false;
             
             // 1. STRATEGY: Cache-First for Instant Load & Offline Support
             const cachedData = localStorage.getItem(cacheKey);
@@ -100,7 +101,7 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                         setItems(parsed.items);
                         setTitle(parsed.title);
                         setLoading(false); // Render immediately
-                        setIsOfflineMode(true); // Assume offline/cache state until API responds
+                        loadedFromCache = true;
                     }
                 } catch(e) { console.error("Cache parse error", e); }
             }
@@ -121,7 +122,8 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                 // 3. FALLBACK STRATEGY: Fetch Static JSON from S3
                 // If API is down, we try to get the manifest directly from the bucket
                 const manifestName = folderName ? `${encodeURIComponent(folderName)}.json` : `latest.json`;
-                const s3Url = `${FALLBACK_BUCKET_URL}/manifests/${manifestName}`;
+                // Add timestamp to bust browser cache for S3 objects
+                const s3Url = `${FALLBACK_BUCKET_URL}/manifests/${manifestName}?t=${Date.now()}`;
 
                 try {
                     const s3Res = await fetch(s3Url);
@@ -133,10 +135,13 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                         // Update cache with S3 data
                         localStorage.setItem(cacheKey, JSON.stringify(s3Data));
                     } else {
-                        throw new Error("S3 Manifest not found");
+                        // If both API and S3 fail, stick with cache if we have it
+                        if (!loadedFromCache) throw new Error("S3 Manifest not found");
                     }
                 } catch (s3Err) {
                     console.error("S3 Fallback failed", s3Err);
+                    // If everything fails and we have cache, we are fine.
+                    // If no cache, we show empty state.
                 }
             } finally {
                 setLoading(false);

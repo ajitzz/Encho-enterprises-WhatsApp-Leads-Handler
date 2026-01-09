@@ -21,7 +21,7 @@ const router = express.Router();
 app.use(express.json({ limit: '10mb' }));
 app.use(cors()); 
 
-// Disable Caching
+// Disable Caching for API responses
 app.set('etag', false);
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -47,13 +47,18 @@ const BUCKET_NAME = process.env.AWS_BUCKET_NAME || 'uber-fleet-assets';
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL;
 
-const pool = new Pool({
-  connectionString: CONNECTION_STRING,
-  ssl: { rejectUnauthorized: false },
-  max: 10, 
-  idleTimeoutMillis: 1000, 
-  connectionTimeoutMillis: 15000, 
-});
+// Global pool handling for Serverless environments (prevent exhausting connections)
+let pool;
+if (!global.pgPool) {
+    global.pgPool = new Pool({
+        connectionString: CONNECTION_STRING,
+        ssl: { rejectUnauthorized: false },
+        max: 5, // Lower limit for serverless
+        idleTimeoutMillis: 1000, 
+        connectionTimeoutMillis: 5000, 
+    });
+}
+pool = global.pgPool;
 
 const queryWithRetry = async (text, params, retries = 3) => {
     let client;
@@ -63,8 +68,9 @@ const queryWithRetry = async (text, params, retries = 3) => {
         return res;
     } catch (err) {
         if (client) { try { client.release(true); } catch(e) {} client = null; }
-        if (retries > 0) {
-            await new Promise(res => setTimeout(res, (4 - retries) * 1000));
+        // Retry only on connection errors
+        if (retries > 0 && (err.code === 'ECONNRESET' || err.code === '57P01')) {
+            await new Promise(res => setTimeout(res, 1000));
             return queryWithRetry(text, params, retries - 1);
         }
         console.error("DB Query Failed:", err.message);
@@ -210,11 +216,13 @@ const uploadShowcaseManifest = async (folderIdOrPath) => {
 
         const key = `manifests/${folder.name}.json`;
         
+        // Upload with cache-control: no-cache to ensure freshness
         await s3Client.send(new PutObjectCommand({
             Bucket: BUCKET_NAME,
             Key: key,
             Body: JSON.stringify(manifest),
-            ContentType: "application/json"
+            ContentType: "application/json",
+            CacheControl: "no-cache, no-store, must-revalidate"
         }));
 
         // Also update 'latest.json' pointer
@@ -222,7 +230,8 @@ const uploadShowcaseManifest = async (folderIdOrPath) => {
             Bucket: BUCKET_NAME,
             Key: `manifests/latest.json`,
             Body: JSON.stringify(manifest),
-            ContentType: "application/json"
+            ContentType: "application/json",
+            CacheControl: "no-cache, no-store, must-revalidate"
         }));
         
         console.log(`[Manifest] Updated for ${folder.name}`);
@@ -231,7 +240,7 @@ const uploadShowcaseManifest = async (folderIdOrPath) => {
     }
 };
 
-// --- API ROUTES (FIX FOR 404s) ---
+// --- API ROUTES ---
 
 // 1. DRIVERS
 router.get('/drivers', async (req, res) => {
@@ -461,10 +470,6 @@ router.post('/folders/:id/public', async (req, res) => {
 router.delete('/folders/:id/public', async (req, res) => {
     try {
         await queryWithRetry('UPDATE folders SET is_public_showcase = FALSE WHERE id = $1', [req.params.id]);
-        
-        // Note: We don't delete the manifest to keep it as cache, but we could empty it.
-        // For now, we leave it as 'last known state' or we could upload an empty one.
-        
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -481,7 +486,7 @@ router.get('/system/stats', async (req, res) => {
             serverLoad: Math.round(Math.random() * 20),
             dbLatency: latency,
             aiCredits: 100,
-            aiModel: 'gemini-3-flash',
+            aiModel: 'Bot-Only Mode',
             s3Status: 'ok',
             whatsappStatus: 'ok',
             activeUploads: parseInt(upRes.rows[0].c || 0),
