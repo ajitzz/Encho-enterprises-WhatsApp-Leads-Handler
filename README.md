@@ -1,6 +1,36 @@
+
 # Uber Fleet Recruiter
 
 A comprehensive recruitment dashboard for Uber Fleet management featuring AI-powered lead qualification, WhatsApp integration, and a persistent PostgreSQL database.
+
+## 🔑 How to Get API Keys
+
+To run this project, you need credentials from the following services. Create a file named `.env` in the root folder and add them there (use `.env.example` as a template).
+
+### 1. Database (PostgreSQL)
+*   **Service:** [Neon.tech](https://neon.tech) (Free Tier recommended)
+*   **Steps:**
+    1.  Create a project.
+    2.  Copy the **Connection String** from the dashboard.
+    3.  Set as `POSTGRES_URL` in your `.env` file.
+
+### 2. AI Intelligence
+*   **Service:** [Google AI Studio](https://aistudio.google.com/app/apikey)
+*   **Steps:**
+    1.  Click **Get API Key**.
+    2.  Click **Create API Key**.
+    3.  Set as `GEMINI_API_KEY` in your `.env` file.
+
+### 3. WhatsApp Integration
+*   **Service:** [Meta for Developers](https://developers.facebook.com/)
+*   **Steps:**
+    1.  Create a Business App.
+    2.  Add **WhatsApp** product.
+    3.  Go to **API Setup**.
+    4.  Copy **Temporary Access Token** (or generate a permanent one via Business Settings). Set as `META_API_TOKEN`.
+    5.  Copy **Phone Number ID**. Set as `PHONE_NUMBER_ID`.
+
+---
 
 ## 🚀 Quick Setup (Vercel + Neon Postgres)
 
@@ -22,7 +52,7 @@ This project is optimized for deployment on Vercel with Neon (PostgreSQL).
 ### 3. Verify Connection
 1. Open your deployed app.
 2. The database tables (`drivers`, `messages`) will be created automatically on the first run.
-3. You can verify the connection status by visiting: `https://your-app.vercel.app/api/health`
+3. You can verify the connection status by visiting: `https://your-app.vercel.app/api/system/stats`
 
 ## 🛠 Local Development
 
@@ -33,13 +63,8 @@ To run this locally with the live database:
    npm install
    ```
 
-2. Pull Env Vars from Vercel (requires Vercel CLI):
-   ```bash
-   npm i -g vercel
-   vercel link
-   vercel env pull .env.local
-   ```
-   *Alternatively, create a `.env` file and manually paste the `POSTGRES_URL` from your Vercel Dashboard.*
+2. Setup Environment:
+   Create a `.env` file and paste your keys (see section above).
 
 3. Start the server:
    ```bash
@@ -50,12 +75,3 @@ To run this locally with the live database:
    ```bash
    npm start
    ```
-
-## 🔑 Environment Variables
-
-Ensure these are set in Vercel settings:
-
-- `POSTGRES_URL`: (Auto-set by Vercel Storage)
-- `GEMINI_API_KEY`: Google Gemini AI Key
-- `META_API_TOKEN`: WhatsApp Business API Token
-- `PHONE_NUMBER_ID`: WhatsApp Phone Number ID

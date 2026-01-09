@@ -1,11 +1,15 @@
 
 import React, { useEffect, useState } from 'react';
 import { liveApiService } from '../services/liveApiService';
-import { Activity, Database, Brain, Cloud, Wifi, ArrowUpCircle } from 'lucide-react';
+import { Activity, Database, Brain, Cloud, Wifi, ArrowUpCircle, Clock } from 'lucide-react';
 import { SystemStats } from '../types';
 
+interface ExtendedSystemStats extends SystemStats {
+    uptime?: number;
+}
+
 export const SystemMonitor = () => {
-    const [stats, setStats] = useState<SystemStats | null>(null);
+    const [stats, setStats] = useState<ExtendedSystemStats | null>(null);
     const [isOpen, setIsOpen] = useState(false);
 
     useEffect(() => {
@@ -21,6 +25,12 @@ export const SystemMonitor = () => {
         const interval = setInterval(fetchStats, 5000);
         return () => clearInterval(interval);
     }, []);
+
+    const formatUptime = (seconds: number) => {
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        return `${h}h ${m}m`;
+    };
 
     if (!stats) return null;
 
@@ -62,6 +72,13 @@ export const SystemMonitor = () => {
                 </div>
 
                 <div className="flex items-center gap-6 px-4 border-l border-gray-700">
+                    {stats.uptime && (
+                        <div className="flex items-center gap-2 text-green-400" title="Server Uptime">
+                            <Clock size={14} />
+                            <span>{formatUptime(stats.uptime)}</span>
+                        </div>
+                    )}
+
                     <div className="flex items-center gap-2" title="Active Media Uploads">
                          <Cloud size={14} className={stats.activeUploads > 0 ? 'text-blue-400 animate-pulse' : 'text-gray-500'} />
                          <span className="text-gray-400">UP:</span>

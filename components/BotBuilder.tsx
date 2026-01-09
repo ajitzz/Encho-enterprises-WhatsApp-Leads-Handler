@@ -189,8 +189,8 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
   const isOptionType = ['Quick Reply', 'List', 'Question'].includes(data.label) || data.inputType === 'option';
   const isLinkType = data.label === 'Link';
   
-  // Validation Checks
-  const hasPlaceholder = data.message && /replace\s+this|enter\s+your/i.test(data.message);
+  // Validation Checks (Strict Anti-Placeholder)
+  const hasPlaceholder = data.message && /replace\s+this|enter\s+your|type\s+your|sample\s+message/i.test(data.message);
   const isEmptyOptions = isOptionType && (!data.options || data.options.length === 0);
   const isDanger = hasPlaceholder || isEmptyOptions;
 
@@ -204,7 +204,7 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
   else if (data.label === 'Text Message') { borderColor = 'border-blue-200'; accentColor = 'bg-blue-50'; iconColor = 'text-blue-600'; }
 
   if (selected) borderColor = 'border-blue-500 ring-2 ring-blue-100 shadow-md';
-  if (isDanger) borderColor = 'border-red-500 ring-2 ring-red-100';
+  if (isDanger) borderColor = 'border-red-500 ring-2 ring-red-100 bg-red-50/20';
 
   if (data.type === 'start') {
       return (
@@ -229,7 +229,12 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
                 <div className={`p-1.5 rounded-md ${iconColor} bg-white shadow-sm border border-black/5`}>{getIconForLabel(data.label)}</div>
                 <span className={`text-xs font-bold uppercase tracking-wide ${iconColor}`}>{data.label}</span>
             </div>
-            {isDanger && <ShieldAlert size={16} className="text-red-500 animate-pulse" />}
+            {isDanger && (
+                <div className="flex items-center gap-1 text-red-600" title="Placeholder text detected! This will be blocked.">
+                    <span className="text-[10px] font-bold">INVALID</span>
+                    <ShieldAlert size={16} className="animate-pulse" />
+                </div>
+            )}
         </div>
 
         {/* Body */}
@@ -245,9 +250,10 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
             {/* Message Text (or URL for Link) */}
             {data.label !== 'Image' && data.label !== 'Video' && (
                 <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 mb-3 relative overflow-hidden">
-                    <p className={`text-xs leading-relaxed font-medium truncate ${hasPlaceholder ? 'text-red-600' : 'text-gray-700'}`}>
+                    <p className={`text-xs leading-relaxed font-medium truncate ${hasPlaceholder ? 'text-red-600 font-bold' : 'text-gray-700'}`}>
                         {data.message || <span className="italic text-gray-300">No content...</span>}
                     </p>
+                    {hasPlaceholder && <div className="text-[9px] text-red-500 mt-1">⚠️ Change default text</div>}
                 </div>
             )}
 
@@ -363,6 +369,7 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                             value={localData.message || ''}
                             onChange={(e) => update('message', e.target.value)}
                         />
+                        <p className="text-[10px] text-gray-400 italic">Do not leave "Replace this..." text.</p>
                     </div>
                 )}
 

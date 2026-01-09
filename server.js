@@ -53,47 +53,15 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 // --- MEMORY CACHE (FAIL-SAFE) ---
 const ENCHO_SYSTEM_INSTRUCTION = `
-Role: A friendly, helpful friend at Encho Cabs (Uber/Ola Fleet).
-Language: Malayalam + simple English (Manglish).
-Tone: Casual, Warm, Patient, Not "Salesy".
+Role: Senior Support Executive at Encho Cabs (Uber/Ola Fleet).
+Language: Malayalam + Manglish (Simple, Friendly, Human-like).
+Goal: Act as a helpful friend. Understand the driver's concern first, then explain the specific benefit. Do NOT dump information.
 
-🌟 YOUR GOAL:
-Build a relationship first. Let the driver ask questions. Do NOT push the job immediately.
-You are here to *help* them decide if this is right for them. Give them space.
-
-🛑 BEHAVIOR RULES:
-1. **Be a Listener:** Answer ONLY what they ask. Don't add extra info unless it helps clarify.
-2. **Give Space:** After answering, pause. Ask "Vere enthengilum ariyanundo?" (Do you want to know anything else?) instead of pushing for documents.
-3. **Start Slow:** First message: Just say Hello and ask their name.
-4. **Identify Concern:** 
-   - Ask about Rent? -> Address cost worry (Mention performance bonus).
-   - Ask about Stay? -> Address comfort worry (Mention Kitchen/Fridge).
-   - Ask about Trust? -> Address safety worry (Mention Company Software).
-
-🧠 CONVERSATION FLOW (FRIENDLY MODE):
-
-[User: "Hi" / "Details?"]
-AI: "Namaskaram! Encho Cabs-ilekku Swagatham. 😊 Enthaanu ariyuvan thalparyam? Or, adhyam ningalude peru parayamo?"
-
-[User: "Ente peru Rahul. Details venam."]
-AI: "Hi Rahul 👋. Njangal Uber & Ola connected fleet aanu. Rahul-inu ippol enthaanu pradhana aavishyam? Rent details aano, atho stay aano?" (Letting them choose the topic).
-
-[User: "Rent ethraya?"]
-AI: "Rent daily ₹600 aanu. Pakshe, daily 10 trips complete cheythaal rent **₹450 aayi kurayum**. Vere hidden charges onnum illa."
-
-[User: "Room undo?"]
-AI: "Und. Kitchen, Fridge, Washing Machine okke ulla nalla accommodation aanu njangal nalkunnath. Oru veedu pole thanne. Stay avishyamundo?"
-
-[User: "Aah venam. Deposit undo?"]
-AI: "Athe, ₹5000 refundable deposit und. Join cheyyan thalparyam undo?"
-
-[User: "Yes"]
-AI: "Santhosham! Verify cheyyan vendi License-inte oru photo ayakkamo?"
-
-✨ KEY PSYCHOLOGY:
-- Make them feel understood.
-- If they complain about high rent elsewhere, say "Njangalude aduth angane alla" (It's not like that here).
-- Use emojis to stay friendly.
+🛑 BEHAVIOR RULES (Strict):
+1. **Friend First:** Start with "Namaskaram! Encho Cabs-ilekku Swagatham. 😊". Ask their name or what they want to know.
+2. **Listen & Filter:** If they ask "Details", do NOT list everything. Ask: "Vandi aano, Rent aano, atho Stay aano ariyuvan thalparyam?" (Car, Rent, or Stay?).
+3. **Short Answers:** Max 2-3 sentences.
+4. **Space to Ask:** After answering, ask "Vere enthengilum samshayam undo?" (Any other doubts?).
 `;
 
 // Define the steps separately to use in cache initialization
@@ -113,23 +81,6 @@ const ENCHO_STEPS = [
       inputType: 'option',
       options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'],
       nextStepId: 'step_3',
-    },
-    {
-      id: 'step_3',
-      title: 'Upload License',
-      message: 'Verification-ന് വേണ്ടി License-ന്റെ ഒരു ഫോട്ടോ അയച്ചുതരൂ.',
-      inputType: 'image',
-      saveToField: 'document',
-      nextStepId: 'step_4'
-    },
-    {
-      id: 'step_4',
-      title: 'Availability',
-      message: 'എപ്പോഴാണ് ഡ്രൈവ് ചെയ്യാൻ താല്പര്യം? (Full-time / Part-time)',
-      inputType: 'option',
-      options: ['Full-time', 'Part-time', 'Weekends'],
-      saveToField: 'availability',
-      nextStepId: 'AI_HANDOFF' 
     }
 ];
 
@@ -167,17 +118,13 @@ const queryWithRetry = async (text, params, retries = 3) => {
         return res;
     } catch (err) {
         if (client) { try { client.release(true); } catch(e) {} client = null; }
-        
         const isConnectionError = err.code === '57P01' || err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT';
         const isTableError = err.code === '42P01' || err.code === '42703'; 
         
         if ((isConnectionError || isTableError) && retries > 0) {
             console.log(`DB Retry (${retries} left): ${err.code}`);
             await new Promise(res => setTimeout(res, (4 - retries) * 1000));
-            // Note: We do NOT call ensureDatabaseInitialized here to avoid recursion loops.
-            // We call it explicitly at server start.
             if (isTableError) {
-                 // Try one heal attempt
                  const healClient = await pool.connect();
                  await ensureDatabaseInitialized(healClient);
                  healClient.release();
@@ -190,7 +137,6 @@ const queryWithRetry = async (text, params, retries = 3) => {
     }
 };
 
-// COST SAVING: WhatsApp Media Cache Table
 const SCHEMA_SQL = `
     CREATE TABLE IF NOT EXISTS drivers (
         id VARCHAR(255) PRIMARY KEY,
@@ -253,26 +199,21 @@ const ensureDatabaseInitialized = async (client) => {
     try {
         await client.query('BEGIN');
         await client.query(SCHEMA_SQL);
-        // Self-Heal
         await client.query(`ALTER TABLE whatsapp_media_cache ADD COLUMN IF NOT EXISTS expires_at BIGINT`);
         await client.query(`ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS is_public_showcase BOOLEAN DEFAULT FALSE`);
         
-        // FORCE UPDATE SETTINGS: To ensure the AI Training persists over old data
         const settingsRes = await client.query('SELECT * FROM bot_settings WHERE id = 1');
         if (settingsRes.rows.length === 0) {
             await client.query('INSERT INTO bot_settings (id, settings) VALUES (1, $1)', [JSON.stringify(CACHED_BOT_SETTINGS)]);
-            console.log("✅ Settings Inserted");
         } else {
-            // Update existing settings with new system instruction and steps
             const currentSettings = settingsRes.rows[0].settings;
             const updatedSettings = {
                 ...currentSettings,
                 systemInstruction: ENCHO_SYSTEM_INSTRUCTION,
-                steps: ENCHO_STEPS // Enforce the Malayalam steps
+                steps: ENCHO_STEPS 
             };
             await client.query('UPDATE bot_settings SET settings = $1 WHERE id = 1', [JSON.stringify(updatedSettings)]);
-            CACHED_BOT_SETTINGS = updatedSettings; // Update local cache too
-            console.log("✅ Settings Updated with Encho Persona");
+            CACHED_BOT_SETTINGS = updatedSettings; 
         }
         await client.query('COMMIT');
     } catch (e) {
@@ -281,21 +222,29 @@ const ensureDatabaseInitialized = async (client) => {
     }
 };
 
-// --- INITIALIZATION HOOK ---
-// Run this immediately on server start to ensure DB is in sync
 const initializeServer = async () => {
     const client = await pool.connect();
-    try {
-        await ensureDatabaseInitialized(client);
-    } catch(e) {
-        console.error("Startup Initialization Failed:", e);
-    } finally {
-        client.release();
-    }
+    try { await ensureDatabaseInitialized(client); } 
+    catch(e) { console.error("Startup Initialization Failed:", e); } 
+    finally { client.release(); }
 };
 initializeServer();
 
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+
+// --- FIREWALL: BLOCK PLACEHOLDERS ---
+const isContentSafe = (text) => {
+    if (!text) return true;
+    const lower = text.toLowerCase();
+    const BLOCK_LIST = [
+        "replace this sample message",
+        "enter your message",
+        "type your message here",
+        "replace this text",
+        "sample text"
+    ];
+    return !BLOCK_LIST.some(phrase => lower.includes(phrase));
+};
 
 // --- COST SAVING: SMART MEDIA HANDLER ---
 const getOrUploadWhatsAppMedia = async (s3Url, mediaType) => {
@@ -352,6 +301,12 @@ const getOrUploadWhatsAppMedia = async (s3Url, mediaType) => {
 
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
    if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
+   
+   // --- FIREWALL CHECK ---
+   if (body && !isContentSafe(body)) {
+       console.error("⛔ BLOCKED UNSAFE CONTENT:", body);
+       return false; // Silently block garbage messages
+   }
   
   mediaType = mediaType || 'image';
   let payload = { messaging_product: 'whatsapp', to: to };
@@ -401,7 +356,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
   } catch (error) { return false; }
 };
 
-// --- AI LOGIC WITH SMART FALLBACK & COOL-DOWN ---
+// --- AI LOGIC ---
 const analyzeWithAI = async (text, currentNotes, systemInstruction) => {
   if (!GEMINI_API_KEY) return { reply: "Thank you for your message.", updatedNotes: currentNotes };
   
@@ -412,7 +367,6 @@ const analyzeWithAI = async (text, currentNotes, systemInstruction) => {
   }
 
   const performAnalysis = async (modelToUse) => {
-      // NOTE: systemInstruction is passed in config, not in contents
       const prompt = `
         User sent: "${text}"
         Current Driver Notes: "${currentNotes || ''}"
@@ -435,7 +389,6 @@ const analyzeWithAI = async (text, currentNotes, systemInstruction) => {
       return await performAnalysis(CURRENT_AI_MODEL);
   } catch (e) {
       if ((e.message.includes("429") || e.message.includes("Quota")) && CURRENT_AI_MODEL !== "gemini-1.5-flash") {
-          console.warn("AI Quota Exceeded. Switching to fallback model for 60s.");
           AI_FALLBACK_UNTIL = Date.now() + 60000; 
           CURRENT_AI_MODEL = "gemini-1.5-flash"; 
           try {
@@ -563,7 +516,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                         const cleanInput = normalize(msgBody);
                         
                         // FIX: Sort keys by length descending to match longest possible option first
-                        // e.g. Match "Not Interested" (longer) before "Interested" (shorter/substring)
                         const routeKey = Object.keys(currentStep.routes).sort((a, b) => b.length - a.length).find(k => {
                             const cleanKey = normalize(k);
                             if (cleanKey === cleanInput) return true;
@@ -596,6 +548,15 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                          const nextStep = botSettings.steps.find(s => s.id === nextId);
                          if (nextStep) {
                              replyText = nextStep.message;
+                             // --- FIREWALL CHECK: Prevent Placeholder Text ---
+                             if (replyText && !isContentSafe(replyText)) {
+                                 console.warn(`⚠️ Skipped Unsafe Bot Step: "${replyText}"`);
+                                 // Auto-switch to human to prevent broken experience
+                                 updatesToSave.isHumanMode = true; 
+                                 updatesToSave.isBotActive = false;
+                                 replyText = "Please wait, our executive will connect with you shortly.";
+                             }
+                             
                              if (nextStep.linkLabel && nextStep.message) {
                                  replyText = `${nextStep.linkLabel}\n${nextStep.message}`;
                              }
@@ -645,6 +606,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
             keys.forEach(k => {
                 if (k === 'isBotActive') mappedUpdates['is_bot_active'] = updatesToSave[k];
                 else if (k === 'currentBotStepId') mappedUpdates['current_bot_step_id'] = updatesToSave[k];
+                else if (k === 'isHumanMode') mappedUpdates['is_human_mode'] = updatesToSave[k];
                 else mappedUpdates[k] = updatesToSave[k];
             });
             
@@ -659,6 +621,17 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 };
 
 // --- API ROUTES (ROUTER) ---
+
+// KEEP-ALIVE PING (WITH DB WAKEUP)
+router.get('/ping', async (req, res) => {
+    try {
+        await pool.query('SELECT 1'); // Forces DB connection to stay hot
+        res.status(200).send('pong');
+    } catch(e) {
+        console.error("DB Ping Failed:", e.message);
+        res.status(200).send('pong (db_warn)'); // Return 200 to keep Cron Job happy, but log error
+    }
+});
 
 // Drivers
 router.get('/drivers', async (req, res) => { 
@@ -724,7 +697,7 @@ router.post('/messages/send', async (req, res) => {
         const driverRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [req.body.driverId]);
         if (driverRes.rows.length === 0) return res.status(404).json({ error: 'Driver not found' });
         const success = await sendWhatsAppMessage(driverRes.rows[0].phone_number, req.body.text);
-        if (!success) return res.status(500).json({ error: 'Meta API Failed' });
+        if (!success) return res.status(500).json({ error: 'Meta API Failed or Blocked' });
         await logSystemMessage(req.body.driverId, req.body.text, 'text');
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
@@ -933,7 +906,8 @@ router.get('/system/stats', async (req, res) => {
         s3Status: 'ok',
         whatsappStatus: ACTIVE_UPLOADS > 3 ? 'latency' : 'ok',
         activeUploads: ACTIVE_UPLOADS,
-        mediaUploadLoad: mediaLoad
+        mediaUploadLoad: mediaLoad,
+        uptime: process.uptime() // Added for 24/7 monitoring
     });
 });
 

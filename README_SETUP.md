@@ -58,3 +58,35 @@ Since your server runs on your laptop (`localhost`), Facebook cannot see it. You
 3. Switch the Frontend Toggle to **Live API**.
 
 Now send a WhatsApp message to the test number. It will appear on your dashboard!
+
+---
+
+# 🚀 24/7 Hosting Guide (Always On)
+
+To keep the automation running while you sleep, use one of these methods:
+
+## Option A: Cost-Effective (Render.com + Cron Job)
+1. Deploy this code to **Render.com** as a "Web Service" (Free Tier).
+2. Render puts free servers to sleep after 15 minutes of inactivity.
+3. To prevent this, go to **[cron-job.org](https://console.cron-job.org)** (Free).
+4. Create a new cron job that hits your URL: `https://your-app-name.onrender.com/ping`
+5. Set it to run **Every 5 Minutes**.
+6. This will keep the server awake 24/7.
+
+## Option B: Robust (VPS + PM2)
+If you have a VPS (DigitalOcean, Hetzner, AWS Lightsail), use PM2 to manage the process.
+
+1. Install PM2:
+   ```bash
+   npm install -g pm2
+   ```
+2. Start the server with the config file:
+   ```bash
+   pm2 start ecosystem.config.js
+   ```
+3. Save the list (so it restarts on reboot):
+   ```bash
+   pm2 save
+   pm2 startup
+   ```
+4. This ensures the server **Auto-Restarts** if it crashes or if the machine reboots.
