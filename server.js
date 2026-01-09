@@ -54,14 +54,22 @@ const upload = multer({ storage: multer.memoryStorage() });
 // --- MEMORY CACHE (FAIL-SAFE) ---
 const ENCHO_SYSTEM_INSTRUCTION = `
 Role: Senior Support Executive at Encho Cabs (Uber/Ola Fleet).
-Language: Malayalam + Manglish (Simple, Friendly, Human-like).
-Goal: Act as a helpful friend. Understand the driver's concern first, then explain the specific benefit. Do NOT dump information.
+Language: Malayalam mixed with simple English (Manglish). Professional but casual.
+Goal: Answer Doubts -> Build Trust -> Schedule Call.
 
-🛑 BEHAVIOR RULES (Strict):
-1. **Friend First:** Start with "Namaskaram! Encho Cabs-ilekku Swagatham. 😊". Ask their name or what they want to know.
-2. **Listen & Filter:** If they ask "Details", do NOT list everything. Ask: "Vandi aano, Rent aano, atho Stay aano ariyuvan thalparyam?" (Car, Rent, or Stay?).
-3. **Short Answers:** Max 2-3 sentences.
-4. **Space to Ask:** After answering, ask "Vere enthengilum samshayam undo?" (Any other doubts?).
+🛑 CONVERSATION STRATEGY:
+1. **Answer First:** If user asks a question, answer it IMMEDIATELY.
+2. **Trust Chain:** After answering, try to hook them with: Software -> Bonus -> Freedom -> Schedule Call.
+   - **Software:** Transparency App.
+   - **Bonus:** Daily Bata & Performance Incentive.
+   - **Freedom:** No fixed shifts (Own Boss).
+   - **Closing:** Ask for a convenient time to call.
+
+🧠 KNOWLEDGE BASE:
+- **Vehicle:** WagonR CNG (Company maintained).
+- **Rent:** ₹600/day. Target thikachaal ₹450/day aakum.
+- **Deposit:** ₹5000 (Refundable).
+- **Tone:** Use emojis like 👋, 😊, 💰. Be polite.
 `;
 
 // Define the steps separately to use in cache initialization
@@ -69,18 +77,72 @@ const ENCHO_STEPS = [
     {
       id: 'step_1',
       title: 'Welcome & Name',
-      message: 'നമസ്കാരം! Encho Cabs-ലേക്ക് സ്വാഗതം. നിങ്ങളുടെ പേര് പറയാമോ?',
+      message: 'നമസ്കാരം! Encho Cabs-ലേക്ക് സ്വാഗതം. ഞങ്ങൾ Uber/Ola connected fleet ആണ്. നിങ്ങളുടെ പേര് പറയാമോ?',
       inputType: 'text',
       saveToField: 'name',
       nextStepId: 'step_2'
     },
     {
       id: 'step_2',
-      title: 'License Check',
-      message: 'നന്ദി! നിങ്ങളുടെ കൈയ്യിൽ valid ആയ Commercial Driving License ഉണ്ടോ?',
+      title: 'Place & Contact',
+      message: 'Hi! നാട്ടിൽ എവിടെയാണ്? നിങ്ങളെ കോൺടാക്ട് ചെയ്യാൻ പറ്റുന്ന ഒരു നമ്പർ കൂടി തന്നാൽ നന്നായിരുന്നു.',
+      inputType: 'text',
+      saveToField: 'vehicleRegistration',
+      nextStepId: 'step_3'
+    },
+    {
+      id: 'step_3',
+      title: 'Open Doubts (Router)',
+      message: 'നന്ദി! Details നോട്ട് ചെയ്തിട്ടുണ്ട്. Encho Cabs-നെ കുറിച്ച് എന്തെങ്കിലും സംശയങ്ങൾ (Doubts) ഉണ്ടോ? ചോദിച്ചോളൂ, ഞാൻ പറഞ്ഞുതരാം. 😊',
+      inputType: 'text',
+      nextStepId: 'step_4', 
+      routes: {
+          "no": "step_4",
+          "illa": "step_4",
+          "nothing": "step_4",
+          "alla": "step_4"
+      }
+    },
+    {
+      id: 'step_4',
+      title: 'Hook 1: Software',
+      message: 'ഒരു കാര്യം കൂടി, ഞങ്ങളുടെ **Company Software**-നെ കുറിച്ച് അറിയാൻ താല്പര്യമുണ്ടോ? 📱 ഡ്രൈവർമാർക്ക് വേണ്ടിയുള്ള സുതാര്യമായ (Transparent) സിസ്റ്റം ആണിത്.',
       inputType: 'option',
-      options: ['ഉണ്ട് (Yes)', 'ഇല്ല (No)'],
-      nextStepId: 'step_3',
+      options: ['Yes, Parayu', 'No, Venda'],
+      routes: { "yes": "step_5", "parayu": "step_5" },
+      nextStepId: 'AI_HANDOFF'
+    },
+    {
+      id: 'step_5',
+      title: 'Explain Software + Hook 2: Bonus',
+      message: 'ഞങ്ങളുടെ App-ൽ നിങ്ങൾക്ക് ഡെയിലി ബില്ലും ഏണിങ്സും കൃത്യമായി കാണാം. കണക്കിൽ ഒരു രൂപയുടെ പോലും വ്യത്യാസം ഉണ്ടാവില്ല! 🤝\n\nഅടുത്തത്, ഞങ്ങളുടെ **Special Driver Bonus**-ine 💰 കുറിച്ച് പറയട്ടെ?',
+      inputType: 'option',
+      options: ['Yes, Parayu', 'No, Venda'],
+      routes: { "yes": "step_6", "parayu": "step_6" },
+      nextStepId: 'AI_HANDOFF'
+    },
+    {
+      id: 'step_6',
+      title: 'Explain Bonus + Hook 3: Freedom',
+      message: 'Daily Target അടിച്ചാൽ അധിക വരുമാനം (Bata) ലഭിക്കും! കൂടാതെ കൃത്യമായി വണ്ടി ഓടിക്കുന്നവർക്ക് Monthly Performance Bonus-ഉം ഉണ്ട്. 💸\n\nഇനി, Encho-യിലെ **\'Own Boss\' Policy**-ye 👑 കുറിച്ച് കേൾക്കണോ?',
+      inputType: 'option',
+      options: ['Yes, Parayu', 'No, Venda'],
+      routes: { "yes": "step_7", "parayu": "step_7" },
+      nextStepId: 'AI_HANDOFF'
+    },
+    {
+      id: 'step_7',
+      title: 'Explain Freedom + Schedule Call',
+      message: 'ഞങ്ങൾക്ക് ഫിക്സഡ് ഷിഫ്റ്റ് ഇല്ല! നിങ്ങൾക്ക് ഇഷ്ടമുള്ള സമയത്ത് ലോഗിൻ ചെയ്യാം. You are your own boss! 😎\n\nവിശദമായി സംസാരിക്കാൻ, ഞങ്ങളുടെ എക്സിക്യൂട്ടീവ് നിങ്ങളെ എപ്പോഴാണ് വിളിക്കേണ്ടത്? (When should we call you?)',
+      inputType: 'text',
+      nextStepId: 'step_8'
+    },
+    {
+      id: 'step_8',
+      title: 'Closing Confirmation',
+      message: 'Sure, We will reach out to you soon. Thank you! 🤝',
+      inputType: 'text',
+      nextStepId: 'AI_HANDOFF'
     }
 ];
 
@@ -96,7 +158,7 @@ let LAST_SETTINGS_FETCH = 0;
 let ACTIVE_UPLOADS = 0;
 let AI_CREDITS_ESTIMATED = 98; 
 let CURRENT_AI_MODEL = "gemini-3-flash-preview";
-let AI_FALLBACK_UNTIL = 0; // Timestamp for cool-down
+let AI_FALLBACK_UNTIL = 0; 
 
 // --- DATABASE CONNECTION ---
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
@@ -370,7 +432,7 @@ const analyzeWithAI = async (text, currentNotes, systemInstruction) => {
       const prompt = `
         User sent: "${text}"
         Current Driver Notes: "${currentNotes || ''}"
-        TASK: 1. Generate a helpful reply based on the system instructions. 2. Extract key details.
+        TASK: 1. Answer the specific question if any (rent, salary, etc). 2. Be helpful.
         Output JSON: { "reply": "string", "updatedNotes": "string" }
       `;
       const response = await ai.models.generateContent({ 
@@ -462,7 +524,39 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
 
     if (driver.is_human_mode) return;
 
-    // 3. BOT LOGIC
+    // 3. INTERRUPTION CHECK (The "Pause & Answer" Strategy)
+    // If user asks a question (contains '?' or keywords) AND they are not strictly answering "No" to the Doubts step
+    const QUESTION_REGEX = /([\?])|(rent|amount|salary|deposit|evide|entha|engane|location|details|doubt|rate)/i;
+    const isQuestion = QUESTION_REGEX.test(msgBody) && msgBody.split(' ').length > 1; 
+    const isStep3 = driver.current_bot_step_id === 'step_3';
+    
+    // If it is a question, we interrupt normal flow to Answer -> Jump to Doubts
+    if (botSettings.isEnabled && (isQuestion || (isStep3 && !msgBody.toLowerCase().match(/^(no|illa|nothing|alla)$/)))) {
+        
+        // A. Generate AI Answer
+        const aiResult = await analyzeWithAI(msgBody, driver.notes, botSettings.systemInstruction);
+        if (aiResult.reply) {
+            await sendWhatsAppMessage(from, aiResult.reply);
+            if (!driver.id.startsWith('temp_')) await logSystemMessage(driver.id, aiResult.reply, 'text');
+        }
+
+        // B. Resume Flow at Step 3 ("Any other doubts?")
+        const step3 = botSettings.steps.find(s => s.id === 'step_3');
+        if (step3) {
+            // Force state update
+            await queryWithRetry('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', ['step_3', driver.id]);
+            
+            // Send Step 3 Prompt
+            setTimeout(async () => {
+                 await sendWhatsAppMessage(from, step3.message);
+                 if (!driver.id.startsWith('temp_')) await logSystemMessage(driver.id, step3.message, 'text');
+            }, 1500); 
+        }
+        return; // Stop linear flow
+    }
+
+
+    // 4. BOT LOGIC (Linear Flow)
     let replyText = null; let replyOptions = null; let replyTemplate = null; let replyMedia = null; let replyMediaType = null; let shouldCallAI = false;
     let updatesToSave = {};
 
@@ -515,7 +609,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                         const normalize = (str) => str.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
                         const cleanInput = normalize(msgBody);
                         
-                        // FIX: Sort keys by length descending to match longest possible option first
                         const routeKey = Object.keys(currentStep.routes).sort((a, b) => b.length - a.length).find(k => {
                             const cleanKey = normalize(k);
                             if (cleanKey === cleanInput) return true;
@@ -551,7 +644,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text', tim
                              // --- FIREWALL CHECK: Prevent Placeholder Text ---
                              if (replyText && !isContentSafe(replyText)) {
                                  console.warn(`⚠️ Skipped Unsafe Bot Step: "${replyText}"`);
-                                 // Auto-switch to human to prevent broken experience
                                  updatesToSave.isHumanMode = true; 
                                  updatesToSave.isBotActive = false;
                                  replyText = "Please wait, our executive will connect with you shortly.";
