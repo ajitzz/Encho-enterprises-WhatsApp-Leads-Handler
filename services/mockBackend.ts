@@ -134,12 +134,31 @@ class MockBackendService {
     if (settings.isEnabled && driver.isBotActive) {
         let currentStep = settings.steps.find(s => s.id === driver.currentBotStepId);
         
+        // CASE 1: RESTART / WAKE UP
         if (!currentStep && settings.steps.length > 0) {
-            driver.currentBotStepId = entryPointId;
-            currentStep = settings.steps.find(s => s.id === entryPointId);
+            const entryStep = settings.steps.find(s => s.id === entryPointId) || settings.steps[0];
+            if (entryStep) {
+                 driver.currentBotStepId = entryStep.id;
+                 replyMsg = {
+                    id: Date.now().toString() + '_bot',
+                    sender: 'system',
+                    text: entryStep.message,
+                    timestamp: Date.now() + 500,
+                    type: entryStep.options ? 'options' : 'text',
+                    options: entryStep.options,
+                    imageUrl: entryStep.mediaUrl
+                };
+                if (entryStep.linkLabel && entryStep.message) {
+                    replyMsg.text = `${entryStep.linkLabel}\n${entryStep.message}`;
+                }
+                this.addMessage(driver.id, replyMsg);
+                this.persist();
+                return { driver, reply: replyMsg, actionNeeded: 'NONE' };
+            }
         }
-
-        if (currentStep) {
+        
+        // CASE 2: NORMAL FLOW
+        else if (currentStep) {
             let nextId = currentStep.nextStepId;
 
             if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {

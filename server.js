@@ -684,12 +684,26 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
     if (driver.is_bot_active && botSettings.isEnabled) {
         let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
         
+        // CASE 1: RESTART / WAKE UP FROM LOOP
+        // If current step is NULL, it means the bot finished a loop and is waiting.
+        // The incoming message (e.g., "Hello") triggers the Welcome message.
         if (!currentStep && botSettings.steps.length > 0) {
-            currentStep = botSettings.steps.find(s => s.id === botSettings.entryPointId);
-            updates.current_bot_step_id = botSettings.entryPointId;
-        }
-
-        if (currentStep) {
+            const entryStep = botSettings.steps.find(s => s.id === botSettings.entryPointId) || botSettings.steps[0];
+            
+            if (entryStep) {
+                // Set state to Entry Point
+                updates.current_bot_step_id = entryStep.id;
+                // Send the Welcome Message
+                replyText = entryStep.message;
+                if (entryStep.linkLabel && entryStep.message) replyText = `${entryStep.linkLabel}\n${entryStep.message}`;
+                replyOptions = entryStep.options;
+                replyMedia = entryStep.mediaUrl;
+                // We stop here. The user's input "Hello" woke up the bot. 
+                // We do NOT treat "Hello" as the answer to the first question yet.
+            }
+        } 
+        // CASE 2: NORMAL FLOW
+        else if (currentStep) {
             let nextId = currentStep.nextStepId;
 
             if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
