@@ -1,9 +1,19 @@
 
-
 import { Driver, BotSettings } from '../types';
 
-const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-const API_BASE_URL = isLocal ? 'http://localhost:3001' : ''; 
+// Determine Base URL:
+// In Vercel, API is served relative to root (e.g. /api/drivers).
+// In Localhost, we might run separate frontend/backend ports.
+const getBaseUrl = () => {
+    if (typeof window === 'undefined') return ''; // Server-side
+    const host = window.location.hostname;
+    if (host === 'localhost' || host === '127.0.0.1') {
+        return 'http://localhost:3001'; // Default local backend port
+    }
+    return ''; // Relative path for production
+};
+
+const API_BASE_URL = getBaseUrl();
 
 // ENTERPRISE RESILIENCE: Retry wrapper for Fetch
 const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, delay = 500): Promise<Response> => {
@@ -12,35 +22,34 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
         if (!response.ok) {
              // If server error (500-599), retry
              if (response.status >= 500) {
-                 const clone = response.clone();
-                 try {
-                    const errorBody = await clone.json();
-                    console.error("SERVER ERROR DETAILS:", errorBody);
-                 } catch(e) {
-                    console.error("SERVER ERROR (Text):", await clone.text());
+                 if (retries > 0) {
+                     await new Promise(res => setTimeout(res, delay));
+                     return fetchWithRetry(url, options, retries - 1, delay * 2);
                  }
-                 
-                 if (retries > 0) throw new Error('Server Error');
+                 throw new Error(`Server Error: ${response.status}`);
              }
+             // For 404s, fail fast so UI knows
              return response;
         }
         return response;
     } catch (err) {
         if (retries > 0) {
             await new Promise(res => setTimeout(res, delay));
-            return fetchWithRetry(url, options, retries - 1, delay * 2); // Exponential backoff
+            return fetchWithRetry(url, options, retries - 1, delay * 2); 
         }
         throw err;
     }
 };
 
 export const liveApiService = {
-  // Fetch drivers with retry logic
   getDrivers: async (): Promise<Driver[]> => {
     try {
       const url = `${API_BASE_URL}/api/drivers`;
       const response = await fetchWithRetry(url);
-      if (!response.ok) throw new Error('API Error');
+      if (!response.ok) {
+          console.error(`Failed to fetch drivers: ${response.status}`);
+          throw new Error('API Error');
+      }
       return await response.json();
     } catch (error: any) {
       console.warn("Fetch Error (handled):", error);
@@ -48,20 +57,15 @@ export const liveApiService = {
     }
   },
 
-  // Optimized Polling (2 Seconds)
   subscribeToUpdates: (callback: () => void) => {
     const interval = setInterval(async () => {
         try {
             await callback();
-        } catch(e) {
-            // Silently fail on individual poll errors to maintain "Connected" illusion
-        }
+        } catch(e) {}
     }, 2000); 
     return () => clearInterval(interval);
   },
 
-  // --- BOT SETTINGS API ---
-  
   getBotSettings: async (): Promise<BotSettings> => {
     try {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/bot-settings`);
@@ -88,8 +92,6 @@ export const liveApiService = {
     return await response.json();
   },
 
-  // --- ACTIONS ---
-
   sendMessage: async (driverId: string, text: string) => {
     const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/send`, {
       method: 'POST',
@@ -110,9 +112,7 @@ export const liveApiService = {
       return await response.json();
   },
 
-  // --- S3 MEDIA UPLOAD (ROBUST PRESIGNED FLOW) ---
   uploadMedia: async (file: File, folderPath: string = '/') => {
-      // 1. Request Presigned URL
       const presignResponse = await fetchWithRetry(`${API_BASE_URL}/api/s3/presign`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -126,7 +126,6 @@ export const liveApiService = {
       if (!presignResponse.ok) throw new Error('Failed to get upload permission');
       const { uploadUrl, key, publicUrl } = await presignResponse.json();
 
-      // 2. Upload Direct to S3
       const uploadResponse = await fetch(uploadUrl, {
           method: 'PUT',
           body: file,
@@ -140,7 +139,6 @@ export const liveApiService = {
           throw new Error(`Upload failed: ${uploadResponse.statusText}`);
       }
 
-      // 3. Register File in DB
       const fileType = file.type.split('/')[0];
       const registerResponse = await fetchWithRetry(`${API_BASE_URL}/api/files/register`, {
           method: 'POST',
@@ -158,19 +156,14 @@ export const liveApiService = {
       return { url: publicUrl, type: fileType };
   },
 
-  // --- NEW: PUBLIC SHOWCASE APIs ---
   setPublicFolder: async (folderId: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${folderId}/public`, {
-          method: 'POST'
-      });
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${folderId}/public`, { method: 'POST' });
       if (!response.ok) throw new Error('Failed to set public folder');
       return await response.json();
   },
 
   unsetPublicFolder: async (folderId: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${folderId}/public`, {
-          method: 'DELETE'
-      });
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${folderId}/public`, { method: 'DELETE' });
       if (!response.ok) throw new Error('Failed to unset public folder');
       return await response.json();
   },
@@ -190,21 +183,17 @@ export const liveApiService = {
       return await response.json();
   },
 
-  // --- SYNC TO WHATSAPP ---
   syncFileToWhatsApp: async (fileId: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/files/${fileId}/sync`, {
-          method: 'POST'
-      });
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/files/${fileId}/sync`, { method: 'POST' });
       if (!response.ok) throw new Error('Sync failed');
       return await response.json();
   },
 
   getMediaLibrary: async (path: string = '/') => {
-      // Encode path for URL safety
       const encodedPath = encodeURIComponent(path);
       const response = await fetchWithRetry(`${API_BASE_URL}/api/media?path=${encodedPath}`);
       if (!response.ok) throw new Error('Failed to fetch media');
-      return await response.json(); // Returns { folders: [], files: [] }
+      return await response.json();
   },
 
   createFolder: async (name: string, parentPath: string) => {
@@ -220,7 +209,6 @@ export const liveApiService = {
       return await response.json();
   },
 
-  // NEW: Rename Folder
   renameFolder: async (id: string, newName: string) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${id}`, {
           method: 'PUT',
@@ -235,22 +223,16 @@ export const liveApiService = {
   },
 
   deleteMediaFile: async (id: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/files/${id}`, {
-          method: 'DELETE'
-      });
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/files/${id}`, { method: 'DELETE' });
       if (!response.ok) throw new Error('Failed to delete file');
       return await response.json();
   },
 
   deleteFolder: async (id: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${id}`, {
-          method: 'DELETE'
-      });
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${id}`, { method: 'DELETE' });
       if (!response.ok) throw new Error('Failed to delete folder');
       return await response.json();
   },
-
-  // --- CONFIG ---
 
   configureWebhook: async (config: any) => {
     const response = await fetchWithRetry(`${API_BASE_URL}/api/configure-webhook`, {
@@ -269,50 +251,9 @@ export const liveApiService = {
     });
     return await response.json();
   },
-
-  // --- SYSTEM DOCTOR (ADMIN) ---
   
-  getProjectContext: async (): Promise<{files: Array<{path: string, content: string}>}> => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/project-context`);
-      if (!response.ok) throw new Error('Failed to read project context');
-      return await response.json();
-  },
-
-  getSourceCode: async (): Promise<{code: string}> => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/source-code`);
-      if (!response.ok) throw new Error('Failed to read source code');
-      return await response.json();
-  },
-
-  applySystemPatch: async (changes: Array<{filePath: string, content: string}>): Promise<{success: boolean, message: string}> => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/write-files`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ changes })
-      });
-      if (!response.ok) throw new Error('Failed to patch system');
-      return await response.json();
-  },
-  
-  // --- AI AUDIT ---
-  auditFlow: async (nodes: any[]) => {
-    const response = await fetchWithRetry(`${API_BASE_URL}/api/admin/audit-flow`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nodes })
-    });
-    if (!response.ok) throw new Error('Audit Failed');
-    return await response.json();
-  },
-
-  // --- AI ASSISTANT (JARVIS) ---
   sendAssistantMessage: async (message: string, history: any[]) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/assistant/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message, history })
-      });
-      if (!response.ok) throw new Error('Failed to chat with assistant');
-      return await response.json();
+      // Stub for future AI assistant
+      return { text: "AI Assistant is disabled in this mode." };
   }
 };
