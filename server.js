@@ -47,13 +47,13 @@ const BUCKET_NAME = process.env.AWS_BUCKET_NAME || 'uber-fleet-assets';
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL;
 
-// Global pool handling for Serverless environments (prevent exhausting connections)
+// Global pool handling for Serverless environments
 let pool;
 if (!global.pgPool) {
     global.pgPool = new Pool({
         connectionString: CONNECTION_STRING,
         ssl: { rejectUnauthorized: false },
-        max: 5, // Lower limit for serverless
+        max: 5,
         idleTimeoutMillis: 1000, 
         connectionTimeoutMillis: 5000, 
     });
@@ -68,7 +68,6 @@ const queryWithRetry = async (text, params, retries = 3) => {
         return res;
     } catch (err) {
         if (client) { try { client.release(true); } catch(e) {} client = null; }
-        // Retry only on connection errors
         if (retries > 0 && (err.code === 'ECONNRESET' || err.code === '57P01')) {
             await new Promise(res => setTimeout(res, 1000));
             return queryWithRetry(text, params, retries - 1);
@@ -81,7 +80,6 @@ const queryWithRetry = async (text, params, retries = 3) => {
 };
 
 // --- INIT DB (LAZY LOADING) ---
-// We track initialization to avoid hitting the DB with CREATE TABLE on every request
 let isDbInitialized = false;
 
 const initDB = async () => {
@@ -138,11 +136,9 @@ const initDB = async () => {
         console.log("Database initialized (Lazy)");
     } catch (e) {
         console.error("DB Init Failed:", e);
-        // Do not block execution, allow retry on next request
     }
 };
 
-// Middleware to ensure DB is ready before handling request
 const ensureDbReady = async (req, res, next) => {
     await initDB();
     next();
@@ -203,10 +199,14 @@ const logSystemMessage = async (driverId, text, type = 'text') => {
  */
 const uploadShowcaseManifest = async (folderIdOrPath) => {
     try {
+        if (!folderIdOrPath || folderIdOrPath === '/') return; // Cannot showcase root
+
         let folder;
         // Determine if ID or Path
         if (folderIdOrPath.includes('/')) {
              const parts = folderIdOrPath.split('/').filter(Boolean);
+             if (parts.length === 0) return;
+             
              const name = parts.pop();
              const parent = parts.length > 0 ? `/${parts.join('/')}` : '/';
              const fRes = await queryWithRetry('SELECT * FROM folders WHERE name = $1 AND parent_path = $2', [name, parent]);
@@ -229,7 +229,6 @@ const uploadShowcaseManifest = async (folderIdOrPath) => {
 
         const key = `manifests/${folder.name}.json`;
         
-        // Upload with cache-control: no-cache to ensure freshness
         await s3Client.send(new PutObjectCommand({
             Bucket: BUCKET_NAME,
             Key: key,
@@ -379,7 +378,10 @@ router.post('/files/register', async (req, res) => {
         await queryWithRetry(`INSERT INTO files (id, filename, url, type, folder_path) VALUES ($1, $2, $3, $4, $5)`, [id, filename, url, type, folderPath]);
         
         // --- MANIFEST UPDATE ---
-        uploadShowcaseManifest(folderPath).catch(console.error);
+        // Only update manifest if not root, or if logic allows.
+        if (folderPath && folderPath !== '/') {
+            uploadShowcaseManifest(folderPath).catch(console.error);
+        }
         
         res.json({ success: true, id });
     } catch (e) {
@@ -394,7 +396,7 @@ router.delete('/files/:id', async (req, res) => {
         
         await queryWithRetry('DELETE FROM files WHERE id = $1', [req.params.id]);
         
-        if (fRes.rows.length > 0) {
+        if (fRes.rows.length > 0 && fRes.rows[0].folder_path !== '/') {
              uploadShowcaseManifest(fRes.rows[0].folder_path).catch(console.error);
         }
 
