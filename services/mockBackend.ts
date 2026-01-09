@@ -99,10 +99,9 @@ class MockBackendService {
   subscribe(l: () => void) { this.listeners.push(l); return () => { this.listeners = this.listeners.filter(i => i !== l); }; }
   getDrivers() { return [...this.drivers].sort((a,b) => b.lastMessageTime - a.lastMessageTime); }
   getBotSettings() { return this.botSettings; }
-  updateBotSettings(s: BotSettings) { this.botSettings = s; }
+  updateBotSettings(s: BotSettings) { this.botSettings = s; this.notify(); }
   getDriver(id: string) { return this.drivers.find(d => d.id === id); }
 
-  // Added optional imageUrl parameter to fix argument mismatch error in Simulator.tsx
   processIncomingMessage(phone: string, text: string, imageUrl?: string): { driver: Driver, actionNeeded: string } {
     let driver = this.drivers.find(d => d.phoneNumber === phone);
     const settings = this.botSettings;
@@ -128,7 +127,6 @@ class MockBackendService {
       this.drivers.push(driver);
     }
 
-    // Fixed: Message now correctly stores imageUrl and updates type if an image is present
     const msg: Message = { 
       id: Date.now().toString(), 
       sender: 'driver', 
@@ -142,6 +140,31 @@ class MockBackendService {
     driver.lastMessageTime = Date.now();
 
     if (driver.isHumanMode) return { driver, actionNeeded };
+
+    // --- INTERRUPTION LOGIC (Answer & Jump to Doubts) ---
+    const QUESTION_REGEX = /([\?])|(rent|amount|salary|deposit|evide|entha|engane|location|details|doubt|rate)/i;
+    const isQuestion = QUESTION_REGEX.test(text) && text.split(' ').length > 1; 
+    const isStep3 = driver.currentBotStepId === 'step_3';
+
+    // FIX: Only trigger AI interruption if NOT in Bot Only mode
+    if (settings.routingStrategy !== 'BOT_ONLY' && settings.isEnabled && (isQuestion || (isStep3 && !text.toLowerCase().match(/^(no|illa|nothing|alla)$/)))) {
+        const step3 = settings.steps.find(s => s.id === 'step_3');
+        if (step3) {
+            driver.currentBotStepId = 'step_3';
+            setTimeout(() => {
+                const followUp: Message = {
+                    id: Date.now().toString() + '_follow',
+                    sender: 'system',
+                    text: step3.message,
+                    timestamp: Date.now() + 2000,
+                    type: 'text'
+                };
+                this.addMessage(driver!.id, followUp);
+            }, 2000);
+            this.persist();
+            return { driver, actionNeeded: 'AI_REPLY' }; 
+        }
+    }
 
     // Strict linear logic for Bot Only
     if (driver.isBotActive && driver.currentBotStepId) {

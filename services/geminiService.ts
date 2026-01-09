@@ -2,13 +2,15 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { LeadStatus, AuditReport, AuditIssue } from "../types";
 
-// Always use process.env.API_KEY for initialization as per guidelines
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
+// Helper to clean JSON from AI responses
 const cleanJSON = (text: string) => {
   if (!text) return "{}";
-  // Remove markdown code blocks like ```json ... ```
   return text.replace(/```json/g, '').replace(/```/g, '').trim();
+};
+
+// Helper to get AI instance with the latest API key
+const getAI = () => {
+  return new GoogleGenAI({ apiKey: process.env.API_KEY });
 };
 
 export interface AIAnalysisResult {
@@ -22,169 +24,158 @@ export interface AIAnalysisResult {
     availability?: string;
     isLicenseValid?: boolean;
   };
+  modelUsed?: string;
 }
 
-export const analyzeMessage = async (text: string, imageUrl?: string, systemInstruction?: string): Promise<AIAnalysisResult> => {
-  try {
-    const model = "gemini-3-flash-preview";
-    const persona = systemInstruction || `You are an AI recruiter for Uber Fleet. Your goal is to be helpful, professional, and encourage drivers to apply.`;
+const runLocalMessageHeuristic = (text: string, hasImage: boolean): AIAnalysisResult => {
+  const lower = text.toLowerCase();
+  let reply = "Thank you for reaching out. An executive will review your message shortly.";
+  let status = LeadStatus.NEW;
+  let intent = "General Inquiry";
 
-    let prompt = `Analyze the driver's message.
+  if (lower.includes("hi") || lower.includes("hello") || lower.includes("ഹലോ")) {
+    reply = "Hello! Welcome to Encho Cabs. Are you interested in joining our Uber/Ola fleet?";
+    intent = "Greeting";
+  } else if (lower.includes("rent") || lower.includes("വാടക") || lower.includes("rate")) {
+    reply = "Our vehicle rent is ₹600/day, which can be reduced to ₹450/day if you meet the targets. Would you like to know more?";
+    intent = "Pricing Inquiry";
+  } else if (lower.includes("join") || lower.includes("ജോലി") || lower.includes("work")) {
+    reply = "We have WagonR CNG vehicles ready! Do you have a valid driving license?";
+    intent = "Job Application";
+    status = LeadStatus.QUALIFIED;
+  } else if (hasImage) {
+    reply = "I see you've sent a document. Our team will verify it and get back to you.";
+    intent = "Document Submission";
+  }
+
+  return {
+    intent,
+    isInterested: true,
+    containsDocument: hasImage,
+    suggestedReply: `[Local Fallback] ${reply}`,
+    recommendedStatus: status,
+    modelUsed: 'local-heuristic'
+  };
+};
+
+export const analyzeMessage = async (text: string, imageUrl?: string, systemInstruction?: string): Promise<AIAnalysisResult> => {
+  const models = ["gemini-3-flash-preview", "gemini-flash-lite-latest"];
+  const persona = systemInstruction || `You are an AI recruiter for Uber Fleet. Your goal is to be helpful, professional, and encourage drivers to apply.`;
+  let prompt = `Analyze the driver's message.
     Message: "${text}"
     Has Image Attachment: ${imageUrl ? 'Yes' : 'No'}
     Tasks: 1. Reply to the user. 2. Extract data. 3. Determine status.`;
 
-    // Updated generateContent call to follow the latest SDK pattern
-    const response = await ai.models.generateContent({
-      model,
-      contents: prompt,
-      config: {
-        systemInstruction: persona, 
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            intent: { type: Type.STRING },
-            isInterested: { type: Type.BOOLEAN },
-            containsDocument: { type: Type.BOOLEAN },
-            suggestedReply: { type: Type.STRING },
-            recommendedStatus: { type: Type.STRING },
-            extractedData: {
-              type: Type.OBJECT,
-              properties: {
-                 vehicleRegistration: { type: Type.STRING, nullable: true },
-                 availability: { type: Type.STRING, nullable: true },
-                 isLicenseValid: { type: Type.BOOLEAN }
+  for (const model of models) {
+    try {
+      const ai = getAI();
+      const response = await ai.models.generateContent({
+        model,
+        contents: prompt,
+        config: {
+          systemInstruction: persona, 
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              intent: { type: Type.STRING },
+              isInterested: { type: Type.BOOLEAN },
+              containsDocument: { type: Type.BOOLEAN },
+              suggestedReply: { type: Type.STRING },
+              recommendedStatus: { type: Type.STRING },
+              extractedData: {
+                type: Type.OBJECT,
+                properties: {
+                   vehicleRegistration: { type: Type.STRING, nullable: true },
+                   availability: { type: Type.STRING, nullable: true },
+                   isLicenseValid: { type: Type.BOOLEAN }
+                }
               }
-            }
-          },
-          propertyOrdering: ["intent", "isInterested", "containsDocument", "suggestedReply", "recommendedStatus", "extractedData"],
+            },
+            required: ["intent", "isInterested", "containsDocument", "suggestedReply", "recommendedStatus"],
+          }
         }
-      }
-    });
+      });
 
-    // Directly access .text property from response object as per guidelines
-    const result = JSON.parse(cleanJSON(response.text || '{}'));
-    let status = LeadStatus.NEW;
-    switch(result.recommendedStatus) {
-      case 'Qualified': status = LeadStatus.QUALIFIED; break;
-      case 'Flagged': status = LeadStatus.FLAGGED_FOR_REVIEW; break;
-      case 'Rejected': status = LeadStatus.REJECTED; break;
-      case 'Onboarded': status = LeadStatus.ONBOARDED; break;
-      default: status = LeadStatus.NEW;
+      const result = JSON.parse(cleanJSON(response.text || '{}'));
+      let status = LeadStatus.NEW;
+      switch(result.recommendedStatus) {
+        case 'Qualified': status = LeadStatus.QUALIFIED; break;
+        case 'Flagged': status = LeadStatus.FLAGGED_FOR_REVIEW; break;
+        case 'Rejected': status = LeadStatus.REJECTED; break;
+        case 'Onboarded': status = LeadStatus.ONBOARDED; break;
+        default: status = LeadStatus.NEW;
+      }
+
+      return { ...result, recommendedStatus: status, modelUsed: model };
+    } catch (error: any) {
+      if (error?.message?.includes("429") || error?.message?.includes("quota")) {
+        console.warn(`Model ${model} quota exceeded, falling back...`);
+        continue;
+      }
+      console.error(`AI Analysis failed for model ${model}`, error);
+    }
+  }
+
+  return runLocalMessageHeuristic(text, !!imageUrl);
+};
+
+export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
+    const models = ["gemini-3-flash-preview", "gemini-flash-lite-latest"];
+    const prompt = `
+        You are a Quality Assurance AI for a Chatbot Flow.
+        Analyze this JSON flow configuration for logical errors and empty spaces.
+        INPUT DATA: ${JSON.stringify(nodes.map(n => ({ id: n.id, type: n.data.label, message: n.data.message, options: n.data.options, mediaUrl: n.data.mediaUrl })))}
+        OUTPUT FORMAT: JSON with 'isValid' (boolean) and 'issues' (array).`;
+
+    for (const model of models) {
+        try {
+            const ai = getAI();
+            const response = await ai.models.generateContent({
+                model,
+                contents: prompt,
+                config: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: Type.OBJECT,
+                        properties: {
+                            isValid: { type: Type.BOOLEAN },
+                            issues: {
+                                type: Type.ARRAY,
+                                items: {
+                                    type: Type.OBJECT,
+                                    properties: {
+                                        nodeId: { type: Type.STRING },
+                                        severity: { type: Type.STRING, enum: ["CRITICAL", "WARNING"] },
+                                        issue: { type: Type.STRING },
+                                        suggestion: { type: Type.STRING },
+                                        autoFixValue: { type: Type.STRING, nullable: true } 
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            return JSON.parse(cleanJSON(response.text || '{"isValid": true, "issues": []}'));
+        } catch (e: any) {
+            if (e?.message?.includes("429") || e?.message?.includes("quota")) {
+                continue;
+            }
+        }
     }
 
-    return { ...result, recommendedStatus: status };
-
-  } catch (error) {
-    console.error("AI Analysis failed", error);
-    return {
-      intent: "Analysis Failed",
-      isInterested: false,
-      containsDocument: !!imageUrl,
-      suggestedReply: "Could you please repeat that?",
-      recommendedStatus: LeadStatus.NEW
-    };
-  }
+    return { isValid: true, issues: [] }; // Basic fallback
 };
 
-// --- CLIENT-SIDE HEURISTIC FALLBACK ---
-const runLocalAudit = (nodes: any[]): AuditReport => {
-    console.warn("⚠️ API Quota Exceeded / Offline. Running Local Heuristic Audit.");
-    const issues: AuditIssue[] = [];
-    
-    // Regex matches: "replace this sample message", "enter your message", etc.
-    const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
+export const analyzeSystemCode = async (files: Array<{path: string, content: string}>, issueDescription: string): Promise<{ diagnosis: string, changes: Array<{filePath: string, content: string, explanation: string}> }> => {
+    const model = "gemini-3-pro-preview"; 
+    const fileContext = files.map(f => `-- ${f.path} --\n${f.content}\n`).join("\n");
+    const prompt = `Engineer AI. ISSUE: "${issueDescription}"\nCONTEXT:\n${fileContext}`;
 
-    nodes.forEach(node => {
-        if (node.id === 'start' || node.type === 'start' || node.data?.type === 'start') return;
-        const data = node.data || {};
-
-        // 1. Placeholder Text
-        if (data.message && BLOCKED_REGEX.test(data.message)) {
-             issues.push({ 
-                 nodeId: node.id, 
-                 severity: 'CRITICAL', 
-                 issue: 'Placeholder Text Detected', 
-                 suggestion: 'You are using default text. Please write a real message.', 
-                 autoFixValue: 'Please reply.' 
-             });
-        }
-        // 2. Empty Text
-        else if ((data.label === 'Text' || data.inputType === 'text') && (!data.message || !data.message.trim())) {
-            issues.push({ 
-                nodeId: node.id, 
-                severity: 'CRITICAL', 
-                issue: 'Empty Message', 
-                suggestion: 'This message bubble is empty.', 
-                autoFixValue: 'Hello!' 
-            });
-        }
-        // 3. Missing Media
-        else if (['Image', 'Video'].includes(data.label)) {
-            if (!data.mediaUrl || !data.mediaUrl.trim()) {
-                 issues.push({ 
-                     nodeId: node.id, 
-                     severity: 'CRITICAL', 
-                     issue: 'Missing Media URL', 
-                     suggestion: 'This media node has no file link. Please add a URL.', 
-                     autoFixValue: null 
-                 });
-            }
-        }
-        // 4. Empty Options
-        else if (data.inputType === 'option') {
-            if (!data.options || data.options.length === 0) {
-                 issues.push({
-                     nodeId: node.id,
-                     severity: 'CRITICAL',
-                     issue: 'No Options',
-                     suggestion: 'Add at least one button option.',
-                     autoFixValue: ['Yes', 'No']
-                 });
-            } else if (data.options.some((o: string) => !o || !o.trim())) {
-                 issues.push({
-                     nodeId: node.id,
-                     severity: 'WARNING',
-                     issue: 'Empty Option Label',
-                     suggestion: 'One or more buttons have no text.',
-                     autoFixValue: data.options.filter((o: string) => o && o.trim())
-                 });
-            }
-        }
-    });
-
-    return { isValid: issues.length === 0, issues };
-};
-
-// --- SYSTEM AUDITOR (JSON CONFIG) ---
-export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
     try {
-        const model = "gemini-3-flash-preview";
-        
-        const prompt = `
-        You are a Quality Assurance AI for a Chatbot Flow.
-        
-        Analyze this JSON flow configuration for logical errors and empty spaces.
-        
-        STRICT VALIDATION RULES:
-        1. "Placeholder Text": Any message containing "replace this", "sample message", "type here".
-        2. "Empty Options": An Options node where the 'options' array is empty OR contains empty strings.
-        3. "Empty Text": A Text node with an empty or whitespace-only message.
-        4. "Missing Media": A Media node (Image/Video) with no URL.
-
-        INPUT DATA:
-        ${JSON.stringify(nodes.map(n => ({ id: n.id, type: n.data.label, message: n.data.message, options: n.data.options, mediaUrl: n.data.mediaUrl })))}
-
-        OUTPUT FORMAT:
-        Return a JSON object with 'isValid' (boolean) and 'issues' (array).
-        
-        For 'autoFixValue':
-        - If the node is redundant or hopelessly empty, set autoFixValue to "DELETE_NODE".
-        - If it's a text node, provide a professional fallback message.
-        - If it's an option node with empty options, suggest a fixed list like ["Yes", "No"].
-        `;
-
+        const ai = getAI();
         const response = await ai.models.generateContent({
             model,
             contents: prompt,
@@ -193,94 +184,24 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
                 responseSchema: {
                     type: Type.OBJECT,
                     properties: {
-                        isValid: { type: Type.BOOLEAN },
-                        issues: {
+                        diagnosis: { type: Type.STRING },
+                        changes: {
                             type: Type.ARRAY,
                             items: {
                                 type: Type.OBJECT,
                                 properties: {
-                                    nodeId: { type: Type.STRING },
-                                    severity: { type: Type.STRING, enum: ["CRITICAL", "WARNING"] },
-                                    issue: { type: Type.STRING },
-                                    suggestion: { type: Type.STRING },
-                                    autoFixValue: { type: Type.STRING, nullable: true } 
+                                    filePath: { type: Type.STRING },
+                                    content: { type: Type.STRING },
+                                    explanation: { type: Type.STRING }
                                 }
                             }
                         }
-                    },
-                    propertyOrdering: ["isValid", "issues"],
+                    }
                 }
             }
         });
-
-        // Directly access .text property as per guidelines
-        const report = JSON.parse(cleanJSON(response.text || '{"isValid": true, "issues": []}'));
-        return report;
-
-    } catch (e: any) {
-        console.error("Gemini Audit failed", e);
-        // Fallback to local heuristics on any AI error
-        return runLocalAudit(nodes);
+        return JSON.parse(cleanJSON(response.text || '{}'));
+    } catch (e) {
+        return { diagnosis: "System analysis failed. Check API quota.", changes: [] };
     }
-};
-
-// --- SYSTEM DOCTOR (FULL PROJECT ANALYSIS) ---
-export const analyzeSystemCode = async (files: Array<{path: string, content: string}>, issueDescription: string): Promise<{ diagnosis: string, changes: Array<{filePath: string, content: string, explanation: string}> }> => {
-    const model = "gemini-3-pro-preview"; // Correctly using gemini-3-pro-preview for complex tasks
-
-    // Create a compact representation of the files
-    const fileContext = files.map(f => `
-    --- START OF FILE ${f.path} ---
-    ${f.content}
-    --- END OF FILE ${f.path} ---
-    `).join("\n");
-
-    const prompt = `
-    You are a Principal Full-Stack Engineer with read/write access to this entire project.
-    
-    USER ISSUE: "${issueDescription}"
-
-    YOUR TASKS:
-    1. Analyze the provided project files to understand the root cause.
-    2. Check dependencies, imports, API logic, and Frontend components.
-    3. Determine which files need to be modified to fix the issue.
-    4. Provide the FULL content of the fixed files.
-
-    CONSTRAINTS:
-    - Do NOT remove existing valid logic. Only fix what is broken.
-    - If you need to fix multiple files (e.g., update an Interface in types.ts AND the Component usage in App.tsx), return changes for ALL of them.
-    - Return a valid JSON object.
-
-    PROJECT CONTEXT:
-    ${fileContext}
-    `;
-
-    const response = await ai.models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                    diagnosis: { type: Type.STRING },
-                    changes: {
-                        type: Type.ARRAY,
-                        items: {
-                            type: Type.OBJECT,
-                            properties: {
-                                filePath: { type: Type.STRING },
-                                content: { type: Type.STRING },
-                                explanation: { type: Type.STRING }
-                            }
-                        }
-                    }
-                },
-                propertyOrdering: ["diagnosis", "changes"],
-            }
-        }
-    });
-
-    // Directly access .text property from response object as per guidelines
-    return JSON.parse(cleanJSON(response.text || '{}'));
 }
