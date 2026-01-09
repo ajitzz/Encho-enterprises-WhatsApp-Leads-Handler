@@ -3,6 +3,7 @@ import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, B
 
 const DEFAULT_BOT_SETTINGS: BotSettings = {
   isEnabled: true,
+  shouldRepeat: false,
   routingStrategy: 'BOT_ONLY', // Enforced
   systemInstruction: "",
   steps: [
@@ -181,9 +182,16 @@ class MockBackendService {
                     this.addMessage(driver.id, replyMsg);
                 }
             } else {
-                // End of Flow - Static Message
-                driver.isBotActive = false;
-                driver.currentBotStepId = undefined;
+                // End of Flow - Logic Update for Repeat
+                if (settings.shouldRepeat) {
+                    // Loop enabled: Keep active, reset step to null
+                    driver.isBotActive = true;
+                    driver.currentBotStepId = undefined;
+                } else {
+                    // Default: Deactivate
+                    driver.isBotActive = false;
+                    driver.currentBotStepId = undefined;
+                }
                 
                 replyMsg = {
                     id: Date.now().toString() + '_end',

@@ -14,7 +14,7 @@ import { SystemMonitor } from './components/SystemMonitor';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
-import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon } from 'lucide-react';
+import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat } from 'lucide-react';
 
 export default function App() {
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
@@ -42,8 +42,21 @@ export default function App() {
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [showWebhookModal, setShowWebhookModal] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
+  const [isRepeatToggling, setIsRepeatToggling] = useState(false);
   
   const [dataSource, setDataSource] = useState<'mock' | 'live'>('mock');
+
+  // Load Settings for Dashboard Toggle
+  useEffect(() => {
+      const loadSettings = async () => {
+          try {
+              const s = dataSource === 'live' ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
+              setBotSettings(s);
+          } catch(e) {}
+      };
+      if (activeTab === 'dashboard') loadSettings();
+  }, [activeTab, dataSource]);
 
   useEffect(() => {
     if (isShowcaseMode) return; 
@@ -228,6 +241,21 @@ export default function App() {
     }
   };
 
+  const handleToggleRepeat = async () => {
+      if (!botSettings || isRepeatToggling) return;
+      setIsRepeatToggling(true);
+      const newSettings = { ...botSettings, shouldRepeat: !botSettings.shouldRepeat };
+      try {
+          if (dataSource === 'live') await liveApiService.saveBotSettings(newSettings);
+          else mockBackend.updateBotSettings(newSettings);
+          setBotSettings(newSettings);
+      } catch(e) {
+          alert("Failed to toggle setting");
+      } finally {
+          setIsRepeatToggling(false);
+      }
+  };
+
   const stats = {
     total: drivers.length,
     flagged: drivers.filter(d => d.status === LeadStatus.FLAGGED_FOR_REVIEW).length,
@@ -253,6 +281,23 @@ export default function App() {
                  </div>
                  
                  <div className="flex items-center gap-2">
+                   {/* BOT REPEAT TOGGLE */}
+                   {botSettings && (
+                       <button
+                           onClick={handleToggleRepeat}
+                           disabled={isRepeatToggling}
+                           className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-bold transition-all shadow-sm ${
+                               botSettings.shouldRepeat 
+                               ? 'bg-purple-100 text-purple-700 border-purple-200 hover:bg-purple-200' 
+                               : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
+                           }`}
+                           title="Restart bot flow automatically after completion"
+                       >
+                           <Repeat size={18} className={isRepeatToggling ? 'animate-spin' : ''} />
+                           Bot Repeat: {botSettings.shouldRepeat ? 'ON' : 'OFF'}
+                       </button>
+                   )}
+
                    {dataSource === 'live' && (
                      <button
                         onClick={() => setShowWebhookModal(true)}

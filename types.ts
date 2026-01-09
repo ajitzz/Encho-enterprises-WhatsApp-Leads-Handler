@@ -101,6 +101,7 @@ export interface BotStep {
 
 export interface BotSettings {
   isEnabled: boolean;
+  shouldRepeat?: boolean; // New: Controls if bot loops after finishing
   routingStrategy: 'BOT_ONLY' | 'AI_ONLY' | 'HYBRID_BOT_FIRST';
   systemInstruction: string; // The "Training" for Gemini
   steps: BotStep[];

@@ -132,7 +132,7 @@ const initDB = async () => {
             );
         `);
         // Insert default settings if not exists
-        await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT DO NOTHING`, [JSON.stringify({ isEnabled: true, steps: [] })]);
+        await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT DO NOTHING`, [JSON.stringify({ isEnabled: true, shouldRepeat: false, steps: [] })]);
         isDbInitialized = true;
         console.log("Database initialized (Lazy)");
     } catch (e) {
@@ -224,10 +224,6 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
            }
        } catch(e) {}
 
-       // If no ID, we could upload it now, but for 'send' speed we might just send the link if not critical.
-       // However, user requested Upload strategy.
-       // If it's a raw URL not in our DB, we send as link.
-       
        const type = mediaType || 'image';
        payload.type = type;
        
@@ -340,7 +336,7 @@ router.get('/bot-settings', async (req, res) => {
     try {
         const result = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1', []);
         if (result.rows.length > 0) res.json(result.rows[0].settings);
-        else res.json({ isEnabled: true, steps: [] });
+        else res.json({ isEnabled: true, shouldRepeat: false, steps: [] });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -645,7 +641,7 @@ router.get('/system/stats', async (req, res) => {
 // --- BOT LOGIC (STRICT) ---
 const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => {
     // 1. Fetch Settings
-    let botSettings = { isEnabled: true, steps: [] };
+    let botSettings = { isEnabled: true, shouldRepeat: false, steps: [] };
     try {
         const sRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1', []);
         if (sRes.rows.length > 0) botSettings = sRes.rows[0].settings;
@@ -722,8 +718,15 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
                     replyMedia = nextStep.mediaUrl;
                 }
             } else if (nextId === 'END' || nextId === 'AI_HANDOFF') {
-                updates.is_bot_active = false;
-                updates.current_bot_step_id = null;
+                if (botSettings.shouldRepeat) {
+                    // LOOP: Stay active, reset step to null so next message triggers entry point
+                    updates.is_bot_active = true;
+                    updates.current_bot_step_id = null;
+                } else {
+                    // STOP: Deactivate bot
+                    updates.is_bot_active = false;
+                    updates.current_bot_step_id = null;
+                }
                 replyText = "Thank you! We have received your details. Our team will verify them and contact you shortly.";
             }
         }
