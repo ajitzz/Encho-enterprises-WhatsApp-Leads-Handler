@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { liveApiService } from '../services/liveApiService';
-import { Share2, Volume2, VolumeX, MessageCircle, ArrowLeft, Loader2, Store, Clock, Play, CloudOff } from 'lucide-react';
+import { Share2, Volume2, VolumeX, MessageCircle, ArrowLeft, Loader2, Store, Clock, Play, CloudOff, FileText, Download } from 'lucide-react';
 
 interface ShowcaseItem {
     id: string;
@@ -169,13 +169,37 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
         if (index !== activeIndex) setActiveIndex(index);
     };
 
-    const handleWhatsAppReturn = () => {
-        if (document.referrer.includes('whatsapp')) {
-             window.history.back();
+    const handleReturn = () => {
+        // If history exists, go back. Otherwise close window (if standalone) or redirect to WhatsApp.
+        if (window.history.length > 1) {
+            window.history.back();
         } else {
-             window.location.href = "https://wa.me/"; 
+            // Check if we are in a standalone window/tab
+            if (window.opener) {
+                window.close();
+            } else {
+                window.location.href = "https://wa.me/";
+            }
         }
     };
+
+    const renderDocumentCard = (item: ShowcaseItem) => (
+        <div className="relative w-full max-w-sm mx-auto aspect-[3/4] bg-white/10 backdrop-blur-xl border border-white/20 rounded-2xl p-6 flex flex-col items-center justify-center text-center shadow-2xl">
+            <div className="bg-white/10 p-6 rounded-full mb-6 ring-1 ring-white/20">
+                <FileText size={64} className="text-white drop-shadow-md" />
+            </div>
+            <h3 className="text-white font-bold text-xl mb-2 line-clamp-2">{item.filename}</h3>
+            <p className="text-gray-300 text-sm mb-8">Document / PDF</p>
+            <a 
+                href={item.url} 
+                target="_blank" 
+                rel="noreferrer"
+                className="bg-white text-black font-bold py-3 px-8 rounded-full flex items-center gap-2 hover:bg-gray-100 transition-colors shadow-lg active:scale-95"
+            >
+                <Download size={18} /> Download / View
+            </a>
+        </div>
+    );
 
     if (loading) {
         return (
@@ -205,6 +229,12 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                         <Clock size={12} />
                         Updates in progress...
                     </div>
+                    <button 
+                        onClick={handleReturn}
+                        className="mt-8 bg-white/10 border border-white/20 text-white px-6 py-2 rounded-full text-sm font-medium hover:bg-white/20 transition-colors flex items-center gap-2"
+                    >
+                        <ArrowLeft size={16} /> Return to Chat
+                    </button>
                 </div>
             </div>
         );
@@ -250,6 +280,8 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                                 loop 
                                 playsInline
                             />
+                        ) : item.type === 'document' ? (
+                             <div className="w-full h-full bg-gradient-to-br from-gray-900 to-slate-800" />
                         ) : (
                             <img 
                                 src={item.url} 
@@ -261,7 +293,7 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                     </div>
 
                     {/* 2. Main Content */}
-                    <div className="relative z-10 w-full h-full flex items-center justify-center p-0 md:p-8">
+                    <div className="relative z-10 w-full h-full flex items-center justify-center p-4 md:p-8">
                         {item.type === 'video' ? (
                             <div className="relative w-full h-full md:max-h-[85vh] md:w-auto md:max-w-md md:aspect-[9/16] flex items-center justify-center">
                                 {index === activeIndex && (
@@ -276,6 +308,8 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                                     <div className="w-full h-full bg-gray-800 animate-pulse rounded-none md:rounded-2xl" />
                                 )}
                             </div>
+                        ) : item.type === 'document' ? (
+                            renderDocumentCard(item)
                         ) : (
                             <img 
                                 src={item.url} 
@@ -309,7 +343,7 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                 </button>
                 
                 <button 
-                    onClick={handleWhatsAppReturn}
+                    onClick={handleReturn}
                     className="bg-green-500 p-4 rounded-full text-white shadow-lg shadow-green-500/30 hover:bg-green-600 transition-all active:scale-95 w-14 h-14 flex items-center justify-center animate-bounce-slow"
                 >
                     <MessageCircle size={24} fill="currentColor" />
@@ -318,7 +352,7 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
             
             {/* Back Arrow for non-app users */}
             <div className="fixed top-6 left-6 z-50 md:hidden">
-                 <button onClick={handleWhatsAppReturn} className="text-white/80 p-2 rounded-full bg-black/20 backdrop-blur-md border border-white/10">
+                 <button onClick={handleReturn} className="text-white/80 p-2 rounded-full bg-black/20 backdrop-blur-md border border-white/10">
                      <ArrowLeft size={24} />
                  </button>
             </div>

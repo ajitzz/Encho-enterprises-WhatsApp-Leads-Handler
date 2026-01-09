@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye, Link as LinkIcon, ExternalLink, Share2, Power, Edit2, Pencil, AlertTriangle, RefreshCcw, DownloadCloud } from 'lucide-react';
+import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye, Link as LinkIcon, ExternalLink, Share2, Power, Edit2, Pencil, AlertTriangle, RefreshCcw, DownloadCloud, FileText } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface MediaFile {
@@ -405,7 +405,7 @@ export const MediaLibrary = () => {
                                 id="file-upload" 
                                 className="hidden" 
                                 onChange={handleUpload} 
-                                accept="image/*,video/*,application/pdf"
+                                accept="image/*,video/*,application/pdf,text/plain,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                                 disabled={uploadStatus === 'uploading'}
                             />
                             <label 
@@ -507,7 +507,10 @@ export const MediaLibrary = () => {
                                         ) : file.type === 'image' ? (
                                             <img src={file.url} alt={file.filename} className="w-full h-full object-cover" />
                                         ) : (
-                                            <div className="flex flex-col items-center justify-center h-full text-gray-400"><File size={32} /></div>
+                                            <div className="flex flex-col items-center justify-center h-full text-blue-500 bg-blue-50 w-full">
+                                                <FileText size={40} />
+                                                <span className="text-[10px] font-bold uppercase mt-2 text-blue-400">{file.type}</span>
+                                            </div>
                                         )}
                                         <button 
                                             onClick={() => handleDeleteFile(file.id, file.filename)}
@@ -520,7 +523,7 @@ export const MediaLibrary = () => {
                                     <div className="p-2 flex-1 flex flex-col justify-between">
                                         <div className="flex items-center justify-between mb-1">
                                             <div className="flex items-center gap-1">
-                                                {file.type === 'video' ? <Video size={12} className="text-purple-500" /> : <ImageIcon size={12} className="text-blue-500" />}
+                                                {file.type === 'video' ? <Video size={12} className="text-purple-500" /> : file.type === 'document' ? <FileText size={12} className="text-orange-500" /> : <ImageIcon size={12} className="text-blue-500" />}
                                                 <span className="text-[10px] font-bold text-gray-500 uppercase">{file.type}</span>
                                             </div>
                                             {file.media_id ? (

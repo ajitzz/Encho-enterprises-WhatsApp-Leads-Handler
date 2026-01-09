@@ -193,9 +193,19 @@ const logSystemMessage = async (driverId, text, type = 'text') => {
     await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text, Date.now(), driverId]);
 };
 
+// --- FILE TYPE DETECTION UTILITY ---
+const getFileType = (filename) => {
+    if (!filename) return 'image';
+    const ext = filename.split('.').pop().toLowerCase();
+    if (['mp4', 'mov', 'webm', 'avi'].includes(ext)) return 'video';
+    if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'csv'].includes(ext)) return 'document';
+    return 'image';
+};
+
 /**
  * GENERATES A STATIC JSON MANIFEST ON S3
  * Allows frontend to fallback to this file if API is down.
+ * UPDATED: Sorts by ID DESC to show newest uploads first.
  */
 const uploadShowcaseManifest = async (folderIdOrPath) => {
     try {
@@ -205,10 +215,10 @@ const uploadShowcaseManifest = async (folderIdOrPath) => {
         
         // --- CASE 1: ROOT FOLDER (Main Library) ---
         if (!folderIdOrPath || folderIdOrPath === '/') {
-            // We treat root as the default "latest" or "root" showcase
             manifestTitle = "Main Library";
             manifestName = "root";
-            const filesRes = await queryWithRetry('SELECT id, url, type, filename FROM files WHERE folder_path = $1', ['/']);
+            // ORDER BY id DESC puts the newest files (highest timestamp in ID) first
+            const filesRes = await queryWithRetry('SELECT id, url, type, filename FROM files WHERE folder_path = $1 ORDER BY id DESC', ['/']);
             manifestItems = filesRes.rows;
         } 
         // --- CASE 2: SUB-FOLDER ---
@@ -232,7 +242,8 @@ const uploadShowcaseManifest = async (folderIdOrPath) => {
             manifestTitle = folder.name;
             manifestName = folder.name;
             const path = folder.parent_path === '/' ? `/${folder.name}` : `${folder.parent_path}/${folder.name}`;
-            const filesRes = await queryWithRetry('SELECT id, url, type, filename FROM files WHERE folder_path = $1', [path]);
+            // ORDER BY id DESC puts the newest files first
+            const filesRes = await queryWithRetry('SELECT id, url, type, filename FROM files WHERE folder_path = $1 ORDER BY id DESC', [path]);
             manifestItems = filesRes.rows;
         }
 
@@ -260,7 +271,7 @@ const uploadShowcaseManifest = async (folderIdOrPath) => {
             CacheControl: "no-cache, no-store, must-revalidate"
         }));
         
-        console.log(`[Manifest] Updated: manifests/${manifestName}.json`);
+        console.log(`[Manifest] Updated: manifests/${manifestName}.json (Sorted Newest First)`);
     } catch(e) {
         console.error("Manifest Update Failed:", e.message);
     }
@@ -352,11 +363,9 @@ router.get('/media', async (req, res) => {
         const { path } = req.query;
         const safePath = path || '/';
         
-        // Debug Log
-        console.log(`[Media] Fetching for path: ${safePath}`);
-
-        const filesRes = await queryWithRetry('SELECT * FROM files WHERE folder_path = $1', [safePath]);
-        const foldersRes = await queryWithRetry('SELECT * FROM folders WHERE parent_path = $1', [safePath]);
+        // Fetch files sorted by ID DESC (Newest First)
+        const filesRes = await queryWithRetry('SELECT * FROM files WHERE folder_path = $1 ORDER BY id DESC', [safePath]);
+        const foldersRes = await queryWithRetry('SELECT * FROM folders WHERE parent_path = $1 ORDER BY id DESC', [safePath]);
         
         res.json({ files: filesRes.rows, folders: foldersRes.rows });
     } catch (e) {
@@ -387,12 +396,14 @@ router.post('/s3/presign', async (req, res) => {
 
 router.post('/files/register', async (req, res) => {
     try {
-        const { key, url, filename, type, folderPath } = req.body;
+        const { key, url, filename, folderPath } = req.body;
+        // Strict Type Detection on Server Side
+        const type = getFileType(filename); 
+        
         const id = `file_${Date.now()}`;
         await queryWithRetry(`INSERT INTO files (id, filename, url, type, folder_path) VALUES ($1, $2, $3, $4, $5)`, [id, filename, url, type, folderPath]);
         
         // --- MANIFEST UPDATE ---
-        // Always attempt manifest update, even for root
         uploadShowcaseManifest(folderPath).catch(console.error);
         
         res.json({ success: true, id });
@@ -437,8 +448,8 @@ router.post('/media/sync', async (req, res) => {
                 }
             }
 
-            // Insert File
-            const type = filename.match(/\.(mp4|mov|webm)$/i) ? 'video' : 'image';
+            // Insert File with Correct Type
+            const type = getFileType(filename);
             const fileId = `file_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
             
             await queryWithRetry(
@@ -539,7 +550,8 @@ router.get('/public/showcase', async (req, res) => {
         const targetFolder = fRes.rows[0];
         const path = targetFolder.parent_path === '/' ? `/${targetFolder.name}` : `${targetFolder.parent_path}/${targetFolder.name}`;
         
-        const files = await queryWithRetry('SELECT id, url, type, filename FROM files WHERE folder_path = $1', [path]);
+        // Sort items by ID DESC (Newest First)
+        const files = await queryWithRetry('SELECT id, url, type, filename FROM files WHERE folder_path = $1 ORDER BY id DESC', [path]);
         res.json({ title: targetFolder.name, items: files.rows });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
