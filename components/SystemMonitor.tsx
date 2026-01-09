@@ -1,15 +1,11 @@
 
 import React, { useEffect, useState } from 'react';
 import { liveApiService } from '../services/liveApiService';
-import { Activity, Database, Brain, Cloud, Wifi, ArrowUpCircle, Clock } from 'lucide-react';
+import { Activity, Database, Brain, Cloud, Wifi, ArrowUpCircle, Clock, UploadCloud, MessageSquare } from 'lucide-react';
 import { SystemStats } from '../types';
 
-interface ExtendedSystemStats extends SystemStats {
-    uptime?: number;
-}
-
 export const SystemMonitor = () => {
-    const [stats, setStats] = useState<ExtendedSystemStats | null>(null);
+    const [stats, setStats] = useState<SystemStats | null>(null);
     const [isOpen, setIsOpen] = useState(false);
 
     useEffect(() => {
@@ -44,58 +40,63 @@ export const SystemMonitor = () => {
             />
             
             {/* Detailed Dashboard */}
-            <div className="bg-black/90 backdrop-blur-md text-white border-t border-gray-800 p-2 flex items-center justify-between text-xs font-mono shadow-2xl">
-                <div className="flex items-center gap-6 px-4">
-                    <div className="flex items-center gap-2" title="Server CPU Load">
-                        <Activity size={14} className={stats.serverLoad > 80 ? 'text-red-500' : 'text-green-400'} />
+            <div className="bg-black/90 backdrop-blur-md text-white border-t border-gray-800 p-2 flex items-center justify-between text-[10px] font-mono shadow-2xl">
+                <div className="flex items-center gap-4 px-2">
+                    {/* Server Load */}
+                    <div className="flex items-center gap-1.5" title="Server CPU Load">
+                        <Activity size={12} className={stats.serverLoad > 80 ? 'text-red-500' : 'text-green-400'} />
                         <span className="text-gray-400">SRV:</span>
                         <span className="font-bold">{stats.serverLoad}%</span>
                     </div>
 
-                    <div className="flex items-center gap-2" title="DB Latency">
-                        <Database size={14} className={stats.dbLatency > 500 ? 'text-amber-500' : 'text-blue-400'} />
+                    {/* DB Latency */}
+                    <div className="flex items-center gap-1.5" title="DB Latency">
+                        <Database size={12} className={stats.dbLatency > 500 ? 'text-amber-500' : 'text-blue-400'} />
                         <span className="text-gray-400">DB:</span>
                         <span className="font-bold">{stats.dbLatency}ms</span>
                     </div>
 
-                    <div className="flex items-center gap-2" title="Active AI Model & Credits">
-                        <Brain size={14} className="text-purple-400" />
+                    {/* AI Stats */}
+                    <div className="flex items-center gap-1.5" title={`Active Model: ${stats.aiModel}`}>
+                        <Brain size={12} className={stats.aiCredits < 20 ? 'text-red-400' : 'text-purple-400'} />
                         <span className="text-gray-400">AI:</span>
-                        <span className="font-bold">{stats.aiModel.split('-')[1]}</span>
-                        <div className="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden ml-1">
-                            <div 
-                                className="h-full bg-purple-500 transition-all duration-500" 
-                                style={{ width: `${stats.aiCredits}%` }}
-                            />
-                        </div>
+                        <span className="font-bold">{stats.aiModel.replace('Gemini ', '')}</span>
+                        <span className={`px-1 rounded ${stats.aiCredits < 20 ? 'bg-red-900 text-red-200' : 'bg-purple-900 text-purple-200'}`}>
+                            {stats.aiCredits}%
+                        </span>
                     </div>
                 </div>
 
-                <div className="flex items-center gap-6 px-4 border-l border-gray-700">
-                    {stats.uptime && (
-                        <div className="flex items-center gap-2 text-green-400" title="Server Uptime">
-                            <Clock size={14} />
+                <div className="flex items-center gap-4 px-2 border-l border-gray-700">
+                    {/* S3 Status & Load */}
+                    <div className="flex items-center gap-1.5" title="S3 Storage & Transfer">
+                         <Cloud size={12} className={stats.s3Load > 0 ? 'text-blue-400 animate-pulse' : 'text-gray-500'} />
+                         <span className="text-gray-400">S3:</span>
+                         <span className={stats.s3Status === 'ok' ? 'text-green-400' : 'text-red-400'}>{stats.s3Status}</span>
+                         {stats.s3Load > 0 && <span className="text-blue-300">({stats.s3Load}%)</span>}
+                    </div>
+
+                    {/* WhatsApp API Status & Upload Load */}
+                    <div className="flex items-center gap-1.5" title="WhatsApp Media Uploads">
+                        <MessageSquare size={12} className={stats.whatsappUploadLoad > 0 ? 'text-green-400 animate-pulse' : 'text-gray-500'} />
+                        <span className="text-gray-400">WA-API:</span>
+                        <span className={stats.whatsappStatus === 'ok' ? 'text-green-400' : 'text-amber-400'}>{stats.whatsappStatus}</span>
+                        {stats.whatsappUploadLoad > 0 && (
+                            <div className="flex items-center gap-1 text-green-300">
+                                <UploadCloud size={10} />
+                                <span>{stats.whatsappUploadLoad}%</span>
+                            </div>
+                        )}
+                    </div>
+                    
+                    {stats.uptime !== undefined && (
+                        <div className="flex items-center gap-1.5 text-gray-500" title="Server Uptime">
+                            <Clock size={12} />
                             <span>{formatUptime(stats.uptime)}</span>
                         </div>
                     )}
-
-                    <div className="flex items-center gap-2" title="Active Media Uploads">
-                         <Cloud size={14} className={stats.activeUploads > 0 ? 'text-blue-400 animate-pulse' : 'text-gray-500'} />
-                         <span className="text-gray-400">UP:</span>
-                         <span>{stats.activeUploads}</span>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                        <span className={`w-2 h-2 rounded-full ${stats.s3Status === 'ok' ? 'bg-green-500' : 'bg-red-500'}`} />
-                        <span className="text-gray-500">S3</span>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                        <span className={`w-2 h-2 rounded-full ${stats.whatsappStatus === 'ok' ? 'bg-green-500' : 'bg-amber-500'}`} />
-                        <span className="text-gray-500">WhatsApp</span>
-                    </div>
                     
-                    <button onClick={() => setIsOpen(false)} className="text-gray-500 hover:text-white">
+                    <button onClick={() => setIsOpen(false)} className="text-gray-500 hover:text-white ml-2">
                         <ArrowUpCircle size={14} className="rotate-180" />
                     </button>
                 </div>

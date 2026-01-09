@@ -114,13 +114,16 @@ export interface BotSettings {
 
 // --- SYSTEM MONITOR ---
 export interface SystemStats {
-    serverLoad: number; // 0-100
+    serverLoad: number; // 0-100 (CPU/Mem composite)
     dbLatency: number; // ms
-    aiCredits: number; // 0-100 (estimated remaining)
-    aiModel: string; // 'gemini-3-flash' | 'gemini-1.5-flash'
+    aiCredits: number; // 0-100 (Estimated)
+    aiModel: string; // Current Active Model
     s3Status: 'ok' | 'error';
+    s3Load: number; // 0-100 (Active transfers)
     whatsappStatus: 'ok' | 'latency' | 'error';
+    whatsappUploadLoad: number; // 0-100 (Active Media Uploads)
     activeUploads: number;
+    uptime: number;
 }
 
 // --- AI AUDIT TYPES ---

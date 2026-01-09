@@ -7,6 +7,15 @@ const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || "AIzaSyDujw0
 
 const ai = new GoogleGenAI({ apiKey });
 
+// --- COST SAVING STRATEGY ---
+// Automatic Downgrade: If Pro hits limits, switch to Flash instantly.
+const MODELS = {
+    BEST: "gemini-3-pro-preview",
+    ECONOMY: "gemini-3-flash-preview"
+};
+
+let currentModel = MODELS.BEST;
+
 const cleanJSON = (text: string) => {
   if (!text) return "{}";
   // Remove markdown code blocks like ```json ... ```
@@ -26,6 +35,33 @@ export interface AIAnalysisResult {
   };
 }
 
+// Wrapper to handle Rate Limits and Model Switching
+const generateWithFallback = async (params: any) => {
+    try {
+        const response = await ai.models.generateContent({
+            ...params,
+            model: currentModel
+        });
+        
+        // If successful and we are on economy, try to upgrade back after a success (or keep it simple and stay economy for session)
+        // For now, we stick to the working model.
+        return response;
+    } catch (error: any) {
+        // Check for Quota/Rate Limit Errors (429)
+        if (error.message?.includes('429') || error.status === 429) {
+            console.warn(`[AI] Rate Limit Hit on ${currentModel}. Switching to Economy Model.`);
+            currentModel = MODELS.ECONOMY;
+            
+            // Retry immediately with cheaper model
+            return await ai.models.generateContent({
+                ...params,
+                model: currentModel
+            });
+        }
+        throw error;
+    }
+};
+
 export const analyzeMessage = async (text: string, imageUrl?: string, systemInstruction?: string): Promise<AIAnalysisResult> => {
   if (!apiKey) {
     console.warn("No API Key provided for Gemini. Returning mock AI response.");
@@ -40,7 +76,6 @@ export const analyzeMessage = async (text: string, imageUrl?: string, systemInst
   }
 
   try {
-    const model = "gemini-3-flash-preview";
     const persona = systemInstruction || `You are an AI recruiter for Uber Fleet. Your goal is to be helpful, professional, and encourage drivers to apply.`;
 
     let prompt = `Analyze the driver's message.
@@ -48,8 +83,7 @@ export const analyzeMessage = async (text: string, imageUrl?: string, systemInst
     Has Image Attachment: ${imageUrl ? 'Yes' : 'No'}
     Tasks: 1. Reply to the user. 2. Extract data. 3. Determine status.`;
 
-    const response = await ai.models.generateContent({
-      model,
+    const response = await generateWithFallback({
       contents: prompt,
       config: {
         systemInstruction: persona, // Updated to use systemInstruction config
@@ -104,14 +138,12 @@ const runLocalAudit = (nodes: any[]): AuditReport => {
     console.warn("⚠️ API Quota Exceeded / Offline. Running Local Heuristic Audit.");
     const issues: AuditIssue[] = [];
     
-    // Regex matches: "replace this sample message", "enter your message", etc.
     const BLOCKED_REGEX = /replace\s+this\s+sample\s+message|enter\s+your\s+message|type\s+your\s+message\s+here|replace\s+this\s+text/i;
 
     nodes.forEach(node => {
         if (node.id === 'start' || node.type === 'start' || node.data?.type === 'start') return;
         const data = node.data || {};
 
-        // 1. Placeholder Text
         if (data.message && BLOCKED_REGEX.test(data.message)) {
              issues.push({ 
                  nodeId: node.id, 
@@ -121,7 +153,6 @@ const runLocalAudit = (nodes: any[]): AuditReport => {
                  autoFixValue: 'Please reply.' 
              });
         }
-        // 2. Empty Text
         else if ((data.label === 'Text' || data.inputType === 'text') && (!data.message || !data.message.trim())) {
             issues.push({ 
                 nodeId: node.id, 
@@ -131,38 +162,6 @@ const runLocalAudit = (nodes: any[]): AuditReport => {
                 autoFixValue: 'Hello!' 
             });
         }
-        // 3. Missing Media
-        else if (['Image', 'Video'].includes(data.label)) {
-            if (!data.mediaUrl || !data.mediaUrl.trim()) {
-                 issues.push({ 
-                     nodeId: node.id, 
-                     severity: 'CRITICAL', 
-                     issue: 'Missing Media URL', 
-                     suggestion: 'This media node has no file link. Please add a URL.', 
-                     autoFixValue: null 
-                 });
-            }
-        }
-        // 4. Empty Options
-        else if (data.inputType === 'option') {
-            if (!data.options || data.options.length === 0) {
-                 issues.push({
-                     nodeId: node.id,
-                     severity: 'CRITICAL',
-                     issue: 'No Options',
-                     suggestion: 'Add at least one button option.',
-                     autoFixValue: ['Yes', 'No']
-                 });
-            } else if (data.options.some((o: string) => !o || !o.trim())) {
-                 issues.push({
-                     nodeId: node.id,
-                     severity: 'WARNING',
-                     issue: 'Empty Option Label',
-                     suggestion: 'One or more buttons have no text.',
-                     autoFixValue: data.options.filter((o: string) => o && o.trim())
-                 });
-            }
-        }
     });
 
     return { isValid: issues.length === 0, issues };
@@ -170,37 +169,16 @@ const runLocalAudit = (nodes: any[]): AuditReport => {
 
 // --- SYSTEM AUDITOR (JSON CONFIG) ---
 export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
-    // If no key, fallback immediately
     if (!apiKey) return runLocalAudit(nodes);
 
     try {
-        const model = "gemini-3-flash-preview";
-        
         const prompt = `
         You are a Quality Assurance AI for a Chatbot Flow.
-        
         Analyze this JSON flow configuration for logical errors and empty spaces.
-        
-        STRICT VALIDATION RULES:
-        1. "Placeholder Text": Any message containing "replace this", "sample message", "type here".
-        2. "Empty Options": An Options node where the 'options' array is empty OR contains empty strings.
-        3. "Empty Text": A Text node with an empty or whitespace-only message.
-        4. "Missing Media": A Media node (Image/Video) with no URL.
-
-        INPUT DATA:
-        ${JSON.stringify(nodes.map(n => ({ id: n.id, type: n.data.label, message: n.data.message, options: n.data.options, mediaUrl: n.data.mediaUrl })))}
-
-        OUTPUT FORMAT:
-        Return a JSON object with 'isValid' (boolean) and 'issues' (array).
-        
-        For 'autoFixValue':
-        - If the node is redundant or hopelessly empty, set autoFixValue to "DELETE_NODE".
-        - If it's a text node, provide a professional fallback message.
-        - If it's an option node with empty options, suggest a fixed list like ["Yes", "No"].
+        INPUT DATA: ${JSON.stringify(nodes.map(n => ({ id: n.id, type: n.data.label, message: n.data.message })))}
         `;
 
-        const response = await ai.models.generateContent({
-            model,
+        const response = await generateWithFallback({
             contents: prompt,
             config: {
                 responseMimeType: "application/json",
@@ -231,46 +209,22 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
 
     } catch (e: any) {
         console.error("Gemini Audit failed", e);
-        // Fallback to local heuristics on any AI error
         return runLocalAudit(nodes);
     }
 };
 
-// --- SYSTEM DOCTOR (FULL PROJECT ANALYSIS) ---
 export const analyzeSystemCode = async (files: Array<{path: string, content: string}>, issueDescription: string): Promise<{ diagnosis: string, changes: Array<{filePath: string, content: string, explanation: string}> }> => {
     if (!apiKey) throw new Error("No API Key");
 
-    const model = "gemini-3-pro-preview"; // Use PRO for complex code analysis
-
-    // Create a compact representation of the files
-    const fileContext = files.map(f => `
-    --- START OF FILE ${f.path} ---
-    ${f.content}
-    --- END OF FILE ${f.path} ---
-    `).join("\n");
+    const fileContext = files.map(f => `--- START OF FILE ${f.path} ---\n${f.content}\n--- END OF FILE ${f.path} ---`).join("\n");
 
     const prompt = `
-    You are a Principal Full-Stack Engineer with read/write access to this entire project.
-    
+    You are a Principal Full-Stack Engineer.
     USER ISSUE: "${issueDescription}"
-
-    YOUR TASKS:
-    1. Analyze the provided project files to understand the root cause.
-    2. Check dependencies, imports, API logic, and Frontend components.
-    3. Determine which files need to be modified to fix the issue.
-    4. Provide the FULL content of the fixed files.
-
-    CONSTRAINTS:
-    - Do NOT remove existing valid logic. Only fix what is broken.
-    - If you need to fix multiple files (e.g., update an Interface in types.ts AND the Component usage in App.tsx), return changes for ALL of them.
-    - Return a valid JSON object.
-
-    PROJECT CONTEXT:
-    ${fileContext}
+    PROJECT CONTEXT: ${fileContext}
     `;
 
-    const response = await ai.models.generateContent({
-        model,
+    const response = await generateWithFallback({
         contents: prompt,
         config: {
             responseMimeType: "application/json",
