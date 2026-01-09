@@ -131,7 +131,10 @@ class MockBackendService {
     // 2. Bot Logic (NO AI)
     let replyMsg: Message | undefined;
 
-    if (settings.isEnabled && driver.isBotActive) {
+    // Fix: Allow processing if Bot Enabled AND (Driver Active OR Repeat is ON)
+    const shouldProcess = settings.isEnabled && (driver.isBotActive || settings.shouldRepeat);
+
+    if (shouldProcess) {
         let currentStep = settings.steps.find(s => s.id === driver.currentBotStepId);
         
         // CASE 1: RESTART / WAKE UP / INITIALIZE
@@ -139,6 +142,8 @@ class MockBackendService {
             const entryStep = settings.steps.find(s => s.id === entryPointId) || settings.steps[0];
             if (entryStep) {
                  driver.currentBotStepId = entryStep.id;
+                 driver.isBotActive = true; // Reactivate
+                 
                  replyMsg = {
                     id: Date.now().toString() + '_bot',
                     sender: 'system',

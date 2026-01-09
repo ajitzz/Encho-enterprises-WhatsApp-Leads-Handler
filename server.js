@@ -658,6 +658,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
         
         if (dRes.rows.length === 0) {
             const isActive = botSettings.isEnabled;
+            // FIXED: Initialize current_bot_step_id as NULL (not entryPointId) so Case 1 triggers correctly
             const iRes = await client.query(
                 `INSERT INTO drivers (id, phone_number, name, source, status, last_message, last_message_time, current_bot_step_id, is_bot_active, is_human_mode)
                 VALUES ($1, $2, $3, 'WhatsApp', 'New', $4, $5, $6, $7, false) RETURNING *`,
@@ -681,7 +682,11 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
     let replyText = null; let replyOptions = null; let replyMedia = null; 
     let updates = {};
 
-    if (driver.is_bot_active && botSettings.isEnabled) {
+    // Allow processing if: Bot Enabled GLOBALLY AND (Driver is Active OR Repeat Mode is ON)
+    // This fixes the issue where finished drivers (inactive) couldn't restart even if repeat was turned on later.
+    const shouldProcess = botSettings.isEnabled && (driver.is_bot_active || botSettings.shouldRepeat);
+
+    if (shouldProcess) {
         let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
         
         // CASE 1: RESTART / WAKE UP FROM LOOP / NEW USER
@@ -693,6 +698,8 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
             if (entryStep) {
                 // Set state to Entry Point
                 updates.current_bot_step_id = entryStep.id;
+                updates.is_bot_active = true; // IMPORTANT: Reactivate driver if they were finished
+                
                 // Send the Welcome Message
                 replyText = entryStep.message;
                 if (entryStep.linkLabel && entryStep.message) replyText = `${entryStep.linkLabel}\n${entryStep.message}`;
