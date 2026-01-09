@@ -178,6 +178,59 @@ const logSystemMessage = async (driverId, text, type = 'text') => {
     await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text, Date.now(), driverId]);
 };
 
+/**
+ * GENERATES A STATIC JSON MANIFEST ON S3
+ * Allows frontend to fallback to this file if API is down.
+ */
+const uploadShowcaseManifest = async (folderIdOrPath) => {
+    try {
+        let folder;
+        // Determine if ID or Path
+        if (folderIdOrPath.includes('/')) {
+             const parts = folderIdOrPath.split('/').filter(Boolean);
+             const name = parts.pop();
+             const parent = parts.length > 0 ? `/${parts.join('/')}` : '/';
+             const fRes = await queryWithRetry('SELECT * FROM folders WHERE name = $1 AND parent_path = $2', [name, parent]);
+             folder = fRes.rows[0];
+        } else {
+             const fRes = await queryWithRetry('SELECT * FROM folders WHERE id = $1', [folderIdOrPath]);
+             folder = fRes.rows[0];
+        }
+
+        if (!folder || !folder.is_public_showcase) return;
+
+        const path = folder.parent_path === '/' ? `/${folder.name}` : `${folder.parent_path}/${folder.name}`;
+        const filesRes = await queryWithRetry('SELECT id, url, type, filename FROM files WHERE folder_path = $1', [path]);
+
+        const manifest = {
+            title: folder.name,
+            lastUpdated: Date.now(),
+            items: filesRes.rows
+        };
+
+        const key = `manifests/${folder.name}.json`;
+        
+        await s3Client.send(new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: key,
+            Body: JSON.stringify(manifest),
+            ContentType: "application/json"
+        }));
+
+        // Also update 'latest.json' pointer
+        await s3Client.send(new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: `manifests/latest.json`,
+            Body: JSON.stringify(manifest),
+            ContentType: "application/json"
+        }));
+        
+        console.log(`[Manifest] Updated for ${folder.name}`);
+    } catch(e) {
+        console.error("Manifest Update Failed:", e.message);
+    }
+};
+
 // --- API ROUTES (FIX FOR 404s) ---
 
 // 1. DRIVERS
@@ -186,11 +239,10 @@ router.get('/drivers', async (req, res) => {
         const result = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC', []);
         const drivers = result.rows;
         
-        // Fetch messages for each driver (simplified for performance)
         for (let d of drivers) {
             const mRes = await queryWithRetry('SELECT * FROM messages WHERE driver_id = $1 ORDER BY timestamp ASC', [d.id]);
             d.messages = mRes.rows;
-            d.documents = []; // Placeholder if not storing doc URLs explicitly
+            d.documents = []; 
         }
         res.json(drivers);
     } catch (e) {
@@ -206,7 +258,6 @@ router.patch('/drivers/:id', async (req, res) => {
         if (keys.length === 0) return res.json({ success: true });
 
         const setClause = keys.map((k, i) => {
-             // Map camelCase to snake_case
              const dbKey = k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
              return `${dbKey} = $${i+2}`;
         }).join(', ');
@@ -298,6 +349,10 @@ router.post('/files/register', async (req, res) => {
         const { key, url, filename, type, folderPath } = req.body;
         const id = `file_${Date.now()}`;
         await queryWithRetry(`INSERT INTO files (id, filename, url, type, folder_path) VALUES ($1, $2, $3, $4, $5)`, [id, filename, url, type, folderPath]);
+        
+        // --- MANIFEST UPDATE ---
+        uploadShowcaseManifest(folderPath).catch(console.error);
+        
         res.json({ success: true, id });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -306,7 +361,15 @@ router.post('/files/register', async (req, res) => {
 
 router.delete('/files/:id', async (req, res) => {
     try {
+        // Get folder path before deleting to update manifest
+        const fRes = await queryWithRetry('SELECT folder_path FROM files WHERE id = $1', [req.params.id]);
+        
         await queryWithRetry('DELETE FROM files WHERE id = $1', [req.params.id]);
+        
+        if (fRes.rows.length > 0) {
+             uploadShowcaseManifest(fRes.rows[0].folder_path).catch(console.error);
+        }
+
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -340,7 +403,6 @@ router.delete('/folders/:id', async (req, res) => {
         const parentPath = fRes.rows[0].parent_path;
         const fullPath = parentPath === '/' ? `/${folderName}` : `${parentPath}/${folderName}`;
 
-        // Check content
         const files = await queryWithRetry('SELECT id FROM files WHERE folder_path = $1', [fullPath]);
         const sub = await queryWithRetry('SELECT id FROM folders WHERE parent_path = $1', [fullPath]);
         
@@ -388,6 +450,10 @@ router.get('/public/status', async (req, res) => {
 router.post('/folders/:id/public', async (req, res) => {
     try {
         await queryWithRetry('UPDATE folders SET is_public_showcase = TRUE WHERE id = $1', [req.params.id]);
+        
+        // --- MANIFEST UPDATE ---
+        uploadShowcaseManifest(req.params.id).catch(console.error);
+
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -395,6 +461,10 @@ router.post('/folders/:id/public', async (req, res) => {
 router.delete('/folders/:id/public', async (req, res) => {
     try {
         await queryWithRetry('UPDATE folders SET is_public_showcase = FALSE WHERE id = $1', [req.params.id]);
+        
+        // Note: We don't delete the manifest to keep it as cache, but we could empty it.
+        // For now, we leave it as 'last known state' or we could upload an empty one.
+        
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -424,7 +494,6 @@ router.get('/system/stats', async (req, res) => {
 
 // --- BOT LOGIC (STRICT) ---
 const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => {
-    // [BOT LOGIC RESTORED FROM PREVIOUS TURN - STRICT NO AI]
     // 1. Fetch Settings
     let botSettings = { isEnabled: true, steps: [] };
     try {

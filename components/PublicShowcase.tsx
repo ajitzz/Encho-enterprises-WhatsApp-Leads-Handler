@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { liveApiService } from '../services/liveApiService';
-import { Share2, Volume2, VolumeX, MessageCircle, ArrowLeft, Loader2, Store, Clock, Play } from 'lucide-react';
+import { Share2, Volume2, VolumeX, MessageCircle, ArrowLeft, Loader2, Store, Clock, Play, CloudOff } from 'lucide-react';
 
 interface ShowcaseItem {
     id: string;
@@ -9,6 +9,10 @@ interface ShowcaseItem {
     type: string;
     filename: string;
 }
+
+// Fallback S3 Bucket Base URL (Production Resilience)
+// This should match the BUCKET_NAME in server.js
+const FALLBACK_BUCKET_URL = "https://uber-fleet-assets.s3.amazonaws.com";
 
 const VideoPlayer = ({ src, isActive, isMuted }: { src: string, isActive: boolean, isMuted: boolean }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -88,7 +92,6 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
             
             // 1. STRATEGY: Cache-First for Instant Load & Offline Support
             const cachedData = localStorage.getItem(cacheKey);
-            let hasCachedData = false;
 
             if (cachedData) {
                 try {
@@ -98,29 +101,44 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                         setTitle(parsed.title);
                         setLoading(false); // Render immediately
                         setIsOfflineMode(true); // Assume offline/cache state until API responds
-                        hasCachedData = true;
                     }
                 } catch(e) { console.error("Cache parse error", e); }
             }
 
             try {
-                // 2. Fetch Fresh Data (Background)
+                // 2. Fetch Fresh Data (API Strategy)
                 const data = await liveApiService.getPublicShowcase(folderName);
                 
-                // CRITICAL FIX: Always update state if data exists, even if empty
-                if (data) {
-                    setItems(data.items || []);
+                if (data && data.items) {
+                    setItems(data.items);
                     setTitle(data.title || 'Showcase');
                     setIsOfflineMode(false); // We are online
-                    
-                    // Update Cache
                     localStorage.setItem(cacheKey, JSON.stringify(data));
                 }
             } catch (e) {
-                console.error("Failed to load showcase from server", e);
-                // If we have cache, we stay in offline mode (isOfflineMode=true from above)
+                console.warn("Primary API Failed. Attempting S3 Manifest Fallback...", e);
+                
+                // 3. FALLBACK STRATEGY: Fetch Static JSON from S3
+                // If API is down, we try to get the manifest directly from the bucket
+                const manifestName = folderName ? `${encodeURIComponent(folderName)}.json` : `latest.json`;
+                const s3Url = `${FALLBACK_BUCKET_URL}/manifests/${manifestName}`;
+
+                try {
+                    const s3Res = await fetch(s3Url);
+                    if (s3Res.ok) {
+                        const s3Data = await s3Res.json();
+                        setItems(s3Data.items || []);
+                        setTitle(s3Data.title || 'Showcase (Archive)');
+                        setIsOfflineMode(true);
+                        // Update cache with S3 data
+                        localStorage.setItem(cacheKey, JSON.stringify(s3Data));
+                    } else {
+                        throw new Error("S3 Manifest not found");
+                    }
+                } catch (s3Err) {
+                    console.error("S3 Fallback failed", s3Err);
+                }
             } finally {
-                // CRITICAL FIX: Ensure loading spinner stops regardless of success/fail/empty
                 setLoading(false);
             }
         };
@@ -186,9 +204,9 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
                 <div className="pointer-events-auto">
                     <h1 className="text-white font-bold text-lg drop-shadow-md tracking-wide">{title}</h1>
                     {isOfflineMode && (
-                        <span className="flex items-center gap-1 text-[10px] text-white/70 bg-white/10 px-2 py-0.5 rounded backdrop-blur-sm w-fit mt-1">
-                            <Clock size={10} />
-                            Offline Mode
+                        <span className="flex items-center gap-1 text-[10px] text-amber-200 bg-amber-900/40 border border-amber-800 px-2 py-0.5 rounded backdrop-blur-sm w-fit mt-1">
+                            <CloudOff size={10} />
+                            Offline Mode (S3 Fallback)
                         </span>
                     )}
                 </div>
