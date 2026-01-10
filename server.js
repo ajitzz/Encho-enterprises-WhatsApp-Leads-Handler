@@ -131,7 +131,7 @@ const initDB = async () => {
                 is_public_showcase BOOLEAN DEFAULT FALSE
             );
         `);
-        // Insert default settings if not exists
+        // Insert default settings if not exists (Safe Initial State)
         await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT DO NOTHING`, [JSON.stringify({ isEnabled: true, shouldRepeat: false, steps: [] })]);
         isDbInitialized = true;
         console.log("Database initialized (Lazy)");
@@ -345,6 +345,7 @@ router.get('/bot-settings', async (req, res) => {
 
 router.post('/bot-settings', async (req, res) => {
     try {
+        // Safe Update: Ensures ID 1 exists and updates it atomically
         await queryWithRetry('INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET settings = $1', [JSON.stringify(req.body)]);
         res.json({ success: true });
     } catch (e) {

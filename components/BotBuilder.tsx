@@ -24,7 +24,7 @@ import {
   MessageSquare, Image as ImageIcon, Video, List, Type, Hash, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, ShieldAlert, 
   GripVertical, MousePointerClick, FileCode, Brush, Eye, 
-  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle, Split, GitBranch, ArrowRight, AlertTriangle, File
+  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle, Split, GitBranch, ArrowRight, AlertTriangle, File, Loader2, RefreshCw
 } from 'lucide-react';
 
 // --- STYLES ---
@@ -517,16 +517,23 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
 const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
     const { 
         nodes, edges, onNodesChange, onEdgesChange, onConnect, 
-        setNodes, setEdges, addNode, updateNodeData 
+        setNodes, setEdges, addNode, updateNodeData, resetFlow
     } = useFlowStore();
     
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
     const [isSaving, setIsSaving] = useState(false);
-    
-    // Load
-    useEffect(() => {
-        const load = async () => {
+    const [isLoading, setIsLoading] = useState(true);
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [lastLoadedTime, setLastLoadedTime] = useState<number>(0);
+
+    const loadData = useCallback(async () => {
+        setIsLoading(true);
+        setLoadError(null);
+        try {
+            // Reset flow to clean state before loading to prevent ghosts
+            // But we keep Start Node as default fallback inside the store
             const settings = isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
+            
             if (settings.flowData && settings.flowData.nodes.length > 0) {
                 const cleanNodes = settings.flowData.nodes.map((n: any) => {
                     const { icon, ...cleanData } = n.data || {};
@@ -535,15 +542,31 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 });
                 setNodes(cleanNodes);
                 setEdges(settings.flowData.edges);
+            } else {
+                // If DB is empty, use default start node from store (already there)
+                // or ensure Start Node exists if store was cleared
+                resetFlow(); 
             }
-        };
-        load();
-    }, [isLiveMode, setNodes, setEdges]);
+            setLastLoadedTime(Date.now());
+        } catch (e: any) {
+            console.error("BotBuilder Load Error:", e);
+            setLoadError(e.message || "Failed to load bot flow");
+        } finally {
+            setIsLoading(false);
+        }
+    }, [isLiveMode, setNodes, setEdges, resetFlow]);
+    
+    // Load on Mount or Mode Change
+    useEffect(() => {
+        loadData();
+    }, [loadData]);
 
     // Drag Drop
     const onDragOver = useCallback((event: React.DragEvent) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }, []);
     const onDrop = useCallback((event: React.DragEvent) => {
         event.preventDefault();
+        if (isLoading || loadError) return; // Prevent editing while loading/error
+
         const type = event.dataTransfer.getData('application/reactflow/type');
         let inputType = event.dataTransfer.getData('application/reactflow/inputType');
         const label = event.dataTransfer.getData('application/reactflow/label');
@@ -566,10 +589,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         };
         addNode(newNode);
         setSelectedNodeId(newNode.id);
-    }, [addNode]);
+    }, [addNode, isLoading, loadError]);
 
     // --- COMPILER LOGIC (Fixed for Production) ---
     const handleSave = async () => {
+        if (isLoading || loadError) return; // Prevent overwriting if not loaded correctly
+
         setIsSaving(true);
         const compiledSteps: BotStep[] = [];
         
@@ -627,21 +652,62 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
         }
 
         // 4. Save
-        const newSettings: BotSettings = {
-            ...(isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings()),
-            steps: compiledSteps,
-            entryPointId,
-            flowData: { nodes: nodes.map(n => ({...n, data: { ...n.data, icon: undefined }})), edges }
-        };
-
         try {
+            // Refetch current settings to ensure we don't overwrite other fields like 'isEnabled'
+            const currentSettings = isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
+            
+            const newSettings: BotSettings = {
+                ...currentSettings,
+                steps: compiledSteps,
+                entryPointId,
+                flowData: { nodes: nodes.map(n => ({...n, data: { ...n.data, icon: undefined }})), edges }
+            };
+
             if (isLiveMode) await liveApiService.saveBotSettings(newSettings);
             else mockBackend.updateBotSettings(newSettings);
-        } catch (e) { alert("Save failed"); }
-        setTimeout(() => setIsSaving(false), 500);
+            
+            setLastLoadedTime(Date.now()); // Mark successful save time
+        } catch (e) { 
+            console.error("Save Failed:", e);
+            alert("Save failed. Please check connection."); 
+        } finally {
+            setIsSaving(false);
+        }
     };
 
     const selectedNode = useMemo(() => nodes.find(n => n.id === selectedNodeId), [nodes, selectedNodeId]);
+
+    // Error / Loading Overlay
+    if (isLoading) {
+        return (
+            <div className="flex h-full items-center justify-center bg-slate-50 flex-col gap-4">
+                <Loader2 size={48} className="text-blue-600 animate-spin" />
+                <p className="text-gray-500 font-medium animate-pulse">Loading Bot Architecture...</p>
+            </div>
+        );
+    }
+
+    if (loadError) {
+        return (
+            <div className="flex h-full items-center justify-center bg-slate-50 flex-col gap-4 p-8 text-center">
+                <div className="bg-red-100 p-4 rounded-full">
+                    <AlertTriangle size={48} className="text-red-600" />
+                </div>
+                <h3 className="text-xl font-bold text-gray-900">Connection Failed</h3>
+                <p className="text-gray-600 max-w-md">
+                    Could not load bot settings from the server. <br/>
+                    The editor is locked to prevent data loss.
+                </p>
+                <div className="text-xs bg-gray-200 px-3 py-1 rounded text-gray-700 font-mono mt-2">{loadError}</div>
+                <button 
+                    onClick={loadData}
+                    className="mt-4 px-6 py-2.5 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 flex items-center gap-2"
+                >
+                    <RefreshCw size={18} /> Retry Connection
+                </button>
+            </div>
+        );
+    }
 
     return (
         <div className="flex h-full bg-slate-50 font-sans relative overflow-hidden">
@@ -674,7 +740,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
             <div className="flex-1 relative h-full flex flex-col">
                 <div className="absolute top-4 right-4 z-20 flex gap-2">
-                    <button onClick={handleSave} disabled={isSaving} className="bg-black text-white px-5 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-gray-800 transition-all flex items-center gap-2">
+                    <button onClick={handleSave} disabled={isSaving} className="bg-black text-white px-5 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-gray-800 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
                         {isSaving ? <span className="animate-spin"><Zap size={16} /></span> : <CheckCircle size={16} />}
                         {isSaving ? 'Publishing...' : 'Publish Flow'}
                     </button>

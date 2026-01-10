@@ -67,19 +67,11 @@ export const liveApiService = {
   },
 
   getBotSettings: async (): Promise<BotSettings> => {
-    try {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/bot-settings`);
-      if (!response.ok) throw new Error('Failed to fetch bot settings');
-      return await response.json();
-    } catch (error) {
-      console.warn("Could not fetch live bot settings, using default");
-      return { 
-          isEnabled: true, 
-          routingStrategy: 'HYBRID_BOT_FIRST', 
-          systemInstruction: '', 
-          steps: [] 
-      };
-    }
+    // CRITICAL: Do not catch errors here silently. 
+    // If this fails, the UI must know so it doesn't overwrite DB with default empty data.
+    const response = await fetchWithRetry(`${API_BASE_URL}/api/bot-settings`);
+    if (!response.ok) throw new Error('Failed to fetch bot settings');
+    return await response.json();
   },
 
   saveBotSettings: async (settings: BotSettings) => {
