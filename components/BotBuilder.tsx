@@ -1,5 +1,5 @@
 
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { 
   ReactFlow, 
   MiniMap, 
@@ -24,7 +24,7 @@ import {
   MessageSquare, Image as ImageIcon, Video, List, Type, Hash, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, ShieldAlert, 
   GripVertical, MousePointerClick, FileCode, Brush, Eye, 
-  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle, Split, GitBranch, ArrowRight, AlertTriangle, File, Loader2, RefreshCw
+  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle, Split, GitBranch, ArrowRight, AlertTriangle, File, Loader2, RefreshCw, Bold, Italic
 } from 'lucide-react';
 
 // --- STYLES ---
@@ -318,6 +318,7 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
 const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onChange: (id: string, data: any) => void }) => {
     const [localData, setLocalData] = useState<any>(selectedNode.data);
     const [showMediaPicker, setShowMediaPicker] = useState(false);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
 
     useEffect(() => { setLocalData(selectedNode.data); }, [selectedNode]);
 
@@ -326,6 +327,30 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
         if (newData.icon) delete newData.icon; 
         setLocalData(newData);
         onChange(selectedNode.id, newData);
+    };
+
+    const insertTag = (tag: string) => {
+        if (!textareaRef.current) return;
+        const input = textareaRef.current;
+        const start = input.selectionStart;
+        const end = input.selectionEnd;
+        const text = localData.message || '';
+        
+        const before = text.substring(0, start);
+        const selected = text.substring(start, end);
+        const after = text.substring(end);
+        
+        const newText = before + tag + selected + tag + after;
+        update('message', newText);
+        
+        // Restore focus and cursor position after React re-render
+        setTimeout(() => {
+            if (textareaRef.current) {
+                textareaRef.current.focus();
+                // Move selection to cover the original text inside tags
+                textareaRef.current.setSelectionRange(start + tag.length, end + tag.length);
+            }
+        }, 0);
     };
 
     if (localData.type === 'start') return <div className="p-6 text-center text-gray-400 text-sm">Start Node has no properties.</div>;
@@ -360,11 +385,30 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                 {/* Message / URL Input */}
                 {!isMediaType && (
                     <div className="space-y-2">
-                        <label className="text-xs font-bold text-gray-500 uppercase">
-                            {isLinkType ? 'Link URL' : 'Message Text'}
+                        <label className="text-xs font-bold text-gray-500 uppercase flex justify-between items-center">
+                            <span>{isLinkType ? 'Link URL' : 'Message Text'}</span>
+                            {!isLinkType && (
+                                <div className="flex gap-1">
+                                    <button 
+                                        onClick={() => insertTag('*')}
+                                        className="p-1 hover:bg-gray-100 rounded text-gray-600 hover:text-black transition-colors"
+                                        title="Bold (*text*)"
+                                    >
+                                        <Bold size={12} />
+                                    </button>
+                                    <button 
+                                        onClick={() => insertTag('_')}
+                                        className="p-1 hover:bg-gray-100 rounded text-gray-600 hover:text-black transition-colors"
+                                        title="Italic (_text_)"
+                                    >
+                                        <Italic size={12} />
+                                    </button>
+                                </div>
+                            )}
                         </label>
                         <textarea 
-                            className="w-full h-32 p-3 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-shadow shadow-sm"
+                            ref={textareaRef}
+                            className="w-full h-32 p-3 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-shadow shadow-sm font-mono"
                             placeholder={isLinkType ? "https://..." : "Type what the bot should say..."}
                             value={localData.message || ''}
                             onChange={(e) => update('message', e.target.value)}

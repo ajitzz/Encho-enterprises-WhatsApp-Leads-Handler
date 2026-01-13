@@ -54,7 +54,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
             }`}
           >
             <Users size={20} />
-            Lead Management
+            Leads & Campaigns
           </button>
 
           <button

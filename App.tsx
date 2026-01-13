@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { Layout } from './components/Layout';
 import { LeadTable } from './components/LeadTable';
+import { LeadManager } from './components/LeadManager'; // NEW
 import { ChatDrawer } from './components/ChatDrawer';
 import { Simulator } from './components/Simulator';
 import { WebhookConfigModal } from './components/WebhookConfigModal';
@@ -153,6 +154,17 @@ export default function App() {
         }
     }
   };
+  
+  const handleBulkStatusUpdate = async (ids: string[], status: LeadStatus) => {
+      for (const id of ids) {
+          await handleUpdateDriver(id, { status });
+      }
+      addNotification({
+          type: 'success',
+          title: 'Bulk Update Complete',
+          message: `Moved ${ids.length} leads to ${status}`
+      });
+  };
 
   const handleSendMessage = async (text: string) => {
     if (!selectedDriver) return;
@@ -218,7 +230,8 @@ export default function App() {
     }
   };
 
-  const handleBulkSend = () => {
+  // Replaced with dedicated handler in LeadManager, but kept for Dashboard compatibility or legacy
+  const handleBulkSendLegacy = () => {
     if (dataSource === 'mock') {
         selectedBulkIds.forEach(id => {
            mockBackend.addMessage(id, {
@@ -239,6 +252,39 @@ export default function App() {
     } else {
         alert("Bulk Send not available in Read-Only Live Mode");
     }
+  };
+  
+  // NEW: LeadManager Callback
+  const handleBulkSendDirect = async (ids: string[], message: string) => {
+      if (dataSource === 'mock') {
+          ids.forEach(id => {
+              mockBackend.addMessage(id, {
+                  id: Date.now().toString() + id,
+                  sender: 'agent',
+                  text: message,
+                  timestamp: Date.now(),
+                  type: 'text'
+              });
+          });
+      } else {
+          // LIVE MODE BULK
+          // In a real app, this should be a backend batch endpoint.
+          // For now, we iterate (Rate limits apply!)
+          let successCount = 0;
+          for (const id of ids) {
+              try {
+                  await liveApiService.sendMessage(id, message);
+                  successCount++;
+                  // Small delay to prevent rate limit
+                  await new Promise(r => setTimeout(r, 200));
+              } catch(e) { console.error(e); }
+          }
+      }
+      addNotification({
+          type: 'success',
+          title: 'Broadcast Sent',
+          message: `Message sent to ${ids.length} recipients.`
+      });
   };
 
   const handleToggleRepeat = async () => {
@@ -270,9 +316,9 @@ export default function App() {
   return (
     <>
       <Layout activeTab={activeTab} onTabChange={setActiveTab}>
-        {(activeTab === 'dashboard' || activeTab === 'leads') && (
+        {/* DASHBOARD TAB */}
+        {activeTab === 'dashboard' && (
         <div className="p-8 max-w-7xl mx-auto space-y-8">
-          {activeTab === 'dashboard' && (
             <>
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                  <div>
@@ -370,22 +416,12 @@ export default function App() {
                 </div>
               </div>
             </>
-          )}
 
           <div className="h-[600px] flex flex-col">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-bold text-gray-900">
-                {activeTab === 'dashboard' ? 'Recent Activity' : 'Lead Management'}
+                Recent Activity
               </h3>
-              {selectedBulkIds.length > 0 && (
-                <button 
-                  onClick={() => setShowBulkModal(true)}
-                  className="bg-black text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-800 transition-colors flex items-center gap-2 animate-in fade-in slide-in-from-right-5"
-                >
-                  <Send size={16} />
-                  Message Selected ({selectedBulkIds.length})
-                </button>
-              )}
             </div>
             
             {dataSource === 'live' && drivers.length === 0 && (
@@ -403,6 +439,18 @@ export default function App() {
             />
           </div>
         </div>
+        )}
+        
+        {/* LEAD MANAGER TAB (Replaces Old LeadTable) */}
+        {activeTab === 'leads' && (
+             <div className="p-4 h-screen bg-gray-50">
+                 <LeadManager 
+                     drivers={drivers}
+                     onSelectDriver={setSelectedDriver}
+                     onBulkSend={handleBulkSendDirect}
+                     onUpdateDriverStatus={handleBulkStatusUpdate}
+                 />
+             </div>
         )}
 
         {activeTab === 'media-library' && <MediaLibrary />}
@@ -427,7 +475,7 @@ export default function App() {
                <h3 className="text-lg font-bold mb-4">Send Bulk Message</h3>
                <div className="flex gap-3">
                  <button onClick={() => setShowBulkModal(false)} className="flex-1 px-4 py-2 border rounded-lg">Cancel</button>
-                 <button onClick={handleBulkSend} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg">Send</button>
+                 <button onClick={handleBulkSendLegacy} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg">Send</button>
                </div>
              </div>
           </div>
