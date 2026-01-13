@@ -16,7 +16,7 @@ import {
   addEdge
 } from '@xyflow/react';
 import type { Node, Connection, Edge } from '@xyflow/react';
-import { BotSettings, BotStep, MessageButton } from '../types';
+import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
 import { useFlowStore } from '../services/flowStore'; 
@@ -25,9 +25,7 @@ import {
   MessageSquare, Image as ImageIcon, Video, List, Type, Hash, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, ShieldAlert, 
   GripVertical, MousePointerClick, FileCode, Brush, Eye, 
-  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, 
-  HelpCircle, Split, GitBranch, ArrowRight, AlertTriangle, File, 
-  Loader2, RefreshCw, Bold, Italic, CreditCard, MapPin, Phone, Globe
+  ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, HelpCircle, Split, GitBranch, ArrowRight, AlertTriangle, File, Loader2, RefreshCw, Bold, Italic
 } from 'lucide-react';
 
 // --- STYLES ---
@@ -46,7 +44,6 @@ const OPTION_HANDLE_STYLE = {
 
 const getIconForLabel = (label: string) => {
     switch(label) {
-        case 'Rich Card': return <CreditCard size={14} />;
         case 'Image': return <ImageIcon size={14} />;
         case 'Video': return <Video size={14} />;
         case 'Question':
@@ -62,10 +59,9 @@ const getIconForLabel = (label: string) => {
 const NodePreviewCard = ({ data, id, selected }: any) => {
   const isMediaType = ['Image', 'Video'].includes(data.label);
   const isOptionType = ['Quick Reply', 'List', 'Question'].includes(data.label) || data.inputType === 'option';
-  const isCardType = data.label === 'Rich Card';
   const isLinkType = data.label === 'Link';
   
-  // Validation Checks
+  // Validation Checks (Strict Anti-Placeholder)
   const hasPlaceholder = data.message && /replace\s+this|enter\s+your|type\s+your|sample\s+message/i.test(data.message);
   const isEmptyOptions = isOptionType && (!data.options || data.options.length === 0);
   const isDanger = hasPlaceholder || isEmptyOptions;
@@ -76,7 +72,6 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
 
   if (isMediaType) { borderColor = 'border-amber-200'; accentColor = 'bg-amber-50'; iconColor = 'text-amber-600'; }
   else if (isOptionType) { borderColor = 'border-violet-300'; accentColor = 'bg-violet-50'; iconColor = 'text-violet-600'; }
-  else if (isCardType) { borderColor = 'border-pink-300'; accentColor = 'bg-pink-50'; iconColor = 'text-pink-600'; }
   else if (isLinkType) { borderColor = 'border-sky-200'; accentColor = 'bg-sky-50'; iconColor = 'text-sky-600'; }
   else if (data.label === 'Text Message') { borderColor = 'border-blue-200'; accentColor = 'bg-blue-50'; iconColor = 'text-blue-600'; }
 
@@ -107,7 +102,8 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
                 <span className={`text-xs font-bold uppercase tracking-wide ${iconColor}`}>{data.label}</span>
             </div>
             {isDanger && (
-                <div className="flex items-center gap-1 text-red-600" title="Validation Error">
+                <div className="flex items-center gap-1 text-red-600" title="Placeholder text detected! This will be blocked.">
+                    <span className="text-[10px] font-bold">INVALID</span>
                     <ShieldAlert size={16} className="animate-pulse" />
                 </div>
             )}
@@ -116,65 +112,72 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
         {/* Body */}
         <div className="p-4">
             
-            {/* RICH CARD HEADER IMAGE */}
-            {isCardType && data.headerImageUrl && (
-                <div className="mb-3 rounded-t-lg bg-gray-100 border border-gray-200 aspect-video overflow-hidden relative">
-                    <img src={data.headerImageUrl} className="w-full h-full object-cover" alt="header" />
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent flex items-end p-2">
-                        {data.mediaLabel && <span className="text-white font-bold text-xs shadow-black drop-shadow-md">{data.mediaLabel}</span>}
-                    </div>
-                </div>
+            {/* Link Label Preview */}
+            {isLinkType && data.linkLabel && (
+                 <div className="mb-2 text-xs font-bold text-gray-900 bg-sky-50 px-2 py-1 rounded border border-sky-100">
+                    {data.linkLabel}
+                 </div>
             )}
 
-            {/* TEMPLATE BADGE */}
-            {isCardType && data.templateName && (
-                <div className="mb-2 bg-green-50 text-green-800 text-[10px] font-bold px-2 py-1 rounded border border-green-200 flex items-center gap-1">
-                    <CheckCircle size={10} /> Template: {data.templateName}
-                </div>
-            )}
-
-            {/* Message Text */}
+            {/* Message Text (or URL for Link) */}
             {data.label !== 'Image' && data.label !== 'Video' && (
                 <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 mb-3 relative overflow-hidden">
-                    <p className={`text-xs leading-relaxed font-medium whitespace-pre-wrap ${hasPlaceholder ? 'text-red-600 font-bold' : 'text-gray-700'}`}>
+                    <p className={`text-xs leading-relaxed font-medium truncate ${hasPlaceholder ? 'text-red-600 font-bold' : 'text-gray-700'}`}>
                         {data.message || <span className="italic text-gray-300">No content...</span>}
                     </p>
-                    {isCardType && data.footerText && (
-                        <p className="text-[10px] text-gray-400 mt-2 border-t border-gray-200 pt-1">{data.footerText}</p>
+                    {hasPlaceholder && <div className="text-[9px] text-red-500 mt-1">⚠️ Change default text</div>}
+                </div>
+            )}
+
+            {/* Media Preview */}
+            {isMediaType && (
+                <div className="mb-3 rounded-lg bg-gray-100 border border-gray-200 aspect-video overflow-hidden flex items-center justify-center relative group/media">
+                    {data.mediaUrl ? (
+                        data.label === 'Video' ? <video src={data.mediaUrl} className="w-full h-full object-cover" /> : <img src={data.mediaUrl} className="w-full h-full object-cover" alt="preview" />
+                    ) : (
+                        <div className="text-center p-4">
+                             <Cloud size={24} className="mx-auto text-gray-300 mb-1" />
+                             <span className="text-[10px] text-gray-400 font-medium">Select {data.label} from S3</span>
+                        </div>
                     )}
                 </div>
             )}
 
-            {/* RICH CARD BUTTONS */}
-            {isCardType && data.buttons && data.buttons.length > 0 && (
-                <div className="space-y-1">
-                    {data.buttons.map((btn: MessageButton, i: number) => (
-                        <div key={i} className="flex items-center justify-center gap-2 w-full py-2 bg-white border border-gray-200 rounded-md shadow-sm text-xs font-bold text-blue-600 group/btn relative">
-                            {btn.type === 'location' && <MapPin size={10} />}
-                            {btn.type === 'url' && <Globe size={10} />}
-                            {btn.type === 'phone' && <Phone size={10} />}
-                            {btn.type === 'reply' && <div className="absolute right-[-10px]"><Handle type="source" position={Position.Right} id={`btn-${i}`} style={OPTION_HANDLE_STYLE} /></div>}
-                            {btn.title}
+            {/* Options Routing UI */}
+            {isOptionType && (
+                <div className="mt-4 space-y-3">
+                    <div className="flex items-center justify-between mb-2">
+                        <div className="text-[10px] font-bold text-violet-500 uppercase tracking-wider flex items-center gap-1">
+                            <GitBranch size={12} /> Routes
+                        </div>
+                    </div>
+                    {data.options?.map((opt: string, i: number) => (
+                        <div key={i} className="relative flex items-center justify-between bg-white border-2 border-gray-100 hover:border-violet-300 px-3 py-3 rounded-lg shadow-sm transition-all group/opt">
+                            <span className="text-xs font-bold text-gray-700 truncate max-w-[200px]" title={opt}>{opt || '(Empty)'}</span>
+                            <div className="h-[2px] bg-gray-100 flex-1 mx-3 group-hover/opt:bg-violet-100 transition-colors"></div>
+                            <div className="relative flex items-center">
+                                <span className="text-[9px] text-gray-400 mr-2 uppercase font-mono group-hover/opt:text-violet-600 font-bold tracking-tight">Next</span>
+                                <ArrowRight size={12} className="text-gray-300 mr-1 group-hover/opt:text-violet-400" />
+                                <Handle type="source" position={Position.Right} id={`option-${i}`} style={OPTION_HANDLE_STYLE} />
+                            </div>
                         </div>
                     ))}
                 </div>
             )}
-
-            {/* Legacy Options Routing */}
-            {isOptionType && (
-                <div className="mt-4 space-y-3">
-                    {data.options?.map((opt: string, i: number) => (
-                        <div key={i} className="relative flex items-center justify-between bg-white border-2 border-gray-100 px-3 py-3 rounded-lg shadow-sm">
-                            <span className="text-xs font-bold text-gray-700">{opt || '(Empty)'}</span>
-                            <Handle type="source" position={Position.Right} id={`option-${i}`} style={OPTION_HANDLE_STYLE} />
-                        </div>
-                    ))}
+            
+            {/* Variable Save Indicator */}
+            {data.saveToField && (
+                <div className="mt-3 pt-3 border-t border-gray-100 flex items-center justify-between text-[10px]">
+                    <span className="text-gray-400 font-medium">Saves to variable</span>
+                    <span className="text-purple-700 font-mono bg-purple-50 px-2 py-0.5 rounded border border-purple-100 flex items-center gap-1">
+                        <Hash size={8} /> {data.saveToField}
+                    </span>
                 </div>
             )}
         </div>
 
-        {/* Fallback Main Output (For non-branching nodes or cards without reply buttons) */}
-        {!isOptionType && (!isCardType || !data.buttons?.some((b: any) => b.type === 'reply')) && (
+        {/* Fallback Main Output (Only if NOT option type) */}
+        {!isOptionType && (
             <div className="absolute -right-3 top-1/2 transform -translate-y-1/2">
                 <Handle type="source" position={Position.Right} id="main" style={OUTPUT_HANDLE_STYLE} />
             </div>
@@ -193,27 +196,41 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
 
     const update = (field: string, value: any) => {
         const newData = { ...localData, [field]: value };
+        if (newData.icon) delete newData.icon; 
         setLocalData(newData);
         onChange(selectedNode.id, newData);
     };
 
-    const addButton = () => {
-        const newButtons = [...(localData.buttons || []), { type: 'reply', title: 'New Button' }];
-        update('buttons', newButtons);
+    const insertTag = (tag: string) => {
+        if (!textareaRef.current) return;
+        const input = textareaRef.current;
+        const start = input.selectionStart;
+        const end = input.selectionEnd;
+        const text = localData.message || '';
+        
+        const before = text.substring(0, start);
+        const selected = text.substring(start, end);
+        const after = text.substring(end);
+        
+        const newText = before + tag + selected + tag + after;
+        update('message', newText);
+        
+        // Restore focus and cursor position after React re-render
+        setTimeout(() => {
+            if (textareaRef.current) {
+                textareaRef.current.focus();
+                // Move selection to cover the original text inside tags
+                textareaRef.current.setSelectionRange(start + tag.length, end + tag.length);
+            }
+        }, 0);
     };
 
-    const updateButton = (index: number, key: string, val: string) => {
-        const newButtons = [...(localData.buttons || [])];
-        newButtons[index] = { ...newButtons[index], [key]: val };
-        update('buttons', newButtons);
-    };
+    if (localData.type === 'start') return <div className="p-6 text-center text-gray-400 text-sm">Start Node has no properties.</div>;
 
-    const removeButton = (index: number) => {
-        const newButtons = localData.buttons.filter((_: any, i: number) => i !== index);
-        update('buttons', newButtons);
-    };
-
-    const isCardType = localData.label === 'Rich Card';
+    const isMediaType = ['Image', 'Video'].includes(localData.label);
+    const isOptionType = ['Quick Reply', 'List', 'Question'].includes(localData.label) || localData.inputType === 'option';
+    const isLinkType = localData.label === 'Link';
+    const isInputType = ['Text', 'Number'].includes(localData.label) || localData.inputType === 'text';
 
     return (
         <div className="w-80 bg-white border-l border-gray-200 flex flex-col h-full shadow-xl z-20">
@@ -223,102 +240,149 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
 
             <div className="flex-1 overflow-y-auto p-5 space-y-6">
                 
-                {/* TEMPLATE NAME FIELD */}
-                {isCardType && (
-                    <div className="space-y-2 pb-4 border-b border-gray-100">
-                        <label className="text-xs font-bold text-gray-500 uppercase">Meta Template Name</label>
+                {/* Link Label Input */}
+                {isLinkType && (
+                     <div className="space-y-2">
+                        <label className="text-xs font-bold text-sky-600 uppercase">Link Label</label>
                         <input 
-                            className="w-full p-2 bg-white border border-gray-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-green-500"
-                            value={localData.templateName || ''}
-                            onChange={(e) => update('templateName', e.target.value)}
-                            placeholder="e.g. welcome_offer_v2"
+                            className="w-full p-2 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-sky-500 outline-none"
+                            placeholder="e.g. Visit Our Website"
+                            value={localData.linkLabel || ''}
+                            onChange={(e) => update('linkLabel', e.target.value)}
                         />
-                        <p className="text-[9px] text-gray-400">Required if using Link/Location buttons.</p>
-                    </div>
+                        <p className="text-[10px] text-gray-400">Displayed above the link URL.</p>
+                     </div>
                 )}
 
-                {/* Header Image for Card */}
-                {isCardType && (
+                {/* Message / URL Input */}
+                {!isMediaType && (
                     <div className="space-y-2">
-                        <label className="text-xs font-bold text-gray-500 uppercase">Header Image</label>
-                        {localData.headerImageUrl ? (
-                            <div className="relative aspect-video rounded-lg overflow-hidden border border-gray-200 group">
-                                <img src={localData.headerImageUrl} className="w-full h-full object-cover" alt="Header" />
-                                <button onClick={() => update('headerImageUrl', '')} className="absolute top-1 right-1 bg-red-500 text-white p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={12} /></button>
-                            </div>
-                        ) : (
-                            <button onClick={() => setShowMediaPicker(true)} className="w-full py-6 border-2 border-dashed border-gray-200 rounded-lg text-gray-400 hover:border-blue-300 hover:text-blue-500 flex flex-col items-center gap-2">
-                                <ImageIcon size={20} />
-                                <span className="text-xs font-medium">Add Header Image</span>
-                            </button>
-                        )}
-                    </div>
-                )}
-
-                {/* Body Text */}
-                <div className="space-y-2">
-                    <label className="text-xs font-bold text-gray-500 uppercase">Message Body</label>
-                    <textarea 
-                        className="w-full h-32 p-3 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none"
-                        value={localData.message || ''}
-                        onChange={(e) => update('message', e.target.value)}
-                        placeholder="Type message text..."
-                    />
-                </div>
-
-                {/* Footer Text */}
-                {isCardType && (
-                    <div className="space-y-2">
-                        <label className="text-xs font-bold text-gray-500 uppercase">Footer (Optional)</label>
-                        <input 
-                            className="w-full p-2 bg-white border border-gray-200 rounded-lg text-xs outline-none"
-                            value={localData.footerText || ''}
-                            onChange={(e) => update('footerText', e.target.value)}
-                            placeholder="e.g. Reply STOP to unsubscribe"
+                        <label className="text-xs font-bold text-gray-500 uppercase flex justify-between items-center">
+                            <span>{isLinkType ? 'Link URL' : 'Message Text'}</span>
+                            {!isLinkType && (
+                                <div className="flex gap-1">
+                                    <button 
+                                        onClick={() => insertTag('*')}
+                                        className="p-1 hover:bg-gray-100 rounded text-gray-600 hover:text-black transition-colors"
+                                        title="Bold (*text*)"
+                                    >
+                                        <Bold size={12} />
+                                    </button>
+                                    <button 
+                                        onClick={() => insertTag('_')}
+                                        className="p-1 hover:bg-gray-100 rounded text-gray-600 hover:text-black transition-colors"
+                                        title="Italic (_text_)"
+                                    >
+                                        <Italic size={12} />
+                                    </button>
+                                </div>
+                            )}
+                        </label>
+                        <textarea 
+                            ref={textareaRef}
+                            className="w-full h-32 p-3 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none transition-shadow shadow-sm font-mono"
+                            placeholder={isLinkType ? "https://..." : "Type what the bot should say..."}
+                            value={localData.message || ''}
+                            onChange={(e) => update('message', e.target.value)}
                         />
+                        <p className="text-[10px] text-gray-400 italic">Do not leave "Replace this..." text.</p>
                     </div>
                 )}
 
-                {/* Buttons Manager */}
-                {isCardType && (
-                    <div className="space-y-3 pt-4 border-t border-gray-100">
-                        <div className="flex justify-between items-center">
-                            <label className="text-xs font-bold text-gray-500 uppercase">Buttons</label>
-                            <button onClick={addButton} className="text-xs text-blue-600 font-bold hover:underline">+ Add Button</button>
+                {/* Media Selector */}
+                {isMediaType && (
+                    <div className="space-y-4">
+                        <label className="text-xs font-bold text-amber-600 uppercase">Selected Asset</label>
+                        
+                        <div className="bg-gray-100 rounded-lg aspect-video flex items-center justify-center border border-gray-200 overflow-hidden relative group">
+                            {localData.mediaUrl ? (
+                                localData.label === 'Video' ? <video src={localData.mediaUrl} className="w-full h-full object-cover" /> : <img src={localData.mediaUrl} className="w-full h-full object-cover" alt="prev" />
+                            ) : (
+                                <div className="text-center p-2">
+                                    <Cloud size={24} className="mx-auto text-gray-400 mb-1" />
+                                    <span className="text-[10px] text-gray-500">No Asset</span>
+                                </div>
+                            )}
+                            {localData.mediaUrl && (
+                                <button 
+                                    onClick={() => update('mediaUrl', '')}
+                                    className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded shadow hover:bg-red-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                                >
+                                    <Trash2 size={12} />
+                                </button>
+                            )}
                         </div>
-                        <div className="space-y-3">
-                            {(localData.buttons || []).map((btn: MessageButton, i: number) => (
-                                <div key={i} className="bg-gray-50 p-2 rounded-lg border border-gray-200 space-y-2">
-                                    <div className="flex gap-2">
-                                        <select 
-                                            value={btn.type}
-                                            onChange={(e) => updateButton(i, 'type', e.target.value)}
-                                            className="bg-white border border-gray-200 text-xs rounded p-1 w-24 outline-none"
-                                        >
-                                            <option value="reply">Reply</option>
-                                            <option value="url">Link</option>
-                                            <option value="location">Location</option>
-                                            <option value="phone">Call</option>
-                                        </select>
+
+                        <button 
+                            onClick={() => setShowMediaPicker(true)}
+                            className="w-full py-2.5 bg-amber-100 text-amber-700 font-bold rounded-lg text-xs hover:bg-amber-200 transition-colors flex items-center justify-center gap-2 border border-amber-200"
+                        >
+                            <Cloud size={14} /> Select from S3 Library
+                        </button>
+                    </div>
+                )}
+
+                {/* Options Manager */}
+                {isOptionType && (
+                    <div className="space-y-3">
+                        <label className="text-xs font-bold text-gray-500 uppercase flex justify-between items-center">
+                            <span>Answer Options</span>
+                        </label>
+                        <div className="space-y-2">
+                            {(localData.options || []).map((opt: string, idx: number) => (
+                                <div key={idx} className="flex gap-2 group">
+                                    <div className="flex-1 flex items-center bg-white border border-gray-200 rounded-lg overflow-hidden focus-within:ring-2 focus-within:ring-violet-100 focus-within:border-violet-300">
+                                        <span className="w-8 h-full bg-gray-50 flex items-center justify-center text-[10px] font-mono text-gray-400 border-r border-gray-100">{idx + 1}</span>
                                         <input 
-                                            value={btn.title}
-                                            onChange={(e) => updateButton(i, 'title', e.target.value)}
-                                            className="flex-1 bg-white border border-gray-200 text-xs rounded p-1 outline-none"
-                                            placeholder="Label"
+                                            value={opt}
+                                            onChange={(e) => {
+                                                const newOpts = [...localData.options];
+                                                newOpts[idx] = e.target.value;
+                                                update('options', newOpts);
+                                            }}
+                                            className="flex-1 px-3 py-2 text-xs outline-none text-gray-700 font-medium"
+                                            placeholder="Option Label"
                                         />
-                                        <button onClick={() => removeButton(i)} className="text-red-400 hover:text-red-600"><X size={14} /></button>
                                     </div>
-                                    {btn.type !== 'reply' && btn.type !== 'location' && (
-                                        <input 
-                                            value={btn.payload || ''}
-                                            onChange={(e) => updateButton(i, 'payload', e.target.value)}
-                                            className="w-full bg-white border border-gray-200 text-xs rounded p-1 outline-none"
-                                            placeholder={btn.type === 'url' ? 'https://...' : '+12345...'}
-                                        />
-                                    )}
+                                    <button 
+                                        onClick={() => {
+                                            const newOpts = localData.options.filter((_: any, i: number) => i !== idx);
+                                            update('options', newOpts);
+                                        }}
+                                        className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                    >
+                                        <X size={16} />
+                                    </button>
                                 </div>
                             ))}
                         </div>
+                        <button 
+                            onClick={() => update('options', [...(localData.options || []), `Option ${(localData.options?.length || 0) + 1}`])}
+                            className="w-full py-2 border border-dashed border-gray-300 rounded-lg text-xs font-bold text-gray-500 hover:text-violet-600 hover:border-violet-300 hover:bg-violet-50 transition-all flex items-center justify-center gap-2"
+                        >
+                            <Plus size={14} /> Add Option
+                        </button>
+                    </div>
+                )}
+
+                {/* Variable Saving */}
+                {isInputType && (
+                    <div className="space-y-2 pt-4 border-t border-gray-100">
+                        <label className="text-xs font-bold text-purple-800 uppercase flex items-center gap-2">
+                            <Hash size={12} /> Save User Reply To
+                        </label>
+                        <select 
+                            value={localData.saveToField || ''}
+                            onChange={(e) => update('saveToField', e.target.value)}
+                            className="w-full bg-white border border-gray-200 text-gray-700 text-xs rounded-lg px-3 py-2 focus:ring-2 focus:ring-purple-500 outline-none"
+                        >
+                            <option value="">-- Do Not Save --</option>
+                            <option value="name">user_name</option>
+                            <option value="vehicleRegistration">vehicle_number</option>
+                            <option value="availability">availability_status</option>
+                            <option value="document">document_url</option>
+                            <option value="email">email_address</option>
+                        </select>
                     </div>
                 )}
             </div>
@@ -326,8 +390,8 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
             <MediaSelectorModal 
                 isOpen={showMediaPicker} 
                 onClose={() => setShowMediaPicker(false)}
-                onSelect={(url: string) => { update('headerImageUrl', url); setShowMediaPicker(false); }}
-                allowedType="Image"
+                onSelect={(url: string) => { update('mediaUrl', url); setShowMediaPicker(false); }}
+                allowedType={localData.label}
             />
         </div>
     );
@@ -357,6 +421,7 @@ const DraggableSidebarItem = ({ type, inputType, label, icon }: any) => {
     );
 };
 
+// --- MAIN COMPONENT ---
 export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
     return (
         <ReactFlowProvider>
@@ -375,38 +440,54 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
     const [isSaving, setIsSaving] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
     const [loadError, setLoadError] = useState<string | null>(null);
+    const [lastLoadedTime, setLastLoadedTime] = useState<number>(0);
 
     const loadData = useCallback(async () => {
         setIsLoading(true);
         setLoadError(null);
         try {
+            // Reset flow to clean state before loading to prevent ghosts
+            // But we keep Start Node as default fallback inside the store
             const settings = isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
+            
             if (settings.flowData && settings.flowData.nodes.length > 0) {
                 const cleanNodes = settings.flowData.nodes.map((n: any) => {
                     const { icon, ...cleanData } = n.data || {};
+                    if (cleanData.inputType === "undefined") cleanData.inputType = "text";
                     return { ...n, data: cleanData };
                 });
                 setNodes(cleanNodes);
                 setEdges(settings.flowData.edges);
             } else {
+                // If DB is empty, use default start node from store (already there)
+                // or ensure Start Node exists if store was cleared
                 resetFlow(); 
             }
+            setLastLoadedTime(Date.now());
         } catch (e: any) {
+            console.error("BotBuilder Load Error:", e);
             setLoadError(e.message || "Failed to load bot flow");
         } finally {
             setIsLoading(false);
         }
     }, [isLiveMode, setNodes, setEdges, resetFlow]);
     
-    useEffect(() => { loadData(); }, [loadData]);
+    // Load on Mount or Mode Change
+    useEffect(() => {
+        loadData();
+    }, [loadData]);
 
+    // Drag Drop
     const onDragOver = useCallback((event: React.DragEvent) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }, []);
     const onDrop = useCallback((event: React.DragEvent) => {
         event.preventDefault();
+        if (isLoading || loadError) return; // Prevent editing while loading/error
+
         const type = event.dataTransfer.getData('application/reactflow/type');
         let inputType = event.dataTransfer.getData('application/reactflow/inputType');
         const label = event.dataTransfer.getData('application/reactflow/label');
         if (!type) return;
+        if (!inputType || inputType === "undefined") inputType = "text";
 
         const position = { x: event.clientX - 300, y: event.clientY };
         const newNode: Node = {
@@ -417,21 +498,27 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 label, 
                 message: '', 
                 inputType,
-                buttons: [], // Init for cards
-                headerImageUrl: '',
-                templateName: '' // New Field
+                options: inputType === 'option' ? ['Yes', 'No'] : undefined,
+                mediaUrl: '',
+                linkLabel: ''
             },
         };
         addNode(newNode);
         setSelectedNodeId(newNode.id);
-    }, [addNode]);
+    }, [addNode, isLoading, loadError]);
 
+    // --- COMPILER LOGIC (Fixed for Production) ---
     const handleSave = async () => {
+        if (isLoading || loadError) return; // Prevent overwriting if not loaded correctly
+
         setIsSaving(true);
         const compiledSteps: BotStep[] = [];
+        
+        // 1. Identify Entry Point
         const startEdge = edges.find(e => e.source === 'start');
         let entryPointId = startEdge?.target;
         
+        // 2. Iterate Nodes to Build Steps
         nodes.forEach(node => {
             const data = node.data as any;
             if (data.type === 'start') return;
@@ -440,53 +527,51 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             let nextStepId: string | undefined = 'END'; 
             let routes: Record<string, string> = {};
 
+            // A. Check for DEFAULT connection (Main Handle)
             const mainEdge = outgoingEdges.find(e => e.sourceHandle === 'main' || !e.sourceHandle);
             if (mainEdge) nextStepId = mainEdge.target;
 
-            // Handle Reply Buttons Routing
-            if (data.buttons) {
-                data.buttons.forEach((btn: MessageButton, idx: number) => {
-                    if (btn.type === 'reply') {
-                        const handleId = `btn-${idx}`;
-                        const edge = outgoingEdges.find(e => e.sourceHandle === handleId);
-                        if (edge) routes[btn.title] = edge.target;
-                    }
-                });
-            }
-            
-            // Legacy Options Routing
-            if (data.options) {
-                data.options.forEach((opt: string, idx: number) => {
+            // B. Check for SPECIFIC OPTION connections
+            if (data.options && data.options.length > 0) {
+                data.options.forEach((optText: string, idx: number) => {
                      const handleId = `option-${idx}`;
                      const edge = outgoingEdges.find(e => e.sourceHandle === handleId);
-                     if (edge) routes[opt] = edge.target;
+                     if (edge && optText && optText.trim()) {
+                         routes[optText.trim()] = edge.target;
+                     }
                 });
             }
             
+            // C. Sanitize Data
             const { icon, ...cleanData } = data;
             
+            // D. Construct Step
             compiledSteps.push({
                 id: node.id,
                 title: cleanData.label,
                 message: cleanData.message || "",
                 inputType: cleanData.inputType,
                 options: cleanData.options,
-                buttons: cleanData.buttons,
-                headerImageUrl: cleanData.headerImageUrl,
-                footerText: cleanData.footerText,
-                templateName: cleanData.templateName, // Save template name
                 saveToField: cleanData.saveToField,
                 nextStepId, 
                 routes: Object.keys(routes).length > 0 ? routes : undefined, 
                 mediaUrl: cleanData.mediaUrl,
-                linkLabel: cleanData.linkLabel
+                templateName: cleanData.templateName,
+                mediaType: ['Video', 'Image', 'File'].includes(cleanData.label) ? cleanData.label.toLowerCase() : undefined,
+                linkLabel: cleanData.linkLabel // Capture new field
             });
         });
 
-        if (!entryPointId && compiledSteps.length > 0) entryPointId = compiledSteps[0].id;
+        // 3. Fallback Entry Point
+        if (!entryPointId && compiledSteps.length > 0) {
+            entryPointId = compiledSteps[0].id;
+        }
 
+        // 4. Save
         try {
+            // Refetch current settings to ensure we don't overwrite other fields like 'isEnabled'
             const currentSettings = isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
+            
             const newSettings: BotSettings = {
                 ...currentSettings,
                 steps: compiledSteps,
@@ -496,7 +581,10 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
             if (isLiveMode) await liveApiService.saveBotSettings(newSettings);
             else mockBackend.updateBotSettings(newSettings);
+            
+            setLastLoadedTime(Date.now()); // Mark successful save time
         } catch (e) { 
+            console.error("Save Failed:", e);
             alert("Save failed. Please check connection."); 
         } finally {
             setIsSaving(false);
@@ -505,27 +593,60 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
     const selectedNode = useMemo(() => nodes.find(n => n.id === selectedNodeId), [nodes, selectedNodeId]);
 
-    if (isLoading) return <div className="flex h-full items-center justify-center bg-slate-50"><Loader2 size={48} className="text-blue-600 animate-spin" /></div>;
+    // Error / Loading Overlay
+    if (isLoading) {
+        return (
+            <div className="flex h-full items-center justify-center bg-slate-50 flex-col gap-4">
+                <Loader2 size={48} className="text-blue-600 animate-spin" />
+                <p className="text-gray-500 font-medium animate-pulse">Loading Bot Architecture...</p>
+            </div>
+        );
+    }
+
+    if (loadError) {
+        return (
+            <div className="flex h-full items-center justify-center bg-slate-50 flex-col gap-4 p-8 text-center">
+                <div className="bg-red-100 p-4 rounded-full">
+                    <AlertTriangle size={48} className="text-red-600" />
+                </div>
+                <h3 className="text-xl font-bold text-gray-900">Connection Failed</h3>
+                <p className="text-gray-600 max-w-md">
+                    Could not load bot settings from the server. <br/>
+                    The editor is locked to prevent data loss.
+                </p>
+                <div className="text-xs bg-gray-200 px-3 py-1 rounded text-gray-700 font-mono mt-2">{loadError}</div>
+                <button 
+                    onClick={loadData}
+                    className="mt-4 px-6 py-2.5 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 flex items-center gap-2"
+                >
+                    <RefreshCw size={18} /> Retry Connection
+                </button>
+            </div>
+        );
+    }
 
     return (
         <div className="flex h-full bg-slate-50 font-sans relative overflow-hidden">
             <div className="w-64 bg-white border-r border-gray-200 flex flex-col z-10 shadow-lg">
                 <div className="p-5 border-b border-gray-100">
-                    <h2 className="font-bold text-gray-900 flex items-center gap-2 text-lg"><Zap className="text-yellow-500 fill-yellow-500" size={20} /> Bot Studio</h2>
+                    <h2 className="font-bold text-gray-900 flex items-center gap-2 text-lg">
+                        <Zap className="text-yellow-500 fill-yellow-500" size={20} /> Bot Studio
+                    </h2>
+                    <p className="text-xs text-gray-500 mt-1">Production Flow Builder</p>
                 </div>
                 <div className="flex-1 overflow-y-auto p-4 space-y-6">
                     <div>
-                        <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-3 tracking-wider">Rich Content</h4>
+                        <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-3 tracking-wider">Messages</h4>
                         <div className="space-y-2">
-                            <DraggableSidebarItem type="card" inputType="card" label="Rich Card" icon={<CreditCard size={16} />} />
+                            <DraggableSidebarItem type="text" label="Text Message" icon={<MessageSquare size={16} />} />
                             <DraggableSidebarItem type="image" label="Image" icon={<ImageIcon size={16} />} />
                             <DraggableSidebarItem type="video" label="Video" icon={<Video size={16} />} />
+                            <DraggableSidebarItem type="link" inputType="text" label="Link" icon={<Link size={16} />} />
                         </div>
                     </div>
                     <div>
-                        <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-3 tracking-wider">Basic</h4>
+                        <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-3 tracking-wider">Interaction</h4>
                         <div className="space-y-2">
-                            <DraggableSidebarItem type="text" label="Text Message" icon={<MessageSquare size={16} />} />
                             <DraggableSidebarItem type="option" inputType="option" label="Question" icon={<GitBranch size={16} />} />
                             <DraggableSidebarItem type="input" inputType="text" label="Collect Text" icon={<Type size={16} />} />
                         </div>
@@ -535,7 +656,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
 
             <div className="flex-1 relative h-full flex flex-col">
                 <div className="absolute top-4 right-4 z-20 flex gap-2">
-                    <button onClick={handleSave} disabled={isSaving} className="bg-black text-white px-5 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-gray-800 transition-all flex items-center gap-2">
+                    <button onClick={handleSave} disabled={isSaving} className="bg-black text-white px-5 py-2.5 rounded-full text-sm font-bold shadow-lg hover:bg-gray-800 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
                         {isSaving ? <span className="animate-spin"><Zap size={16} /></span> : <CheckCircle size={16} />}
                         {isSaving ? 'Publishing...' : 'Publish Flow'}
                     </button>
