@@ -224,7 +224,7 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
            }
        } catch(e) {}
 
-       // CRITICAL FIX: Use provided mediaType (video/image) or default to image
+       // CRITICAL FIX: Use provided mediaType (video/image/document)
        const type = mediaType || 'image';
        payload.type = type;
        
@@ -315,14 +315,23 @@ router.patch('/drivers/:id', async (req, res) => {
 // 2. MESSAGES
 router.post('/messages/send', async (req, res) => {
     try {
-        const { driverId, text } = req.body;
+        const { driverId, text, mediaUrl, mediaType, options } = req.body;
         const dRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
         if (dRes.rows.length === 0) return res.status(404).json({ error: "Driver not found" });
         
-        const sent = await sendWhatsAppMessage(dRes.rows[0].phone_number, text);
+        // Pass enriched payload to helper
+        const sent = await sendWhatsAppMessage(dRes.rows[0].phone_number, text, options, null, 'en_US', mediaUrl, mediaType);
+        
         if (sent) {
-            await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'agent', $3, $4, 'text')`, [`ag_${Date.now()}`, driverId, text, Date.now()]);
-            await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text, Date.now(), driverId]);
+            // Determine type for DB
+            let type = 'text';
+            if (mediaUrl) type = mediaType || 'image';
+            else if (options && options.length > 0) type = 'options';
+
+            await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type, image_url) VALUES ($1, $2, 'agent', $3, $4, $5, $6)`, 
+                [`ag_${Date.now()}`, driverId, text, Date.now(), type, mediaUrl]
+            );
+            await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text || `[${type}]`, Date.now(), driverId]);
             res.json({ success: true });
         } else {
             res.status(500).json({ error: "Meta API Failed" });

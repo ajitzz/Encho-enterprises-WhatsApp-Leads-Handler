@@ -84,11 +84,17 @@ export const liveApiService = {
     return await response.json();
   },
 
-  sendMessage: async (driverId: string, text: string) => {
+  sendMessage: async (driverId: string, text: string, attachments?: { mediaUrl?: string, mediaType?: string, options?: string[] }) => {
     const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ driverId, text })
+      body: JSON.stringify({ 
+          driverId, 
+          text,
+          mediaUrl: attachments?.mediaUrl,
+          mediaType: attachments?.mediaType,
+          options: attachments?.options
+      })
     });
     if (!response.ok) throw new Error('Failed to send message');
     return await response.json();

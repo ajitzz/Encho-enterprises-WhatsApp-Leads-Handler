@@ -4,13 +4,14 @@ import { Driver, LeadStatus } from '../types';
 import { 
   Search, Filter, Send, MessageSquare, CheckCircle, 
   AlertCircle, X, Users, ChevronLeft, ChevronRight, 
-  MoreHorizontal, Phone, Mail, FileText, Zap
+  MoreHorizontal, Phone, Mail, FileText, Zap, Paperclip, Cloud, Trash2, Plus, GitBranch
 } from 'lucide-react';
+import { MediaSelectorModal } from './MediaSelectorModal';
 
 interface LeadManagerProps {
   drivers: Driver[];
   onSelectDriver: (driver: Driver) => void;
-  onBulkSend: (ids: string[], message: string) => void;
+  onBulkSend: (ids: string[], message: string, mediaUrl?: string, mediaType?: string, options?: string[]) => void;
   onUpdateDriverStatus: (ids: string[], status: LeadStatus) => void;
 }
 
@@ -27,7 +28,13 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [showBulkCompose, setShowBulkCompose] = useState(false);
+  
+  // Compose State
   const [bulkMessage, setBulkMessage] = useState('');
+  const [selectedMedia, setSelectedMedia] = useState<{url: string, type: 'image' | 'video' | 'document'} | null>(null);
+  const [showMediaPicker, setShowMediaPicker] = useState(false);
+  const [showOptions, setShowOptions] = useState(false);
+  const [options, setOptions] = useState<string[]>([]);
 
   // --- SECTIONS CONFIG ---
   const sections = [
@@ -57,9 +64,6 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
   // --- HANDLERS ---
   const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.checked) {
-      // Select ONLY what is visible or all in filter? 
-      // For bulk actions on 10k items, usually we select all in filter.
-      // But for safety, let's select all currently filtered.
       setSelectedIds(filteredDrivers.map(d => d.id));
     } else {
       setSelectedIds([]);
@@ -75,10 +79,19 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
   };
 
   const executeBulkSend = () => {
-    if (!bulkMessage.trim()) return;
-    onBulkSend(selectedIds, bulkMessage);
+    if (!bulkMessage.trim() && !selectedMedia) return;
+    onBulkSend(
+        selectedIds, 
+        bulkMessage, 
+        selectedMedia?.url, 
+        selectedMedia?.type, 
+        options.length > 0 ? options : undefined
+    );
     setShowBulkCompose(false);
     setBulkMessage('');
+    setSelectedMedia(null);
+    setOptions([]);
+    setShowOptions(false);
     setSelectedIds([]);
   };
 
@@ -87,6 +100,20 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
           onUpdateDriverStatus(selectedIds, status);
           setSelectedIds([]);
       }
+  };
+
+  const addOption = () => {
+      if (options.length < 3) setOptions([...options, `Option ${options.length + 1}`]);
+  };
+
+  const removeOption = (index: number) => {
+      setOptions(options.filter((_, i) => i !== index));
+  };
+
+  const updateOption = (index: number, val: string) => {
+      const newOpts = [...options];
+      newOpts[index] = val;
+      setOptions(newOpts);
   };
 
   return (
@@ -288,7 +315,7 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
       {/* BULK COMPOSE MODAL */}
       {showBulkCompose && (
           <div className="absolute inset-0 z-30 bg-black/20 backdrop-blur-sm flex items-end justify-end">
-              <div className="w-96 bg-white h-full shadow-2xl border-l border-gray-200 flex flex-col animate-in slide-in-from-right duration-300">
+              <div className="w-[480px] bg-white h-full shadow-2xl border-l border-gray-200 flex flex-col animate-in slide-in-from-right duration-300">
                   <div className="p-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
                       <h3 className="font-bold text-gray-800 flex items-center gap-2">
                           <Send size={16} className="text-blue-600" /> 
@@ -299,23 +326,98 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
                       </button>
                   </div>
                   
-                  <div className="p-6 flex-1 flex flex-col">
+                  <div className="p-6 flex-1 flex flex-col overflow-y-auto">
                       <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 mb-4 text-xs text-blue-800">
                           <p>Sending to <strong>{selectedIds.length}</strong> recipients in <strong>{activeSection}</strong>.</p>
                       </div>
                       
-                      <label className="text-xs font-bold text-gray-500 uppercase mb-2">Message</label>
-                      <textarea 
-                          value={bulkMessage}
-                          onChange={(e) => setBulkMessage(e.target.value)}
-                          className="flex-1 w-full p-4 bg-gray-50 border border-gray-200 rounded-xl resize-none outline-none focus:ring-2 focus:ring-blue-500 mb-4 text-sm"
-                          placeholder="Type your message here..."
-                      />
-                      
+                      <div className="space-y-4">
+                          <div>
+                              <label className="text-xs font-bold text-gray-500 uppercase mb-2 block">Message</label>
+                              <textarea 
+                                  value={bulkMessage}
+                                  onChange={(e) => setBulkMessage(e.target.value)}
+                                  className="w-full p-4 bg-gray-50 border border-gray-200 rounded-xl resize-none outline-none focus:ring-2 focus:ring-blue-500 min-h-[120px] text-sm"
+                                  placeholder="Type your message here..."
+                              />
+                          </div>
+
+                          {/* Media Attachment */}
+                          <div>
+                              <div className="flex items-center justify-between mb-2">
+                                  <label className="text-xs font-bold text-gray-500 uppercase">Attachment</label>
+                                  {selectedMedia && (
+                                      <button onClick={() => setSelectedMedia(null)} className="text-red-500 text-xs hover:underline flex items-center gap-1">
+                                          <Trash2 size={12} /> Remove
+                                      </button>
+                                  )}
+                              </div>
+                              
+                              {selectedMedia ? (
+                                  <div className="bg-gray-100 rounded-lg p-3 border border-gray-200 flex items-center gap-3">
+                                      {selectedMedia.type === 'image' ? <div className="w-10 h-10 bg-blue-100 rounded flex items-center justify-center text-blue-500"><Cloud size={20} /></div> :
+                                       selectedMedia.type === 'video' ? <div className="w-10 h-10 bg-purple-100 rounded flex items-center justify-center text-purple-500"><Zap size={20} /></div> :
+                                       <div className="w-10 h-10 bg-orange-100 rounded flex items-center justify-center text-orange-500"><FileText size={20} /></div>}
+                                      
+                                      <div className="flex-1 min-w-0">
+                                          <div className="text-xs font-bold truncate">S3 Media Asset</div>
+                                          <div className="text-[10px] text-gray-500 uppercase">{selectedMedia.type}</div>
+                                      </div>
+                                  </div>
+                              ) : (
+                                  <button 
+                                      onClick={() => setShowMediaPicker(true)}
+                                      className="w-full py-3 border-2 border-dashed border-gray-200 rounded-xl text-sm font-medium text-gray-500 hover:text-blue-600 hover:border-blue-300 hover:bg-blue-50 transition-all flex items-center justify-center gap-2"
+                                  >
+                                      <Paperclip size={16} /> Attach Media (Video, Image, PDF)
+                                  </button>
+                              )}
+                          </div>
+
+                          {/* Options */}
+                          <div>
+                              <div className="flex items-center justify-between mb-2">
+                                  <label className="text-xs font-bold text-gray-500 uppercase flex items-center gap-2">
+                                      <GitBranch size={14} /> Interactive Options
+                                  </label>
+                                  {!showOptions && (
+                                      <button onClick={() => { setShowOptions(true); addOption(); }} className="text-blue-600 text-xs hover:underline font-bold">
+                                          + Add Buttons
+                                      </button>
+                                  )}
+                              </div>
+
+                              {showOptions && (
+                                  <div className="bg-gray-50 p-3 rounded-xl border border-gray-200 space-y-2">
+                                      {options.map((opt, idx) => (
+                                          <div key={idx} className="flex gap-2">
+                                              <input 
+                                                  value={opt} 
+                                                  onChange={(e) => updateOption(idx, e.target.value)}
+                                                  className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-lg outline-none focus:border-blue-500"
+                                                  placeholder="Button Label"
+                                              />
+                                              <button onClick={() => removeOption(idx)} className="p-2 text-gray-400 hover:text-red-500">
+                                                  <X size={16} />
+                                              </button>
+                                          </div>
+                                      ))}
+                                      {options.length < 3 && (
+                                          <button onClick={addOption} className="w-full py-2 text-xs font-bold text-gray-400 hover:text-blue-600 border border-dashed border-gray-300 rounded-lg hover:border-blue-300">
+                                              + Add Another Option
+                                          </button>
+                                      )}
+                                  </div>
+                              )}
+                          </div>
+                      </div>
+                  </div>
+
+                  <div className="p-6 border-t border-gray-100 bg-gray-50">
                       <button 
                           onClick={executeBulkSend}
-                          disabled={!bulkMessage.trim()}
-                          className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                          disabled={(!bulkMessage.trim() && !selectedMedia)}
+                          className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                       >
                           <Send size={18} /> Send Broadcast
                       </button>
@@ -323,6 +425,14 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
               </div>
           </div>
       )}
+      
+      {/* Media Selector Overlay */}
+      <MediaSelectorModal 
+          isOpen={showMediaPicker}
+          onClose={() => setShowMediaPicker(false)}
+          onSelect={(url, type) => { setSelectedMedia({ url, type }); setShowMediaPicker(false); }}
+          allowedType="All"
+      />
 
     </div>
   );

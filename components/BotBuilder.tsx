@@ -20,6 +20,7 @@ import { BotSettings, BotStep } from '../types';
 import { mockBackend } from '../services/mockBackend';
 import { liveApiService } from '../services/liveApiService';
 import { useFlowStore } from '../services/flowStore'; 
+import { MediaSelectorModal } from './MediaSelectorModal';
 import { 
   MessageSquare, Image as ImageIcon, Video, List, Type, Hash, 
   LayoutGrid, X, Trash2, Zap, CheckCircle, Flag, ShieldAlert, 
@@ -52,135 +53,6 @@ const getIconForLabel = (label: string) => {
         case 'Link': return <Link size={14} />;
         default: return <MessageSquare size={14} />;
     }
-};
-
-// --- MEDIA SELECTOR MODAL ---
-const MediaSelectorModal = ({ isOpen, onClose, onSelect, allowedType }: any) => {
-    const [files, setFiles] = useState<any[]>([]);
-    const [folders, setFolders] = useState<any[]>([]);
-    const [currentPath, setCurrentPath] = useState('/');
-    const [loading, setLoading] = useState(false);
-
-    useEffect(() => {
-        if (isOpen) {
-            loadMedia(currentPath);
-        } else {
-            setCurrentPath('/'); // Reset to root on close
-        }
-    }, [isOpen, currentPath]);
-
-    const loadMedia = (path: string) => {
-        setLoading(true);
-        liveApiService.getMediaLibrary(path)
-            .then(data => {
-                setFolders(data.folders);
-                const filtered = data.files.filter((f: any) => 
-                    allowedType === 'Video' ? f.type === 'video' : f.type === 'image'
-                );
-                setFiles(filtered);
-            })
-            .catch(console.error)
-            .finally(() => setLoading(false));
-    };
-
-    const handleFolderClick = (folderName: string) => {
-        const newPath = currentPath === '/' ? `/${folderName}` : `${currentPath}/${folderName}`;
-        setCurrentPath(newPath);
-    };
-
-    const handleBackClick = () => {
-         if (currentPath === '/') return;
-         const parts = currentPath.split('/').filter(Boolean);
-         parts.pop();
-         const newPath = parts.length === 0 ? '/' : `/${parts.join('/')}`;
-         setCurrentPath(newPath);
-    };
-
-    if (!isOpen) return null;
-
-    return (
-        <div className="fixed inset-0 bg-black/50 z-[100] flex items-center justify-center p-4 backdrop-blur-sm">
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl h-[80vh] flex flex-col animate-in fade-in zoom-in-95">
-                <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50 rounded-t-xl">
-                    <h3 className="font-bold text-gray-900 flex items-center gap-2">
-                        <Cloud size={18} className="text-blue-600" /> 
-                        Select {allowedType} from S3
-                    </h3>
-                    <button onClick={onClose}><X size={20} className="text-gray-400" /></button>
-                </div>
-                
-                <div className="bg-white px-4 py-2 border-b border-gray-100 text-xs text-gray-500 flex items-center gap-2">
-                    <span className="font-bold text-gray-700">Path:</span> 
-                    <span className="font-mono bg-gray-100 px-1 rounded">{currentPath}</span>
-                </div>
-
-                <div className="flex-1 overflow-y-auto p-4 bg-slate-50">
-                    {loading ? (
-                        <div className="flex justify-center p-10"><span className="animate-spin mr-2">⏳</span> Loading Library...</div>
-                    ) : (
-                        <>
-                            {currentPath !== '/' && (
-                                <button 
-                                    onClick={handleBackClick} 
-                                    className="flex items-center gap-2 text-sm text-gray-600 mb-4 hover:text-blue-600 font-medium px-2 py-1 rounded hover:bg-white"
-                                >
-                                    <ArrowLeft size={16} /> Back to parent
-                                </button>
-                            )}
-
-                            {/* Folders */}
-                            {folders.length > 0 && (
-                                <div className="mb-6">
-                                    <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-2 tracking-wider">Folders</h4>
-                                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
-                                        {folders.map(folder => (
-                                            <div 
-                                                key={folder.id} 
-                                                onClick={() => handleFolderClick(folder.name)}
-                                                className="bg-white p-3 rounded-lg border border-gray-200 cursor-pointer hover:border-blue-400 hover:shadow-sm flex flex-col items-center gap-2 transition-all"
-                                            >
-                                                <Folder size={28} className="text-yellow-400 fill-yellow-100" />
-                                                <span className="text-xs font-medium text-gray-700 truncate w-full text-center">{folder.name}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Files */}
-                            <div>
-                                <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-2 tracking-wider">Files</h4>
-                                {files.length === 0 ? (
-                                    <div className="text-center py-8 text-gray-400 text-sm italic border-2 border-dashed border-gray-200 rounded-lg">
-                                        No matching {allowedType.toLowerCase()}s found in this folder.
-                                    </div>
-                                ) : (
-                                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-                                        {files.map((file) => (
-                                            <div 
-                                                key={file.id}
-                                                onClick={() => onSelect(file.url)}
-                                                className="bg-white rounded-lg border border-gray-200 p-2 cursor-pointer hover:border-blue-500 hover:ring-2 hover:ring-blue-200 transition-all group"
-                                            >
-                                                <div className="aspect-video bg-gray-100 rounded overflow-hidden mb-2 relative flex items-center justify-center">
-                                                    {file.type === 'image' ? (
-                                                        <img src={file.url} className="w-full h-full object-cover" alt="prev" />
-                                                    ) : (
-                                                        <Video size={24} className="text-gray-400" />
-                                                    )}
-                                                </div>
-                                                <div className="text-xs font-medium text-gray-700 truncate px-1" title={file.filename}>{file.filename}</div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
-                        </>
-                    )}
-                </div>
-            </div>
-        </div>
-    );
 };
 
 // --- NODE PREVIEW CARD ---

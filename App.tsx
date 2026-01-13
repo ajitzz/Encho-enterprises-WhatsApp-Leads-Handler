@@ -255,25 +255,25 @@ export default function App() {
   };
   
   // NEW: LeadManager Callback
-  const handleBulkSendDirect = async (ids: string[], message: string) => {
+  const handleBulkSendDirect = async (ids: string[], message: string, mediaUrl?: string, mediaType?: string, options?: string[]) => {
       if (dataSource === 'mock') {
           ids.forEach(id => {
               mockBackend.addMessage(id, {
                   id: Date.now().toString() + id,
                   sender: 'agent',
                   text: message,
+                  imageUrl: mediaUrl, // Used for any media in mock
+                  options: options,
                   timestamp: Date.now(),
-                  type: 'text'
+                  type: mediaType ? (mediaType as any) : options ? 'options' : 'text'
               });
           });
       } else {
           // LIVE MODE BULK
-          // In a real app, this should be a backend batch endpoint.
-          // For now, we iterate (Rate limits apply!)
           let successCount = 0;
           for (const id of ids) {
               try {
-                  await liveApiService.sendMessage(id, message);
+                  await liveApiService.sendMessage(id, message, { mediaUrl, mediaType, options });
                   successCount++;
                   // Small delay to prevent rate limit
                   await new Promise(r => setTimeout(r, 200));
