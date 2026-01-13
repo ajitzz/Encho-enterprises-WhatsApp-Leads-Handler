@@ -1,26 +1,20 @@
 
-import { Driver, BotSettings } from '../types';
+import { Driver, BotSettings, MessageButton } from '../types';
 
-// Determine Base URL:
-// In Vercel, API is served relative to root (e.g. /api/drivers).
-// In Localhost, we might run separate frontend/backend ports.
+// Determine Base URL
 const getBaseUrl = () => {
-    if (typeof window === 'undefined') return ''; // Server-side
+    if (typeof window === 'undefined') return '';
     const host = window.location.hostname;
-    if (host === 'localhost' || host === '127.0.0.1') {
-        return 'http://localhost:3001'; // Default local backend port
-    }
-    return ''; // Relative path for production
+    if (host === 'localhost' || host === '127.0.0.1') return 'http://localhost:3001';
+    return ''; 
 };
 
 const API_BASE_URL = getBaseUrl();
 
-// ENTERPRISE RESILIENCE: Retry wrapper for Fetch
 const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, delay = 500): Promise<Response> => {
     try {
         const response = await fetch(url, options);
         if (!response.ok) {
-             // If server error (500-599), retry
              if (response.status >= 500) {
                  if (retries > 0) {
                      await new Promise(res => setTimeout(res, delay));
@@ -28,7 +22,6 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
                  }
                  throw new Error(`Server Error: ${response.status}`);
              }
-             // For 404s, fail fast so UI knows
              return response;
         }
         return response;
@@ -46,10 +39,7 @@ export const liveApiService = {
     try {
       const url = `${API_BASE_URL}/api/drivers`;
       const response = await fetchWithRetry(url);
-      if (!response.ok) {
-          console.error(`Failed to fetch drivers: ${response.status}`);
-          throw new Error('API Error');
-      }
+      if (!response.ok) throw new Error('API Error');
       return await response.json();
     } catch (error: any) {
       console.warn("Fetch Error (handled):", error);
@@ -59,16 +49,12 @@ export const liveApiService = {
 
   subscribeToUpdates: (callback: () => void) => {
     const interval = setInterval(async () => {
-        try {
-            await callback();
-        } catch(e) {}
+        try { await callback(); } catch(e) {}
     }, 2000); 
     return () => clearInterval(interval);
   },
 
   getBotSettings: async (): Promise<BotSettings> => {
-    // CRITICAL: Do not catch errors here silently. 
-    // If this fails, the UI must know so it doesn't overwrite DB with default empty data.
     const response = await fetchWithRetry(`${API_BASE_URL}/api/bot-settings`);
     if (!response.ok) throw new Error('Failed to fetch bot settings');
     return await response.json();
@@ -84,7 +70,7 @@ export const liveApiService = {
     return await response.json();
   },
 
-  sendMessage: async (driverId: string, text: string, attachments?: { mediaUrl?: string, mediaType?: string, options?: string[] }) => {
+  sendMessage: async (driverId: string, text: string, attachments?: { mediaUrl?: string, mediaType?: string, options?: string[], headerImageUrl?: string, footerText?: string, buttons?: MessageButton[] }) => {
     const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -93,7 +79,11 @@ export const liveApiService = {
           text,
           mediaUrl: attachments?.mediaUrl,
           mediaType: attachments?.mediaType,
-          options: attachments?.options
+          options: attachments?.options,
+          // New Rich Card Fields
+          headerImageUrl: attachments?.headerImageUrl,
+          footerText: attachments?.footerText,
+          buttons: attachments?.buttons
       })
     });
     if (!response.ok) throw new Error('Failed to send message');
@@ -114,11 +104,7 @@ export const liveApiService = {
       const presignResponse = await fetchWithRetry(`${API_BASE_URL}/api/s3/presign`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-              filename: file.name,
-              fileType: file.type,
-              folderPath
-          })
+          body: JSON.stringify({ filename: file.name, fileType: file.type, folderPath })
       });
       
       if (!presignResponse.ok) throw new Error('Failed to get upload permission');
@@ -127,27 +113,16 @@ export const liveApiService = {
       const uploadResponse = await fetch(uploadUrl, {
           method: 'PUT',
           body: file,
-          headers: {
-              'Content-Type': file.type
-          }
+          headers: { 'Content-Type': file.type }
       });
 
-      if (!uploadResponse.ok) {
-          console.error("S3 Upload Failed", await uploadResponse.text());
-          throw new Error(`Upload failed: ${uploadResponse.statusText}`);
-      }
+      if (!uploadResponse.ok) throw new Error(`Upload failed: ${uploadResponse.statusText}`);
 
       const fileType = file.type.split('/')[0];
       const registerResponse = await fetchWithRetry(`${API_BASE_URL}/api/files/register`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-              key,
-              url: publicUrl,
-              filename: file.name,
-              type: fileType,
-              folderPath
-          })
+          body: JSON.stringify({ key, url: publicUrl, filename: file.name, type: fileType, folderPath })
       });
 
       if (!registerResponse.ok) throw new Error('Failed to register file');
@@ -206,10 +181,7 @@ export const liveApiService = {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, parentPath })
       });
-      if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error || `Error ${response.status}: Failed to create folder`);
-      }
+      if (!response.ok) throw new Error(`Failed to create folder`);
       return await response.json();
   },
 
@@ -219,10 +191,7 @@ export const liveApiService = {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: newName })
       });
-      if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error || `Error ${response.status}: Failed to rename folder`);
-      }
+      if (!response.ok) throw new Error(`Failed to rename folder`);
       return await response.json();
   },
 
@@ -257,7 +226,6 @@ export const liveApiService = {
   },
   
   sendAssistantMessage: async (message: string, history: any[]) => {
-      // Stub for future AI assistant
       return { text: "AI Assistant is disabled in this mode." };
   }
 };
