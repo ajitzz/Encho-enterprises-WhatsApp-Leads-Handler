@@ -194,19 +194,45 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
   
    let payload = { messaging_product: 'whatsapp', to: to };
 
+   // --- CASE 1: TEMPLATE MESSAGE (Supports URL/Location Buttons) ---
    if (templateName) {
      payload.type = 'template';
-     payload.template = { name: templateName, language: { code: language } };
-   } else if (headerImageUrl || buttons) {
-       // --- RICH CARD FALLBACK LOGIC ---
-       // Interactive messages (List/Reply) do NOT support URL/Location buttons.
-       // Only Templates support URL/Location buttons.
-       // If buttons have URL/Location, we must FALLBACK to Media + Text + Links unless a template is used.
+     payload.template = { 
+         name: templateName, 
+         language: { code: language },
+         components: [] 
+     };
+
+     // Map Header Image to Template Component (if template has header)
+     if (headerImageUrl) {
+         payload.template.components.push({
+             type: 'header',
+             parameters: [{ type: 'image', image: { link: headerImageUrl } }]
+         });
+     }
+
+     // Map Body Text to Template Component (if template has variables {{1}})
+     if (body) {
+         payload.template.components.push({
+             type: 'body',
+             parameters: [{ type: 'text', text: body }]
+         });
+     }
+     
+     // Note: Button payloads in templates are complex and require variable mapping.
+     // For this iteration, we assume static buttons in template or simple mapping.
+
+   } 
+   // --- CASE 2: DYNAMIC RICH CARD (Only Supports Reply Buttons Natively) ---
+   else if (headerImageUrl || buttons) {
        
+       // Check if we have "Complex" buttons (URL/Phone/Location) that are ILLEGAL in dynamic messages
        const hasComplexButtons = buttons?.some(b => b.type === 'url' || b.type === 'location' || b.type === 'phone');
        
        if (hasComplexButtons) {
-           // FALLBACK MODE: Send Media + Caption with text links
+           // --- FALLBACK MODE ---
+           // We cannot send URL buttons dynamically. We must convert them to text links.
+           // This prevents the message from failing.
            let caption = body;
            if (buttons) {
                caption += "\n\n";
@@ -218,12 +244,12 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
            }
            if (footerText) caption += `\n_${footerText}_`;
 
-           payload.type = 'image'; // Assuming header is image
-           payload.image = { link: headerImageUrl || mediaUrl }; // Fallback to link
+           payload.type = 'image'; 
+           payload.image = { link: headerImageUrl || mediaUrl }; 
            payload.image.caption = caption;
            
        } else {
-           // ONLY REPLY BUTTONS: Use Native Interactive Message
+           // --- INTERACTIVE MESSAGE (Reply Buttons Only) ---
            payload.type = 'interactive';
            payload.interactive = {
                type: 'button',
@@ -236,10 +262,22 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
            };
            
            if (headerImageUrl) {
-               payload.interactive.header = {
-                   type: 'image',
-                   image: { link: headerImageUrl }
-               };
+               try {
+                   // CRITICAL FIX: Interactive Headers often REJECT 'link'. We MUST upload to get an ID.
+                   // If upload fails, we fall back to link, but ID is preferred for Interactive.
+                   console.log(`[RichCard] Uploading header image for stability...`);
+                   const mediaId = await uploadToWhatsApp(headerImageUrl, 'image/jpeg');
+                   payload.interactive.header = {
+                       type: 'image',
+                       image: { id: mediaId }
+                   };
+               } catch (e) {
+                   console.warn("[RichCard] Header upload failed, trying link fallback:", e.message);
+                   payload.interactive.header = {
+                       type: 'image',
+                       image: { link: headerImageUrl }
+                   };
+               }
            }
            
            if (footerText) {
@@ -248,19 +286,18 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
        }
 
    } else if (mediaUrl) {
-       // Standard Media Message
        const type = mediaType || 'image';
        payload.type = type;
        payload[type] = { link: mediaUrl };
        if (body) payload[type].caption = body;
    } else {
-       // Standard Text
        payload.type = 'text';
        payload.text = { body: body };
    }
   
    try {
-     await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, payload, { headers: { Authorization: `Bearer ${META_API_TOKEN}` } });
+     const res = await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, payload, { headers: { Authorization: `Bearer ${META_API_TOKEN}` } });
+     console.log("Meta API Response:", res.data);
      return true;
    } catch (error) { 
        console.error("Meta Send Error:", error.response?.data || error.message);
@@ -326,15 +363,16 @@ router.patch('/drivers/:id', async (req, res) => {
 
 router.post('/messages/send', async (req, res) => {
     try {
-        const { driverId, text, mediaUrl, mediaType, options, headerImageUrl, footerText, buttons } = req.body;
+        const { driverId, text, mediaUrl, mediaType, options, headerImageUrl, footerText, buttons, templateName } = req.body;
         const dRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
         if (dRes.rows.length === 0) return res.status(404).json({ error: "Driver not found" });
         
-        const sent = await sendWhatsAppMessage(dRes.rows[0].phone_number, text, options, null, 'en_US', mediaUrl, mediaType, headerImageUrl, footerText, buttons);
+        const sent = await sendWhatsAppMessage(dRes.rows[0].phone_number, text, options, templateName, 'en_US', mediaUrl, mediaType, headerImageUrl, footerText, buttons);
         
         if (sent) {
             let type = 'text';
-            if (buttons) type = 'rich_card';
+            if (templateName) type = 'template';
+            else if (buttons) type = 'rich_card';
             else if (mediaUrl) type = mediaType || 'image';
             else if (options && options.length > 0) type = 'options';
 
@@ -605,7 +643,18 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
         
         // --- HELPER TO SEND REPLY ---
         const sendReply = async (step) => {
-            const sent = await sendWhatsAppMessage(from, step.message, step.options, null, 'en_US', step.mediaUrl, step.mediaType, step.headerImageUrl, step.footerText, step.buttons);
+            const sent = await sendWhatsAppMessage(
+                from, 
+                step.message, 
+                step.options, 
+                step.templateName, // PASS TEMPLATE NAME
+                'en_US', 
+                step.mediaUrl, 
+                step.mediaType, 
+                step.headerImageUrl, 
+                step.footerText, 
+                step.buttons
+            );
             if (sent) await logSystemMessage(driver.id, step.message || `[Template]`, 'text', step.headerImageUrl, step.footerText, step.buttons);
         };
 

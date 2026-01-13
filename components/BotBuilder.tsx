@@ -126,6 +126,13 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
                 </div>
             )}
 
+            {/* TEMPLATE BADGE */}
+            {isCardType && data.templateName && (
+                <div className="mb-2 bg-green-50 text-green-800 text-[10px] font-bold px-2 py-1 rounded border border-green-200 flex items-center gap-1">
+                    <CheckCircle size={10} /> Template: {data.templateName}
+                </div>
+            )}
+
             {/* Message Text */}
             {data.label !== 'Image' && data.label !== 'Video' && (
                 <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 mb-3 relative overflow-hidden">
@@ -216,6 +223,20 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
 
             <div className="flex-1 overflow-y-auto p-5 space-y-6">
                 
+                {/* TEMPLATE NAME FIELD */}
+                {isCardType && (
+                    <div className="space-y-2 pb-4 border-b border-gray-100">
+                        <label className="text-xs font-bold text-gray-500 uppercase">Meta Template Name</label>
+                        <input 
+                            className="w-full p-2 bg-white border border-gray-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-green-500"
+                            value={localData.templateName || ''}
+                            onChange={(e) => update('templateName', e.target.value)}
+                            placeholder="e.g. welcome_offer_v2"
+                        />
+                        <p className="text-[9px] text-gray-400">Required if using Link/Location buttons.</p>
+                    </div>
+                )}
+
                 {/* Header Image for Card */}
                 {isCardType && (
                     <div className="space-y-2">
@@ -397,7 +418,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 message: '', 
                 inputType,
                 buttons: [], // Init for cards
-                headerImageUrl: ''
+                headerImageUrl: '',
+                templateName: '' // New Field
             },
         };
         addNode(newNode);
@@ -452,6 +474,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 buttons: cleanData.buttons,
                 headerImageUrl: cleanData.headerImageUrl,
                 footerText: cleanData.footerText,
+                templateName: cleanData.templateName, // Save template name
                 saveToField: cleanData.saveToField,
                 nextStepId, 
                 routes: Object.keys(routes).length > 0 ? routes : undefined, 
