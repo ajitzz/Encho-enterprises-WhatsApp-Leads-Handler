@@ -50,7 +50,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
         }
 
         try {
-            // Use the new API service method that handles Base URL correctly
             await liveApiService.scheduleMessage(
                 [driver.id], 
                 {

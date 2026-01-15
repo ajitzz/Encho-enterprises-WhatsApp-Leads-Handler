@@ -293,8 +293,9 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
 
 const logSystemMessage = async (driverId, text, type = 'text', headerImg = null, footer = null, btns = null, tmpl = null) => {
     const msgId = `sys_${Date.now()}_${Math.random()}`;
+    // FIXED: Removed extra placeholders to match column count (10 columns, 9 params + sender)
     await queryWithRetry(
-        `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'system', $3, $4, $5, $6, $7, $8, $9, $10, $11)`, 
+        `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'system', $3, $4, $5, $6, $7, $8, $9)`, 
         [msgId, driverId, text, Date.now(), type, headerImg, footer, btns ? JSON.stringify(btns) : null, tmpl]
     );
     await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text, Date.now(), driverId]);
@@ -336,9 +337,9 @@ const runScheduler = async () => {
                     
                     if (sent) {
                         successCount++;
-                        // Log (Fixed $11 param)
+                        // FIXED: Corrected placeholders to match params (9 values)
                         await queryWithRetry(
-                            `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, $10, $11)`, 
+                            `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9)`, 
                             [`sch_${Date.now()}_${Math.random()}`, driverId, content.text || `[Scheduled]`, Date.now(), task.type, content.headerImageUrl, content.footerText, content.buttons ? JSON.stringify(content.buttons) : null, content.templateName]
                         );
                         await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [`[Scheduled]: ${content.text || content.templateName}`, Date.now(), driverId]);
@@ -424,8 +425,8 @@ router.post('/messages/send', async (req, res) => {
             else if (mediaUrl) type = mediaType || 'image';
             else if (options && options.length > 0) type = 'options';
 
-            // FIXED: Added $11 for template_name to prevent "prepared statement requires 10" error
-            await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type, image_url, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, $10, $11)`, 
+            // FIXED: Added correct params ($1..$10) matching 10 values provided in array
+            await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type, image_url, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, $10)`, 
                 [`ag_${Date.now()}`, driverId, text, Date.now(), type, mediaUrl, headerImageUrl, footerText, buttons ? JSON.stringify(buttons) : null, templateName]
             );
             await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text || `[${type}]`, Date.now(), driverId]);
@@ -710,6 +711,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
                     step.footerText, 
                     step.buttons
                 );
+                // FIXED: Removed extra placeholders
                 if (sent) await logSystemMessage(targetId, step.message || `[Template]`, 'text', step.headerImageUrl, step.footerText, step.buttons, step.templateName);
             }
         };
