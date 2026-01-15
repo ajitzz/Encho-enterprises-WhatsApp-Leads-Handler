@@ -165,6 +165,9 @@ const isContentSafe = (text) => {
     return !BLOCK_LIST.some(phrase => lower.includes(phrase));
 };
 
+// Helper: Ensure values are null if undefined (prevents PG errors)
+const safeVal = (val) => val === undefined ? null : val;
+
 const uploadToWhatsApp = async (fileUrl, fileType) => {
     activeS3Transfers++;
     activeWhatsAppUploads++;
@@ -293,10 +296,10 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
 
 const logSystemMessage = async (driverId, text, type = 'text', headerImg = null, footer = null, btns = null, tmpl = null) => {
     const msgId = `sys_${Date.now()}_${Math.random()}`;
-    // FIXED: Removed extra placeholders to match column count (10 columns, 9 params + sender)
+    // Fixed: Ensure undefined params are null to prevent PG errors
     await queryWithRetry(
         `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'system', $3, $4, $5, $6, $7, $8, $9)`, 
-        [msgId, driverId, text, Date.now(), type, headerImg, footer, btns ? JSON.stringify(btns) : null, tmpl]
+        [msgId, driverId, text, Date.now(), type, safeVal(headerImg), safeVal(footer), btns ? JSON.stringify(btns) : null, safeVal(tmpl)]
     );
     await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text, Date.now(), driverId]);
 };
@@ -337,10 +340,21 @@ const runScheduler = async () => {
                     
                     if (sent) {
                         successCount++;
-                        // FIXED: Corrected placeholders to match params (9 values)
+                        // Fixed: Added image_url support and safeVal
                         await queryWithRetry(
-                            `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9)`, 
-                            [`sch_${Date.now()}_${Math.random()}`, driverId, content.text || `[Scheduled]`, Date.now(), task.type, content.headerImageUrl, content.footerText, content.buttons ? JSON.stringify(content.buttons) : null, content.templateName]
+                            `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, header_image_url, footer_text, buttons, template_name, image_url) VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, $10)`, 
+                            [
+                                `sch_${Date.now()}_${Math.random()}`, 
+                                driverId, 
+                                content.text || `[Scheduled]`, 
+                                Date.now(), 
+                                task.type, 
+                                safeVal(content.headerImageUrl), 
+                                safeVal(content.footerText), 
+                                content.buttons ? JSON.stringify(content.buttons) : null, 
+                                safeVal(content.templateName),
+                                safeVal(content.mediaUrl) // Added image_url
+                            ]
                         );
                         await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [`[Scheduled]: ${content.text || content.templateName}`, Date.now(), driverId]);
                     }
@@ -425,16 +439,30 @@ router.post('/messages/send', async (req, res) => {
             else if (mediaUrl) type = mediaType || 'image';
             else if (options && options.length > 0) type = 'options';
 
-            // FIXED: Added correct params ($1..$10) matching 10 values provided in array
+            // FIXED: Use safeVal to prevent "bind message has undefined parameter" error which causes 500 loop
             await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type, image_url, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, $10)`, 
-                [`ag_${Date.now()}`, driverId, text, Date.now(), type, mediaUrl, headerImageUrl, footerText, buttons ? JSON.stringify(buttons) : null, templateName]
+                [
+                    `ag_${Date.now()}`, 
+                    driverId, 
+                    text, 
+                    Date.now(), 
+                    type, 
+                    safeVal(mediaUrl), 
+                    safeVal(headerImageUrl), 
+                    safeVal(footerText), 
+                    buttons ? JSON.stringify(buttons) : null, 
+                    safeVal(templateName)
+                ]
             );
             await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text || `[${type}]`, Date.now(), driverId]);
             res.json({ success: true });
         } else {
             res.status(500).json({ error: "Meta API Failed" });
         }
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) { 
+        console.error("Message Send Error:", e);
+        res.status(500).json({ error: e.message }); 
+    }
 });
 
 router.get('/bot-settings', async (req, res) => {
@@ -711,8 +739,8 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
                     step.footerText, 
                     step.buttons
                 );
-                // FIXED: Removed extra placeholders
-                if (sent) await logSystemMessage(targetId, step.message || `[Template]`, 'text', step.headerImageUrl, step.footerText, step.buttons, step.templateName);
+                // Fixed: Use safeVal
+                if (sent) await logSystemMessage(targetId, step.message || `[Template]`, 'text', safeVal(step.headerImageUrl), safeVal(step.footerText), step.buttons, safeVal(step.templateName));
             }
         };
 
