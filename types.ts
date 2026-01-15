@@ -17,14 +17,27 @@ export enum OnboardingStep {
 
 export type LeadSource = 'Organic' | 'Meta Ad' | 'Referral' | 'Manual';
 
+export interface MessageButton {
+  type: 'reply' | 'url' | 'phone' | 'location' | 'copy_code';
+  title: string;
+  payload?: string; // URL, Phone Number, or ID
+}
+
 export interface Message {
   id: string;
   sender: 'driver' | 'system' | 'agent';
   text?: string;
-  imageUrl?: string;
+  imageUrl?: string; // Legacy field for basic images
+  
+  // Rich Card Fields
+  headerImageUrl?: string;
+  footerText?: string;
+  buttons?: MessageButton[];
+  templateName?: string; // New: Track template used
+  
   timestamp: number;
-  type: 'text' | 'image' | 'video_link' | 'template' | 'options';
-  options?: string[]; // For buttons
+  type: 'text' | 'image' | 'video_link' | 'template' | 'options' | 'rich_card';
+  options?: string[]; // Legacy for quick replies
 }
 
 export interface Driver {
@@ -72,28 +85,32 @@ export interface AppNotification {
 
 // --- BOT BUILDER TYPES ---
 
-export type InputType = 'text' | 'image' | 'option' | 'location';
+export type InputType = 'text' | 'image' | 'option' | 'location' | 'card';
 
 export interface BotStep {
   id: string;
   title: string;
-  message: string; // What the bot says (Fallback text if template used)
-  inputType: InputType; // What the user should reply with
-  options?: string[]; // If inputType is 'option'
-  saveToField?: 'name' | 'vehicleRegistration' | 'availability' | 'document' | 'email'; // Where to save the data
+  message: string; // Body text
+  inputType: InputType; 
+  options?: string[]; // Legacy simple options
+  saveToField?: 'name' | 'vehicleRegistration' | 'availability' | 'document' | 'email'; 
   nextStepId?: string | 'END' | 'AI_HANDOFF';
   
-  // Branching Logic: Maps an Option Text to a Step ID
-  // Example: { "Yes": "step_5", "No": "step_9" }
+  // Branching Logic
   routes?: Record<string, string>; 
   
-  // Template Integration
-  templateName?: string; // The ID/Name of the template in Meta
-  templateLanguage?: string; // e.g. en_US, ml_IN
+  // Template / Rich Card
+  templateName?: string; 
+  templateLanguage?: string;
   
   // Rich Media
   mediaUrl?: string;
-  mediaType?: 'image' | 'video' | 'document'; // Explicit type
+  mediaType?: 'image' | 'video' | 'document';
+  
+  // Rich Card Specifics
+  headerImageUrl?: string;
+  footerText?: string;
+  buttons?: MessageButton[];
   
   // Link Node Specific
   linkLabel?: string;
@@ -101,12 +118,11 @@ export interface BotStep {
 
 export interface BotSettings {
   isEnabled: boolean;
-  shouldRepeat?: boolean; // New: Controls if bot loops after finishing
+  shouldRepeat?: boolean; 
   routingStrategy: 'BOT_ONLY' | 'AI_ONLY' | 'HYBRID_BOT_FIRST';
-  systemInstruction: string; // The "Training" for Gemini
+  systemInstruction: string; 
   steps: BotStep[];
-  entryPointId?: string; // The ID of the first step connected to Start
-  // New Visual Flow Data
+  entryPointId?: string; 
   flowData?: {
     nodes: any[];
     edges: any[];
@@ -115,14 +131,14 @@ export interface BotSettings {
 
 // --- SYSTEM MONITOR ---
 export interface SystemStats {
-    serverLoad: number; // 0-100 (CPU/Mem composite)
-    dbLatency: number; // ms
-    aiCredits: number; // 0-100 (Estimated)
-    aiModel: string; // Current Active Model
+    serverLoad: number; 
+    dbLatency: number; 
+    aiCredits: number; 
+    aiModel: string; 
     s3Status: 'ok' | 'error';
-    s3Load: number; // 0-100 (Active transfers)
+    s3Load: number; 
     whatsappStatus: 'ok' | 'latency' | 'error';
-    whatsappUploadLoad: number; // 0-100 (Active Media Uploads)
+    whatsappUploadLoad: number; 
     activeUploads: number;
     uptime: number;
 }
@@ -131,13 +147,13 @@ export interface SystemStats {
 export interface AuditIssue {
   nodeId: string;
   severity: 'CRITICAL' | 'WARNING';
-  issue: string; // "Placeholder text detected"
-  suggestion: string; // "Change to 'Please reply...'"
-  autoFixValue?: any; // The sanitized value
+  issue: string; 
+  suggestion: string; 
+  autoFixValue?: any; 
 }
 
 export interface AuditReport {
   isValid: boolean;
   issues: AuditIssue[];
-  fixedNodes?: any[]; // The auto-healed node list
+  fixedNodes?: any[]; 
 }

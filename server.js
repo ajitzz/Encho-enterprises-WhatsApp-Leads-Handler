@@ -12,29 +12,25 @@ const cors = require('cors');
 const { Pool } = require('pg'); 
 const { S3Client, PutObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
-const FormData = require('form-data'); // Required for streaming to Meta
+const FormData = require('form-data'); 
 require('dotenv').config();
 
 const app = express();
 const router = express.Router(); 
 
-// --- MIDDLEWARE ---
 app.use(express.json({ limit: '10mb' }));
 app.use(cors()); 
 
-// Disable Caching for API responses
 app.set('etag', false);
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     next();
 });
 
-// --- CONFIGURATION ---
 const PORT = process.env.PORT || 3001;
 let META_API_TOKEN = process.env.META_API_TOKEN || "EAAkr7Y9S2qYBQfHTNZASIugAzOi8b2MZCBct4z4jZBHSmQ2KGlFduuDQQGEYC9NRDtZBUdhMPdeJ06OjYUiJYGfFkZCAxzyh4TdidN7ZA10K3XPOVEiQh01jo22xLsQjXrEtMHc5ZCHZBbRZAyA5d0pl26Jsg3IuNKY272QYmqEjHghf11OKJmbUZBfJLe5EvHzl48gAZDZD"; 
 let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "982841698238647"; 
 
-// AWS S3 Config
 const s3Client = new S3Client({
     region: process.env.AWS_REGION || 'us-east-1',
     credentials: {
@@ -44,11 +40,9 @@ const s3Client = new S3Client({
 });
 const BUCKET_NAME = process.env.AWS_BUCKET_NAME || 'uber-fleet-assets';
 
-// --- DATABASE CONNECTION ---
 const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
 const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL;
 
-// Global pool handling for Serverless environments
 let pool;
 if (!global.pgPool) {
     global.pgPool = new Pool({
@@ -80,7 +74,6 @@ const queryWithRetry = async (text, params, retries = 3) => {
     }
 };
 
-// --- INIT DB (LAZY LOADING) ---
 let isDbInitialized = false;
 
 const initDB = async () => {
@@ -110,7 +103,11 @@ const initDB = async () => {
                 text TEXT,
                 type TEXT,
                 timestamp BIGINT,
-                image_url TEXT
+                image_url TEXT,
+                header_image_url TEXT,
+                footer_text TEXT,
+                buttons JSONB,
+                template_name TEXT
             );
             CREATE TABLE IF NOT EXISTS bot_settings (
                 id INT PRIMARY KEY,
@@ -131,7 +128,6 @@ const initDB = async () => {
                 is_public_showcase BOOLEAN DEFAULT FALSE
             );
         `);
-        // Insert default settings if not exists (Safe Initial State)
         await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT DO NOTHING`, [JSON.stringify({ isEnabled: true, shouldRepeat: false, steps: [] })]);
         isDbInitialized = true;
         console.log("Database initialized (Lazy)");
@@ -147,11 +143,9 @@ const ensureDbReady = async (req, res, next) => {
 
 app.use('/api', ensureDbReady);
 
-// --- LOAD MONITORING ---
 let activeS3Transfers = 0;
 let activeWhatsAppUploads = 0;
 
-// --- HELPER FUNCTIONS ---
 const isContentSafe = (text) => {
     if (!text || !text.trim()) return false;
     const lower = text.toLowerCase();
@@ -159,14 +153,11 @@ const isContentSafe = (text) => {
     return !BLOCK_LIST.some(phrase => lower.includes(phrase));
 };
 
-// S3 -> WhatsApp Stream Pipe (Memory Efficient)
 const uploadToWhatsApp = async (fileUrl, fileType) => {
     activeS3Transfers++;
     activeWhatsAppUploads++;
     try {
         console.log(`[Sync] Starting Stream: ${fileUrl}`);
-        
-        // 1. Get Stream from S3 (via URL)
         const response = await axios({
             method: 'get',
             url: fileUrl,
@@ -177,19 +168,13 @@ const uploadToWhatsApp = async (fileUrl, fileType) => {
         formData.append('messaging_product', 'whatsapp');
         formData.append('file', response.data, {
             contentType: fileType,
-            knownLength: response.headers['content-length'] // Helps Meta process it faster
+            knownLength: response.headers['content-length']
         });
 
-        // 2. Upload to Meta
         const metaRes = await axios.post(
             `https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/media`,
             formData,
-            {
-                headers: {
-                    ...formData.getHeaders(),
-                    Authorization: `Bearer ${META_API_TOKEN}`
-                }
-            }
+            { headers: { ...formData.getHeaders(), Authorization: `Bearer ${META_API_TOKEN}` } }
         );
 
         console.log(`[Sync] Success. Media ID: ${metaRes.data.id}`);
@@ -203,53 +188,124 @@ const uploadToWhatsApp = async (fileUrl, fileType) => {
     }
 };
 
-const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image') => {
+const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image', headerImageUrl = null, footerText = null, buttons = null) => {
    if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
-   if (!templateName && !mediaUrl && (!body || body.trim() === '')) return false;
+   if (!templateName && !mediaUrl && !headerImageUrl && (!body || body.trim() === '')) return false;
    if (body && !isContentSafe(body)) return false;
   
    let payload = { messaging_product: 'whatsapp', to: to };
 
+   // --- CASE 1: TEMPLATE MESSAGE (Supports URL/Location Buttons) ---
    if (templateName) {
      payload.type = 'template';
-     payload.template = { name: templateName, language: { code: language } };
-   } else if (mediaUrl) {
-       // STRATEGY: Check if we have a cached Media ID for this URL
-       let mediaId = null;
-       try {
-           const fileRes = await queryWithRetry('SELECT media_id, type FROM files WHERE url = $1', [mediaUrl]);
-           if (fileRes.rows.length > 0 && fileRes.rows[0].media_id) {
-               mediaId = fileRes.rows[0].media_id;
-               console.log(`[Optimization] Reusing cached Media ID: ${mediaId}`);
-           }
-       } catch(e) {}
+     payload.template = { 
+         name: templateName, 
+         language: { code: language },
+         components: [] 
+     };
 
-       // CRITICAL FIX: Use provided mediaType (video/image/document)
+     // Map Header Image to Template Component (Supports ID)
+     if (headerImageUrl) {
+         try {
+             console.log(`[Template] Uploading header image to Meta for stability...`);
+             // Default to jpeg if type unknown, usually headers are images
+             const mediaId = await uploadToWhatsApp(headerImageUrl, 'image/jpeg');
+             payload.template.components.push({
+                 type: 'header',
+                 parameters: [{ type: 'image', image: { id: mediaId } }]
+             });
+         } catch (e) {
+             console.warn("[Template] Header upload failed, attempting fallback to link:", e.message);
+             payload.template.components.push({
+                 type: 'header',
+                 parameters: [{ type: 'image', image: { link: headerImageUrl } }]
+             });
+         }
+     }
+
+     // Map Body Text to Template Component (Variable {{1}})
+     if (body) {
+         payload.template.components.push({
+             type: 'body',
+             parameters: [{ type: 'text', text: body }]
+         });
+     }
+     
+     // NOTE: Template buttons are defined in Meta. 
+     // We do not pass 'buttons' array here unless we are mapping variables to dynamic buttons.
+     // The mere existence of the template config in Meta combined with this payload triggers the buttons.
+
+   } 
+   // --- CASE 2: DYNAMIC RICH CARD (Only Supports Reply Buttons Natively) ---
+   else if (headerImageUrl || buttons) {
+       
+       const hasComplexButtons = buttons?.some(b => b.type === 'url' || b.type === 'location' || b.type === 'phone');
+       
+       if (hasComplexButtons) {
+           // FALLBACK MODE: Convert unsupported buttons to text links
+           let caption = body;
+           if (buttons) {
+               caption += "\n\n";
+               buttons.forEach(b => {
+                   if (b.type === 'url') caption += `🔗 ${b.title}: ${b.payload}\n`;
+                   if (b.type === 'phone') caption += `📞 ${b.title}: ${b.payload}\n`;
+                   if (b.type === 'location') caption += `📍 ${b.title}\n`;
+               });
+           }
+           if (footerText) caption += `\n_${footerText}_`;
+
+           payload.type = 'image'; 
+           payload.image = { link: headerImageUrl || mediaUrl }; 
+           payload.image.caption = caption;
+           
+       } else {
+           // INTERACTIVE MESSAGE (Reply Buttons Only)
+           payload.type = 'interactive';
+           payload.interactive = {
+               type: 'button',
+               body: { text: body },
+               action: { 
+                   buttons: buttons 
+                    ? buttons.map((b, i) => ({ type: 'reply', reply: { id: `btn_${i}`, title: b.title.substring(0, 20) } }))
+                    : options?.slice(0, 3).map((opt, i) => ({ type: 'reply', reply: { id: `btn_${i}`, title: opt.substring(0, 20) } }))
+               }
+           };
+           
+           if (headerImageUrl) {
+               try {
+                   console.log(`[RichCard] Uploading header image for stability...`);
+                   const mediaId = await uploadToWhatsApp(headerImageUrl, 'image/jpeg');
+                   payload.interactive.header = {
+                       type: 'image',
+                       image: { id: mediaId }
+                   };
+               } catch (e) {
+                   console.warn("[RichCard] Header upload failed, using link:", e.message);
+                   payload.interactive.header = {
+                       type: 'image',
+                       image: { link: headerImageUrl }
+                   };
+               }
+           }
+           
+           if (footerText) {
+               payload.interactive.footer = { text: footerText };
+           }
+       }
+
+   } else if (mediaUrl) {
        const type = mediaType || 'image';
        payload.type = type;
-       
-       if (mediaId) {
-           payload[type] = { id: mediaId };
-       } else {
-           // Fallback to link if not synced yet (Prevents failure)
-           payload[type] = { link: mediaUrl };
-       }
-       
+       payload[type] = { link: mediaUrl };
        if (body) payload[type].caption = body;
-   } else if (options && options.length > 0) {
-       payload.type = 'interactive';
-       payload.interactive = {
-           type: 'button',
-           body: { text: body || "Please select:" },
-           action: { buttons: options.slice(0, 3).map((opt, i) => ({ type: 'reply', reply: { id: `btn_${i}`, title: opt.substring(0, 20) } })) }
-       };
    } else {
        payload.type = 'text';
        payload.text = { body: body };
    }
   
    try {
-     await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, payload, { headers: { Authorization: `Bearer ${META_API_TOKEN}` } });
+     const res = await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, payload, { headers: { Authorization: `Bearer ${META_API_TOKEN}` } });
+     console.log("Meta API Response:", res.data);
      return true;
    } catch (error) { 
        console.error("Meta Send Error:", error.response?.data || error.message);
@@ -257,13 +313,15 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
    }
 };
 
-const logSystemMessage = async (driverId, text, type = 'text') => {
+const logSystemMessage = async (driverId, text, type = 'text', headerImg = null, footer = null, btns = null, tmpl = null) => {
     const msgId = `sys_${Date.now()}_${Math.random()}`;
-    await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'system', $3, $4, $5)`, [msgId, driverId, text, Date.now(), type]);
+    await queryWithRetry(
+        `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'system', $3, $4, $5, $6, $7, $8, $9)`, 
+        [msgId, driverId, text, Date.now(), type, headerImg, footer, btns ? JSON.stringify(btns) : null, tmpl]
+    );
     await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text, Date.now(), driverId]);
 };
 
-// --- FILE TYPE DETECTION UTILITY ---
 const getFileType = (filename) => {
     if (!filename) return 'image';
     const ext = filename.split('.').pop().toLowerCase();
@@ -272,9 +330,8 @@ const getFileType = (filename) => {
     return 'image';
 };
 
-// --- API ROUTES ---
+// --- ROUTES ---
 
-// 1. DRIVERS
 router.get('/drivers', async (req, res) => {
     try {
         const result = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC', []);
@@ -312,24 +369,23 @@ router.patch('/drivers/:id', async (req, res) => {
     }
 });
 
-// 2. MESSAGES
 router.post('/messages/send', async (req, res) => {
     try {
-        const { driverId, text, mediaUrl, mediaType, options } = req.body;
+        const { driverId, text, mediaUrl, mediaType, options, headerImageUrl, footerText, buttons, templateName } = req.body;
         const dRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
         if (dRes.rows.length === 0) return res.status(404).json({ error: "Driver not found" });
         
-        // Pass enriched payload to helper
-        const sent = await sendWhatsAppMessage(dRes.rows[0].phone_number, text, options, null, 'en_US', mediaUrl, mediaType);
+        const sent = await sendWhatsAppMessage(dRes.rows[0].phone_number, text, options, templateName, 'en_US', mediaUrl, mediaType, headerImageUrl, footerText, buttons);
         
         if (sent) {
-            // Determine type for DB
             let type = 'text';
-            if (mediaUrl) type = mediaType || 'image';
+            if (templateName) type = 'template';
+            else if (buttons) type = 'rich_card';
+            else if (mediaUrl) type = mediaType || 'image';
             else if (options && options.length > 0) type = 'options';
 
-            await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type, image_url) VALUES ($1, $2, 'agent', $3, $4, $5, $6)`, 
-                [`ag_${Date.now()}`, driverId, text, Date.now(), type, mediaUrl]
+            await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type, image_url, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, $10)`, 
+                [`ag_${Date.now()}`, driverId, text, Date.now(), type, mediaUrl, headerImageUrl, footerText, buttons ? JSON.stringify(buttons) : null, templateName]
             );
             await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text || `[${type}]`, Date.now(), driverId]);
             res.json({ success: true });
@@ -341,7 +397,6 @@ router.post('/messages/send', async (req, res) => {
     }
 });
 
-// 3. BOT SETTINGS
 router.get('/bot-settings', async (req, res) => {
     try {
         const result = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1', []);
@@ -354,7 +409,6 @@ router.get('/bot-settings', async (req, res) => {
 
 router.post('/bot-settings', async (req, res) => {
     try {
-        // Safe Update: Ensures ID 1 exists and updates it atomically
         await queryWithRetry('INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET settings = $1', [JSON.stringify(req.body)]);
         res.json({ success: true });
     } catch (e) {
@@ -362,19 +416,14 @@ router.post('/bot-settings', async (req, res) => {
     }
 });
 
-// 4. MEDIA & S3
 router.get('/media', async (req, res) => {
     try {
         const { path } = req.query;
         const safePath = path || '/';
-        
-        // Fetch files sorted by ID DESC (Newest First)
         const filesRes = await queryWithRetry('SELECT * FROM files WHERE folder_path = $1 ORDER BY id DESC', [safePath]);
         const foldersRes = await queryWithRetry('SELECT * FROM folders WHERE parent_path = $1 ORDER BY id DESC', [safePath]);
-        
         res.json({ files: filesRes.rows, folders: foldersRes.rows });
     } catch (e) {
-        console.error("Media Error:", e);
         res.status(500).json({ error: e.message });
     }
 });
@@ -383,16 +432,9 @@ router.post('/s3/presign', async (req, res) => {
     try {
         const { filename, fileType, folderPath } = req.body;
         const key = `${folderPath === '/' ? '' : folderPath.substring(1) + '/'}${Date.now()}_${filename}`;
-        
-        const command = new PutObjectCommand({
-            Bucket: BUCKET_NAME,
-            Key: key,
-            ContentType: fileType
-        });
-        
+        const command = new PutObjectCommand({ Bucket: BUCKET_NAME, Key: key, ContentType: fileType });
         const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
         const publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${key}`;
-        
         res.json({ uploadUrl, key, publicUrl });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -402,48 +444,29 @@ router.post('/s3/presign', async (req, res) => {
 router.post('/files/register', async (req, res) => {
     try {
         const { key, url, filename, folderPath } = req.body;
-        // Strict Type Detection on Server Side
         const type = getFileType(filename); 
-        
         const id = `file_${Date.now()}`;
         await queryWithRetry(`INSERT INTO files (id, filename, url, type, folder_path) VALUES ($1, $2, $3, $4, $5)`, [id, filename, url, type, folderPath]);
-        
-        // --- MANIFEST UPDATE ---
-        uploadShowcaseManifest(folderPath).catch(console.error);
-        
         res.json({ success: true, id });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// SYNC SPECIFIC FILE TO WHATSAPP (Stream Pipe)
 router.post('/files/:id/sync', async (req, res) => {
     try {
         const { id } = req.params;
         const fileRes = await queryWithRetry('SELECT * FROM files WHERE id = $1', [id]);
         if (fileRes.rows.length === 0) return res.status(404).json({ error: "File not found" });
-        
         const file = fileRes.rows[0];
-        
-        if (file.media_id) {
-            return res.json({ success: true, mediaId: file.media_id, cached: true });
-        }
-
-        // Determine MIME type
+        if (file.media_id) return res.json({ success: true, mediaId: file.media_id, cached: true });
         let mime = 'image/jpeg';
         if (file.type === 'video') mime = 'video/mp4';
-        else if (file.type === 'document') mime = 'application/pdf'; // Basic fallback
-
-        // Perform Stream Upload
+        else if (file.type === 'document') mime = 'application/pdf';
         const mediaId = await uploadToWhatsApp(file.url, mime);
-        
-        // Save ID to DB
         await queryWithRetry('UPDATE files SET media_id = $1 WHERE id = $2', [mediaId, id]);
-        
         res.json({ success: true, mediaId, cached: false });
     } catch(e) {
-        console.error("WhatsApp Sync Failed:", e);
         res.status(500).json({ error: e.message });
     }
 });
@@ -453,71 +476,37 @@ router.post('/media/sync', async (req, res) => {
         const command = new ListObjectsV2Command({ Bucket: BUCKET_NAME });
         const s3Res = await s3Client.send(command);
         const s3Objects = s3Res.Contents || [];
-        
         let addedCount = 0;
-
         for (const obj of s3Objects) {
             const key = obj.Key;
-            if (key.endsWith('/')) continue; // Skip explicit folder keys
-            if (key.startsWith('manifests/')) continue; // Skip system manifests
-
-            // Check if exists
+            if (key.endsWith('/')) continue;
             const publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${key}`;
             const exists = await queryWithRetry('SELECT id FROM files WHERE url = $1', [publicUrl]);
             if (exists.rows.length > 0) continue;
-
-            // Determine Folder Structure
             const parts = key.split('/');
             const filename = parts.pop();
             const folderPath = parts.length > 0 ? `/${parts.join('/')}` : '/';
-
-            // Ensure Folders Exist in DB (Sync Folders)
             if (folderPath !== '/') {
                 let currentParent = '/';
                 for (const part of parts) {
                     const checkFolder = await queryWithRetry('SELECT id FROM folders WHERE name = $1 AND parent_path = $2', [part, currentParent]);
-                    if (checkFolder.rows.length === 0) {
-                        const newFolderId = `fold_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-                        await queryWithRetry('INSERT INTO folders (id, name, parent_path) VALUES ($1, $2, $3)', [newFolderId, part, currentParent]);
-                    }
+                    if (checkFolder.rows.length === 0) await queryWithRetry('INSERT INTO folders (id, name, parent_path) VALUES ($1, $2, $3)', [`fold_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`, part, currentParent]);
                     currentParent = currentParent === '/' ? `/${part}` : `${currentParent}/${part}`;
                 }
             }
-
-            // Insert File with Correct Type
             const type = getFileType(filename);
-            const fileId = `file_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-            
-            await queryWithRetry(
-                `INSERT INTO files (id, filename, url, type, folder_path) VALUES ($1, $2, $3, $4, $5)`,
-                [fileId, filename, publicUrl, type, folderPath]
-            );
+            await queryWithRetry(`INSERT INTO files (id, filename, url, type, folder_path) VALUES ($1, $2, $3, $4, $5)`, [`file_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`, filename, publicUrl, type, folderPath]);
             addedCount++;
         }
-        
-        // If we added files, update the root manifest
-        if (addedCount > 0) {
-            uploadShowcaseManifest('/').catch(console.error);
-        }
-        
         res.json({ success: true, added: addedCount });
     } catch(e) {
-        console.error("Sync Error:", e);
         res.status(500).json({ error: e.message });
     }
 });
 
 router.delete('/files/:id', async (req, res) => {
     try {
-        // Get folder path before deleting to update manifest
-        const fRes = await queryWithRetry('SELECT folder_path FROM files WHERE id = $1', [req.params.id]);
-        
         await queryWithRetry('DELETE FROM files WHERE id = $1', [req.params.id]);
-        
-        if (fRes.rows.length > 0) {
-             uploadShowcaseManifest(fRes.rows[0].folder_path).catch(console.error);
-        }
-
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -525,10 +514,8 @@ router.delete('/files/:id', async (req, res) => {
 router.post('/folders', async (req, res) => {
     try {
         const { name, parentPath } = req.body;
-        // Check duplicate
         const check = await queryWithRetry('SELECT id FROM folders WHERE name = $1 AND parent_path = $2', [name, parentPath]);
         if (check.rows.length > 0) return res.status(409).json({ error: "Folder exists" });
-        
         await queryWithRetry('INSERT INTO folders (id, name, parent_path) VALUES ($1, $2, $3)', [`fold_${Date.now()}`, name, parentPath]);
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -546,47 +533,30 @@ router.delete('/folders/:id', async (req, res) => {
     try {
         const fRes = await queryWithRetry('SELECT name, parent_path FROM folders WHERE id = $1', [req.params.id]);
         if (fRes.rows.length === 0) return res.json({ success: true });
-        
         const folderName = fRes.rows[0].name;
         const parentPath = fRes.rows[0].parent_path;
         const fullPath = parentPath === '/' ? `/${folderName}` : `${parentPath}/${folderName}`;
-
         const files = await queryWithRetry('SELECT id FROM files WHERE folder_path = $1', [fullPath]);
         const sub = await queryWithRetry('SELECT id FROM folders WHERE parent_path = $1', [fullPath]);
-        
         if (files.rows.length > 0 || sub.rows.length > 0) return res.status(400).json({ error: "Folder not empty" });
-        
         await queryWithRetry('DELETE FROM folders WHERE id = $1', [req.params.id]);
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 5. PUBLIC SHOWCASE & SYSTEM
 router.get('/public/showcase', async (req, res) => {
     try {
         const { folder } = req.query;
         let query = 'SELECT * FROM folders WHERE is_public_showcase = TRUE ORDER BY id DESC LIMIT 1';
         let params = [];
-        
         if (folder) {
             query = 'SELECT * FROM folders WHERE name = $1';
             params = [folder];
         }
-        
         const fRes = await queryWithRetry(query, params);
-        
-        // If not looking for a specific folder and none are marked public, 
-        // fall back to showing root items (if intended).
-        // But strictly for showcase logic, if user provided a folder and it's missing, return empty.
-        
-        if (fRes.rows.length === 0) {
-            return res.json({ title: 'Showcase', items: [] });
-        }
-        
+        if (fRes.rows.length === 0) return res.json({ title: 'Showcase', items: [] });
         const targetFolder = fRes.rows[0];
         const path = targetFolder.parent_path === '/' ? `/${targetFolder.name}` : `${targetFolder.parent_path}/${targetFolder.name}`;
-        
-        // Sort items by ID DESC (Newest First)
         const files = await queryWithRetry('SELECT id, url, type, filename FROM files WHERE folder_path = $1 ORDER BY id DESC', [path]);
         res.json({ title: targetFolder.name, items: files.rows });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -606,10 +576,6 @@ router.get('/public/status', async (req, res) => {
 router.post('/folders/:id/public', async (req, res) => {
     try {
         await queryWithRetry('UPDATE folders SET is_public_showcase = TRUE WHERE id = $1', [req.params.id]);
-        
-        // --- MANIFEST UPDATE ---
-        uploadShowcaseManifest(req.params.id).catch(console.error);
-
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -624,19 +590,15 @@ router.delete('/folders/:id/public', async (req, res) => {
 router.get('/system/stats', async (req, res) => {
     try {
         const start = Date.now();
-        await queryWithRetry('SELECT 1', []); // Test DB
+        await queryWithRetry('SELECT 1', []); 
         const latency = Date.now() - start;
-        
         const upRes = await queryWithRetry('SELECT count(*) as c FROM files', []);
-        
-        // Mock Load Calculation based on active transfers
         const serverLoad = Math.min(100, 5 + (activeS3Transfers * 10) + (activeWhatsAppUploads * 15));
-        
         res.json({
             serverLoad: Math.round(serverLoad),
             dbLatency: latency,
-            aiCredits: 92, // Mock for now, requires credit tracking implementation
-            aiModel: 'Gemini 3 Pro', // Defaults to Pro until fallback triggers
+            aiCredits: 92,
+            aiModel: 'Gemini 3 Pro',
             s3Status: 'ok',
             s3Load: activeS3Transfers > 0 ? 100 : 0,
             whatsappStatus: 'ok',
@@ -649,27 +611,20 @@ router.get('/system/stats', async (req, res) => {
     }
 });
 
-// --- BOT LOGIC (STRICT) ---
 const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => {
-    // 1. Fetch Settings
     let botSettings = { isEnabled: true, shouldRepeat: false, steps: [] };
     try {
         const sRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1', []);
         if (sRes.rows.length > 0) botSettings = sRes.rows[0].settings;
     } catch(e) {}
 
-    // 2. Sync Driver
     let driver;
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
         let dRes = await client.query('SELECT * FROM drivers WHERE phone_number = $1', [from]);
-        
-        const entryPointId = botSettings.entryPointId || botSettings.steps?.[0]?.id;
-        
         if (dRes.rows.length === 0) {
             const isActive = botSettings.isEnabled;
-            // FIXED: Initialize current_bot_step_id as NULL (not entryPointId) so Case 1 triggers correctly
             const iRes = await client.query(
                 `INSERT INTO drivers (id, phone_number, name, source, status, last_message, last_message_time, current_bot_step_id, is_bot_active, is_human_mode)
                 VALUES ($1, $2, $3, 'WhatsApp', 'New', $4, $5, $6, $7, false) RETURNING *`,
@@ -689,100 +644,57 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
 
     if (driver.is_human_mode) return;
 
-    // 3. LOGIC ENGINE
-    let replyText = null; let replyOptions = null; let replyMedia = null; let replyMediaType = null;
-    let updates = {};
-
-    // Allow processing if: Bot Enabled GLOBALLY AND (Driver is Active OR Repeat Mode is ON)
-    // This fixes the issue where finished drivers (inactive) couldn't restart even if repeat was turned on later.
     const shouldProcess = botSettings.isEnabled && (driver.is_bot_active || botSettings.shouldRepeat);
 
     if (shouldProcess) {
         let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
         
-        // CASE 1: RESTART / WAKE UP FROM LOOP / NEW USER
-        // If current step is NULL, it means the bot finished a loop or is new.
-        // The incoming message (e.g., "Hello") triggers the Welcome message.
+        // --- HELPER TO SEND REPLY ---
+        const sendReply = async (step) => {
+            const sent = await sendWhatsAppMessage(
+                from, 
+                step.message, 
+                step.options, 
+                step.templateName, 
+                'en_US', 
+                step.mediaUrl, 
+                step.mediaType, 
+                step.headerImageUrl, 
+                step.footerText, 
+                step.buttons
+            );
+            if (sent) await logSystemMessage(driver.id, step.message || `[Template]`, 'text', step.headerImageUrl, step.footerText, step.buttons, step.templateName);
+        };
+
         if (!currentStep && botSettings.steps.length > 0) {
             const entryStep = botSettings.steps.find(s => s.id === botSettings.entryPointId) || botSettings.steps[0];
-            
             if (entryStep) {
-                // Set state to Entry Point
-                updates.current_bot_step_id = entryStep.id;
-                updates.is_bot_active = true; // IMPORTANT: Reactivate driver if they were finished
-                
-                // Send the Welcome Message
-                replyText = entryStep.message;
-                if (entryStep.linkLabel && entryStep.message) replyText = `${entryStep.linkLabel}\n${entryStep.message}`;
-                replyOptions = entryStep.options;
-                replyMedia = entryStep.mediaUrl;
-                replyMediaType = entryStep.mediaType; // CRITICAL: Extract media type (video/image)
-                // We stop here. The user's input "Hello" woke up the bot. 
+                await queryWithRetry(`UPDATE drivers SET current_bot_step_id = $1, is_bot_active = TRUE WHERE id = $2`, [entryStep.id, driver.id]);
+                await sendReply(entryStep);
             }
-        } 
-        // CASE 2: NORMAL FLOW
-        else if (currentStep) {
+        } else if (currentStep) {
             let nextId = currentStep.nextStepId;
-
             if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
                 const input = msgBody.trim().toLowerCase();
                 const matched = Object.keys(currentStep.routes).find(k => input.includes(k.toLowerCase()));
-                if (matched) {
-                    nextId = currentStep.routes[matched];
-                } else {
-                    replyText = "Please select one of the valid options:";
-                    replyOptions = currentStep.options;
-                }
+                if (matched) nextId = currentStep.routes[matched];
             }
-            
             if (currentStep.saveToField) {
-                 updates[currentStep.saveToField] = msgBody;
-                 if (currentStep.saveToField === 'name') updates.name = msgBody;
+                 await queryWithRetry(`UPDATE drivers SET ${currentStep.saveToField === 'name' ? 'name' : currentStep.saveToField} = $1 WHERE id = $2`, [msgBody, driver.id]);
             }
-
-            if (nextId && nextId !== 'END' && nextId !== 'AI_HANDOFF' && !replyText) {
-                updates.current_bot_step_id = nextId;
+            if (nextId && nextId !== 'END' && nextId !== 'AI_HANDOFF') {
+                await queryWithRetry(`UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2`, [nextId, driver.id]);
                 const nextStep = botSettings.steps.find(s => s.id === nextId);
-                if (nextStep) {
-                    replyText = nextStep.message;
-                    if (nextStep.linkLabel && nextStep.message) replyText = `${nextStep.linkLabel}\n${nextStep.message}`;
-                    replyOptions = nextStep.options;
-                    replyMedia = nextStep.mediaUrl;
-                    replyMediaType = nextStep.mediaType; // CRITICAL: Extract media type (video/image)
-                }
+                if (nextStep) await sendReply(nextStep);
             } else if (nextId === 'END' || nextId === 'AI_HANDOFF') {
-                if (botSettings.shouldRepeat) {
-                    // LOOP: Stay active, reset step to null so next message triggers entry point
-                    updates.is_bot_active = true;
-                    updates.current_bot_step_id = null;
-                } else {
-                    // STOP: Deactivate bot
-                    updates.is_bot_active = false;
-                    updates.current_bot_step_id = null;
-                }
-                replyText = "Thank you! We have received your details. Our team will verify them and contact you shortly.";
+                if (botSettings.shouldRepeat) await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = TRUE WHERE id = $1`, [driver.id]);
+                else await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = FALSE WHERE id = $1`, [driver.id]);
+                await sendWhatsAppMessage(from, "Thank you! We have received your details.");
             }
         }
-    } 
-
-    if (replyText || replyMedia) {
-        // PASS MEDIA TYPE TO HELPER
-        const sent = await sendWhatsAppMessage(from, replyText, replyOptions, null, 'en_US', replyMedia, replyMediaType);
-        if (sent) await logSystemMessage(driver.id, replyText || `[Media: ${replyMediaType || 'image'}]`, 'text');
-    }
-
-    if (Object.keys(updates).length > 0) {
-        const keys = Object.keys(updates);
-        const setClause = keys.map((k, i) => {
-            const dbKey = k === 'currentBotStepId' ? 'current_bot_step_id' : k === 'isBotActive' ? 'is_bot_active' : k;
-            return `${dbKey} = $${i+2}`; 
-        }).join(', ');
-        const values = keys.map(k => updates[k]);
-        await queryWithRetry(`UPDATE drivers SET ${setClause} WHERE id = $1`, [driver.id, ...values]);
     }
 };
 
-// --- WEBHOOK ---
 app.use('/api', router);
 app.get('/webhook', (req, res) => res.send(req.query['hub.challenge']));
 app.post('/webhook', async (req, res) => {

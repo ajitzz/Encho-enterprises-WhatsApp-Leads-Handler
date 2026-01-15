@@ -255,7 +255,7 @@ export default function App() {
   };
   
   // NEW: LeadManager Callback
-  const handleBulkSendDirect = async (ids: string[], message: string, mediaUrl?: string, mediaType?: string, options?: string[]) => {
+  const handleBulkSendDirect = async (ids: string[], message: string, mediaUrl?: string, mediaType?: string, options?: string[], templateName?: string) => {
       if (dataSource === 'mock') {
           ids.forEach(id => {
               mockBackend.addMessage(id, {
@@ -265,7 +265,8 @@ export default function App() {
                   imageUrl: mediaUrl, // Used for any media in mock
                   options: options,
                   timestamp: Date.now(),
-                  type: mediaType ? (mediaType as any) : options ? 'options' : 'text'
+                  type: templateName ? 'template' : (mediaType ? (mediaType as any) : options ? 'options' : 'text'),
+                  templateName: templateName // Mock support
               });
           });
       } else {
@@ -273,7 +274,7 @@ export default function App() {
           let successCount = 0;
           for (const id of ids) {
               try {
-                  await liveApiService.sendMessage(id, message, { mediaUrl, mediaType, options });
+                  await liveApiService.sendMessage(id, message, { mediaUrl, mediaType, options, templateName });
                   successCount++;
                   // Small delay to prevent rate limit
                   await new Promise(r => setTimeout(r, 200));

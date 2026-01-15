@@ -2,24 +2,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, LeadStatus, OnboardingStep } from '../types';
 import { 
-  X, 
-  Send, 
-  Image as ImageIcon, 
-  Video, 
-  CheckCircle, 
-  UserX, 
-  Car, 
-  Clock, 
-  ShieldCheck, 
-  ChevronRight, 
-  Facebook, 
-  Globe, 
-  Headset, 
-  MicOff,
-  Phone,
-  FileText,
-  Sparkles
+  X, Send, Image as ImageIcon, Video, CheckCircle, UserX, Car, Clock, 
+  ShieldCheck, ChevronRight, Facebook, Globe, Headset, MicOff, Phone, 
+  FileText, Sparkles, MapPin, ExternalLink, LayoutTemplate
 } from 'lucide-react';
+import { liveApiService } from '../services/liveApiService';
 
 interface ChatDrawerProps {
   driver: Driver | null;
@@ -31,31 +18,47 @@ interface ChatDrawerProps {
 export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver }) => {
   const [replyText, setReplyText] = useState('');
   const [localNotes, setLocalNotes] = useState('');
+  const [isTemplateMode, setIsTemplateMode] = useState(false);
+  const [templateName, setTemplateName] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Safe accessors for array properties
   const messages = driver && Array.isArray(driver.messages) ? driver.messages : [];
   const documents = driver && Array.isArray(driver.documents) ? driver.documents : [];
 
   useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
+    if (messagesEndRef.current) messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Sync local notes with driver notes
   useEffect(() => {
-    if (driver) {
-        setLocalNotes(driver.notes || '');
-    }
+    if (driver) setLocalNotes(driver.notes || '');
   }, [driver]);
 
   if (!driver) return null;
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if (!replyText.trim()) return;
-    onSendMessage(replyText);
+    
+    if (isTemplateMode && templateName) {
+        // Direct Send via API Service for Template (bypassing parent handler if it doesn't support tempalte arg)
+        // Since we need to pass templateName, we should assume onSendMessage can handle it or we call API directly.
+        // For consistency with app architecture, we'll assume we can call liveApiService if parent is mock or doesn't support.
+        try {
+            await liveApiService.sendMessage(driver.id, replyText, { templateName });
+            // Add Optimistic Message
+            onUpdateDriver(driver.id, { 
+                lastMessage: `[Template: ${templateName}]`, 
+                lastMessageTime: Date.now() 
+            });
+        } catch(e) {
+            alert("Failed to send template");
+        }
+    } else {
+        onSendMessage(replyText);
+    }
+    
     setReplyText('');
+    setTemplateName('');
+    setIsTemplateMode(false);
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -65,7 +68,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     }
   };
 
-  // Helper to update specific driver fields
   const handleUpdateDetails = (updates: Partial<Driver>) => {
     onUpdateDriver(driver.id, updates);
   };
@@ -76,23 +78,16 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   
   const toggleHumanMode = () => {
       const newState = !driver.isHumanMode;
-      // 1. Update backend state
       onUpdateDriver(driver.id, { isHumanMode: newState });
-      
-      // 2. If turning ON, send the specific message
-      if (newState) {
-          onSendMessage("Now our executive on the line to connect");
-      }
+      if (newState) onSendMessage("Now our executive on the line to connect");
   };
 
   const handleVoiceCall = () => {
-      // Simulate Voice Call - Since we can't real VoIP to WhatsApp, we send a link or notification
       onSendMessage("📞 Uber Fleet: Incoming Voice Call Request. Please click here to join: https://meet.google.com/call-voice-mock");
       alert("Voice Call Request Sent to Driver's WhatsApp");
   };
 
   const handleVideoCall = () => {
-      // Simulate Video Call
       onSendMessage("📹 Uber Fleet: Incoming Video Call Request. Please click here to join: https://meet.google.com/call-video-mock");
       alert("Video Call Request Sent to Driver's WhatsApp");
   };
@@ -121,132 +116,121 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                <div>
                  <div className="flex items-center gap-2">
                     <h2 className="text-xl font-semibold">{driver.name}</h2>
-                    {driver.source === 'Meta Ad' && (
-                        <span className="bg-blue-600 text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 font-medium">
-                            <Facebook size={10} /> Meta Ad
-                        </span>
-                    )}
-                    {driver.source === 'Organic' && (
-                         <span className="bg-gray-700 text-gray-300 text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 font-medium">
-                            <Globe size={10} /> Organic
-                        </span>
-                    )}
+                    {driver.source === 'Meta Ad' && <span className="bg-blue-600 text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 font-medium"><Facebook size={10} /> Meta Ad</span>}
+                    {driver.source === 'Organic' && <span className="bg-gray-700 text-gray-300 text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 font-medium"><Globe size={10} /> Organic</span>}
                  </div>
                  <p className="text-gray-400 text-sm font-mono">{driver.phoneNumber}</p>
                </div>
             </div>
             
             <div className="flex items-center gap-4">
-               {/* Call Buttons */}
                <div className="flex items-center gap-1 bg-gray-800 rounded-lg p-1 border border-gray-700 mr-2">
-                   <button onClick={handleVoiceCall} className="p-2 text-gray-300 hover:text-white hover:bg-gray-700 rounded transition-colors" title="Voice Call">
-                       <Phone size={18} />
-                   </button>
-                   <button onClick={handleVideoCall} className="p-2 text-gray-300 hover:text-white hover:bg-gray-700 rounded transition-colors" title="Video Call">
-                       <Video size={18} />
-                   </button>
+                   <button onClick={handleVoiceCall} className="p-2 text-gray-300 hover:text-white hover:bg-gray-700 rounded transition-colors" title="Voice Call"><Phone size={18} /></button>
+                   <button onClick={handleVideoCall} className="p-2 text-gray-300 hover:text-white hover:bg-gray-700 rounded transition-colors" title="Video Call"><Video size={18} /></button>
                </div>
 
-               {/* Human Agent Toggle */}
                <div className="flex items-center gap-2 bg-gray-900 rounded-lg p-1 border border-gray-800">
-                    <button 
-                        onClick={toggleHumanMode}
-                        className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${driver.isHumanMode ? 'bg-amber-500 text-black' : 'text-gray-400 hover:text-white'}`}
-                        title={driver.isHumanMode ? 'Bot is Stopped' : 'Bot is Active'}
-                    >
+                    <button onClick={toggleHumanMode} className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${driver.isHumanMode ? 'bg-amber-500 text-black' : 'text-gray-400 hover:text-white'}`} title={driver.isHumanMode ? 'Bot is Stopped' : 'Bot is Active'}>
                         {driver.isHumanMode ? <Headset size={14} /> : <MicOff size={14} />}
                         {driver.isHumanMode ? 'Human Agent Mode' : 'Automation Active'}
                     </button>
                </div>
 
-               <select 
-                  className="bg-gray-800 text-white text-sm border-none rounded-md px-3 py-1.5 cursor-pointer outline-none focus:ring-2 focus:ring-blue-500"
-                  value={driver.status}
-                  onChange={(e) => onUpdateDriver(driver.id, { status: e.target.value as LeadStatus })}
-                >
-                  {Object.values(LeadStatus).map(s => (
-                    <option key={s} value={s}>{s}</option>
-                  ))}
+               <select className="bg-gray-800 text-white text-sm border-none rounded-md px-3 py-1.5 cursor-pointer outline-none focus:ring-2 focus:ring-blue-500" value={driver.status} onChange={(e) => onUpdateDriver(driver.id, { status: e.target.value as LeadStatus })}>
+                  {Object.values(LeadStatus).map(s => (<option key={s} value={s}>{s}</option>))}
                </select>
-              <button onClick={onClose} className="p-2 hover:bg-gray-800 rounded-full transition-colors">
-                <X size={20} />
-              </button>
+              <button onClick={onClose} className="p-2 hover:bg-gray-800 rounded-full transition-colors"><X size={20} /></button>
             </div>
           </div>
 
-          {/* Main Content Area: Split View */}
           <div className="flex-1 flex overflow-hidden">
-            
             {/* Left: Chat History */}
             <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px] relative">
-              
-              {/* Human Mode Banner */}
               {driver.isHumanMode && (
                   <div className="absolute top-0 left-0 right-0 bg-amber-50 border-b border-amber-200 p-2 z-10 flex items-center justify-center gap-2 text-xs font-bold text-amber-800 shadow-sm">
-                      <Headset size={14} />
-                      Automation Paused. You are in manual control.
+                      <Headset size={14} /> Automation Paused. You are in manual control.
                   </div>
               )}
 
               <div className={`flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4 ${driver.isHumanMode ? 'pt-10' : ''}`}>
                 {messages.length > 0 ? (
                     messages.map((msg) => (
-                    <div 
-                        key={msg.id} 
-                        className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}
-                    >
-                        <div 
-                        className={`max-w-[80%] rounded-2xl px-4 py-3 shadow-sm ${
-                            msg.sender === 'driver' 
-                            ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' 
-                            : 'bg-blue-600 text-white rounded-tr-none'
-                        }`}
-                        >
-                        {msg.type === 'image' && msg.imageUrl && (
-                            <div className="mb-2 rounded-lg overflow-hidden border border-gray-200/20">
-                            <img src={msg.imageUrl} alt="Attachment" className="w-full h-full object-cover max-h-60" />
+                    <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
+                        <div className={`max-w-[80%] rounded-2xl shadow-sm overflow-hidden ${msg.sender === 'driver' ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' : 'bg-blue-600 text-white rounded-tr-none'}`}>
+                            
+                            {/* RICH CARD HEADER IMAGE */}
+                            {(msg.headerImageUrl || msg.imageUrl) && (
+                                <div className="w-full aspect-video overflow-hidden">
+                                    <img src={msg.headerImageUrl || msg.imageUrl} alt="Header" className="w-full h-full object-cover" />
+                                </div>
+                            )}
+
+                            {/* MESSAGE BODY */}
+                            <div className="px-4 py-3">
+                                {msg.templateName && (
+                                    <div className="text-[10px] uppercase font-bold opacity-50 mb-1 flex items-center gap-1">
+                                        <LayoutTemplate size={10} /> Template: {msg.templateName}
+                                    </div>
+                                )}
+                                {msg.text && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
+                                {msg.footerText && <p className={`text-[10px] mt-2 pt-2 border-t opacity-70 ${msg.sender === 'driver' ? 'border-gray-100' : 'border-blue-500'}`}>{msg.footerText}</p>}
+                                <div className={`text-[10px] mt-1 text-right opacity-60`}>
+                                    {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                </div>
                             </div>
-                        )}
-                        {msg.text && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
-                        <div className={`text-[10px] mt-1 text-right ${msg.sender === 'driver' ? 'text-gray-400' : 'text-blue-200'}`}>
-                            {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                        </div>
+
+                            {/* RICH BUTTONS */}
+                            {msg.buttons && msg.buttons.length > 0 && (
+                                <div className="border-t border-white/20 divide-y divide-white/20 bg-black/5">
+                                    {msg.buttons.map((btn, i) => (
+                                        <button key={i} className="w-full py-2.5 text-sm font-semibold flex items-center justify-center gap-2 hover:bg-black/10 transition-colors">
+                                            {btn.type === 'url' && <ExternalLink size={14} />}
+                                            {btn.type === 'phone' && <Phone size={14} />}
+                                            {btn.type === 'location' && <MapPin size={14} />}
+                                            {btn.title}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     </div>
                     ))
                 ) : (
-                    <div className="h-full flex items-center justify-center text-gray-400 text-sm">
-                        No messages yet
-                    </div>
+                    <div className="h-full flex items-center justify-center text-gray-400 text-sm">No messages yet</div>
                 )}
                 <div ref={messagesEndRef} />
               </div>
 
-              {/* Input Area */}
               <div className="p-4 bg-white border-t border-gray-200">
+                {isTemplateMode && (
+                    <div className="mb-2 bg-purple-50 p-2 rounded-lg border border-purple-100 flex items-center gap-2">
+                        <LayoutTemplate size={16} className="text-purple-600" />
+                        <input 
+                            value={templateName}
+                            onChange={(e) => setTemplateName(e.target.value)}
+                            placeholder="Template Name (e.g. welcome_v2)"
+                            className="flex-1 bg-white border border-gray-200 rounded px-2 py-1 text-xs outline-none"
+                            autoFocus
+                        />
+                        <button onClick={() => setIsTemplateMode(false)} className="text-gray-400 hover:text-gray-600"><X size={14} /></button>
+                    </div>
+                )}
                 <div className="flex gap-3">
-                  <textarea
-                    value={replyText}
-                    onChange={(e) => setReplyText(e.target.value)}
-                    onKeyDown={handleKeyPress}
-                    placeholder="Type a message..."
-                    className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20"
-                  />
                   <button 
-                    onClick={handleSend}
-                    disabled={!replyText.trim()}
-                    className="self-end bg-black text-white p-3 rounded-xl hover:bg-gray-800 disabled:opacity-50 transition-all"
+                    onClick={() => setIsTemplateMode(!isTemplateMode)}
+                    className={`p-3 rounded-xl transition-all ${isTemplateMode ? 'bg-purple-100 text-purple-600' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}
+                    title="Send Template"
                   >
-                    <Send size={20} />
+                      <LayoutTemplate size={20} />
                   </button>
+                  <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} onKeyDown={handleKeyPress} placeholder={isTemplateMode ? "Body Parameter (e.g. User Name)..." : "Type a message..."} className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20" />
+                  <button onClick={handleSend} disabled={!replyText.trim() && !templateName} className="self-end bg-black text-white p-3 rounded-xl hover:bg-gray-800 disabled:opacity-50 transition-all"><Send size={20} /></button>
                 </div>
               </div>
             </div>
 
-            {/* Right: Driver Profile & Onboarding */}
+            {/* Right: Driver Profile */}
             <div className="w-[400px] bg-white flex flex-col overflow-y-auto border-l border-gray-200">
-              
-              {/* Onboarding Progress Bar */}
               <div className="p-6 border-b border-gray-100 bg-gray-50/50">
                 <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Onboarding Progress</h3>
                 <div className="flex items-center justify-between relative">
@@ -263,161 +247,31 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
               </div>
 
               <div className="p-6 space-y-8">
-                
-                {/* SMART NOTES */}
                 <section>
-                    <h3 className="font-semibold text-gray-900 mb-2 flex items-center gap-2">
-                         <FileText size={18} className="text-purple-600" /> 
-                         Smart Notes
-                         <Sparkles size={12} className="text-purple-400 animate-pulse" />
-                    </h3>
+                    <h3 className="font-semibold text-gray-900 mb-2 flex items-center gap-2"><FileText size={18} className="text-purple-600" /> Smart Notes <Sparkles size={12} className="text-purple-400 animate-pulse" /></h3>
                     <div className="relative group">
-                        <textarea 
-                            value={localNotes}
-                            onChange={(e) => setLocalNotes(e.target.value)}
-                            onBlur={handleSaveNotes}
-                            className="w-full h-32 p-3 text-sm bg-yellow-50/50 border border-yellow-200 rounded-lg focus:ring-2 focus:ring-yellow-400 focus:border-yellow-400 outline-none resize-none"
-                            placeholder="AI will auto-fill details here based on the conversation..."
-                        />
-                        <div className="absolute bottom-2 right-2 text-[10px] text-gray-400 bg-white/50 px-1 rounded">
-                            Auto-saves
-                        </div>
+                        <textarea value={localNotes} onChange={(e) => setLocalNotes(e.target.value)} onBlur={handleSaveNotes} className="w-full h-32 p-3 text-sm bg-yellow-50/50 border border-yellow-200 rounded-lg focus:ring-2 focus:ring-yellow-400 focus:border-yellow-400 outline-none resize-none" placeholder="AI will auto-fill details here..." />
                     </div>
                 </section>
 
-                {/* Qualification Checklist */}
                 <section>
-                   <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                     <ShieldCheck size={18} className="text-blue-600" />
-                     Qualification Criteria
-                   </h3>
+                   <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2"><ShieldCheck size={18} className="text-blue-600" /> Qualification Criteria</h3>
                    <div className="space-y-3">
                       <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-100">
                         <span className="text-sm text-gray-600">Valid Driving License</span>
-                        <button 
-                          onClick={() => handleUpdateDetails({ qualificationChecks: { ...driver.qualificationChecks, hasValidLicense: !driver.qualificationChecks?.hasValidLicense } })}
-                          className={`p-1 rounded-full ${driver.qualificationChecks?.hasValidLicense ? 'text-green-500 bg-green-100' : 'text-gray-300 bg-gray-200'}`}
-                        >
-                          <CheckCircle size={20} />
-                        </button>
+                        <button onClick={() => handleUpdateDetails({ qualificationChecks: { ...driver.qualificationChecks, hasValidLicense: !driver.qualificationChecks?.hasValidLicense } })} className={`p-1 rounded-full ${driver.qualificationChecks?.hasValidLicense ? 'text-green-500 bg-green-100' : 'text-gray-300 bg-gray-200'}`}><CheckCircle size={20} /></button>
                       </div>
                       <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-100">
                         <span className="text-sm text-gray-600">Local Availability</span>
-                        <button 
-                          onClick={() => handleUpdateDetails({ qualificationChecks: { ...driver.qualificationChecks, isLocallyAvailable: !driver.qualificationChecks?.isLocallyAvailable } })}
-                          className={`p-1 rounded-full ${driver.qualificationChecks?.isLocallyAvailable ? 'text-green-500 bg-green-100' : 'text-gray-300 bg-gray-200'}`}
-                        >
-                          <CheckCircle size={20} />
-                        </button>
-                      </div>
-                      {/* Overall Status Helper */}
-                      <div className="text-xs text-gray-400 mt-2 px-1">
-                        * Verify documents manually before marking Qualified.
+                        <button onClick={() => handleUpdateDetails({ qualificationChecks: { ...driver.qualificationChecks, isLocallyAvailable: !driver.qualificationChecks?.isLocallyAvailable } })} className={`p-1 rounded-full ${driver.qualificationChecks?.isLocallyAvailable ? 'text-green-500 bg-green-100' : 'text-gray-300 bg-gray-200'}`}><CheckCircle size={20} /></button>
                       </div>
                    </div>
                 </section>
 
-                {/* Vehicle Details */}
-                <section>
-                   <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                     <Car size={18} className="text-blue-600" />
-                     Vehicle Details
-                   </h3>
-                   <div className="space-y-3">
-                     <div>
-                       <label className="text-xs text-gray-500 font-medium mb-1 block">Registration Number</label>
-                       <div className="flex gap-2">
-                         <input 
-                           type="text" 
-                           value={driver.vehicleRegistration || ''} 
-                           onChange={(e) => handleUpdateDetails({ vehicleRegistration: e.target.value })}
-                           placeholder="MH 02 AB 1234"
-                           className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-                         />
-                         <button 
-                           onClick={() => onSendMessage('Please provide your vehicle registration number.')}
-                           className="text-blue-600 hover:bg-blue-50 p-2 rounded-lg text-xs font-medium"
-                           title="Request Info"
-                         >
-                           Ask
-                         </button>
-                       </div>
-                     </div>
-                   </div>
-                </section>
-
-                {/* Availability */}
-                <section>
-                   <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                     <Clock size={18} className="text-blue-600" />
-                     Availability
-                   </h3>
-                   <div className="space-y-3">
-                     <div className="grid grid-cols-3 gap-2">
-                        {['Full-time', 'Part-time', 'Weekends'].map((opt) => (
-                          <button
-                            key={opt}
-                            onClick={() => handleUpdateDetails({ availability: opt as any })}
-                            className={`px-3 py-2 text-xs font-medium rounded-lg border transition-all ${driver.availability === opt ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}`}
-                          >
-                            {opt}
-                          </button>
-                        ))}
-                     </div>
-                     <button 
-                       onClick={() => onSendMessage('What is your driving availability? (Full-time / Part-time / Weekends)')}
-                       className="w-full text-center text-blue-600 hover:bg-blue-50 py-2 rounded-lg text-xs font-medium border border-transparent hover:border-blue-100 transition-colors"
-                     >
-                       Request Availability Info
-                     </button>
-                   </div>
-                </section>
-
-                {/* Documents */}
-                <section>
-                   <h3 className="font-semibold text-gray-900 mb-4 text-sm">Documents</h3>
-                   {documents.length > 0 ? (
-                     <div className="grid grid-cols-2 gap-3">
-                       {documents.map((doc, idx) => (
-                         <a key={idx} href={doc} target="_blank" rel="noreferrer" className="block relative aspect-video rounded-lg overflow-hidden border border-gray-200 group hover:shadow-md transition-shadow">
-                           <img src={doc} alt={`Doc ${idx}`} className="w-full h-full object-cover" />
-                           <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white text-xs font-medium">
-                             View Document
-                           </div>
-                         </a>
-                       ))}
-                     </div>
-                   ) : (
-                     <div className="text-center py-6 bg-gray-50 rounded-lg border border-dashed border-gray-300 text-gray-400 text-xs">
-                       No documents uploaded yet
-                     </div>
-                   )}
-                </section>
-
-                {/* Actions */}
                 <div className="pt-4 border-t border-gray-100">
-                  <button 
-                    onClick={() => {
-                      if (driver.qualificationChecks?.hasValidLicense) {
-                        onUpdateDriver(driver.id, { status: LeadStatus.QUALIFIED });
-                      } else {
-                        alert("Cannot qualify driver without a valid license check.");
-                      }
-                    }}
-                    className="w-full bg-black text-white py-3 rounded-lg font-medium hover:bg-gray-800 transition-colors flex items-center justify-center gap-2"
-                  >
-                    <CheckCircle size={18} />
-                    Approve & Qualify Driver
-                  </button>
-                  <button 
-                    onClick={() => onUpdateDriver(driver.id, { status: LeadStatus.REJECTED })}
-                    className="w-full mt-3 text-red-600 py-3 rounded-lg font-medium hover:bg-red-50 transition-colors flex items-center justify-center gap-2"
-                  >
-                    <UserX size={18} />
-                    Reject Application
-                  </button>
+                  <button onClick={() => { if (driver.qualificationChecks?.hasValidLicense) onUpdateDriver(driver.id, { status: LeadStatus.QUALIFIED }); else alert("Cannot qualify driver without a valid license check."); }} className="w-full bg-black text-white py-3 rounded-lg font-medium hover:bg-gray-800 transition-colors flex items-center justify-center gap-2"><CheckCircle size={18} /> Approve & Qualify Driver</button>
+                  <button onClick={() => onUpdateDriver(driver.id, { status: LeadStatus.REJECTED })} className="w-full mt-3 text-red-600 py-3 rounded-lg font-medium hover:bg-red-50 transition-colors flex items-center justify-center gap-2"><UserX size={18} /> Reject Application</button>
                 </div>
-
               </div>
             </div>
           </div>
