@@ -137,12 +137,24 @@ const initDB = async () => {
                 created_at BIGINT
             );
         `);
-        // Migration to ensure template_name exists if table was already created
-        await queryWithRetry("ALTER TABLE messages ADD COLUMN IF NOT EXISTS template_name TEXT", []);
+        
+        // --- CRITICAL MIGRATIONS ---
+        // Ensure all columns exist to prevent "Column does not exist" errors that cause 500 loops
+        const migrations = [
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS template_name TEXT",
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url TEXT",
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS header_image_url TEXT",
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS footer_text TEXT",
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS buttons JSONB"
+        ];
+        
+        for (const migration of migrations) {
+            await queryWithRetry(migration, []);
+        }
         
         await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT DO NOTHING`, [JSON.stringify({ isEnabled: true, shouldRepeat: false, steps: [] })]);
         isDbInitialized = true;
-        console.log("Database initialized (Lazy)");
+        console.log("Database initialized (Lazy with Migrations)");
     } catch (e) {
         console.error("DB Init Failed:", e);
     }
@@ -296,7 +308,6 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
 
 const logSystemMessage = async (driverId, text, type = 'text', headerImg = null, footer = null, btns = null, tmpl = null) => {
     const msgId = `sys_${Date.now()}_${Math.random()}`;
-    // Fixed: Ensure undefined params are null to prevent PG errors
     await queryWithRetry(
         `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'system', $3, $4, $5, $6, $7, $8, $9)`, 
         [msgId, driverId, text, Date.now(), type, safeVal(headerImg), safeVal(footer), btns ? JSON.stringify(btns) : null, safeVal(tmpl)]
@@ -340,7 +351,7 @@ const runScheduler = async () => {
                     
                     if (sent) {
                         successCount++;
-                        // Fixed: Added image_url support and safeVal
+                        // Insert log safely
                         await queryWithRetry(
                             `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, header_image_url, footer_text, buttons, template_name, image_url) VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, $10)`, 
                             [
@@ -353,10 +364,11 @@ const runScheduler = async () => {
                                 safeVal(content.footerText), 
                                 content.buttons ? JSON.stringify(content.buttons) : null, 
                                 safeVal(content.templateName),
-                                safeVal(content.mediaUrl) // Added image_url
+                                safeVal(content.mediaUrl) 
                             ]
-                        );
-                        await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [`[Scheduled]: ${content.text || content.templateName}`, Date.now(), driverId]);
+                        ).catch(e => console.error("Scheduler Log Error:", e.message)); // Catch DB error to prevent loop
+
+                        await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [`[Scheduled]: ${content.text || content.templateName}`, Date.now(), driverId]).catch(e => {});
                     }
                 }
             }
@@ -405,7 +417,7 @@ router.patch('/drivers/:id', async (req, res) => {
 // CREATE SCHEDULED MESSAGE
 router.post('/messages/schedule', async (req, res) => {
     try {
-        const { driverIds, scheduledTime, ...content } = req.body; // content includes text, mediaUrl, etc.
+        const { driverIds, scheduledTime, ...content } = req.body; 
         const id = `task_${Date.now()}_${Math.random()}`;
         
         let type = 'text';
@@ -439,24 +451,33 @@ router.post('/messages/send', async (req, res) => {
             else if (mediaUrl) type = mediaType || 'image';
             else if (options && options.length > 0) type = 'options';
 
-            // FIXED: Use safeVal to prevent "bind message has undefined parameter" error which causes 500 loop
-            await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type, image_url, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, $10)`, 
-                [
-                    `ag_${Date.now()}`, 
-                    driverId, 
-                    text, 
-                    Date.now(), 
-                    type, 
-                    safeVal(mediaUrl), 
-                    safeVal(headerImageUrl), 
-                    safeVal(footerText), 
-                    buttons ? JSON.stringify(buttons) : null, 
-                    safeVal(templateName)
-                ]
-            );
-            await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text || `[${type}]`, Date.now(), driverId]);
+            // SAFETY: Try to insert, but if DB fails (e.g. storage full), do NOT crash the response with 500.
+            // This prevents the frontend from infinite retrying.
+            try {
+                await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type, image_url, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, $10)`, 
+                    [
+                        `ag_${Date.now()}`, 
+                        driverId, 
+                        text, 
+                        Date.now(), 
+                        type, 
+                        safeVal(mediaUrl), 
+                        safeVal(headerImageUrl), 
+                        safeVal(footerText), 
+                        buttons ? JSON.stringify(buttons) : null, 
+                        safeVal(templateName)
+                    ]
+                );
+                await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text || `[${type}]`, Date.now(), driverId]);
+            } catch (dbErr) {
+                console.error("Message Sent but DB Save Failed:", dbErr.message);
+                // Return success 200 anyway so frontend stops retrying
+                return res.json({ success: true, warning: "Message sent but not logged" });
+            }
+
             res.json({ success: true });
         } else {
+            // Only return 500 if WhatsApp API actually failed
             res.status(500).json({ error: "Meta API Failed" });
         }
     } catch (e) { 
