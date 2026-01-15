@@ -20,6 +20,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [localNotes, setLocalNotes] = useState('');
   const [isTemplateMode, setIsTemplateMode] = useState(false);
   const [templateName, setTemplateName] = useState('');
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [scheduleTime, setScheduleTime] = useState('');
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const messages = driver && Array.isArray(driver.messages) ? driver.messages : [];
@@ -38,13 +41,40 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const handleSend = async () => {
     if (!replyText.trim()) return;
     
-    if (isTemplateMode && templateName) {
-        // Direct Send via API Service for Template (bypassing parent handler if it doesn't support tempalte arg)
-        // Since we need to pass templateName, we should assume onSendMessage can handle it or we call API directly.
-        // For consistency with app architecture, we'll assume we can call liveApiService if parent is mock or doesn't support.
+    // Scheduled Message
+    if (showSchedule && scheduleTime) {
+        try {
+            await liveApiService.sendMessage(driver.id, replyText, { 
+                templateName: isTemplateMode ? templateName : undefined,
+                // Add custom property for scheduling in Api Service
+            });
+            // HACK: Since sendMessage doesn't officially support scheduling in the generic signature yet
+            // we will call the specific endpoint if time is set.
+            const timestamp = new Date(scheduleTime).getTime();
+            await fetch('/api/messages/schedule', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    driverIds: [driver.id],
+                    text: replyText,
+                    templateName: isTemplateMode ? templateName : undefined,
+                    scheduledTime: timestamp
+                })
+            });
+
+            onUpdateDriver(driver.id, { 
+                lastMessage: `[Scheduled for ${new Date(timestamp).toLocaleTimeString()}]`, 
+                lastMessageTime: Date.now() 
+            });
+            alert("Message Scheduled!");
+        } catch(e) {
+            alert("Failed to schedule");
+        }
+    } 
+    // Immediate Template
+    else if (isTemplateMode && templateName) {
         try {
             await liveApiService.sendMessage(driver.id, replyText, { templateName });
-            // Add Optimistic Message
             onUpdateDriver(driver.id, { 
                 lastMessage: `[Template: ${templateName}]`, 
                 lastMessageTime: Date.now() 
@@ -52,13 +82,17 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
         } catch(e) {
             alert("Failed to send template");
         }
-    } else {
+    } 
+    // Standard Text
+    else {
         onSendMessage(replyText);
     }
     
     setReplyText('');
     setTemplateName('');
     setIsTemplateMode(false);
+    setShowSchedule(false);
+    setScheduleTime('');
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -202,9 +236,30 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
               </div>
 
               <div className="p-4 bg-white border-t border-gray-200">
+                {/* TOOLBAR */}
+                <div className="flex gap-2 mb-2 overflow-x-auto">
+                    {/* Template Toggle */}
+                    <button 
+                        onClick={() => setIsTemplateMode(!isTemplateMode)}
+                        className={`p-2 rounded-lg text-xs font-bold flex items-center gap-1 transition-all ${isTemplateMode ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                        title="Send Template"
+                    >
+                        <LayoutTemplate size={14} /> Template
+                    </button>
+
+                    {/* Schedule Toggle */}
+                    <button 
+                        onClick={() => setShowSchedule(!showSchedule)}
+                        className={`p-2 rounded-lg text-xs font-bold flex items-center gap-1 transition-all ${showSchedule ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                        title="Schedule Message"
+                    >
+                        <Clock size={14} /> Schedule
+                    </button>
+                </div>
+
+                {/* TEMPLATE INPUT */}
                 {isTemplateMode && (
-                    <div className="mb-2 bg-purple-50 p-2 rounded-lg border border-purple-100 flex items-center gap-2">
-                        <LayoutTemplate size={16} className="text-purple-600" />
+                    <div className="mb-2 bg-purple-50 p-2 rounded-lg border border-purple-100 flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2">
                         <input 
                             value={templateName}
                             onChange={(e) => setTemplateName(e.target.value)}
@@ -215,16 +270,26 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                         <button onClick={() => setIsTemplateMode(false)} className="text-gray-400 hover:text-gray-600"><X size={14} /></button>
                     </div>
                 )}
+
+                {/* SCHEDULE INPUT */}
+                {showSchedule && (
+                    <div className="mb-2 bg-amber-50 p-2 rounded-lg border border-amber-100 flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2">
+                        <span className="text-[10px] font-bold text-amber-700 uppercase">Send at:</span>
+                        <input 
+                            type="datetime-local"
+                            value={scheduleTime}
+                            onChange={(e) => setScheduleTime(e.target.value)}
+                            className="flex-1 bg-white border border-gray-200 rounded px-2 py-1 text-xs outline-none"
+                        />
+                        <button onClick={() => setShowSchedule(false)} className="text-gray-400 hover:text-gray-600"><X size={14} /></button>
+                    </div>
+                )}
+
                 <div className="flex gap-3">
-                  <button 
-                    onClick={() => setIsTemplateMode(!isTemplateMode)}
-                    className={`p-3 rounded-xl transition-all ${isTemplateMode ? 'bg-purple-100 text-purple-600' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}
-                    title="Send Template"
-                  >
-                      <LayoutTemplate size={20} />
-                  </button>
                   <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} onKeyDown={handleKeyPress} placeholder={isTemplateMode ? "Body Parameter (e.g. User Name)..." : "Type a message..."} className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20" />
-                  <button onClick={handleSend} disabled={!replyText.trim() && !templateName} className="self-end bg-black text-white p-3 rounded-xl hover:bg-gray-800 disabled:opacity-50 transition-all"><Send size={20} /></button>
+                  <button onClick={handleSend} disabled={(!replyText.trim() && !templateName) || (showSchedule && !scheduleTime)} className={`self-end text-white p-3 rounded-xl shadow-lg disabled:opacity-50 transition-all ${showSchedule ? 'bg-amber-600 hover:bg-amber-700' : 'bg-black hover:bg-gray-800'}`}>
+                      {showSchedule ? <Clock size={20} /> : <Send size={20} />}
+                  </button>
                 </div>
               </div>
             </div>

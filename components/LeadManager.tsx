@@ -5,14 +5,14 @@ import {
   Search, Filter, Send, MessageSquare, CheckCircle, 
   AlertCircle, X, Users, ChevronLeft, ChevronRight, 
   MoreHorizontal, Phone, Mail, FileText, Zap, Paperclip, Cloud, Trash2, Plus, GitBranch,
-  Globe, MapPin, CreditCard, LayoutTemplate
+  Globe, MapPin, CreditCard, LayoutTemplate, Clock
 } from 'lucide-react';
 import { MediaSelectorModal } from './MediaSelectorModal';
 
 interface LeadManagerProps {
   drivers: Driver[];
   onSelectDriver: (driver: Driver) => void;
-  onBulkSend: (ids: string[], message: string, mediaUrl?: string, mediaType?: string, options?: string[], templateName?: string) => void;
+  onBulkSend: (ids: string[], message: string, mediaUrl?: string, mediaType?: string, options?: string[], templateName?: string, scheduledTime?: number) => void;
   onUpdateDriverStatus: (ids: string[], status: LeadStatus) => void;
 }
 
@@ -36,6 +36,10 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
   const [showMediaPicker, setShowMediaPicker] = useState(false);
   const [showOptions, setShowOptions] = useState(false);
   const [templateName, setTemplateName] = useState('');
+  
+  // Scheduling State
+  const [isScheduled, setIsScheduled] = useState(false);
+  const [scheduleTime, setScheduleTime] = useState('');
   
   // Buttons State
   const [buttons, setButtons] = useState<MessageButton[]>([]);
@@ -77,13 +81,17 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
 
   const executeBulkSend = () => {
     if (!bulkMessage.trim() && !selectedMedia && !templateName) return;
+    
+    const timestamp = isScheduled && scheduleTime ? new Date(scheduleTime).getTime() : undefined;
+
     onBulkSend(
         selectedIds, 
         bulkMessage, 
         selectedMedia?.url, 
         selectedMedia?.type, 
         buttons.length > 0 ? (buttons as any) : undefined,
-        templateName || undefined
+        templateName || undefined,
+        timestamp
     );
     setShowBulkCompose(false);
     setBulkMessage('');
@@ -91,6 +99,8 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
     setSelectedMedia(null);
     setButtons([]);
     setShowOptions(false);
+    setIsScheduled(false);
+    setScheduleTime('');
     setSelectedIds([]);
   };
 
@@ -236,6 +246,32 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
                       </div>
                       
                       <div className="space-y-4">
+                          {/* Scheduling Toggle */}
+                          <div className={`p-3 rounded-lg border transition-all ${isScheduled ? 'bg-amber-50 border-amber-200' : 'bg-gray-50 border-gray-200'}`}>
+                              <div className="flex items-center justify-between">
+                                  <label className="text-xs font-bold text-gray-600 uppercase flex items-center gap-2">
+                                      <Clock size={14} /> Schedule for Later
+                                  </label>
+                                  <input 
+                                      type="checkbox" 
+                                      className="toggle"
+                                      checked={isScheduled} 
+                                      onChange={(e) => setIsScheduled(e.target.checked)} 
+                                  />
+                              </div>
+                              {isScheduled && (
+                                  <div className="mt-3">
+                                      <input 
+                                          type="datetime-local" 
+                                          value={scheduleTime}
+                                          onChange={(e) => setScheduleTime(e.target.value)}
+                                          className="w-full p-2 text-sm border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-amber-500"
+                                      />
+                                      <p className="text-[10px] text-gray-500 mt-1">Server Timezone: UTC</p>
+                                  </div>
+                              )}
+                          </div>
+
                           {/* Template Name Field */}
                           <div>
                               <label className="text-xs font-bold text-gray-500 uppercase mb-2 flex items-center gap-2">
@@ -312,8 +348,13 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
                   </div>
 
                   <div className="p-6 border-t border-gray-100 bg-gray-50">
-                      <button onClick={executeBulkSend} disabled={(!bulkMessage.trim() && !selectedMedia && !templateName)} className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
-                          <Send size={18} /> Send Broadcast
+                      <button 
+                        onClick={executeBulkSend} 
+                        disabled={(!bulkMessage.trim() && !selectedMedia && !templateName) || (isScheduled && !scheduleTime)} 
+                        className={`w-full text-white py-3.5 rounded-xl font-bold transition-all shadow-lg flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${isScheduled ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-200' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-200'}`}
+                      >
+                          {isScheduled ? <Clock size={18} /> : <Send size={18} />}
+                          {isScheduled ? 'Schedule Broadcast' : 'Send Broadcast'}
                       </button>
                   </div>
               </div>

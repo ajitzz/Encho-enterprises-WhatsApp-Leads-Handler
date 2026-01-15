@@ -114,6 +114,9 @@ export interface BotStep {
   
   // Link Node Specific
   linkLabel?: string;
+  
+  // New: Scheduling
+  delay?: number; // Delay in seconds before sending this step
 }
 
 export interface BotSettings {

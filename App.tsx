@@ -255,8 +255,9 @@ export default function App() {
   };
   
   // NEW: LeadManager Callback
-  const handleBulkSendDirect = async (ids: string[], message: string, mediaUrl?: string, mediaType?: string, options?: string[], templateName?: string) => {
+  const handleBulkSendDirect = async (ids: string[], message: string, mediaUrl?: string, mediaType?: string, options?: string[], templateName?: string, scheduledTime?: number) => {
       if (dataSource === 'mock') {
+          // Mock doesn't support scheduling UI feedback well, just send immediately
           ids.forEach(id => {
               mockBackend.addMessage(id, {
                   id: Date.now().toString() + id,
@@ -270,7 +271,29 @@ export default function App() {
               });
           });
       } else {
-          // LIVE MODE BULK
+          if (scheduledTime && scheduledTime > Date.now()) {
+              // SCHEDULE MODE
+              try {
+                  await fetch('/api/messages/schedule', {
+                      method: 'POST',
+                      headers: {'Content-Type': 'application/json'},
+                      body: JSON.stringify({
+                          driverIds: ids,
+                          text: message,
+                          mediaUrl, mediaType, options, templateName,
+                          scheduledTime
+                      })
+                  });
+                  addNotification({
+                      type: 'success',
+                      title: 'Broadcast Scheduled',
+                      message: `Message queued for ${new Date(scheduledTime).toLocaleString()}`
+                  });
+                  return;
+              } catch(e) { console.error(e); }
+          }
+
+          // IMMEDIATE MODE
           let successCount = 0;
           for (const id of ids) {
               try {
@@ -281,11 +304,14 @@ export default function App() {
               } catch(e) { console.error(e); }
           }
       }
-      addNotification({
-          type: 'success',
-          title: 'Broadcast Sent',
-          message: `Message sent to ${ids.length} recipients.`
-      });
+      
+      if (!scheduledTime) {
+          addNotification({
+              type: 'success',
+              title: 'Broadcast Sent',
+              message: `Message sent to ${ids.length} recipients.`
+          });
+      }
   };
 
   const handleToggleRepeat = async () => {
