@@ -8,6 +8,7 @@ import {
   Globe, MapPin, CreditCard, LayoutTemplate, Clock
 } from 'lucide-react';
 import { MediaSelectorModal } from './MediaSelectorModal';
+import { liveApiService } from '../services/liveApiService'; // Imported Service
 
 interface LeadManagerProps {
   drivers: Driver[];
@@ -79,20 +80,51 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
     else setSelectedIds(prev => [...prev, id]);
   };
 
-  const executeBulkSend = () => {
+  const executeBulkSend = async () => {
     if (!bulkMessage.trim() && !selectedMedia && !templateName) return;
     
     const timestamp = isScheduled && scheduleTime ? new Date(scheduleTime).getTime() : undefined;
 
-    onBulkSend(
-        selectedIds, 
-        bulkMessage, 
-        selectedMedia?.url, 
-        selectedMedia?.type, 
-        buttons.length > 0 ? (buttons as any) : undefined,
-        templateName || undefined,
-        timestamp
-    );
+    if (timestamp && timestamp > Date.now()) {
+        try {
+            await liveApiService.scheduleMessage(selectedIds, {
+                text: bulkMessage,
+                mediaUrl: selectedMedia?.url,
+                mediaType: selectedMedia?.type,
+                buttons: buttons.length > 0 ? (buttons as any) : undefined,
+                templateName: templateName || undefined
+            }, timestamp);
+            
+            // Trigger parent callback just for notification purposes if needed, 
+            // but the scheduling is already handled by liveApiService.
+            // onBulkSend(selectedIds, bulkMessage, ... , timestamp) -> App.tsx handles notification
+            // We can still call parent for consistency if it handles mock mode.
+            onBulkSend(
+                selectedIds, 
+                bulkMessage, 
+                selectedMedia?.url, 
+                selectedMedia?.type, 
+                buttons.length > 0 ? (buttons as any) : undefined,
+                templateName || undefined,
+                timestamp
+            );
+        } catch (e) {
+            console.error(e);
+            alert("Failed to schedule broadcast");
+            return;
+        }
+    } else {
+        onBulkSend(
+            selectedIds, 
+            bulkMessage, 
+            selectedMedia?.url, 
+            selectedMedia?.type, 
+            buttons.length > 0 ? (buttons as any) : undefined,
+            templateName || undefined,
+            undefined
+        );
+    }
+
     setShowBulkCompose(false);
     setBulkMessage('');
     setTemplateName('');

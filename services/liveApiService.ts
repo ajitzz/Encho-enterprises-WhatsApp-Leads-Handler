@@ -90,6 +90,20 @@ export const liveApiService = {
     return await response.json();
   },
 
+  scheduleMessage: async (driverIds: string[], content: { text: string, mediaUrl?: string, mediaType?: string, options?: string[], headerImageUrl?: string, footerText?: string, buttons?: MessageButton[], templateName?: string }, scheduledTime: number) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/schedule`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+              driverIds,
+              scheduledTime,
+              ...content
+          })
+      });
+      if (!response.ok) throw new Error('Failed to schedule message');
+      return await response.json();
+  },
+
   updateDriver: async (driverId: string, updates: Partial<Driver>) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}`, {
           method: 'PATCH',

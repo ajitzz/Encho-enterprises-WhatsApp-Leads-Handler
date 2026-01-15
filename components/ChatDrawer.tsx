@@ -4,7 +4,7 @@ import { Driver, Message, LeadStatus, OnboardingStep } from '../types';
 import { 
   X, Send, Image as ImageIcon, Video, CheckCircle, UserX, Car, Clock, 
   ShieldCheck, ChevronRight, Facebook, Globe, Headset, MicOff, Phone, 
-  FileText, Sparkles, MapPin, ExternalLink, LayoutTemplate
+  FileText, Sparkles, MapPin, ExternalLink, LayoutTemplate, Calendar
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
@@ -41,37 +41,43 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const handleSend = async () => {
     if (!replyText.trim()) return;
     
-    // Scheduled Message
+    // 1. Scheduled Message Path
     if (showSchedule && scheduleTime) {
+        const timestamp = new Date(scheduleTime).getTime();
+        if (isNaN(timestamp) || timestamp <= Date.now()) {
+            alert("Please select a future date and time.");
+            return;
+        }
+
         try {
-            await liveApiService.sendMessage(driver.id, replyText, { 
-                templateName: isTemplateMode ? templateName : undefined,
-                // Add custom property for scheduling in Api Service
-            });
-            // HACK: Since sendMessage doesn't officially support scheduling in the generic signature yet
-            // we will call the specific endpoint if time is set.
-            const timestamp = new Date(scheduleTime).getTime();
-            await fetch('/api/messages/schedule', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    driverIds: [driver.id],
+            // Use the new API service method that handles Base URL correctly
+            await liveApiService.scheduleMessage(
+                [driver.id], 
+                {
                     text: replyText,
                     templateName: isTemplateMode ? templateName : undefined,
-                    scheduledTime: timestamp
-                })
-            });
+                }, 
+                timestamp
+            );
 
             onUpdateDriver(driver.id, { 
                 lastMessage: `[Scheduled for ${new Date(timestamp).toLocaleTimeString()}]`, 
                 lastMessageTime: Date.now() 
             });
-            alert("Message Scheduled!");
+            
+            // Clean up UI
+            setReplyText('');
+            setTemplateName('');
+            setIsTemplateMode(false);
+            setShowSchedule(false);
+            setScheduleTime('');
+            
         } catch(e) {
-            alert("Failed to schedule");
+            console.error("Schedule Error:", e);
+            alert("Failed to schedule message. Check server connection.");
         }
     } 
-    // Immediate Template
+    // 2. Immediate Template Path
     else if (isTemplateMode && templateName) {
         try {
             await liveApiService.sendMessage(driver.id, replyText, { templateName });
@@ -79,20 +85,18 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                 lastMessage: `[Template: ${templateName}]`, 
                 lastMessageTime: Date.now() 
             });
+            setReplyText('');
+            setTemplateName('');
+            setIsTemplateMode(false);
         } catch(e) {
             alert("Failed to send template");
         }
     } 
-    // Standard Text
+    // 3. Standard Text Path
     else {
         onSendMessage(replyText);
+        setReplyText('');
     }
-    
-    setReplyText('');
-    setTemplateName('');
-    setIsTemplateMode(false);
-    setShowSchedule(false);
-    setScheduleTime('');
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -235,59 +239,78 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                 <div ref={messagesEndRef} />
               </div>
 
-              <div className="p-4 bg-white border-t border-gray-200">
-                {/* TOOLBAR */}
-                <div className="flex gap-2 mb-2 overflow-x-auto">
-                    {/* Template Toggle */}
-                    <button 
-                        onClick={() => setIsTemplateMode(!isTemplateMode)}
-                        className={`p-2 rounded-lg text-xs font-bold flex items-center gap-1 transition-all ${isTemplateMode ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-                        title="Send Template"
-                    >
-                        <LayoutTemplate size={14} /> Template
-                    </button>
-
-                    {/* Schedule Toggle */}
-                    <button 
-                        onClick={() => setShowSchedule(!showSchedule)}
-                        className={`p-2 rounded-lg text-xs font-bold flex items-center gap-1 transition-all ${showSchedule ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-                        title="Schedule Message"
-                    >
-                        <Clock size={14} /> Schedule
-                    </button>
-                </div>
+              <div className="p-4 bg-white border-t border-gray-200 relative">
+                {/* MODERN SCHEDULE POPUP */}
+                {showSchedule && (
+                    <div className="absolute bottom-[calc(100%+10px)] left-4 right-4 bg-white rounded-xl shadow-2xl border border-gray-200 p-4 animate-in slide-in-from-bottom-5 fade-in duration-200 z-20">
+                        <div className="flex items-center justify-between mb-3 border-b border-gray-100 pb-2">
+                            <h4 className="font-bold text-gray-800 flex items-center gap-2">
+                                <Calendar size={16} className="text-amber-500" />
+                                Schedule Message
+                            </h4>
+                            <button onClick={() => setShowSchedule(false)} className="p-1 hover:bg-gray-100 rounded-full transition-colors"><X size={16} className="text-gray-400" /></button>
+                        </div>
+                        <div className="space-y-3">
+                            <div>
+                                <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Pick Date & Time (Local)</label>
+                                <input 
+                                    type="datetime-local"
+                                    value={scheduleTime}
+                                    onChange={(e) => setScheduleTime(e.target.value)}
+                                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-amber-500 transition-all"
+                                />
+                            </div>
+                            <p className="text-[10px] text-gray-400">
+                                Message will be sent automatically by the server at the selected time.
+                            </p>
+                        </div>
+                    </div>
+                )}
 
                 {/* TEMPLATE INPUT */}
                 {isTemplateMode && (
                     <div className="mb-2 bg-purple-50 p-2 rounded-lg border border-purple-100 flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2">
+                        <span className="text-[10px] font-bold text-purple-700 uppercase">Template:</span>
                         <input 
                             value={templateName}
                             onChange={(e) => setTemplateName(e.target.value)}
-                            placeholder="Template Name (e.g. welcome_v2)"
-                            className="flex-1 bg-white border border-gray-200 rounded px-2 py-1 text-xs outline-none"
+                            placeholder="e.g. welcome_v2"
+                            className="flex-1 bg-white border border-gray-200 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-purple-500"
                             autoFocus
                         />
                         <button onClick={() => setIsTemplateMode(false)} className="text-gray-400 hover:text-gray-600"><X size={14} /></button>
                     </div>
                 )}
 
-                {/* SCHEDULE INPUT */}
-                {showSchedule && (
-                    <div className="mb-2 bg-amber-50 p-2 rounded-lg border border-amber-100 flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2">
-                        <span className="text-[10px] font-bold text-amber-700 uppercase">Send at:</span>
-                        <input 
-                            type="datetime-local"
-                            value={scheduleTime}
-                            onChange={(e) => setScheduleTime(e.target.value)}
-                            className="flex-1 bg-white border border-gray-200 rounded px-2 py-1 text-xs outline-none"
-                        />
-                        <button onClick={() => setShowSchedule(false)} className="text-gray-400 hover:text-gray-600"><X size={14} /></button>
-                    </div>
-                )}
+                <div className="flex gap-2 mb-3">
+                    {/* Template Toggle */}
+                    <button 
+                        onClick={() => setIsTemplateMode(!isTemplateMode)}
+                        className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1 transition-all border ${isTemplateMode ? 'bg-purple-100 text-purple-700 border-purple-200' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+                        title="Send Template"
+                    >
+                        <LayoutTemplate size={12} /> Template
+                    </button>
+
+                    {/* Schedule Toggle */}
+                    <button 
+                        onClick={() => setShowSchedule(!showSchedule)}
+                        className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1 transition-all border ${showSchedule ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+                        title="Schedule Message"
+                    >
+                        <Clock size={12} /> {scheduleTime ? 'Scheduled' : 'Schedule'}
+                    </button>
+                </div>
 
                 <div className="flex gap-3">
-                  <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} onKeyDown={handleKeyPress} placeholder={isTemplateMode ? "Body Parameter (e.g. User Name)..." : "Type a message..."} className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20" />
-                  <button onClick={handleSend} disabled={(!replyText.trim() && !templateName) || (showSchedule && !scheduleTime)} className={`self-end text-white p-3 rounded-xl shadow-lg disabled:opacity-50 transition-all ${showSchedule ? 'bg-amber-600 hover:bg-amber-700' : 'bg-black hover:bg-gray-800'}`}>
+                  <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} onKeyDown={handleKeyPress} placeholder={isTemplateMode ? "Body Parameter (e.g. User Name)..." : "Type a message..."} className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20 shadow-inner" />
+                  
+                  <button 
+                    onClick={handleSend} 
+                    disabled={(!replyText.trim() && !templateName) || (showSchedule && !scheduleTime)} 
+                    className={`self-end p-3 rounded-xl shadow-lg disabled:opacity-50 transition-all flex items-center justify-center w-12 h-12 ${showSchedule ? 'bg-amber-500 hover:bg-amber-600 text-white' : 'bg-black hover:bg-gray-800 text-white'}`}
+                    title={showSchedule ? "Schedule Message" : "Send Now"}
+                  >
                       {showSchedule ? <Clock size={20} /> : <Send size={20} />}
                   </button>
                 </div>
