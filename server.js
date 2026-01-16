@@ -118,8 +118,7 @@ const initDB = async () => {
                 filename TEXT,
                 url TEXT,
                 type TEXT,
-                folder_path TEXT,
-                media_id TEXT
+                folder_path TEXT,                media_id TEXT
             );
             CREATE TABLE IF NOT EXISTS folders (
                 id TEXT PRIMARY KEY,
@@ -139,7 +138,7 @@ const initDB = async () => {
         `);
         
         // --- CRITICAL MIGRATIONS ---
-        // Ensure all columns exist to prevent "Column does not exist" errors that cause 500 loops
+        // Ensure all columns exist to prevent "Column does not exist" errors
         const migrations = [
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS template_name TEXT",
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url TEXT",
@@ -366,7 +365,7 @@ const runScheduler = async () => {
                                 safeVal(content.templateName),
                                 safeVal(content.mediaUrl) 
                             ]
-                        ).catch(e => console.error("Scheduler Log Error:", e.message)); // Catch DB error to prevent loop
+                        ).catch(e => console.error("Scheduler Log Error:", e.message));
 
                         await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [`[Scheduled]: ${content.text || content.templateName}`, Date.now(), driverId]).catch(e => {});
                     }
@@ -381,7 +380,7 @@ const runScheduler = async () => {
     }
 };
 
-setInterval(runScheduler, 30000); // Check every 30 seconds
+setInterval(runScheduler, 30000); 
 
 // --- ROUTES ---
 
@@ -414,7 +413,6 @@ router.patch('/drivers/:id', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// CREATE SCHEDULED MESSAGE
 router.post('/messages/schedule', async (req, res) => {
     try {
         const { driverIds, scheduledTime, ...content } = req.body; 
@@ -436,7 +434,6 @@ router.post('/messages/schedule', async (req, res) => {
 });
 
 router.post('/messages/send', async (req, res) => {
-    // Legacy endpoint for immediate sending
     try {
         const { driverId, text, mediaUrl, mediaType, options, headerImageUrl, footerText, buttons, templateName } = req.body;
         const dRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
@@ -451,8 +448,6 @@ router.post('/messages/send', async (req, res) => {
             else if (mediaUrl) type = mediaType || 'image';
             else if (options && options.length > 0) type = 'options';
 
-            // SAFETY: Try to insert, but if DB fails (e.g. storage full), do NOT crash the response with 500.
-            // This prevents the frontend from infinite retrying.
             try {
                 await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type, image_url, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, $10)`, 
                     [
@@ -471,13 +466,11 @@ router.post('/messages/send', async (req, res) => {
                 await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text || `[${type}]`, Date.now(), driverId]);
             } catch (dbErr) {
                 console.error("Message Sent but DB Save Failed:", dbErr.message);
-                // Return success 200 anyway so frontend stops retrying
                 return res.json({ success: true, warning: "Message sent but not logged" });
             }
 
             res.json({ success: true });
         } else {
-            // Only return 500 if WhatsApp API actually failed
             res.status(500).json({ error: "Meta API Failed" });
         }
     } catch (e) { 
@@ -501,7 +494,7 @@ router.post('/bot-settings', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ... Media Routes ...
+// ... Media Routes (Unchanged) ...
 router.get('/media', async (req, res) => {
     try {
         const { path } = req.query;
@@ -702,7 +695,11 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        let dRes = await client.query('SELECT * FROM drivers WHERE phone_number = $1', [from]);
+        
+        // --- IMPROVED PHONE MATCHING ---
+        // Match exact, with +, or without + to catch discrepancies
+        let dRes = await client.query('SELECT * FROM drivers WHERE phone_number = $1 OR phone_number = $2', [from, '+' + from.replace('+', '')]);
+        
         if (dRes.rows.length === 0) {
             const isActive = botSettings.isEnabled;
             const iRes = await client.query(
@@ -729,7 +726,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
     if (shouldProcess) {
         let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
         
-        // --- UPDATED HELPER: Handle Delays ---
         const executeStep = async (step, targetId) => {
             if (step.delay && step.delay > 0) {
                 // Schedule Future Message
@@ -760,7 +756,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
                     step.footerText, 
                     step.buttons
                 );
-                // Fixed: Use safeVal
                 if (sent) await logSystemMessage(targetId, step.message || `[Template]`, 'text', safeVal(step.headerImageUrl), safeVal(step.footerText), step.buttons, safeVal(step.templateName));
             }
         };
@@ -795,14 +790,85 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
 };
 
 app.use('/api', router);
-app.get('/webhook', (req, res) => res.send(req.query['hub.challenge']));
-app.post('/webhook', async (req, res) => {
-    const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-    const contact = req.body.entry?.[0]?.changes?.[0]?.value?.contacts?.[0];
-    if (msg) {
-        let text = msg.text?.body || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || "";
-        await processIncomingMessage(msg.from, contact?.profile?.name || "Unknown", text, msg.type);
+
+// --- ROBUST WEBHOOK HANDLER ---
+app.get('/webhook', (req, res) => {
+    // Basic verification for Meta
+    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === 'uber_fleet_verify_token') {
+        res.send(req.query['hub.challenge']);
+    } else {
+        res.sendStatus(400);
     }
+});
+
+app.post('/webhook', async (req, res) => {
+    // LOG RAW PAYLOAD FOR DEBUGGING
+    // This is crucial to see if Meta is actually hitting the server
+    console.log('Incoming Webhook Payload:', JSON.stringify(req.body, null, 2));
+
+    try {
+        const entry = req.body.entry?.[0];
+        const changes = entry?.changes?.[0];
+        const value = changes?.value;
+        
+        if (!value) return res.sendStatus(200);
+
+        // Handle Messages
+        if (value.messages?.[0]) {
+            const msg = value.messages[0];
+            const contact = value.contacts?.[0];
+            
+            let text = "";
+            
+            // Extract content based on message type
+            switch (msg.type) {
+                case 'text':
+                    text = msg.text?.body || "";
+                    break;
+                case 'interactive':
+                    text = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || "";
+                    break;
+                case 'button':
+                    text = msg.button?.text || "";
+                    break;
+                case 'image':
+                    text = msg.caption ? `[Image]: ${msg.caption}` : "[Image]";
+                    break;
+                case 'video':
+                    text = msg.caption ? `[Video]: ${msg.caption}` : "[Video]";
+                    break;
+                case 'document':
+                    text = msg.caption ? `[Document]: ${msg.caption}` : "[Document]";
+                    break;
+                case 'audio':
+                    text = "[Audio]";
+                    break;
+                case 'location':
+                    text = "[Location Shared]";
+                    break;
+                default:
+                    text = `[${msg.type} Message]`;
+            }
+
+            // Ensure we never pass empty string if we can avoid it
+            if (!text.trim()) text = `[${msg.type}]`;
+
+            const senderName = contact?.profile?.name || "Unknown";
+            const senderPhone = msg.from; // This is the WhatsApp ID (Phone Number)
+
+            await processIncomingMessage(senderPhone, senderName, text, msg.type);
+        }
+        
+        // Handle Status Updates (Sent/Delivered/Read) - Optional but good for logs
+        if (value.statuses?.[0]) {
+             const s = value.statuses[0];
+             console.log(`>> Message Status Update: ${s.status} (Recipient: ${s.recipient_id})`);
+        }
+
+    } catch (error) {
+        console.error("Webhook Error:", error);
+    }
+
     res.sendStatus(200);
 });
 
