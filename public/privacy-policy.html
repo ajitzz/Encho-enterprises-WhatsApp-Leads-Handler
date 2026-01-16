@@ -3,85 +3,180 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Privacy Policy | WhatsApp Leads Handler</title>
+    <title>Privacy Policy | Encho Cabs</title>
     <style>
+      :root {
+        color-scheme: light;
+        --text: #111827;
+        --muted: #6b7280;
+        --border: #e5e7eb;
+        --background: #ffffff;
+        --panel: #f9fafb;
+        --accent: #2563eb;
+      }
+
       body {
-        font-family: "Inter", Arial, sans-serif;
-        line-height: 1.6;
         margin: 0;
-        padding: 32px;
-        background: #f9fafb;
-        color: #111827;
+        font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+        color: var(--text);
+        background: var(--background);
+        line-height: 1.6;
       }
-      main {
-        max-width: 860px;
+
+      .page {
+        max-width: 960px;
         margin: 0 auto;
-        background: #ffffff;
-        padding: 32px;
-        border-radius: 12px;
-        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
+        padding: 48px 24px 72px;
       }
-      h1,
+
+      header {
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 32px;
+        padding-bottom: 16px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 2.25rem;
+      }
+
       h2 {
-        color: #111827;
+        margin-top: 32px;
+        font-size: 1.4rem;
       }
+
+      p {
+        margin: 12px 0;
+      }
+
+      .meta {
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 20px 24px;
+        margin: 24px 0;
+      }
+
       ul {
         padding-left: 20px;
       }
-      .muted {
-        color: #6b7280;
+
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+
+      a:hover {
+        text-decoration: underline;
+      }
+
+      footer {
+        margin-top: 48px;
+        border-top: 1px solid var(--border);
+        padding-top: 16px;
+        color: var(--muted);
+        font-size: 0.95rem;
       }
     </style>
   </head>
   <body>
-    <main>
-      <h1>Privacy Policy</h1>
-      <p class="muted">Last updated: March 2025</p>
+    <main class="page">
+      <header>
+        <h1>Privacy Policy</h1>
+        <p class="meta">Last updated: March 8, 2025</p>
+        <p>
+          This Privacy Policy explains how Encho Cabs (“we,” “us,” or “our”) collects, uses, and
+          protects personal information when you contact us through WhatsApp or use our services.
+        </p>
+      </header>
 
-      <p>
-        This Privacy Policy explains how our WhatsApp Leads Handler application
-        (“we”, “our”, or “us”) collects, uses, and protects information when you
-        interact with us through WhatsApp messaging.
-      </p>
+      <section class="card">
+        <h2>Business Details</h2>
+        <p><strong>Company:</strong> Encho Cabs</p>
+        <p><strong>Address:</strong> Electronic City, Bengaluru</p>
+        <p>
+          <strong>Privacy Contact:</strong>
+          <a href="mailto:enchoenterprises@gmail.com">enchoenterprises@gmail.com</a>
+        </p>
+      </section>
 
-      <h2>Information We Collect</h2>
-      <ul>
-        <li>WhatsApp identifiers (such as phone number and WhatsApp ID).</li>
-        <li>Message content you send to us for customer support or inquiries.</li>
-        <li>Metadata such as timestamps and message status.</li>
-      </ul>
+      <section>
+        <h2>Information We Collect</h2>
+        <p>We collect information that you provide when you message us or book services, including:</p>
+        <ul>
+          <li>WhatsApp profile information (name, phone number, and message content).</li>
+          <li>Service details such as pickup/drop locations or booking preferences.</li>
+          <li>Any additional information you voluntarily share to resolve your request.</li>
+        </ul>
+      </section>
 
-      <h2>How We Use Information</h2>
-      <ul>
-        <li>To receive and respond to customer inquiries on WhatsApp.</li>
-        <li>To provide customer support and follow up on requests.</li>
-        <li>To improve our messaging workflows and service quality.</li>
-      </ul>
+      <section>
+        <h2>How We Use Your Information</h2>
+        <p>We use WhatsApp messages and related information for:</p>
+        <ul>
+          <li>Customer support and answering inquiries.</li>
+          <li>Service booking and order tracking.</li>
+          <li>Resolving issues and improving our customer experience.</li>
+        </ul>
+      </section>
 
-      <h2>Data Sharing</h2>
-      <p>
-        We do not sell your data. We only share data with service providers
-        necessary to deliver WhatsApp messaging (e.g., Meta’s WhatsApp Cloud API)
-        and to run our systems securely.
-      </p>
+      <section>
+        <h2>Legal Basis</h2>
+        <p>
+          We process your information to fulfill service requests, respond to inquiries, and provide
+          customer support. We only use your data for the purposes described above.
+        </p>
+      </section>
 
-      <h2>Data Retention</h2>
-      <p>
-        We retain message data only as long as needed for customer support and
-        business operations, and we delete it when it is no longer required.
-      </p>
+      <section>
+        <h2>Data Retention</h2>
+        <p>
+          We retain WhatsApp messages and related records for up to <strong>1 year</strong> or until the
+          issue is resolved, whichever is longer. After that, we delete or anonymize the data unless
+          we are required to keep it for legal or operational reasons.
+        </p>
+      </section>
 
-      <h2>Your Rights</h2>
-      <p>
-        You may request access, correction, or deletion of your data by
-        contacting us at the address below.
-      </p>
+      <section>
+        <h2>Sharing of Information</h2>
+        <p>
+          We do not sell your personal data. We may share limited information with service providers
+          that help us operate our WhatsApp messaging and booking workflows, only when necessary and
+          under appropriate safeguards.
+        </p>
+      </section>
 
-      <h2>Contact</h2>
-      <p>
-        If you have questions about this policy, contact us at:
-        <strong>privacy@yourcompany.com</strong>
-      </p>
+      <section>
+        <h2>Security</h2>
+        <p>
+          We take reasonable technical and organizational measures to protect your information from
+          unauthorized access, loss, or misuse.
+        </p>
+      </section>
+
+      <section>
+        <h2>Your Rights</h2>
+        <p>You may request to access, correct, or delete your personal data by emailing us.</p>
+      </section>
+
+      <section>
+        <h2>Contact Us</h2>
+        <p>
+          If you have any questions or privacy requests, contact us at
+          <a href="mailto:enchoenterprises@gmail.com">enchoenterprises@gmail.com</a>.
+        </p>
+      </section>
+
+      <footer>
+        <p>
+          This policy applies to WhatsApp communications and related services provided by Encho Cabs.
+        </p>
+      </footer>
     </main>
   </body>
 </html>
