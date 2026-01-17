@@ -1,5 +1,6 @@
 
-import { Driver, BotSettings, MessageButton } from '../types';
+
+import { Driver, BotSettings, MessageButton, Message } from '../types';
 
 // Determine Base URL
 const getBaseUrl = () => {
@@ -34,9 +35,12 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
     }
 };
 
+let lastSyncTimestamp = 0;
+
 export const liveApiService = {
   getDrivers: async (): Promise<Driver[]> => {
     try {
+      lastSyncTimestamp = Date.now();
       const url = `${API_BASE_URL}/api/drivers`;
       const response = await fetchWithRetry(url);
       if (!response.ok) throw new Error('API Error');
@@ -47,9 +51,42 @@ export const liveApiService = {
     }
   },
 
-  subscribeToUpdates: (callback: () => void) => {
+  // New: Efficient Delta Sync
+  syncDrivers: async (): Promise<Driver[]> => {
+      try {
+          const url = `${API_BASE_URL}/api/sync?since=${lastSyncTimestamp}`;
+          const response = await fetchWithRetry(url);
+          if (!response.ok) return [];
+          
+          const drivers = await response.json();
+          if (drivers.length > 0) {
+              lastSyncTimestamp = Date.now();
+          }
+          return drivers;
+      } catch (e) {
+          return [];
+      }
+  },
+
+  // New: On Demand Message Fetching
+  getDriverMessages: async (driverId: string): Promise<Message[]> => {
+      try {
+          const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}/messages`);
+          if (!response.ok) return [];
+          return await response.json();
+      } catch (e) {
+          return [];
+      }
+  },
+
+  subscribeToUpdates: (callback: (updatedDrivers: Driver[]) => void) => {
     const interval = setInterval(async () => {
-        try { await callback(); } catch(e) {}
+        try { 
+            const updates = await liveApiService.syncDrivers();
+            if (updates.length > 0) {
+                callback(updates);
+            }
+        } catch(e) {}
     }, 2000); 
     return () => clearInterval(interval);
   },
@@ -83,7 +120,7 @@ export const liveApiService = {
           headerImageUrl: attachments?.headerImageUrl,
           footerText: attachments?.footerText,
           buttons: attachments?.buttons,
-          templateName: attachments?.templateName // Pass template name
+          templateName: attachments?.templateName 
       })
     });
     if (!response.ok) throw new Error('Failed to send message');

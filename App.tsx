@@ -79,17 +79,26 @@ export default function App() {
            const data = await liveApiService.getDrivers();
            setDrivers(data);
 
-           unsubscribe = liveApiService.subscribeToUpdates(async () => {
-               try {
-                   const updated = await liveApiService.getDrivers();
-                   setDrivers(updated);
-               } catch (e) {}
+           // Use the new efficient delta-sync subscription
+           unsubscribe = liveApiService.subscribeToUpdates((updatedDrivers) => {
+               setDrivers(prevDrivers => {
+                   const driverMap = new Map<string, Driver>(prevDrivers.map(d => [d.id, d]));
+                   updatedDrivers.forEach(d => {
+                       // Preserve messages if they exist locally but not in the update
+                       const existing = driverMap.get(d.id);
+                       if (existing && existing.messages && existing.messages.length > 0 && (!d.messages || d.messages.length === 0)) {
+                           d.messages = existing.messages;
+                       }
+                       driverMap.set(d.id, d);
+                   });
+                   return Array.from(driverMap.values()).sort((a, b) => b.lastMessageTime - a.lastMessageTime);
+               });
            });
            
            addNotification({
              type: 'info',
              title: 'Connected to Live Server',
-             message: 'Polling active (2s interval)'
+             message: 'Delta-Sync Active (Low Bandwidth)'
            });
          } catch (e) {
              addNotification({
@@ -105,14 +114,44 @@ export default function App() {
     return () => unsubscribe();
   }, [dataSource, activeTab, isShowcaseMode]); 
 
+  // Updated Driver Selection with Lazy Loading
+  const handleSelectDriver = async (driver: Driver) => {
+      // Set immediately to open drawer
+      setSelectedDriver(driver);
+
+      // If live mode and messages are empty, fetch them on demand
+      if (dataSource === 'live' && (!driver.messages || driver.messages.length === 0)) {
+          try {
+              const messages = await liveApiService.getDriverMessages(driver.id);
+              const updatedDriver = { ...driver, messages };
+              
+              setSelectedDriver(updatedDriver);
+              setDrivers(prev => prev.map(d => d.id === driver.id ? updatedDriver : d));
+          } catch(e) {
+              console.error("Failed to fetch history");
+          }
+      }
+  };
+
   useEffect(() => {
     if (selectedDriver && dataSource === 'live') {
       const updated = drivers.find(d => d.id === selectedDriver.id);
-      if (updated && updated !== selectedDriver) {
-        setSelectedDriver(updated);
+      if (updated && updated.lastMessageTime !== selectedDriver.lastMessageTime) {
+         // If a new message arrived while open, update the selected driver view
+         // We might need to fetch the message content if it was a delta update without body
+         if (updated.messages.length === 0 && selectedDriver.messages.length > 0) {
+             // Preserve history, but fetch latest if needed. 
+             // Actually, usually the delta update for a driver row doesn't have messages.
+             // We should re-fetch messages if the driver updated.
+             liveApiService.getDriverMessages(updated.id).then(msgs => {
+                 setSelectedDriver({ ...updated, messages: msgs });
+             });
+         } else {
+             setSelectedDriver(updated);
+         }
       }
     }
-  }, [drivers, selectedDriver, dataSource]);
+  }, [drivers, dataSource]);
 
   const addNotification = (notif: Omit<AppNotification, 'id'>) => {
     const newNotif = { ...notif, id: Date.now().toString() + Math.random() };
@@ -144,6 +183,7 @@ export default function App() {
     } else {
         try {
             await liveApiService.updateDriver(id, updates);
+            // Optimistic update
             const updated = drivers.map(d => d.id === id ? { ...d, ...updates } : d);
             setDrivers(updated);
             if (selectedDriver && selectedDriver.id === id) {
@@ -188,11 +228,12 @@ export default function App() {
                 timestamp: Date.now(),
                 type: 'text'
             };
+            // Manually append the message locally so we don't need to re-fetch immediately
             const updatedDriver = {
                 ...selectedDriver,
                 lastMessage: text,
                 lastMessageTime: Date.now(),
-                messages: [...selectedDriver.messages, msg]
+                messages: [...(selectedDriver.messages || []), msg]
             };
             setSelectedDriver(updatedDriver);
             setDrivers(prev => prev.map(d => d.id === selectedDriver.id ? updatedDriver : d));
@@ -459,7 +500,7 @@ export default function App() {
 
             <LeadTable 
               drivers={drivers}
-              onSelectDriver={setSelectedDriver}
+              onSelectDriver={handleSelectDriver}
               onSendWelcome={handleSendWelcome}
               selectedIds={selectedBulkIds}
               onBulkSelect={setSelectedBulkIds}
@@ -473,7 +514,7 @@ export default function App() {
              <div className="p-4 h-screen bg-gray-50">
                  <LeadManager 
                      drivers={drivers}
-                     onSelectDriver={setSelectedDriver}
+                     onSelectDriver={handleSelectDriver}
                      onBulkSend={handleBulkSendDirect}
                      onUpdateDriverStatus={handleBulkStatusUpdate}
                  />

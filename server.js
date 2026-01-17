@@ -1,4 +1,3 @@
-
 /**
  * UBER FLEET RECRUITER - BACKEND SERVER
  * Enterprise-Grade Connection Handling for Vercel + Neon
@@ -138,13 +137,13 @@ const initDB = async () => {
         `);
         
         // --- CRITICAL MIGRATIONS ---
-        // Ensure all columns exist to prevent "Column does not exist" errors
         const migrations = [
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS template_name TEXT",
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS image_url TEXT",
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS header_image_url TEXT",
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS footer_text TEXT",
-            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS buttons JSONB"
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS buttons JSONB",
+            "ALTER TABLE drivers ADD COLUMN IF NOT EXISTS updated_at BIGINT DEFAULT 0"
         ];
         
         for (const migration of migrations) {
@@ -176,7 +175,6 @@ const isContentSafe = (text) => {
     return !BLOCK_LIST.some(phrase => lower.includes(phrase));
 };
 
-// Helper: Ensure values are null if undefined (prevents PG errors)
 const safeVal = (val) => val === undefined ? null : val;
 
 const uploadToWhatsApp = async (fileUrl, fileType) => {
@@ -307,11 +305,12 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
 
 const logSystemMessage = async (driverId, text, type = 'text', headerImg = null, footer = null, btns = null, tmpl = null) => {
     const msgId = `sys_${Date.now()}_${Math.random()}`;
+    const now = Date.now();
     await queryWithRetry(
         `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'system', $3, $4, $5, $6, $7, $8, $9)`, 
-        [msgId, driverId, text, Date.now(), type, safeVal(headerImg), safeVal(footer), btns ? JSON.stringify(btns) : null, safeVal(tmpl)]
+        [msgId, driverId, text, now, type, safeVal(headerImg), safeVal(footer), btns ? JSON.stringify(btns) : null, safeVal(tmpl)]
     );
-    await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text, Date.now(), driverId]);
+    await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2, updated_at = $2 WHERE id = $3', [text, now, driverId]);
 };
 
 // --- SCHEDULER ENGINE ---
@@ -367,7 +366,7 @@ const runScheduler = async () => {
                             ]
                         ).catch(e => console.error("Scheduler Log Error:", e.message));
 
-                        await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [`[Scheduled]: ${content.text || content.templateName}`, Date.now(), driverId]).catch(e => {});
+                        await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2, updated_at = $2 WHERE id = $3', [`[Scheduled]: ${content.text || content.templateName}`, Date.now(), driverId]).catch(e => {});
                     }
                 }
             }
@@ -384,16 +383,37 @@ setInterval(runScheduler, 30000);
 
 // --- ROUTES ---
 
+// 1. OPTIMIZED DRIVERS LIST (No Messages)
 router.get('/drivers', async (req, res) => {
     try {
         const result = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC', []);
-        const drivers = result.rows;
-        for (let d of drivers) {
-            const mRes = await queryWithRetry('SELECT * FROM messages WHERE driver_id = $1 ORDER BY timestamp ASC', [d.id]);
-            d.messages = mRes.rows;
-            d.documents = []; 
-        }
+        const drivers = result.rows.map(d => ({
+            ...d,
+            messages: [] // Send empty array to respect Type interface, fetch on demand
+        }));
         res.json(drivers);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 2. DELTA SYNC (Bandwidth Saver)
+router.get('/sync', async (req, res) => {
+    try {
+        const since = parseInt(req.query.since) || 0;
+        const result = await queryWithRetry('SELECT * FROM drivers WHERE updated_at > $1 ORDER BY updated_at DESC', [since]);
+        const drivers = result.rows.map(d => ({
+            ...d,
+            messages: [] // Lightweight
+        }));
+        res.json(drivers);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 3. FETCH MESSAGES ON DEMAND
+router.get('/drivers/:id/messages', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const mRes = await queryWithRetry('SELECT * FROM messages WHERE driver_id = $1 ORDER BY timestamp ASC', [id]);
+        res.json(mRes.rows);
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -403,11 +423,16 @@ router.patch('/drivers/:id', async (req, res) => {
         const updates = req.body;
         const keys = Object.keys(updates);
         if (keys.length === 0) return res.json({ success: true });
+        
+        // Add updated_at to the update
         const setClause = keys.map((k, i) => {
              const dbKey = k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
              return `${dbKey} = $${i+2}`;
-        }).join(', ');
+        }).join(', ') + `, updated_at = $${keys.length + 2}`;
+        
         const values = keys.map(k => updates[k]);
+        values.push(Date.now()); // Add timestamp value
+
         await queryWithRetry(`UPDATE drivers SET ${setClause} WHERE id = $1`, [id, ...values]);
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -448,13 +473,14 @@ router.post('/messages/send', async (req, res) => {
             else if (mediaUrl) type = mediaType || 'image';
             else if (options && options.length > 0) type = 'options';
 
+            const now = Date.now();
             try {
                 await queryWithRetry(`INSERT INTO messages (id, driver_id, sender, text, timestamp, type, image_url, header_image_url, footer_text, buttons, template_name) VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, $10)`, 
                     [
-                        `ag_${Date.now()}`, 
+                        `ag_${now}`, 
                         driverId, 
                         text, 
-                        Date.now(), 
+                        now, 
                         type, 
                         safeVal(mediaUrl), 
                         safeVal(headerImageUrl), 
@@ -463,7 +489,7 @@ router.post('/messages/send', async (req, res) => {
                         safeVal(templateName)
                     ]
                 );
-                await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [text || `[${type}]`, Date.now(), driverId]);
+                await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2, updated_at = $2 WHERE id = $3', [text || `[${type}]`, now, driverId]);
             } catch (dbErr) {
                 console.error("Message Sent but DB Save Failed:", dbErr.message);
                 return res.json({ success: true, warning: "Message sent but not logged" });
@@ -494,7 +520,7 @@ router.post('/bot-settings', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ... Media Routes (Unchanged) ...
+// ... Media Routes ...
 router.get('/media', async (req, res) => {
     try {
         const { path } = req.query;
@@ -693,28 +719,27 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
 
     let driver;
     const client = await pool.connect();
+    const now = Date.now();
     try {
         await client.query('BEGIN');
         
-        // --- IMPROVED PHONE MATCHING ---
-        // Match exact, with +, or without + to catch discrepancies
         let dRes = await client.query('SELECT * FROM drivers WHERE phone_number = $1 OR phone_number = $2', [from, '+' + from.replace('+', '')]);
         
         if (dRes.rows.length === 0) {
             const isActive = botSettings.isEnabled;
             const iRes = await client.query(
-                `INSERT INTO drivers (id, phone_number, name, source, status, last_message, last_message_time, current_bot_step_id, is_bot_active, is_human_mode)
-                VALUES ($1, $2, $3, 'WhatsApp', 'New', $4, $5, $6, $7, false) RETURNING *`,
-                [Date.now().toString(), from, name, msgBody, Date.now(), null, isActive]
+                `INSERT INTO drivers (id, phone_number, name, source, status, last_message, last_message_time, current_bot_step_id, is_bot_active, is_human_mode, updated_at)
+                VALUES ($1, $2, $3, 'WhatsApp', 'New', $4, $5, $6, $7, false, $5) RETURNING *`,
+                [now.toString(), from, name, msgBody, now, null, isActive]
             );
             driver = iRes.rows[0];
         } else {
             driver = dRes.rows[0];
-            await client.query('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [msgBody, Date.now(), driver.id]);
+            await client.query('UPDATE drivers SET last_message = $1, last_message_time = $2, updated_at = $2 WHERE id = $3', [msgBody, now, driver.id]);
         }
         await client.query(
             `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'driver', $3, $4, $5)`,
-            [`msg_${Date.now()}`, driver.id, msgBody, Date.now(), msgType]
+            [`msg_${now}`, driver.id, msgBody, now, msgType]
         );
         await client.query('COMMIT');
     } catch (e) { await client.query('ROLLBACK'); } finally { client.release(); }
@@ -728,7 +753,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
         
         const executeStep = async (step, targetId) => {
             if (step.delay && step.delay > 0) {
-                // Schedule Future Message
                 const scheduledTime = Date.now() + (step.delay * 1000);
                 await queryWithRetry(
                     "INSERT INTO scheduled_messages (id, target_ids, type, content, scheduled_time, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
@@ -743,7 +767,6 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
                     }), scheduledTime, Date.now()]
                 );
             } else {
-                // Send Immediately
                 const sent = await sendWhatsAppMessage(
                     from, 
                     step.message, 
@@ -763,7 +786,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
         if (!currentStep && botSettings.steps.length > 0) {
             const entryStep = botSettings.steps.find(s => s.id === botSettings.entryPointId) || botSettings.steps[0];
             if (entryStep) {
-                await queryWithRetry(`UPDATE drivers SET current_bot_step_id = $1, is_bot_active = TRUE WHERE id = $2`, [entryStep.id, driver.id]);
+                await queryWithRetry(`UPDATE drivers SET current_bot_step_id = $1, is_bot_active = TRUE, updated_at = $3 WHERE id = $2`, [entryStep.id, driver.id, Date.now()]);
                 await executeStep(entryStep, driver.id);
             }
         } else if (currentStep) {
@@ -777,12 +800,12 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
                  await queryWithRetry(`UPDATE drivers SET ${currentStep.saveToField === 'name' ? 'name' : currentStep.saveToField} = $1 WHERE id = $2`, [msgBody, driver.id]);
             }
             if (nextId && nextId !== 'END' && nextId !== 'AI_HANDOFF') {
-                await queryWithRetry(`UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2`, [nextId, driver.id]);
+                await queryWithRetry(`UPDATE drivers SET current_bot_step_id = $1, updated_at = $3 WHERE id = $2`, [nextId, driver.id, Date.now()]);
                 const nextStep = botSettings.steps.find(s => s.id === nextId);
                 if (nextStep) await executeStep(nextStep, driver.id);
             } else if (nextId === 'END' || nextId === 'AI_HANDOFF') {
-                if (botSettings.shouldRepeat) await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = TRUE WHERE id = $1`, [driver.id]);
-                else await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = FALSE WHERE id = $1`, [driver.id]);
+                if (botSettings.shouldRepeat) await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = TRUE, updated_at = $2 WHERE id = $1`, [driver.id, Date.now()]);
+                else await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = FALSE, updated_at = $2 WHERE id = $1`, [driver.id, Date.now()]);
                 await sendWhatsAppMessage(from, "Thank you! We have received your details.");
             }
         }
@@ -791,9 +814,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
 
 app.use('/api', router);
 
-// --- ROBUST WEBHOOK HANDLER ---
 app.get('/webhook', (req, res) => {
-    // Basic verification for Meta
     if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === 'uber_fleet_verify_token') {
         res.send(req.query['hub.challenge']);
     } else {
@@ -802,73 +823,33 @@ app.get('/webhook', (req, res) => {
 });
 
 app.post('/webhook', async (req, res) => {
-    // LOG RAW PAYLOAD FOR DEBUGGING
-    // This is crucial to see if Meta is actually hitting the server
     console.log('Incoming Webhook Payload:', JSON.stringify(req.body, null, 2));
-
     try {
         const entry = req.body.entry?.[0];
         const changes = entry?.changes?.[0];
         const value = changes?.value;
-        
         if (!value) return res.sendStatus(200);
 
-        // Handle Messages
         if (value.messages?.[0]) {
             const msg = value.messages[0];
             const contact = value.contacts?.[0];
-            
             let text = "";
-            
-            // Extract content based on message type
             switch (msg.type) {
-                case 'text':
-                    text = msg.text?.body || "";
-                    break;
-                case 'interactive':
-                    text = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || "";
-                    break;
-                case 'button':
-                    text = msg.button?.text || "";
-                    break;
-                case 'image':
-                    text = msg.caption ? `[Image]: ${msg.caption}` : "[Image]";
-                    break;
-                case 'video':
-                    text = msg.caption ? `[Video]: ${msg.caption}` : "[Video]";
-                    break;
-                case 'document':
-                    text = msg.caption ? `[Document]: ${msg.caption}` : "[Document]";
-                    break;
-                case 'audio':
-                    text = "[Audio]";
-                    break;
-                case 'location':
-                    text = "[Location Shared]";
-                    break;
-                default:
-                    text = `[${msg.type} Message]`;
+                case 'text': text = msg.text?.body || ""; break;
+                case 'interactive': text = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || ""; break;
+                case 'button': text = msg.button?.text || ""; break;
+                case 'image': text = msg.caption ? `[Image]: ${msg.caption}` : "[Image]"; break;
+                case 'video': text = msg.caption ? `[Video]: ${msg.caption}` : "[Video]"; break;
+                case 'document': text = msg.caption ? `[Document]: ${msg.caption}` : "[Document]"; break;
+                case 'location': text = "[Location Shared]"; break;
+                default: text = `[${msg.type} Message]`;
             }
-
-            // Ensure we never pass empty string if we can avoid it
             if (!text.trim()) text = `[${msg.type}]`;
-
             const senderName = contact?.profile?.name || "Unknown";
-            const senderPhone = msg.from; // This is the WhatsApp ID (Phone Number)
-
+            const senderPhone = msg.from; 
             await processIncomingMessage(senderPhone, senderName, text, msg.type);
         }
-        
-        // Handle Status Updates (Sent/Delivered/Read) - Optional but good for logs
-        if (value.statuses?.[0]) {
-             const s = value.statuses[0];
-             console.log(`>> Message Status Update: ${s.status} (Recipient: ${s.recipient_id})`);
-        }
-
-    } catch (error) {
-        console.error("Webhook Error:", error);
-    }
-
+    } catch (error) { console.error("Webhook Error:", error); }
     res.sendStatus(200);
 });
 
