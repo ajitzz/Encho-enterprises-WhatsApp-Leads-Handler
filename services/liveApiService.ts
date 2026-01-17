@@ -10,7 +10,6 @@ const getBaseUrl = () => {
 };
 
 const API_BASE_URL = getBaseUrl();
-let LOCAL_DATA_VERSION = 0;
 
 const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, delay = 500): Promise<Response> => {
     try {
@@ -48,32 +47,10 @@ export const liveApiService = {
     }
   },
 
-  // OPTIMIZED: Fetch only new messages since timestamp
-  getDriverMessages: async (driverId: string, since?: number) => {
-    let url = `${API_BASE_URL}/api/drivers/${driverId}/messages`;
-    if (since) url += `?since=${since}`;
-    
-    const response = await fetchWithRetry(url);
-    if (!response.ok) throw new Error('Failed to fetch messages');
-    return await response.json();
-  },
-
-  // SMART POLLING: DB-Backed Version Check
   subscribeToUpdates: (callback: () => void) => {
     const interval = setInterval(async () => {
-        try { 
-            // Lightweight check (20 bytes)
-            const res = await fetch(`${API_BASE_URL}/api/sync/heartbeat`);
-            if (res.ok) {
-                const { version } = await res.json();
-                // If version is different (or greater), we fetch fresh data
-                if (version > LOCAL_DATA_VERSION) {
-                    LOCAL_DATA_VERSION = version;
-                    await callback();
-                }
-            }
-        } catch(e) {}
-    }, 5000); // Check every 5s
+        try { await callback(); } catch(e) {}
+    }, 2000); 
     return () => clearInterval(interval);
   },
 
@@ -106,7 +83,7 @@ export const liveApiService = {
           headerImageUrl: attachments?.headerImageUrl,
           footerText: attachments?.footerText,
           buttons: attachments?.buttons,
-          templateName: attachments?.templateName
+          templateName: attachments?.templateName // Pass template name
       })
     });
     if (!response.ok) throw new Error('Failed to send message');

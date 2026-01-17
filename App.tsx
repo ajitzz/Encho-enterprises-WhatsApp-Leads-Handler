@@ -89,7 +89,7 @@ export default function App() {
            addNotification({
              type: 'info',
              title: 'Connected to Live Server',
-             message: 'Polling active (Optimized Mode)'
+             message: 'Polling active (2s interval)'
            });
          } catch (e) {
              addNotification({
@@ -105,18 +105,11 @@ export default function App() {
     return () => unsubscribe();
   }, [dataSource, activeTab, isShowcaseMode]); 
 
-  // Sync selected driver with list updates without wiping chat
   useEffect(() => {
     if (selectedDriver && dataSource === 'live') {
       const updated = drivers.find(d => d.id === selectedDriver.id);
       if (updated && updated !== selectedDriver) {
-        // IMPORTANT: The list endpoint returns empty messages array for performance.
-        // We preserve existing messages to avoid flickering/wiping the active chat.
-        // ChatDrawer fetches its own messages independently in live mode.
-        setSelectedDriver({
-            ...updated,
-            messages: selectedDriver.messages 
-        });
+        setSelectedDriver(updated);
       }
     }
   }, [drivers, selectedDriver, dataSource]);
@@ -151,7 +144,6 @@ export default function App() {
     } else {
         try {
             await liveApiService.updateDriver(id, updates);
-            // Optimistic update
             const updated = drivers.map(d => d.id === id ? { ...d, ...updates } : d);
             setDrivers(updated);
             if (selectedDriver && selectedDriver.id === id) {
@@ -189,12 +181,18 @@ export default function App() {
     } else {
         try {
             await liveApiService.sendMessage(selectedDriver.id, text);
-            // We update last message snippet, but NOT the full message list here.
-            // ChatDrawer handles the list update via local state.
+            const msg: Message = {
+                id: Date.now().toString(),
+                sender: 'agent',
+                text: text,
+                timestamp: Date.now(),
+                type: 'text'
+            };
             const updatedDriver = {
                 ...selectedDriver,
                 lastMessage: text,
-                lastMessageTime: Date.now()
+                lastMessageTime: Date.now(),
+                messages: [...selectedDriver.messages, msg]
             };
             setSelectedDriver(updatedDriver);
             setDrivers(prev => prev.map(d => d.id === selectedDriver.id ? updatedDriver : d));
@@ -232,7 +230,7 @@ export default function App() {
     }
   };
 
-  // Legacy Bulk Support
+  // Replaced with dedicated handler in LeadManager, but kept for Dashboard compatibility or legacy
   const handleBulkSendLegacy = () => {
     if (dataSource === 'mock') {
         selectedBulkIds.forEach(id => {
@@ -256,22 +254,25 @@ export default function App() {
     }
   };
   
+  // NEW: LeadManager Callback
   const handleBulkSendDirect = async (ids: string[], message: string, mediaUrl?: string, mediaType?: string, options?: string[], templateName?: string, scheduledTime?: number) => {
       if (dataSource === 'mock') {
+          // Mock doesn't support scheduling UI feedback well, just send immediately
           ids.forEach(id => {
               mockBackend.addMessage(id, {
                   id: Date.now().toString() + id,
                   sender: 'agent',
                   text: message,
-                  imageUrl: mediaUrl, 
+                  imageUrl: mediaUrl, // Used for any media in mock
                   options: options,
                   timestamp: Date.now(),
                   type: templateName ? 'template' : (mediaType ? (mediaType as any) : options ? 'options' : 'text'),
-                  templateName: templateName 
+                  templateName: templateName // Mock support
               });
           });
       } else {
           if (scheduledTime && scheduledTime > Date.now()) {
+              // SCHEDULE MODE
               try {
                   await fetch('/api/messages/schedule', {
                       method: 'POST',
@@ -292,9 +293,13 @@ export default function App() {
               } catch(e) { console.error(e); }
           }
 
+          // IMMEDIATE MODE
+          let successCount = 0;
           for (const id of ids) {
               try {
                   await liveApiService.sendMessage(id, message, { mediaUrl, mediaType, options, templateName });
+                  successCount++;
+                  // Small delay to prevent rate limit
                   await new Promise(r => setTimeout(r, 200));
               } catch(e) { console.error(e); }
           }
@@ -349,6 +354,7 @@ export default function App() {
                  </div>
                  
                  <div className="flex items-center gap-2">
+                   {/* BOT REPEAT TOGGLE */}
                    {botSettings && (
                        <button
                            onClick={handleToggleRepeat}
@@ -462,7 +468,7 @@ export default function App() {
         </div>
         )}
         
-        {/* LEAD MANAGER TAB */}
+        {/* LEAD MANAGER TAB (Replaces Old LeadTable) */}
         {activeTab === 'leads' && (
              <div className="p-4 h-screen bg-gray-50">
                  <LeadManager 
@@ -507,7 +513,6 @@ export default function App() {
           onClose={() => setSelectedDriver(null)}
           onSendMessage={handleSendMessage}
           onUpdateDriver={handleUpdateDriver}
-          isLiveMode={dataSource === 'live'}
         />
         
         {dataSource === 'live' && <AssistantChat />}
