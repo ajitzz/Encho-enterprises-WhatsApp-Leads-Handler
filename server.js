@@ -859,73 +859,13 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
 
 app.use('/api', router);
 app.get('/webhook', (req, res) => res.send(req.query['hub.challenge']));
-
-// --- UPDATED WEBHOOK HANDLER ---
 app.post('/webhook', async (req, res) => {
-    try {
-        const entry = req.body.entry?.[0];
-        const changes = entry?.changes?.[0];
-        const value = changes?.value;
-
-        if (!value) return res.sendStatus(200);
-
-        // 1. Acknowledge Status Updates but don't process
-        if (value.statuses) return res.sendStatus(200);
-
-        // 2. Handle Incoming Messages
-        if (value.messages && value.messages.length > 0) {
-            const msg = value.messages[0];
-            const contact = value.contacts?.[0];
-            
-            const from = msg.from; 
-            const name = contact?.profile?.name || from;
-            const type = msg.type;
-            
-            let textBody = "";
-
-            // Robust Extraction of all Types
-            switch (type) {
-                case 'text':
-                    textBody = msg.text?.body;
-                    break;
-                case 'interactive':
-                    textBody = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title;
-                    break;
-                case 'image':
-                    textBody = msg.image?.caption || "📷 [Image]";
-                    break;
-                case 'video':
-                    textBody = msg.video?.caption || "🎥 [Video]";
-                    break;
-                case 'document':
-                    textBody = msg.document?.caption || msg.document?.filename || "📄 [Document]";
-                    break;
-                case 'audio':
-                    textBody = "🎤 [Audio]";
-                    break;
-                case 'sticker':
-                    textBody = "👾 [Sticker]";
-                    break;
-                case 'location':
-                    textBody = "📍 [Location]";
-                    break;
-                case 'button': // Legacy
-                    textBody = msg.button?.text;
-                    break;
-                default:
-                    textBody = `[${type}]`;
-            }
-
-            if (!textBody) textBody = "[Media/Unknown]";
-
-            console.log(`[Webhook] From ${from}: ${textBody}`);
-            
-            await processIncomingMessage(from, name, textBody, type);
-        }
-    } catch (e) {
-        console.error("Webhook Error:", e);
+    const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const contact = req.body.entry?.[0]?.changes?.[0]?.value?.contacts?.[0];
+    if (msg) {
+        let text = msg.text?.body || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || "";
+        await processIncomingMessage(msg.from, contact?.profile?.name || "Unknown", text, msg.type);
     }
-    
     res.sendStatus(200);
 });
 

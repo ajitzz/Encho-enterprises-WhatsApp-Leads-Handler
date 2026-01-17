@@ -3,20 +3,6 @@
 
 To make the automation work, you must connect your local computer to the Internet so Meta (Facebook) can send you messages.
 
-### 🛑 CRITICAL: Enable "Live Mode" for Real Users
-
-If test messages work but **real WhatsApp users are ignored**:
-
-1.  Go to **[Meta for Developers](https://developers.facebook.com)**.
-2.  Open your App ("Encho Enterprises").
-3.  Look at the **Top Right Corner** of the dashboard.
-4.  You will see a toggle switch: **App Mode**.
-5.  If it says **Development**, you can only message specific "Tester" numbers.
-6.  **Switch it to LIVE**.
-    *   *Note: You may need to provide a Privacy Policy URL in Settings > Basic to enable Live Mode.*
-
----
-
 ### 🛑 CRITICAL: Disable "Replace this sample message"
 
 If you see a default "Replace this sample message" reply, it is coming from **Meta Business Suite Automations**, not your code.
