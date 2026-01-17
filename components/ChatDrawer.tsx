@@ -13,20 +13,64 @@ interface ChatDrawerProps {
   onClose: () => void;
   onSendMessage: (text: string) => void;
   onUpdateDriver: (id: string, updates: Partial<Driver>) => void;
+  isLiveMode?: boolean;
 }
 
-export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver }) => {
+export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver, isLiveMode = false }) => {
   const [replyText, setReplyText] = useState('');
   const [localNotes, setLocalNotes] = useState('');
   const [isTemplateMode, setIsTemplateMode] = useState(false);
   const [templateName, setTemplateName] = useState('');
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
+  const [localMessages, setLocalMessages] = useState<Message[]>([]);
+  
+  // Track last sync time to request delta updates
+  const lastSyncTimeRef = useRef<number>(0);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const messages = driver && Array.isArray(driver.messages) ? driver.messages : [];
+  // OPTIMIZATION: Use local messages state to handle lazy loaded data
+  const messages = isLiveMode ? localMessages : (driver && Array.isArray(driver.messages) ? driver.messages : []);
   const documents = driver && Array.isArray(driver.documents) ? driver.documents : [];
+
+  // Poll for messages only when drawer is OPEN
+  useEffect(() => {
+    // Reset state on driver change
+    setLocalMessages([]);
+    lastSyncTimeRef.current = 0;
+    
+    if (!driver || !isLiveMode) return;
+    
+    const fetchMessages = async () => {
+        try {
+            // INCREMENTAL FETCH: Only ask for messages newer than last sync
+            const newMsgs = await liveApiService.getDriverMessages(driver.id, lastSyncTimeRef.current);
+            
+            if (newMsgs && newMsgs.length > 0) {
+                // Update cursor
+                const lastMsg = newMsgs[newMsgs.length - 1];
+                if (lastMsg && lastMsg.timestamp) {
+                    lastSyncTimeRef.current = Number(lastMsg.timestamp);
+                }
+
+                setLocalMessages(prev => {
+                    // Prevent duplicates via ID check
+                    const existingIds = new Set(prev.map(m => m.id));
+                    const uniqueNew = newMsgs.filter((m: Message) => !existingIds.has(m.id));
+                    if (uniqueNew.length === 0) return prev;
+                    return [...prev, ...uniqueNew];
+                });
+            }
+        } catch(e) {}
+    };
+
+    fetchMessages(); // Initial fetch (get all)
+    
+    // High frequency poll ONLY for the active chat
+    const interval = setInterval(fetchMessages, 3000);
+    return () => clearInterval(interval);
+  }, [driver?.id, isLiveMode]);
 
   useEffect(() => {
     if (messagesEndRef.current) messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -64,7 +108,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                 lastMessageTime: Date.now() 
             });
             
-            // Clean up UI
             setReplyText('');
             setTemplateName('');
             setIsTemplateMode(false);
@@ -84,6 +127,22 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                 lastMessage: `[Template: ${templateName}]`, 
                 lastMessageTime: Date.now() 
             });
+            
+            // Optimistic update for Live Mode
+            if (isLiveMode) {
+                 const newMsg: Message = {
+                    id: 'temp_' + Date.now(),
+                    sender: 'agent',
+                    text: `[Template: ${templateName}]`,
+                    timestamp: Date.now(),
+                    type: 'template'
+                 };
+                 // Add to local state manually (next poll will sync real ID)
+                 setLocalMessages(prev => [...prev, newMsg]);
+                 // Bump timestamp slightly to avoid re-fetching this specific one immediately if clock skews
+                 lastSyncTimeRef.current = Math.max(lastSyncTimeRef.current, Date.now()); 
+            }
+
             setReplyText('');
             setTemplateName('');
             setIsTemplateMode(false);
@@ -94,6 +153,18 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     // 3. Standard Text Path
     else {
         onSendMessage(replyText);
+        if (isLiveMode) {
+             // We need to manually add it to local state since App.tsx logic doesn't touch localMessages
+             const newMsg: Message = {
+                id: 'temp_' + Date.now(),
+                sender: 'agent',
+                text: replyText,
+                timestamp: Date.now(),
+                type: 'text'
+             };
+             setLocalMessages(prev => [...prev, newMsg]);
+             lastSyncTimeRef.current = Math.max(lastSyncTimeRef.current, Date.now());
+        }
         setReplyText('');
     }
   };
