@@ -33,7 +33,6 @@ app.use((req, res, next) => {
 const PORT = process.env.PORT || 3001;
 let META_API_TOKEN = process.env.META_API_TOKEN || "EAAkr7Y9S2qYBQfHTNZASIugAzOi8b2MZCBct4z4jZBHSmQ2KGlFduuDQQGEYC9NRDtZBUdhMPdeJ06OjYUiJYGfFkZCAxzyh4TdidN7ZA10K3XPOVEiQh01jo22xLsQjXrEtMHc5ZCHZBbRZAyA5d0pl26Jsg3IuNKY272QYmqEjHghf11OKJmbUZBfJLe5EvHzl48gAZDZD"; 
 let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "982841698238647"; 
-const VERIFY_TOKEN = "uber_fleet_verify_token";
 
 // CACHE: In-memory settings only (Drivers handled via DB Heartbeat now)
 let CACHED_BOT_SETTINGS = null;
@@ -404,24 +403,24 @@ setInterval(runScheduler, 30000);
 
 // --- ROUTES ---
 
-// Root route for health check
-router.get('/', (req, res) => {
-    res.send("Uber Fleet Recruiter API is Running. Configure Webhook at /webhook");
-});
-
-// 2. OPTIMIZED HEARTBEAT
+// 2. OPTIMIZED HEARTBEAT: Returns latest timestamp from DB. 
+// Uses "MAX" which is extremely cheap for the DB (Index scan) vs fetching rows.
 router.get('/sync/heartbeat', async (req, res) => {
     try {
         const result = await queryWithRetry('SELECT MAX(last_message_time) as ver FROM drivers');
         const ver = result.rows[0]?.ver || 0;
+        // Return simple JSON, 20 bytes max.
         res.json({ version: Number(ver) });
     } catch(e) {
+        // Fallback
         res.json({ version: Date.now() });
     }
 });
 
 router.get('/drivers', async (req, res) => {
     try {
+        // We only fetch basic info for the list to save bandwidth.
+        // The frontend already initializes messages as []
         const result = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC', []);
         const drivers = result.rows.map(d => ({
             ...d,
@@ -432,7 +431,7 @@ router.get('/drivers', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 3. INCREMENTAL MESSAGE FETCH
+// 3. INCREMENTAL MESSAGE FETCH: Support 'since' parameter
 router.get('/drivers/:id/messages', async (req, res) => {
     try {
         const { id } = req.params;
@@ -859,97 +858,14 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
 };
 
 app.use('/api', router);
-
-// --- UPDATED WEBHOOK HANDLERS ---
-
-// GET: Verify Webhook (Required by Meta)
-app.get('/webhook', (req, res) => {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
-
-    if (mode && token) {
-        if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-            console.log('WEBHOOK_VERIFIED');
-            res.status(200).send(challenge);
-        } else {
-            console.error(`Verification Failed. Expected ${VERIFY_TOKEN} but got ${token}`);
-            res.sendStatus(403);
-        }
-    } else {
-        res.sendStatus(400);
-    }
-});
-
-// POST: Handle Incoming Messages
+app.get('/webhook', (req, res) => res.send(req.query['hub.challenge']));
 app.post('/webhook', async (req, res) => {
-    try {
-        const body = req.body;
-        console.log("Incoming Webhook Payload:", JSON.stringify(body, null, 2));
-
-        const entry = body.entry?.[0];
-        const changes = entry?.changes?.[0];
-        const value = changes?.value;
-
-        if (!value) return res.sendStatus(200);
-
-        // 1. Acknowledge Status Updates but don't process
-        if (value.statuses) return res.sendStatus(200);
-
-        // 2. Handle Incoming Messages
-        if (value.messages && value.messages.length > 0) {
-            const msg = value.messages[0];
-            const contact = value.contacts?.[0];
-            
-            const from = msg.from; 
-            const name = contact?.profile?.name || from;
-            const type = msg.type;
-            
-            let textBody = "";
-
-            // Robust Extraction of all Types
-            switch (type) {
-                case 'text':
-                    textBody = msg.text?.body;
-                    break;
-                case 'interactive':
-                    textBody = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title;
-                    break;
-                case 'image':
-                    textBody = msg.image?.caption || "📷 [Image]";
-                    break;
-                case 'video':
-                    textBody = msg.video?.caption || "🎥 [Video]";
-                    break;
-                case 'document':
-                    textBody = msg.document?.caption || msg.document?.filename || "📄 [Document]";
-                    break;
-                case 'audio':
-                    textBody = "🎤 [Audio]";
-                    break;
-                case 'sticker':
-                    textBody = "👾 [Sticker]";
-                    break;
-                case 'location':
-                    textBody = "📍 [Location]";
-                    break;
-                case 'button': // Legacy
-                    textBody = msg.button?.text;
-                    break;
-                default:
-                    textBody = `[${type}]`;
-            }
-
-            if (!textBody) textBody = "[Media/Unknown]";
-
-            console.log(`[Webhook] From ${from}: ${textBody}`);
-            
-            await processIncomingMessage(from, name, textBody, type);
-        }
-    } catch (e) {
-        console.error("Webhook Error:", e);
+    const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const contact = req.body.entry?.[0]?.changes?.[0]?.value?.contacts?.[0];
+    if (msg) {
+        let text = msg.text?.body || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || "";
+        await processIncomingMessage(msg.from, contact?.profile?.name || "Unknown", text, msg.type);
     }
-    
     res.sendStatus(200);
 });
 
