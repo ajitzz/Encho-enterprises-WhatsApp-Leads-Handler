@@ -1,11 +1,4 @@
 
-
-
-
-
-
-
-
 import { Driver, BotSettings, MessageButton, Message, DriverDocument } from '../types';
 
 // Determine Base URL
@@ -23,6 +16,7 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
         const response = await fetch(url, options);
         if (!response.ok) {
              // CRITICAL FIX: Do not retry POST/PUT/DELETE requests to avoid duplication
+             // If the server returns 500 for a POST, retrying immediately often causes double-sends in non-idempotent systems.
              const method = options?.method?.toUpperCase() || 'GET';
              if (method !== 'GET' && method !== 'HEAD') {
                  // Parse error immediately and throw
@@ -57,7 +51,7 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
         }
         return response;
     } catch (err: any) {
-        // Only retry network errors for idempotent requests
+        // Only retry network errors for idempotent requests (GET)
         const method = options?.method?.toUpperCase() || 'GET';
         if (retries > 0 && !err.message.includes('4') && (method === 'GET' || method === 'HEAD')) { 
             await new Promise(res => setTimeout(res, delay));
@@ -155,7 +149,7 @@ export const liveApiService = {
   },
 
   sendMessage: async (driverId: string, text: string, attachments?: { mediaUrl?: string, mediaType?: string, options?: string[], headerImageUrl?: string, footerText?: string, buttons?: MessageButton[], templateName?: string }) => {
-    // Generate Idempotency Key
+    // Generate Idempotency Key (Unique per message attempt)
     const clientMessageId = `web_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
     const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/send`, {
@@ -164,7 +158,7 @@ export const liveApiService = {
       body: JSON.stringify({ 
           driverId, 
           text,
-          clientMessageId, // Send unique ID
+          clientMessageId, // IDEMPOTENCY KEY
           mediaUrl: attachments?.mediaUrl,
           mediaType: attachments?.mediaType,
           options: attachments?.options,
@@ -311,13 +305,11 @@ export const liveApiService = {
     return await response.json();
   },
   
-  // NEW: System Settings
   getSystemSettings: async (): Promise<any> => {
       try {
           const response = await fetchWithRetry(`${API_BASE_URL}/api/system/settings`);
           return await response.json();
       } catch (e) {
-          // Default fallback
           return { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true };
       }
   },

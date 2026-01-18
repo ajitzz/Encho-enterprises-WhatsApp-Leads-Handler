@@ -1,5 +1,4 @@
 
-
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { 
   ReactFlow, 
@@ -336,7 +335,15 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                                             value={btn.payload || ''}
                                             onChange={(e) => updateButton(i, 'payload', e.target.value)}
                                             className="w-full bg-white border border-gray-200 text-xs rounded p-1 outline-none"
-                                            placeholder={btn.type === 'url' ? 'https://...' : '+12345...'}
+                                            placeholder={btn.type === 'url' ? 'https://...' : 'Payload/ID...'}
+                                        />
+                                    )}
+                                     {btn.type === 'reply' && (
+                                        <input 
+                                            value={btn.payload || ''}
+                                            onChange={(e) => updateButton(i, 'payload', e.target.value)}
+                                            className="w-full bg-white border border-gray-200 text-xs rounded p-1 outline-none"
+                                            placeholder="Optional ID (e.g. btn_yes)"
                                         />
                                     )}
                                 </div>
@@ -473,7 +480,12 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     if (btn.type === 'reply') {
                         const handleId = `btn-${idx}`;
                         const edge = outgoingEdges.find(e => e.sourceHandle === handleId);
-                        if (edge) routes[btn.title] = edge.target;
+                        // Fix: Routing Key Priority -> Payload > Title
+                        // This matches backend logic to prefer IDs over text
+                        if (edge) {
+                            const key = btn.payload || btn.title;
+                            routes[key] = edge.target;
+                        }
                     }
                 });
             }
@@ -489,12 +501,9 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             
             const { icon, ...cleanData } = data;
             
-            // CLEANING DATA TO ENSURE CORRECT SERVER PROCESSING
-            // If it's a simple text message, remove interaction triggers so server auto-advances
             if (cleanData.label === 'Text Message') {
                 delete cleanData.options;
                 delete cleanData.saveToField;
-                // keep delay
             }
 
             compiledSteps.push({
