@@ -29,6 +29,7 @@ app.use((req, res, next) => {
 const PORT = process.env.PORT || 3001;
 let META_API_TOKEN = process.env.META_API_TOKEN || "EAAkr7Y9S2qYBQfHTNZASIugAzOi8b2MZCBct4z4jZBHSmQ2KGlFduuDQQGEYC9NRDtZBUdhMPdeJ06OjYUiJYGfFkZCAxzyh4TdidN7ZA10K3XPOVEiQh01jo22xLsQjXrEtMHc5ZCHZBbRZAyA5d0pl26Jsg3IuNKY272QYmqEjHghf11OKJmbUZBfJLe5EvHzl48gAZDZD"; 
 let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "982841698238647"; 
+let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
 const s3Client = new S3Client({
     region: process.env.AWS_REGION || 'us-east-1',
@@ -164,6 +165,7 @@ const ensureDbReady = async (req, res, next) => {
 };
 
 app.use('/api', ensureDbReady);
+app.use('/webhook', ensureDbReady);
 
 let activeS3Transfers = 0;
 let activeWhatsAppUploads = 0;
@@ -815,7 +817,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
 app.use('/api', router);
 
 app.get('/webhook', (req, res) => {
-    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === 'uber_fleet_verify_token') {
+    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
         res.send(req.query['hub.challenge']);
     } else {
         res.sendStatus(400);
