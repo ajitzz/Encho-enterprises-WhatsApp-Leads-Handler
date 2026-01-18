@@ -77,6 +77,19 @@ const queryWithRetry = async (text, params, retries = 3) => {
     }
 };
 
+// --- HELPER: System Settings ---
+const getSystemSetting = async (key) => {
+    try {
+        const res = await queryWithRetry('SELECT value FROM system_settings WHERE key = $1', [key]);
+        if (res.rows.length > 0) return res.rows[0].value === 'true';
+        // Default values if not set
+        return true; 
+    } catch (e) {
+        console.error(`Failed to fetch setting ${key}:`, e.message);
+        return true; // Fail open (safe default) or closed depending on preference, here true to keep running
+    }
+};
+
 // --- HELPER: Validate Meta Credentials ---
 const validateMetaCredentials = async (phoneId, token) => {
     try {
@@ -218,6 +231,11 @@ const initDB = async () => {
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at BIGINT
+            );
             CREATE TABLE IF NOT EXISTS files (
                 id TEXT PRIMARY KEY,
                 filename TEXT,
@@ -256,6 +274,16 @@ const initDB = async () => {
             await queryWithRetry(migration, []);
         }
         
+        // --- INITIALIZE DEFAULT SETTINGS ---
+        const defaultSettings = {
+            'webhook_ingest_enabled': 'true',
+            'automation_enabled': 'true',
+            'sending_enabled': 'true'
+        };
+        for (const [k, v] of Object.entries(defaultSettings)) {
+            await queryWithRetry(`INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, [k, v, Date.now()]);
+        }
+
         // --- INITIALIZE DEFAULT BOT SETTINGS ---
         await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT DO NOTHING`, [JSON.stringify(DEFAULT_BOT_FLOW)]);
 
@@ -338,6 +366,13 @@ const uploadToWhatsApp = async (fileUrl, fileType) => {
 };
 
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image', headerImageUrl = null, footerText = null, buttons = null) => {
+   // --- KILL SWITCH CHECK ---
+   const sendingEnabled = await getSystemSetting('sending_enabled');
+   if (!sendingEnabled) {
+       console.warn(`[System] KILL SWITCH ACTIVE: Blocked outbound message to ${to}`);
+       return { success: false, error: "BLOCKED: Sending disabled by System Kill Switch" };
+   }
+
    if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
        console.error("[Meta] Missing credentials");
        return { success: false, error: "Server missing Meta credentials" };
@@ -472,6 +507,9 @@ const logSystemMessage = async (driverId, text, type = 'text', headerImg = null,
 const runScheduler = async () => {
     if (!isDbInitialized) return;
     try {
+        const sendingEnabled = await getSystemSetting('sending_enabled');
+        if (!sendingEnabled) return; // Kill switch for scheduler
+
         const now = Date.now();
         // Fetch tasks ready to process (pending and time passed)
         const res = await queryWithRetry(
@@ -540,6 +578,30 @@ const runScheduler = async () => {
 setInterval(runScheduler, 5000); 
 
 // --- ROUTES ---
+
+router.get('/system/settings', async (req, res) => {
+    try {
+        const resDb = await queryWithRetry('SELECT key, value FROM system_settings', []);
+        const settings = {};
+        resDb.rows.forEach(r => settings[r.key] = r.value === 'true');
+        res.json(settings);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/system/settings', async (req, res) => {
+    try {
+        const { settings } = req.body; // { webhook_ingest_enabled: true, ... }
+        const now = Date.now();
+        for (const [key, val] of Object.entries(settings)) {
+            await queryWithRetry(
+                `INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, $3) 
+                 ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = $3`, 
+                [key, String(val), now]
+            );
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // 1. OPTIMIZED DRIVERS LIST (No Messages)
 router.get('/drivers', async (req, res) => {
@@ -963,6 +1025,13 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
 
     if (!driver) return; // Guard against db failure
 
+    // --- AUTOMATION KILL SWITCH ---
+    const automationEnabled = await getSystemSetting('automation_enabled');
+    if (!automationEnabled) {
+        console.log('[System] AUTOMATION DISABLED. Skipping bot logic for', from);
+        return;
+    }
+
     if (driver.is_human_mode) {
         console.log(`[Bot] Skipped: ${from} is in Human Mode`);
         return;
@@ -1029,7 +1098,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
                 if (botSettings.shouldRepeat) {
                     await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = TRUE, updated_at = $2 WHERE id = $1`, [driverId, Date.now()]);
                 } else {
-                    await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = FALSE, updated_at = $2 WHERE id = $1`, [driver.id, Date.now()]);
+                    await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = FALSE, updated_at = $2 WHERE id = $1`, [driverId, Date.now()]);
                 }
                 if (step.nextStepId !== 'END' && step.nextStepId !== 'AI_HANDOFF') {
                     await sendWhatsAppMessage(from, "Thank you! Application complete.");
@@ -1098,6 +1167,14 @@ app.post('/webhook', async (req, res) => {
     
     // FAIL-SAFE: Ensure DB is ready for this webhook request specifically
     await initDB(); 
+
+    // --- WEBHOOK KILL SWITCH ---
+    const ingestEnabled = await getSystemSetting('webhook_ingest_enabled');
+    if (!ingestEnabled) {
+        console.log('[System] INGEST DISABLED. Dropping inbound request.');
+        // Return 200 to acknowledge Meta so they don't retry, but process nothing
+        return res.sendStatus(200);
+    }
 
     try {
         const entry = req.body.entry?.[0];

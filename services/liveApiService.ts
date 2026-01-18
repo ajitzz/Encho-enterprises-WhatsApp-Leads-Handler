@@ -1,6 +1,7 @@
 
 
 
+
 import { Driver, BotSettings, MessageButton, Message } from '../types';
 
 // Determine Base URL
@@ -266,6 +267,26 @@ export const liveApiService = {
       body: JSON.stringify(credentials)
     });
     return await response.json();
+  },
+  
+  // NEW: System Settings
+  getSystemSettings: async (): Promise<any> => {
+      try {
+          const response = await fetchWithRetry(`${API_BASE_URL}/api/system/settings`);
+          return await response.json();
+      } catch (e) {
+          // Default fallback
+          return { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true };
+      }
+  },
+
+  updateSystemSettings: async (settings: any) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/system/settings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ settings })
+      });
+      return await response.json();
   },
   
   sendAssistantMessage: async (message: string, history: any[]) => {
