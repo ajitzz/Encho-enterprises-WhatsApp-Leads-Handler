@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, CheckCircle, AlertCircle, Loader2, Globe, Shield, Key, Smartphone, Lock } from 'lucide-react';
+import { X, CheckCircle, AlertCircle, Loader2, Globe, Shield, Key, Smartphone, Lock, HelpCircle } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface WebhookConfigModalProps {
@@ -108,7 +108,9 @@ export const WebhookConfigModal: React.FC<WebhookConfigModalProps> = ({ onClose,
         {activeTab === 'creds' ? (
              <form onSubmit={handleUpdateCreds} className="p-6 space-y-4">
                 <div className="bg-blue-50 text-blue-800 text-xs p-3 rounded-lg border border-blue-100 mb-2">
-                    Enter your <strong>Original Number ID</strong> and <strong>Permanent Token</strong> here. The server will use these to send messages.
+                    <h4 className="font-bold flex items-center gap-1 mb-1"><HelpCircle size={12} /> Finding the Correct ID:</h4>
+                    <p className="mb-2">Go to <strong>Meta Developers &gt; WhatsApp &gt; API Setup</strong>.</p>
+                    <p>Look for <strong>Phone Number ID</strong> (Usually starts with 1 or 5). <br/> <span className="text-red-600 font-bold">DO NOT use Business Account ID.</span></p>
                 </div>
                 <div>
                     <label className="block text-xs font-semibold text-gray-700 mb-1">Production Phone Number ID</label>
@@ -142,7 +144,7 @@ export const WebhookConfigModal: React.FC<WebhookConfigModalProps> = ({ onClose,
                 {status === 'success' && (
                     <div className="flex items-center gap-2 text-green-600 text-sm bg-green-50 p-3 rounded border border-green-100 justify-center font-medium">
                         <CheckCircle size={18} />
-                        Production Credentials Active!
+                        Production Credentials Updated!
                     </div>
                 )}
                  {status === 'error' && (

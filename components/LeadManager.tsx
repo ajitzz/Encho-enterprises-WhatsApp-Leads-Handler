@@ -1,4 +1,5 @@
 
+
 import React, { useState, useMemo } from 'react';
 import { Driver, LeadStatus, MessageButton } from '../types';
 import { 
@@ -83,37 +84,19 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
   const executeBulkSend = async () => {
     if (!bulkMessage.trim() && !selectedMedia && !templateName) return;
     
-    const timestamp = isScheduled && scheduleTime ? new Date(scheduleTime).getTime() : undefined;
+    // Default to NOW if not explicitly scheduled, using the robust scheduler backend
+    const timestamp = isScheduled && scheduleTime ? new Date(scheduleTime).getTime() : Date.now();
 
-    if (timestamp && timestamp > Date.now()) {
-        try {
-            await liveApiService.scheduleMessage(selectedIds, {
-                text: bulkMessage,
-                mediaUrl: selectedMedia?.url,
-                mediaType: selectedMedia?.type,
-                buttons: buttons.length > 0 ? (buttons as any) : undefined,
-                templateName: templateName || undefined
-            }, timestamp);
-            
-            // Trigger parent callback just for notification purposes if needed, 
-            // but the scheduling is already handled by liveApiService.
-            // onBulkSend(selectedIds, bulkMessage, ... , timestamp) -> App.tsx handles notification
-            // We can still call parent for consistency if it handles mock mode.
-            onBulkSend(
-                selectedIds, 
-                bulkMessage, 
-                selectedMedia?.url, 
-                selectedMedia?.type, 
-                buttons.length > 0 ? (buttons as any) : undefined,
-                templateName || undefined,
-                timestamp
-            );
-        } catch (e) {
-            console.error(e);
-            alert("Failed to schedule broadcast");
-            return;
-        }
-    } else {
+    try {
+        await liveApiService.scheduleMessage(selectedIds, {
+            text: bulkMessage,
+            mediaUrl: selectedMedia?.url,
+            mediaType: selectedMedia?.type,
+            buttons: buttons.length > 0 ? (buttons as any) : undefined,
+            templateName: templateName || undefined
+        }, timestamp);
+        
+        // Notify parent to show success toast
         onBulkSend(
             selectedIds, 
             bulkMessage, 
@@ -121,8 +104,12 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
             selectedMedia?.type, 
             buttons.length > 0 ? (buttons as any) : undefined,
             templateName || undefined,
-            undefined
+            timestamp
         );
+    } catch (e) {
+        console.error(e);
+        alert("Failed to schedule broadcast");
+        return;
     }
 
     setShowBulkCompose(false);
@@ -382,7 +369,7 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
                   <div className="p-6 border-t border-gray-100 bg-gray-50">
                       <button 
                         onClick={executeBulkSend} 
-                        disabled={(!bulkMessage.trim() && !selectedMedia && !templateName) || (isScheduled && !scheduleTime)} 
+                        disabled={(!bulkMessage.trim() && !selectedMedia && !templateName)} 
                         className={`w-full text-white py-3.5 rounded-xl font-bold transition-all shadow-lg flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed ${isScheduled ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-200' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-200'}`}
                       >
                           {isScheduled ? <Clock size={18} /> : <Send size={18} />}

@@ -1,4 +1,5 @@
 
+
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { 
   ReactFlow, 
@@ -488,6 +489,14 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
             
             const { icon, ...cleanData } = data;
             
+            // CLEANING DATA TO ENSURE CORRECT SERVER PROCESSING
+            // If it's a simple text message, remove interaction triggers so server auto-advances
+            if (cleanData.label === 'Text Message') {
+                delete cleanData.options;
+                delete cleanData.saveToField;
+                // keep delay
+            }
+
             compiledSteps.push({
                 id: node.id,
                 title: cleanData.label,

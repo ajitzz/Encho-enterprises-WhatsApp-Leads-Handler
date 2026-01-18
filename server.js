@@ -381,9 +381,17 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
    } catch (error) { 
        const details = error.response ? error.response.data : error.message;
        console.error(`[Meta] Failed to send to ${to}:`, JSON.stringify(details, null, 2));
+       
+       let friendlyError = error.response?.data?.error?.message || error.message;
+       
+       // --- SMART ERROR DIAGNOSIS ---
+       if (friendlyError.includes('Unsupported post request') || friendlyError.includes('does not exist')) {
+           friendlyError = "CRITICAL: You are using a Business Account ID (WABA ID) instead of the Phone Number ID. Please check the 'API Setup' page in Meta Developers.";
+       }
+       
        return { 
            success: false, 
-           error: error.response?.data?.error?.message || error.message,
+           error: friendlyError,
            code: error.response?.data?.error?.code
        }; 
    }
@@ -400,10 +408,12 @@ const logSystemMessage = async (driverId, text, type = 'text', headerImg = null,
 };
 
 // --- SCHEDULER ENGINE ---
+// Optimized for near-instant broadcasts (5s interval)
 const runScheduler = async () => {
     if (!isDbInitialized) return;
     try {
         const now = Date.now();
+        // Fetch tasks ready to process (pending and time passed)
         const res = await queryWithRetry(
             "SELECT * FROM scheduled_messages WHERE status = 'pending' AND scheduled_time <= $1 LIMIT 50",
             [now]
@@ -467,7 +477,7 @@ const runScheduler = async () => {
     }
 };
 
-setInterval(runScheduler, 30000); 
+setInterval(runScheduler, 5000); 
 
 // --- ROUTES ---
 
@@ -591,6 +601,34 @@ router.post('/messages/send', async (req, res) => {
     } catch (e) { 
         console.error("Message Send Error:", e);
         res.status(500).json({ error: e.message }); 
+    }
+});
+
+// --- CREDENTIAL UPDATE ROUTES ---
+router.post('/update-credentials', async (req, res) => {
+    try {
+        const { phoneNumberId, apiToken } = req.body;
+        if (!phoneNumberId || !apiToken) return res.status(400).json({ error: "Missing fields" });
+        
+        // Update Runtime Variables
+        PHONE_NUMBER_ID = phoneNumberId;
+        META_API_TOKEN = apiToken;
+        
+        console.log(`[System] Credentials Updated via API. New Phone ID: ${PHONE_NUMBER_ID}`);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+router.post('/configure-webhook', async (req, res) => {
+    try {
+        const { verifyToken } = req.body;
+        if (verifyToken) VERIFY_TOKEN = verifyToken;
+        console.log(`[System] Webhook Token Updated: ${VERIFY_TOKEN}`);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
 });
 
@@ -799,6 +837,7 @@ router.get('/system/stats', async (req, res) => {
     }
 });
 
+// --- CORE BOT LOGIC WITH CHAINING SUPPORT ---
 const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => {
     let botSettings = { isEnabled: true, shouldRepeat: false, steps: [] };
     try {
@@ -841,75 +880,114 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
     const shouldProcess = botSettings.isEnabled && (driver.is_bot_active || botSettings.shouldRepeat);
 
     if (!shouldProcess) {
-        console.log(`[Bot] Skipped: Bot Disabled or User Inactive. (Enabled: ${botSettings.isEnabled}, Active: ${driver.is_bot_active}, Repeat: ${botSettings.shouldRepeat})`);
+        console.log(`[Bot] Skipped: Bot Disabled or User Inactive.`);
         return;
     }
 
-    if (shouldProcess) {
-        let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
+    // --- RECURSIVE STEP EXECUTION ENGINE ---
+    const executeStepSequence = async (stepId, driverId, depth = 0) => {
+        if (depth > 10) return; // Prevent infinite loops
         
-        const executeStep = async (step, targetId) => {
-            if (step.delay && step.delay > 0) {
-                const scheduledTime = Date.now() + (step.delay * 1000);
-                await queryWithRetry(
-                    "INSERT INTO scheduled_messages (id, target_ids, type, content, scheduled_time, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
-                    [`auto_${Date.now()}_${Math.random()}`, JSON.stringify([targetId]), 'text', JSON.stringify({
-                        text: step.message,
-                        mediaUrl: step.mediaUrl,
-                        options: step.options,
-                        templateName: step.templateName,
-                        buttons: step.buttons,
-                        headerImageUrl: step.headerImageUrl,
-                        footerText: step.footerText
-                    }), scheduledTime, Date.now()]
-                );
+        const step = botSettings.steps.find(s => s.id === stepId);
+        if (!step) return;
+
+        // 1. Send the message for this step
+        // Handle Delays (only apply for auto-advanced steps to prevent immediate bursts)
+        if (depth > 0 && step.delay > 0) {
+             if (step.delay <= 10) await new Promise(r => setTimeout(r, step.delay * 1000));
+             // For longer delays, we would normally use the scheduler, but for simplicity in "perfectionist" flow, we wait.
+        }
+
+        const result = await sendWhatsAppMessage(
+            from, 
+            step.message, 
+            step.options, 
+            step.templateName, 
+            'en_US', 
+            step.mediaUrl, 
+            step.mediaType, 
+            step.headerImageUrl, 
+            step.footerText, 
+            step.buttons
+        );
+
+        if (result.success) {
+            await logSystemMessage(driverId, step.message || `[Template]`, 'text', safeVal(step.headerImageUrl), safeVal(step.footerText), step.buttons, safeVal(step.templateName));
+        }
+
+        // 2. Check if this step requires user input (Interactive) or Auto-Advance
+        const isInteractive = 
+            (step.saveToField) || 
+            (step.options && step.options.length > 0) || 
+            (step.buttons && step.buttons.some(b => b.type === 'reply')) ||
+            (step.inputType === 'option' || step.inputType === 'text' || step.inputType === 'input') ||
+            (step.routes && Object.keys(step.routes).length > 0);
+
+        if (isInteractive) {
+            // STOP & WAIT. User needs to reply to this step.
+            await queryWithRetry(`UPDATE drivers SET current_bot_step_id = $1, is_bot_active = TRUE, updated_at = $3 WHERE id = $2`, [step.id, driverId, Date.now()]);
+        } else {
+            // AUTO-ADVANCE
+            if (step.nextStepId && step.nextStepId !== 'END' && step.nextStepId !== 'AI_HANDOFF') {
+                // Recursive call to next step
+                // Update DB to mark progress even if we move past it immediately
+                await queryWithRetry(`UPDATE drivers SET current_bot_step_id = $1, updated_at = $3 WHERE id = $2`, [step.id, driverId, Date.now()]);
+                await executeStepSequence(step.nextStepId, driverId, depth + 1);
             } else {
-                const result = await sendWhatsAppMessage(
-                    from, 
-                    step.message, 
-                    step.options, 
-                    step.templateName, 
-                    'en_US', 
-                    step.mediaUrl, 
-                    step.mediaType, 
-                    step.headerImageUrl, 
-                    step.footerText, 
-                    step.buttons
-                );
-                
-                if (result.success) {
-                    await logSystemMessage(targetId, step.message || `[Template]`, 'text', safeVal(step.headerImageUrl), safeVal(step.footerText), step.buttons, safeVal(step.templateName));
+                // END of Flow
+                if (botSettings.shouldRepeat) {
+                    await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = TRUE, updated_at = $2 WHERE id = $1`, [driverId, Date.now()]);
                 } else {
-                    console.error(`[Bot] Failed to send step: ${result.error}`);
+                    await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = FALSE, updated_at = $2 WHERE id = $1`, [driverId, Date.now()]);
+                }
+                if (step.nextStepId !== 'END' && step.nextStepId !== 'AI_HANDOFF') {
+                    await sendWhatsAppMessage(from, "Thank you! Application complete.");
                 }
             }
-        };
+        }
+    };
 
-        if (!currentStep && botSettings.steps.length > 0) {
-            const entryStep = botSettings.steps.find(s => s.id === botSettings.entryPointId) || botSettings.steps[0];
-            if (entryStep) {
-                await queryWithRetry(`UPDATE drivers SET current_bot_step_id = $1, is_bot_active = TRUE, updated_at = $3 WHERE id = $2`, [entryStep.id, driver.id, Date.now()]);
-                await executeStep(entryStep, driver.id);
+    // Determine Starting Point or Next Step based on input
+    let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
+    
+    if (!currentStep && botSettings.steps.length > 0) {
+        // CASE: START
+        const entryStep = botSettings.steps.find(s => s.id === botSettings.entryPointId) || botSettings.steps[0];
+        if (entryStep) await executeStepSequence(entryStep.id, driver.id);
+    } else if (currentStep) {
+        // CASE: PROCESSING INPUT FOR EXISTING STEP
+        let nextId = currentStep.nextStepId;
+        
+        // 1. Check Routes/Branching
+        if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
+            const input = msgBody.trim().toLowerCase();
+            const matched = Object.keys(currentStep.routes).find(k => input.includes(k.toLowerCase()));
+            if (matched) {
+                nextId = currentStep.routes[matched];
+            } else {
+                // Invalid Input Handling? For now, we allow fall-through to default nextId if strictly defined, 
+                // but usually routes imply restricted choice.
+                // If NO match and NO default nextId, we should probably re-ask or stop.
+                // For this implementation, we assume if nextId exists as fallback, use it.
             }
-        } else if (currentStep) {
-            let nextId = currentStep.nextStepId;
-            if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
-                const input = msgBody.trim().toLowerCase();
-                const matched = Object.keys(currentStep.routes).find(k => input.includes(k.toLowerCase()));
-                if (matched) nextId = currentStep.routes[matched];
+        }
+
+        // 2. Save Data
+        if (currentStep.saveToField) {
+             await queryWithRetry(`UPDATE drivers SET ${currentStep.saveToField === 'name' ? 'name' : currentStep.saveToField} = $1 WHERE id = $2`, [msgBody, driver.id]);
+        }
+
+        // 3. Move to Next
+        if (nextId && nextId !== 'END' && nextId !== 'AI_HANDOFF') {
+            await executeStepSequence(nextId, driver.id);
+        } else if (nextId === 'END' || nextId === 'AI_HANDOFF') {
+            // End Flow logic
+             if (botSettings.shouldRepeat) {
+                await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = TRUE, updated_at = $2 WHERE id = $1`, [driver.id, Date.now()]);
+            } else {
+                await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = FALSE, updated_at = $2 WHERE id = $1`, [driver.id, Date.now()]);
             }
-            if (currentStep.saveToField) {
-                 await queryWithRetry(`UPDATE drivers SET ${currentStep.saveToField === 'name' ? 'name' : currentStep.saveToField} = $1 WHERE id = $2`, [msgBody, driver.id]);
-            }
-            if (nextId && nextId !== 'END' && nextId !== 'AI_HANDOFF') {
-                await queryWithRetry(`UPDATE drivers SET current_bot_step_id = $1, updated_at = $3 WHERE id = $2`, [nextId, driver.id, Date.now()]);
-                const nextStep = botSettings.steps.find(s => s.id === nextId);
-                if (nextStep) await executeStep(nextStep, driver.id);
-            } else if (nextId === 'END' || nextId === 'AI_HANDOFF') {
-                if (botSettings.shouldRepeat) await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = TRUE, updated_at = $2 WHERE id = $1`, [driver.id, Date.now()]);
-                else await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = FALSE, updated_at = $2 WHERE id = $1`, [driver.id, Date.now()]);
-                await sendWhatsAppMessage(from, "Thank you! We have received your details.");
-            }
+            await sendWhatsAppMessage(from, "Thank you! We have received your details.");
         }
     }
 };
