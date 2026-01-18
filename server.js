@@ -27,9 +27,11 @@ app.use((req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3001;
-// CRITICAL: Ensure these match your valid environment variables or hardcoded fallbacks
-let META_API_TOKEN = process.env.META_API_TOKEN || "EAAkr7Y9S2qYBQfHTNZASIugAzOi8b2MZCBct4z4jZBHSmQ2KGlFduuDQQGEYC9NRDtZBUdhMPdeJ06OjYUiJYGfFkZCAxzyh4TdidN7ZA10K3XPOVEiQh01jo22xLsQjXrEtMHc5ZCHZBbRZAyA5d0pl26Jsg3IuNKY272QYmqEjHghf11OKJmbUZBfJLe5EvHzl48gAZDZD"; 
-let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "982841698238647"; 
+
+// --- DYNAMIC CREDENTIALS ---
+// Defaults from Env, but can be overridden by DB settings
+let META_API_TOKEN = process.env.META_API_TOKEN || ""; 
+let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || ""; 
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 
 const s3Client = new S3Client({
@@ -74,6 +76,53 @@ const queryWithRetry = async (text, params, retries = 3) => {
         if (client) { try { client.release(); } catch(e) {} }
     }
 };
+
+// --- HELPER: Validate Meta Credentials ---
+const validateMetaCredentials = async (phoneId, token) => {
+    try {
+        // Attempt to fetch phone number details. This requires 'whatsapp_business_management' permission 
+        // or just a valid token and ID.
+        await axios.get(`https://graph.facebook.com/v17.0/${phoneId}`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        return true;
+    } catch (e) {
+        const msg = e.response?.data?.error?.message || e.message;
+        throw new Error(`Validation Failed: ${msg}`);
+    }
+};
+
+// --- DTO MAPPERS (Snake -> Camel) ---
+const toDriverDTO = (row) => ({
+    id: row.id,
+    phoneNumber: row.phone_number,
+    name: row.name,
+    source: row.source,
+    status: row.status,
+    lastMessage: row.last_message,
+    lastMessageTime: parseInt(row.last_message_time || '0'),
+    notes: row.notes,
+    vehicleRegistration: row.vehicle_registration,
+    availability: row.availability,
+    currentBotStepId: row.current_bot_step_id,
+    isBotActive: row.is_bot_active,
+    isHumanMode: row.is_human_mode,
+    qualificationChecks: row.qualification_checks || {},
+    messages: [] // Always return empty array, messages fetched on demand
+});
+
+const toMessageDTO = (row) => ({
+    id: row.id,
+    sender: row.sender,
+    text: row.text,
+    type: row.type,
+    timestamp: parseInt(row.timestamp || '0'),
+    imageUrl: row.image_url,
+    headerImageUrl: row.header_image_url,
+    footerText: row.footer_text,
+    buttons: row.buttons, // Postgres JSONB parser handles this
+    templateName: row.template_name
+});
 
 let isDbInitialized = false;
 
@@ -165,6 +214,10 @@ const initDB = async () => {
                 id INT PRIMARY KEY,
                 settings JSONB
             );
+            CREATE TABLE IF NOT EXISTS system_credentials (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
             CREATE TABLE IF NOT EXISTS files (
                 id TEXT PRIMARY KEY,
                 filename TEXT,
@@ -204,10 +257,8 @@ const initDB = async () => {
         }
         
         // --- INITIALIZE DEFAULT BOT SETTINGS ---
-        // 1. Insert if missing
         await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT DO NOTHING`, [JSON.stringify(DEFAULT_BOT_FLOW)]);
 
-        // 2. Self-Healing: If settings exist but steps are empty, update them
         const sRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1', []);
         if (sRes.rows.length > 0) {
             const current = sRes.rows[0].settings;
@@ -216,6 +267,15 @@ const initDB = async () => {
                 await queryWithRetry('UPDATE bot_settings SET settings = $1 WHERE id = 1', [JSON.stringify(DEFAULT_BOT_FLOW)]);
             }
         }
+
+        // --- LOAD CREDENTIALS FROM DB ---
+        const credsRes = await queryWithRetry('SELECT * FROM system_credentials', []);
+        credsRes.rows.forEach(row => {
+            if (row.key === 'META_API_TOKEN' && row.value) META_API_TOKEN = row.value;
+            if (row.key === 'PHONE_NUMBER_ID' && row.value) PHONE_NUMBER_ID = row.value;
+            if (row.key === 'VERIFY_TOKEN' && row.value) VERIFY_TOKEN = row.value;
+        });
+        console.log(`Loaded Credentials - PhoneID: ${PHONE_NUMBER_ID ? '***' + PHONE_NUMBER_ID.slice(-4) : 'Missing'}`);
 
         isDbInitialized = true;
         console.log("Database initialized (Lazy with Migrations & Default Flow)");
@@ -485,10 +545,7 @@ setInterval(runScheduler, 5000);
 router.get('/drivers', async (req, res) => {
     try {
         const result = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC', []);
-        const drivers = result.rows.map(d => ({
-            ...d,
-            messages: [] // Send empty array to respect Type interface, fetch on demand
-        }));
+        const drivers = result.rows.map(toDriverDTO); // Use DTO mapper
         res.json(drivers);
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -498,10 +555,7 @@ router.get('/sync', async (req, res) => {
     try {
         const since = parseInt(req.query.since) || 0;
         const result = await queryWithRetry('SELECT * FROM drivers WHERE updated_at > $1 ORDER BY updated_at DESC', [since]);
-        const drivers = result.rows.map(d => ({
-            ...d,
-            messages: [] // Lightweight
-        }));
+        const drivers = result.rows.map(toDriverDTO); // Use DTO mapper
         res.json(drivers);
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -511,7 +565,8 @@ router.get('/drivers/:id/messages', async (req, res) => {
     try {
         const { id } = req.params;
         const mRes = await queryWithRetry('SELECT * FROM messages WHERE driver_id = $1 ORDER BY timestamp ASC', [id]);
-        res.json(mRes.rows);
+        const messages = mRes.rows.map(toMessageDTO); // Use DTO mapper
+        res.json(messages);
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -522,9 +577,11 @@ router.patch('/drivers/:id', async (req, res) => {
         const keys = Object.keys(updates);
         if (keys.length === 0) return res.json({ success: true });
         
-        // Add updated_at to the update
+        // Convert camelCase keys back to snake_case for DB update
+        const toSnakeCase = (str) => str.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+
         const setClause = keys.map((k, i) => {
-             const dbKey = k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+             const dbKey = toSnakeCase(k);
              return `${dbKey} = $${i+2}`;
         }).join(', ') + `, updated_at = $${keys.length + 2}`;
         
@@ -610,23 +667,50 @@ router.post('/update-credentials', async (req, res) => {
         const { phoneNumberId, apiToken } = req.body;
         if (!phoneNumberId || !apiToken) return res.status(400).json({ error: "Missing fields" });
         
+        // Validation: Check if credentials work before saving
+        await validateMetaCredentials(phoneNumberId, apiToken);
+        
         // Update Runtime Variables
         PHONE_NUMBER_ID = phoneNumberId;
         META_API_TOKEN = apiToken;
         
-        console.log(`[System] Credentials Updated via API. New Phone ID: ${PHONE_NUMBER_ID}`);
+        // Persist to DB
+        await queryWithRetry(`INSERT INTO system_credentials (key, value) VALUES ('PHONE_NUMBER_ID', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [phoneNumberId]);
+        await queryWithRetry(`INSERT INTO system_credentials (key, value) VALUES ('META_API_TOKEN', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [apiToken]);
+
+        console.log(`[System] Credentials Verified & Updated via API. New Phone ID: ${PHONE_NUMBER_ID}`);
         res.json({ success: true });
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        console.error("Credential Update Error:", e.message);
+        res.status(400).json({ error: e.message });
     }
 });
 
 router.post('/configure-webhook', async (req, res) => {
     try {
         const { verifyToken } = req.body;
-        if (verifyToken) VERIFY_TOKEN = verifyToken;
+        if (verifyToken) {
+            VERIFY_TOKEN = verifyToken;
+            await queryWithRetry(`INSERT INTO system_credentials (key, value) VALUES ('VERIFY_TOKEN', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [verifyToken]);
+        }
         console.log(`[System] Webhook Token Updated: ${VERIFY_TOKEN}`);
         res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+router.post('/test-connection', async (req, res) => {
+    try {
+        const { testNumber } = req.body; // e.g., '15551234567'
+        if (!testNumber) return res.status(400).json({ error: "Test number required" });
+        
+        const result = await sendWhatsAppMessage(testNumber, "🔔 Test Message from Uber Fleet Recruiter. Connection Successful!");
+        if (result.success) {
+            res.json({ success: true });
+        } else {
+            res.status(500).json({ error: result.error });
+        }
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -870,7 +954,14 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
             [`msg_${now}`, driver.id, msgBody, now, msgType]
         );
         await client.query('COMMIT');
-    } catch (e) { await client.query('ROLLBACK'); } finally { client.release(); }
+    } catch (e) { 
+        await client.query('ROLLBACK'); 
+        console.error("DB Error in processIncomingMessage:", e);
+    } finally { 
+        client.release(); 
+    }
+
+    if (!driver) return; // Guard against db failure
 
     if (driver.is_human_mode) {
         console.log(`[Bot] Skipped: ${from} is in Human Mode`);
@@ -938,7 +1029,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
                 if (botSettings.shouldRepeat) {
                     await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = TRUE, updated_at = $2 WHERE id = $1`, [driverId, Date.now()]);
                 } else {
-                    await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = FALSE, updated_at = $2 WHERE id = $1`, [driverId, Date.now()]);
+                    await queryWithRetry(`UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = FALSE, updated_at = $2 WHERE id = $1`, [driver.id, Date.now()]);
                 }
                 if (step.nextStepId !== 'END' && step.nextStepId !== 'AI_HANDOFF') {
                     await sendWhatsAppMessage(from, "Thank you! Application complete.");
@@ -1004,6 +1095,10 @@ app.get('/webhook', (req, res) => {
 
 app.post('/webhook', async (req, res) => {
     console.log('Incoming Webhook Payload:', JSON.stringify(req.body, null, 2));
+    
+    // FAIL-SAFE: Ensure DB is ready for this webhook request specifically
+    await initDB(); 
+
     try {
         const entry = req.body.entry?.[0];
         const changes = entry?.changes?.[0];
@@ -1033,5 +1128,9 @@ app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
 });
 
-if (require.main === module) app.listen(PORT, () => console.log(`🚀 Server on Port ${PORT}`));
+// Ensure DB is ready before listening (Critical for cold starts)
+initDB().then(() => {
+    if (require.main === module) app.listen(PORT, () => console.log(`🚀 Server on Port ${PORT}`));
+});
+
 module.exports = app;
