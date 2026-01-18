@@ -1,4 +1,5 @@
 
+
 export enum LeadStatus {
   NEW = 'New',
   QUALIFIED = 'Qualified',
@@ -36,8 +37,19 @@ export interface Message {
   templateName?: string; // New: Track template used
   
   timestamp: number;
-  type: 'text' | 'image' | 'video_link' | 'template' | 'options' | 'rich_card';
+  type: 'text' | 'image' | 'video_link' | 'template' | 'options' | 'rich_card' | 'audio' | 'document' | 'video';
   options?: string[]; // Legacy for quick replies
+}
+
+export interface DriverDocument {
+  id: string;
+  driverId: string;
+  docType: 'license' | 'id_proof' | 'rc_book' | 'photo' | 'other';
+  fileUrl: string;
+  mimeType: string;
+  createdAt: number;
+  verificationStatus: 'pending' | 'approved' | 'rejected';
+  notes?: string;
 }
 
 export interface Driver {
@@ -49,7 +61,7 @@ export interface Driver {
   lastMessage: string;
   lastMessageTime: number;
   messages: Message[];
-  documents: string[]; // URLs to documents
+  documents: DriverDocument[]; // Updated to use structured documents
   notes?: string;
   
   // New Onboarding Fields

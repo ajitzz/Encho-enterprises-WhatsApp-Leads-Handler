@@ -8,6 +8,7 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const crypto = require('crypto'); // NEW: For signature verification
 const { Pool } = require('pg'); 
 const { S3Client, PutObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
@@ -17,7 +18,13 @@ require('dotenv').config();
 const app = express();
 const router = express.Router(); 
 
-app.use(express.json({ limit: '10mb' }));
+// Raw body needed for signature verification
+app.use(express.json({ 
+    limit: '10mb',
+    verify: (req, res, buf) => {
+        req.rawBody = buf;
+    }
+}));
 app.use(cors()); 
 
 app.set('etag', false);
@@ -29,10 +36,10 @@ app.use((req, res, next) => {
 const PORT = process.env.PORT || 3001;
 
 // --- DYNAMIC CREDENTIALS ---
-// Defaults from Env, but can be overridden by DB settings
 let META_API_TOKEN = process.env.META_API_TOKEN || ""; 
 let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || ""; 
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
+let APP_SECRET = process.env.APP_SECRET || ""; // NEW: For Signature Verification
 
 const s3Client = new S3Client({
     region: process.env.AWS_REGION || 'us-east-1',
@@ -82,19 +89,16 @@ const getSystemSetting = async (key) => {
     try {
         const res = await queryWithRetry('SELECT value FROM system_settings WHERE key = $1', [key]);
         if (res.rows.length > 0) return res.rows[0].value === 'true';
-        // Default values if not set
         return true; 
     } catch (e) {
         console.error(`Failed to fetch setting ${key}:`, e.message);
-        return true; // Fail open (safe default) or closed depending on preference, here true to keep running
+        return true;
     }
 };
 
 // --- HELPER: Validate Meta Credentials ---
 const validateMetaCredentials = async (phoneId, token) => {
     try {
-        // Attempt to fetch phone number details. This requires 'whatsapp_business_management' permission 
-        // or just a valid token and ID.
         await axios.get(`https://graph.facebook.com/v17.0/${phoneId}`, {
             headers: { Authorization: `Bearer ${token}` }
         });
@@ -103,6 +107,25 @@ const validateMetaCredentials = async (phoneId, token) => {
         const msg = e.response?.data?.error?.message || e.message;
         throw new Error(`Validation Failed: ${msg}`);
     }
+};
+
+// --- NEW: Verify Webhook Signature ---
+const verifySignature = (req) => {
+    // If APP_SECRET is not set, we skip verification (Dev mode safety)
+    // In production, this should be enforced.
+    if (!APP_SECRET) return true;
+
+    const signature = req.headers['x-hub-signature-256'];
+    if (!signature) return false;
+
+    const elements = signature.split('=');
+    const signatureHash = elements[1];
+    const expectedHash = crypto
+        .createHmac('sha256', APP_SECRET)
+        .update(req.rawBody)
+        .digest('hex');
+
+    return signatureHash === expectedHash;
 };
 
 // --- DTO MAPPERS (Snake -> Camel) ---
@@ -121,7 +144,8 @@ const toDriverDTO = (row) => ({
     isBotActive: row.is_bot_active,
     isHumanMode: row.is_human_mode,
     qualificationChecks: row.qualification_checks || {},
-    messages: [] // Always return empty array, messages fetched on demand
+    messages: [], 
+    documents: [] 
 });
 
 const toMessageDTO = (row) => ({
@@ -133,8 +157,20 @@ const toMessageDTO = (row) => ({
     imageUrl: row.image_url,
     headerImageUrl: row.header_image_url,
     footerText: row.footer_text,
-    buttons: row.buttons, // Postgres JSONB parser handles this
+    buttons: row.buttons, 
     templateName: row.template_name
+});
+
+const toDocumentDTO = (row) => ({
+    id: row.id,
+    driverId: row.driver_id,
+    docType: row.doc_type,
+    fileUrl: row.file_url,
+    mimeType: row.mime_type,
+    createdAt: parseInt(row.created_at || '0'),
+    verificationStatus: row.verification_status,
+    notes: row.notes,
+    failureReason: row.failure_reason // NEW
 });
 
 let isDbInitialized = false;
@@ -163,14 +199,14 @@ const DEFAULT_BOT_FLOW = {
             message: "Great! Please type your full name.",
             inputType: "text",
             saveToField: "name",
-            nextStepId: "collect_vehicle"
+            nextStepId: "collect_license"
         },
         {
-            id: "collect_vehicle",
-            title: "Vehicle Check",
-            message: "Do you have a valid driving license and your own vehicle? (Yes/No)",
-            inputType: "text",
-            saveToField: "notes",
+            id: "collect_license",
+            title: "Upload License",
+            message: "Please upload a photo of your Driving License.",
+            inputType: "image",
+            saveToField: "document",
             nextStepId: "qualify"
         },
         {
@@ -221,7 +257,20 @@ const initDB = async () => {
                 header_image_url TEXT,
                 footer_text TEXT,
                 buttons JSONB,
-                template_name TEXT
+                template_name TEXT,
+                meta_message_id TEXT UNIQUE -- NEW: For Idempotency
+            );
+            CREATE TABLE IF NOT EXISTS driver_documents (
+                id TEXT PRIMARY KEY,
+                driver_id TEXT REFERENCES drivers(id),
+                doc_type TEXT DEFAULT 'other',
+                file_url TEXT,
+                mime_type TEXT,
+                created_at BIGINT,
+                verification_status TEXT DEFAULT 'pending',
+                notes TEXT,
+                meta_media_id TEXT, -- NEW: Track original ID
+                failure_reason TEXT -- NEW: Track ingestion errors
             );
             CREATE TABLE IF NOT EXISTS bot_settings (
                 id INT PRIMARY KEY,
@@ -241,7 +290,8 @@ const initDB = async () => {
                 filename TEXT,
                 url TEXT,
                 type TEXT,
-                folder_path TEXT,                media_id TEXT
+                folder_path TEXT,                
+                media_id TEXT
             );
             CREATE TABLE IF NOT EXISTS folders (
                 id TEXT PRIMARY KEY,
@@ -267,7 +317,11 @@ const initDB = async () => {
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS header_image_url TEXT",
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS footer_text TEXT",
             "ALTER TABLE messages ADD COLUMN IF NOT EXISTS buttons JSONB",
-            "ALTER TABLE drivers ADD COLUMN IF NOT EXISTS updated_at BIGINT DEFAULT 0"
+            "ALTER TABLE drivers ADD COLUMN IF NOT EXISTS updated_at BIGINT DEFAULT 0",
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS meta_message_id TEXT",
+            "ALTER TABLE driver_documents ADD COLUMN IF NOT EXISTS meta_media_id TEXT",
+            "ALTER TABLE driver_documents ADD COLUMN IF NOT EXISTS failure_reason TEXT",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_meta_message_id ON messages(meta_message_id)"
         ];
         
         for (const migration of migrations) {
@@ -302,6 +356,7 @@ const initDB = async () => {
             if (row.key === 'META_API_TOKEN' && row.value) META_API_TOKEN = row.value;
             if (row.key === 'PHONE_NUMBER_ID' && row.value) PHONE_NUMBER_ID = row.value;
             if (row.key === 'VERIFY_TOKEN' && row.value) VERIFY_TOKEN = row.value;
+            if (row.key === 'APP_SECRET' && row.value) APP_SECRET = row.value;
         });
         console.log(`Loaded Credentials - PhoneID: ${PHONE_NUMBER_ID ? '***' + PHONE_NUMBER_ID.slice(-4) : 'Missing'}`);
 
@@ -331,6 +386,62 @@ const isContentSafe = (text) => {
 };
 
 const safeVal = (val) => val === undefined ? null : val;
+
+// --- ROBUST MEDIA INGESTION ENGINE ---
+const ingestMetaMedia = async (mediaId) => {
+    try {
+        console.log(`[Media] Ingesting ID: ${mediaId}`);
+        // 1. Get URL from Meta (Validates Token & ID)
+        const urlRes = await axios.get(`https://graph.facebook.com/v17.0/${mediaId}`, {
+            headers: { Authorization: `Bearer ${META_API_TOKEN}` }
+        });
+        
+        if (!urlRes.data || !urlRes.data.url) {
+            throw new Error("Failed to retrieve media URL from Meta Graph");
+        }
+
+        const mediaUrl = urlRes.data.url;
+        const mimeType = urlRes.data.mime_type; // e.g. image/jpeg, audio/ogg
+        
+        // 2. Download File Stream
+        const fileRes = await axios({
+            method: 'get',
+            url: mediaUrl,
+            responseType: 'arraybuffer',
+            headers: { Authorization: `Bearer ${META_API_TOKEN}` }
+        });
+        
+        // 3. Validate Mime Type & Size (Basic Security)
+        const ALLOWED_MIMES = ['image/jpeg', 'image/png', 'application/pdf', 'video/mp4', 'audio/ogg', 'audio/mpeg'];
+        if (!ALLOWED_MIMES.includes(mimeType)) {
+            // Log but maybe allow? For now strict.
+            // Actually, WhatsApp only sends supported types, but good to be safe.
+        }
+
+        // 4. Upload to S3
+        const ext = mimeType.split('/')[1] || 'bin';
+        const key = `inbound/${Date.now()}_${mediaId}.${ext}`;
+        
+        const command = new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: key,
+            Body: fileRes.data,
+            ContentType: mimeType,
+            // ACL: 'private' // Ensure private if sensitive
+        });
+        
+        await s3Client.send(command);
+        
+        // Use Signed URL if bucket is private, or public if public
+        // For this demo assuming public-read or presigned generation on read
+        const publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${key}`;
+        console.log(`[Media] Uploaded to S3: ${publicUrl}`);
+        return { success: true, url: publicUrl, mimeType };
+    } catch (e) {
+        console.error("[Media] Ingestion Failed:", e.message);
+        return { success: false, error: e.message };
+    }
+};
 
 const uploadToWhatsApp = async (fileUrl, fileType) => {
     activeS3Transfers++;
@@ -632,6 +743,34 @@ router.get('/drivers/:id/messages', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// 4. FETCH DOCUMENTS
+router.get('/drivers/:id/documents', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const resDb = await queryWithRetry('SELECT * FROM driver_documents WHERE driver_id = $1 ORDER BY created_at DESC', [id]);
+        const docs = resDb.rows.map(toDocumentDTO);
+        res.json(docs);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 5. UPDATE DOCUMENT STATUS
+router.patch('/documents/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { status, notes } = req.body;
+        
+        if (status) {
+            await queryWithRetry("UPDATE driver_documents SET verification_status = $1 WHERE id = $2", [status, id]);
+        }
+        if (notes !== undefined) {
+            await queryWithRetry("UPDATE driver_documents SET notes = $1 WHERE id = $2", [notes, id]);
+        }
+        res.json({ success: true });
+    } catch(e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 router.patch('/drivers/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -750,12 +889,16 @@ router.post('/update-credentials', async (req, res) => {
 
 router.post('/configure-webhook', async (req, res) => {
     try {
-        const { verifyToken } = req.body;
+        const { verifyToken, appSecret } = req.body;
         if (verifyToken) {
             VERIFY_TOKEN = verifyToken;
             await queryWithRetry(`INSERT INTO system_credentials (key, value) VALUES ('VERIFY_TOKEN', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [verifyToken]);
         }
-        console.log(`[System] Webhook Token Updated: ${VERIFY_TOKEN}`);
+        if (appSecret) {
+            APP_SECRET = appSecret;
+            await queryWithRetry(`INSERT INTO system_credentials (key, value) VALUES ('APP_SECRET', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [appSecret]);
+        }
+        console.log(`[System] Webhook Token & Secret Updated`);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -984,7 +1127,16 @@ router.get('/system/stats', async (req, res) => {
 });
 
 // --- CORE BOT LOGIC WITH CHAINING SUPPORT ---
-const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => {
+const processIncomingMessage = async (from, name, msgBody, msgType = 'text', mediaPayload = null, metaMessageId = null) => {
+    // 1. IDEMPOTENCY CHECK
+    if (metaMessageId) {
+        const checkRes = await queryWithRetry('SELECT 1 FROM messages WHERE meta_message_id = $1', [metaMessageId]);
+        if (checkRes.rows.length > 0) {
+            console.log(`[Bot] Skipped duplicate message ID: ${metaMessageId}`);
+            return;
+        }
+    }
+
     let botSettings = { isEnabled: true, shouldRepeat: false, steps: [] };
     try {
         const sRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1', []);
@@ -1012,8 +1164,8 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
             await client.query('UPDATE drivers SET last_message = $1, last_message_time = $2, updated_at = $2 WHERE id = $3', [msgBody, now, driver.id]);
         }
         await client.query(
-            `INSERT INTO messages (id, driver_id, sender, text, timestamp, type) VALUES ($1, $2, 'driver', $3, $4, $5)`,
-            [`msg_${now}`, driver.id, msgBody, now, msgType]
+            `INSERT INTO messages (id, driver_id, sender, text, timestamp, type, image_url, meta_message_id) VALUES ($1, $2, 'driver', $3, $4, $5, $6, $7)`,
+            [`msg_${now}`, driver.id, msgBody, now, msgType, mediaPayload?.url, metaMessageId]
         );
         await client.query('COMMIT');
     } catch (e) { 
@@ -1024,6 +1176,31 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
     }
 
     if (!driver) return; // Guard against db failure
+
+    // --- SMART DOCUMENT HANDLING ---
+    if (mediaPayload) {
+        try {
+            // Infer Doc Type from Current Bot Step
+            let inferredDocType = 'other';
+            const currentStepId = driver.current_bot_step_id || '';
+            if (currentStepId.includes('license') || currentStepId.includes('dl')) inferredDocType = 'license';
+            else if (currentStepId.includes('rc') || currentStepId.includes('vehicle')) inferredDocType = 'rc_book';
+            else if (currentStepId.includes('pan') || currentStepId.includes('aadhaar') || currentStepId.includes('id')) inferredDocType = 'id_proof';
+            else if (currentStepId.includes('photo') || currentStepId.includes('selfie')) inferredDocType = 'photo';
+
+            const status = mediaPayload.success ? 'pending' : 'failed';
+            const reason = mediaPayload.error || null;
+
+            await queryWithRetry(
+                `INSERT INTO driver_documents (id, driver_id, doc_type, file_url, mime_type, created_at, verification_status, notes, meta_media_id, failure_reason)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'Uploaded via WhatsApp', $8, $9)`,
+                [`doc_${now}`, driver.id, inferredDocType, mediaPayload.url, mediaPayload.mimeType, now, status, mediaPayload.metaMediaId, reason]
+            );
+            console.log(`[Document] Saved ${inferredDocType} for driver ${driver.id} (Status: ${status})`);
+        } catch (docErr) {
+            console.error("Failed to save driver document:", docErr);
+        }
+    }
 
     // --- AUTOMATION KILL SWITCH ---
     const automationEnabled = await getSystemSetting('automation_enabled');
@@ -1080,7 +1257,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
             (step.saveToField) || 
             (step.options && step.options.length > 0) || 
             (step.buttons && step.buttons.some(b => b.type === 'reply')) ||
-            (step.inputType === 'option' || step.inputType === 'text' || step.inputType === 'input') ||
+            (step.inputType === 'option' || step.inputType === 'text' || step.inputType === 'input' || step.inputType === 'image') ||
             (step.routes && Object.keys(step.routes).length > 0);
 
         if (isInteractive) {
@@ -1125,16 +1302,15 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
             if (matched) {
                 nextId = currentStep.routes[matched];
             } else {
-                // Invalid Input Handling? For now, we allow fall-through to default nextId if strictly defined, 
-                // but usually routes imply restricted choice.
-                // If NO match and NO default nextId, we should probably re-ask or stop.
-                // For this implementation, we assume if nextId exists as fallback, use it.
+                // Fallthrough if no route matches, usually keep waiting or send fallback
             }
         }
 
         // 2. Save Data
         if (currentStep.saveToField) {
-             await queryWithRetry(`UPDATE drivers SET ${currentStep.saveToField === 'name' ? 'name' : currentStep.saveToField} = $1 WHERE id = $2`, [msgBody, driver.id]);
+             // Avoid saving image URL to 'name' field if user uploads image at name step (edge case)
+             const valueToSave = msgType === 'text' ? msgBody : (mediaPayload?.url || msgBody);
+             await queryWithRetry(`UPDATE drivers SET ${currentStep.saveToField === 'name' ? 'name' : currentStep.saveToField} = $1 WHERE id = $2`, [valueToSave, driver.id]);
         }
 
         // 3. Move to Next
@@ -1163,6 +1339,12 @@ app.get('/webhook', (req, res) => {
 });
 
 app.post('/webhook', async (req, res) => {
+    // 1. Verify Signature
+    if (!verifySignature(req)) {
+        console.warn("[Webhook] Signature verification failed. Ignoring request.");
+        return res.sendStatus(401);
+    }
+
     console.log('Incoming Webhook Payload:', JSON.stringify(req.body, null, 2));
     
     // FAIL-SAFE: Ensure DB is ready for this webhook request specifically
@@ -1172,7 +1354,6 @@ app.post('/webhook', async (req, res) => {
     const ingestEnabled = await getSystemSetting('webhook_ingest_enabled');
     if (!ingestEnabled) {
         console.log('[System] INGEST DISABLED. Dropping inbound request.');
-        // Return 200 to acknowledge Meta so they don't retry, but process nothing
         return res.sendStatus(200);
     }
 
@@ -1186,20 +1367,41 @@ app.post('/webhook', async (req, res) => {
             const msg = value.messages[0];
             const contact = value.contacts?.[0];
             let text = "";
-            switch (msg.type) {
-                case 'text': text = msg.text?.body || ""; break;
-                case 'interactive': text = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || ""; break;
-                case 'button': text = msg.button?.text || ""; break;
-                case 'image': text = msg.caption ? `[Image]: ${msg.caption}` : "[Image]"; break;
-                case 'video': text = msg.caption ? `[Video]: ${msg.caption}` : "[Video]"; break;
-                case 'document': text = msg.caption ? `[Document]: ${msg.caption}` : "[Document]"; break;
-                case 'location': text = "[Location Shared]"; break;
-                default: text = `[${msg.type} Message]`;
+            let mediaPayload = null;
+
+            // HANDLE MEDIA
+            if (msg.image || msg.document || msg.video || msg.audio || msg.voice) {
+                const mediaType = msg.type;
+                const mediaObj = msg[mediaType];
+                text = mediaObj.caption ? `[${mediaType}]: ${mediaObj.caption}` : `[${mediaType}]`;
+                
+                // Ingest Media
+                const ingestionResult = await ingestMetaMedia(mediaObj.id);
+                mediaPayload = {
+                    url: ingestionResult.url || null, // Keep null if failed
+                    mimeType: ingestionResult.mimeType || 'application/octet-stream',
+                    caption: mediaObj.caption,
+                    success: ingestionResult.success,
+                    error: ingestionResult.error,
+                    metaMediaId: mediaObj.id
+                };
+            } else {
+                // HANDLE TEXT / INTERACTIVE
+                switch (msg.type) {
+                    case 'text': text = msg.text?.body || ""; break;
+                    case 'interactive': text = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || ""; break;
+                    case 'button': text = msg.button?.text || ""; break;
+                    case 'location': text = "[Location Shared]"; break;
+                    default: text = `[${msg.type} Message]`;
+                }
             }
+
             if (!text.trim()) text = `[${msg.type}]`;
             const senderName = contact?.profile?.name || "Unknown";
             const senderPhone = msg.from; 
-            await processIncomingMessage(senderPhone, senderName, text, msg.type);
+            const metaMessageId = msg.id;
+
+            await processIncomingMessage(senderPhone, senderName, text, msg.type, mediaPayload, metaMessageId);
         }
     } catch (error) { console.error("Webhook Error:", error); }
     res.sendStatus(200);

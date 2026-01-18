@@ -1,11 +1,16 @@
 
 
-import React, { useState, useEffect, useRef } from 'react';
-import { Driver, Message, LeadStatus, OnboardingStep } from '../types';
+
+
+
+
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Driver, Message, LeadStatus, OnboardingStep, DriverDocument } from '../types';
 import { 
   X, Send, Image as ImageIcon, Video, CheckCircle, UserX, Car, Clock, 
   ShieldCheck, ChevronRight, Facebook, Globe, Headset, MicOff, Phone, 
-  FileText, Sparkles, MapPin, ExternalLink, LayoutTemplate, Calendar
+  FileText, Sparkles, MapPin, ExternalLink, LayoutTemplate, Calendar,
+  Download, Eye, AlertCircle, File, List, Filter, AlertTriangle
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
@@ -16,6 +21,12 @@ interface ChatDrawerProps {
   onUpdateDriver: (id: string, updates: Partial<Driver>) => void;
 }
 
+const REQUIRED_DOCS = [
+    { type: 'license', label: 'Driving License' },
+    { type: 'rc_book', label: 'Vehicle RC' },
+    { type: 'id_proof', label: 'ID Proof (Aadhaar/PAN)' }
+];
+
 export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver }) => {
   const [replyText, setReplyText] = useState('');
   const [localNotes, setLocalNotes] = useState('');
@@ -24,18 +35,72 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
   
+  // Document State
+  const [documents, setDocuments] = useState<DriverDocument[]>([]);
+  const [docLoading, setDocLoading] = useState(false);
+  const [docFilter, setDocFilter] = useState<'all' | 'license' | 'rc_book' | 'id_proof'>('all');
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const messages = driver && Array.isArray(driver.messages) ? driver.messages : [];
-  const documents = driver && Array.isArray(driver.documents) ? driver.documents : [];
 
   useEffect(() => {
     if (messagesEndRef.current) messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   useEffect(() => {
-    if (driver) setLocalNotes(driver.notes || '');
+    if (driver) {
+        setLocalNotes(driver.notes || '');
+        loadDocuments(driver.id);
+    }
   }, [driver]);
+
+  const loadDocuments = async (driverId: string) => {
+      setDocLoading(true);
+      try {
+          const docs = await liveApiService.getDriverDocuments(driverId);
+          setDocuments(docs);
+      } catch(e) {
+          console.error("Failed to load docs", e);
+      } finally {
+          setDocLoading(false);
+      }
+  };
+
+  const handleUpdateDocStatus = async (docId: string, status: 'approved' | 'rejected') => {
+      try {
+          await liveApiService.updateDocumentStatus(docId, status);
+          // Optimistic update
+          setDocuments(prev => prev.map(d => d.id === docId ? { ...d, verificationStatus: status } : d));
+      } catch(e) {
+          alert("Failed to update status");
+      }
+  };
+
+  const filteredDocuments = useMemo(() => {
+      if (docFilter === 'all') return documents;
+      return documents.filter(d => d.docType === docFilter);
+  }, [documents, docFilter]);
+
+  // Checklist Logic
+  const checklistStatus = useMemo(() => {
+      return REQUIRED_DOCS.map(req => {
+          const found = documents.find(d => d.docType === req.type && d.verificationStatus !== 'rejected');
+          return { ...req, isUploaded: !!found, isApproved: found?.verificationStatus === 'approved' };
+      });
+  }, [documents]);
+
+  const handleRequestMissingDocs = async () => {
+      if (!driver) return;
+      const missing = checklistStatus.filter(c => !c.isUploaded).map(c => c.label);
+      if (missing.length === 0) {
+          alert("All required documents are uploaded!");
+          return;
+      }
+      const msg = `Hello ${driver.name}, please upload the following documents to complete your application:\n- ${missing.join('\n- ')}`;
+      await onSendMessage(msg);
+      alert("Request sent successfully.");
+  };
 
   if (!driver) return null;
 
@@ -96,13 +161,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     else {
         try {
             await liveApiService.sendMessage(driver.id, replyText);
-            // Optimistic update handled by App.tsx or parent handler usually, but here we can rely on parent refetch or prop update
-            // onSendMessage prop triggers parent update in Mock mode, but in Live mode we called API directly above.
-            // We should stick to one pattern. Since onSendMessage in App.tsx calls API too, we should use that OR this.
-            // App.tsx implementation handles both. Let's use the passed prop if it handles errors, 
-            // BUT App.tsx's handler has generic error alerting.
-            // BETTER: Use liveApiService directly here for granular error handling, then notify parent.
-            
             onUpdateDriver(driver.id, { 
                 lastMessage: replyText, 
                 lastMessageTime: Date.now() 
@@ -145,20 +203,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       alert("Video Call Request Sent to Driver's WhatsApp");
   };
 
-  const steps = [
-    { label: 'Welcome', done: true },
-    { label: 'Documents', done: documents.length > 0 },
-    { label: 'Vehicle', done: !!driver.vehicleRegistration },
-    { label: 'Availability', done: !!driver.availability },
-    { label: 'Qualified', done: driver.status === LeadStatus.QUALIFIED }
-  ];
-
   return (
     <div className="fixed inset-0 z-50 overflow-hidden">
       <div className="absolute inset-0 bg-black/30 backdrop-blur-sm transition-opacity" onClick={onClose} />
       
       <div className="absolute inset-y-0 right-0 flex max-w-full pl-10 pointer-events-none">
-        <div className="pointer-events-auto w-screen max-w-4xl bg-white shadow-2xl flex flex-col h-full">
+        <div className="pointer-events-auto w-screen max-w-5xl bg-white shadow-2xl flex flex-col h-full">
           
           {/* Header */}
           <div className="bg-black text-white px-6 py-4 flex items-center justify-between shadow-md z-10">
@@ -213,8 +263,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                             
                             {/* RICH CARD HEADER IMAGE */}
                             {(msg.headerImageUrl || msg.imageUrl) && (
-                                <div className="w-full aspect-video overflow-hidden">
+                                <div className="w-full aspect-video overflow-hidden bg-black/5 relative group">
                                     <img src={msg.headerImageUrl || msg.imageUrl} alt="Header" className="w-full h-full object-cover" />
+                                    <a href={msg.headerImageUrl || msg.imageUrl} target="_blank" rel="noreferrer" className="absolute top-2 right-2 p-1 bg-black/50 text-white rounded opacity-0 group-hover:opacity-100 transition-opacity"><ExternalLink size={12} /></a>
                                 </div>
                             )}
 
@@ -225,6 +276,24 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                                         <LayoutTemplate size={10} /> Template: {msg.templateName}
                                     </div>
                                 )}
+                                
+                                {msg.type === 'audio' && (
+                                    <div className="flex items-center gap-2 my-2 bg-gray-100/20 p-2 rounded-lg">
+                                        <Phone size={16} />
+                                        <span className="text-xs italic">Audio Message (Format not supported in browser)</span>
+                                    </div>
+                                )}
+
+                                {msg.type === 'document' && (
+                                    <div className="flex items-center gap-2 my-2 bg-gray-100/20 p-3 rounded-lg border border-white/20">
+                                        <FileText size={20} />
+                                        <div className="flex-1 min-w-0">
+                                            <div className="text-xs font-bold truncate">Document Received</div>
+                                            <div className="text-[10px] opacity-70">Check Documents Tab</div>
+                                        </div>
+                                    </div>
+                                )}
+
                                 {msg.text && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
                                 {msg.footerText && <p className={`text-[10px] mt-2 pt-2 border-t opacity-70 ${msg.sender === 'driver' ? 'border-gray-100' : 'border-blue-500'}`}>{msg.footerText}</p>}
                                 <div className={`text-[10px] mt-1 text-right opacity-60`}>
@@ -332,24 +401,113 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
               </div>
             </div>
 
-            {/* Right: Driver Profile */}
-            <div className="w-[400px] bg-white flex flex-col overflow-y-auto border-l border-gray-200">
+            {/* Right: Driver Profile & Documents */}
+            <div className="w-[450px] bg-white flex flex-col overflow-y-auto border-l border-gray-200">
+              
+              {/* Profile Summary */}
               <div className="p-6 border-b border-gray-100 bg-gray-50/50">
-                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Onboarding Progress</h3>
-                <div className="flex items-center justify-between relative">
-                  <div className="absolute left-0 right-0 top-1/2 h-0.5 bg-gray-200 -z-10" />
-                  {steps.map((step, idx) => (
-                     <div key={idx} className={`flex flex-col items-center gap-1 bg-white px-1`}>
-                        <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border-2 transition-colors ${step.done ? 'bg-green-500 border-green-500 text-white' : 'bg-white border-gray-300 text-gray-400'}`}>
-                          {step.done ? <CheckCircle size={12} /> : idx + 1}
-                        </div>
-                        <span className="text-[10px] text-gray-500 font-medium">{step.label}</span>
-                     </div>
-                  ))}
+                <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Documents</h3>
+                    <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-lg p-0.5">
+                        <button onClick={() => setDocFilter('all')} className={`px-2 py-1 text-[10px] font-bold rounded ${docFilter === 'all' ? 'bg-gray-100 text-black' : 'text-gray-400'}`}>All</button>
+                        <button onClick={() => setDocFilter('license')} className={`px-2 py-1 text-[10px] font-bold rounded ${docFilter === 'license' ? 'bg-blue-50 text-blue-600' : 'text-gray-400'}`}>License</button>
+                        <button onClick={() => setDocFilter('rc_book')} className={`px-2 py-1 text-[10px] font-bold rounded ${docFilter === 'rc_book' ? 'bg-purple-50 text-purple-600' : 'text-gray-400'}`}>RC</button>
+                    </div>
                 </div>
+
+                {/* Checklist Widget */}
+                <div className="bg-white border border-gray-200 rounded-lg p-3 mb-4">
+                    <h4 className="text-[10px] font-bold text-gray-400 uppercase mb-2">Required Verification</h4>
+                    <div className="space-y-2">
+                        {checklistStatus.map(item => (
+                            <div key={item.type} className="flex items-center justify-between text-sm">
+                                <span className={`flex items-center gap-2 ${item.isUploaded ? 'text-gray-800' : 'text-gray-400'}`}>
+                                    {item.isUploaded ? <CheckCircle size={14} className={item.isApproved ? "text-green-500" : "text-amber-500"} /> : <div className="w-3.5 h-3.5 rounded-full border border-gray-300" />}
+                                    {item.label}
+                                </span>
+                                {item.isUploaded && !item.isApproved && <span className="text-[10px] bg-amber-100 text-amber-700 px-1.5 rounded">Review</span>}
+                            </div>
+                        ))}
+                    </div>
+                    {checklistStatus.some(c => !c.isUploaded) && (
+                        <button 
+                            onClick={handleRequestMissingDocs}
+                            className="w-full mt-3 text-xs bg-blue-50 text-blue-700 py-1.5 rounded font-bold hover:bg-blue-100 transition-colors border border-blue-100"
+                        >
+                            Request Missing Docs
+                        </button>
+                    )}
+                </div>
+
+                {docLoading ? (
+                    <div className="flex items-center justify-center p-4 text-gray-400 text-sm italic">Loading docs...</div>
+                ) : filteredDocuments.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center p-6 bg-white border border-gray-200 border-dashed rounded-xl">
+                        <FileText size={24} className="text-gray-300 mb-2" />
+                        <span className="text-xs text-gray-400">No {docFilter !== 'all' ? docFilter : ''} documents found.</span>
+                    </div>
+                ) : (
+                    <div className="space-y-3">
+                        {filteredDocuments.map((doc) => (
+                            <div key={doc.id} className={`bg-white p-3 rounded-xl border transition-colors shadow-sm group ${doc.verificationStatus === 'pending' ? 'border-amber-200 bg-amber-50/20' : 'border-gray-200 hover:border-blue-300'}`}>
+                                <div className="flex items-start justify-between mb-2">
+                                    <div className="flex items-center gap-2">
+                                        <div className={`p-2 rounded-lg ${doc.mimeType?.includes('image') ? 'bg-blue-50 text-blue-600' : 'bg-orange-50 text-orange-600'}`}>
+                                            {doc.mimeType?.includes('image') ? <ImageIcon size={16} /> : <File size={16} />}
+                                        </div>
+                                        <div>
+                                            <span className="text-xs font-bold text-gray-800 block capitalize">{doc.docType.replace('_', ' ')}</span>
+                                            <span className="text-[10px] text-gray-400">{new Date(doc.createdAt).toLocaleDateString()}</span>
+                                        </div>
+                                    </div>
+                                    
+                                    <div className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${
+                                        doc.verificationStatus === 'approved' ? 'bg-green-100 text-green-700' : 
+                                        doc.verificationStatus === 'rejected' ? 'bg-red-100 text-red-700' : 
+                                        'bg-yellow-100 text-yellow-700'
+                                    }`}>
+                                        {doc.verificationStatus}
+                                    </div>
+                                </div>
+                                
+                                {doc.verificationStatus === 'failed' && (
+                                    <div className="mb-2 text-[10px] text-red-600 bg-red-50 p-1.5 rounded border border-red-100 flex items-center gap-1">
+                                        <AlertTriangle size={10} />
+                                        Upload Failed. Ask to resend.
+                                    </div>
+                                )}
+                                
+                                {doc.mimeType?.includes('image') && doc.fileUrl && (
+                                    <div className="aspect-[4/3] w-full bg-gray-100 rounded-lg mb-3 overflow-hidden relative cursor-pointer" onClick={() => window.open(doc.fileUrl, '_blank')}>
+                                        <img src={doc.fileUrl} alt="Preview" className="w-full h-full object-cover hover:scale-105 transition-transform" />
+                                    </div>
+                                )}
+
+                                <div className="flex gap-2">
+                                    {doc.fileUrl && (
+                                        <a href={doc.fileUrl} target="_blank" rel="noreferrer" className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 py-1.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1 transition-colors">
+                                            <Eye size={12} /> View
+                                        </a>
+                                    )}
+                                    
+                                    {doc.verificationStatus !== 'approved' && (
+                                        <button onClick={() => handleUpdateDocStatus(doc.id, 'approved')} className="flex-1 bg-green-50 hover:bg-green-100 text-green-700 border border-green-200 py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition-colors">
+                                            <CheckCircle size={12} /> Approve
+                                        </button>
+                                    )}
+                                    {doc.verificationStatus !== 'rejected' && (
+                                        <button onClick={() => handleUpdateDocStatus(doc.id, 'rejected')} className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 p-1.5 rounded-lg transition-colors" title="Reject">
+                                            <X size={14} />
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
               </div>
 
-              <div className="p-6 space-y-8">
+              <div className="p-6 space-y-8 flex-1">
                 <section>
                     <h3 className="font-semibold text-gray-900 mb-2 flex items-center gap-2"><FileText size={18} className="text-purple-600" /> Smart Notes <Sparkles size={12} className="text-purple-400 animate-pulse" /></h3>
                     <div className="relative group">

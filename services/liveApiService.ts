@@ -2,7 +2,9 @@
 
 
 
-import { Driver, BotSettings, MessageButton, Message } from '../types';
+
+
+import { Driver, BotSettings, MessageButton, Message, DriverDocument } from '../types';
 
 // Determine Base URL
 const getBaseUrl = () => {
@@ -88,6 +90,26 @@ export const liveApiService = {
       } catch (e) {
           return [];
       }
+  },
+
+  // NEW: Get Documents
+  getDriverDocuments: async (driverId: string): Promise<DriverDocument[]> => {
+      try {
+          const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}/documents`);
+          return await response.json();
+      } catch(e) {
+          return [];
+      }
+  },
+
+  // NEW: Update Document
+  updateDocumentStatus: async (docId: string, status?: string, notes?: string) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/documents/${docId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status, notes })
+      });
+      return await response.json();
   },
 
   subscribeToUpdates: (callback: (updatedDrivers: Driver[]) => void) => {
