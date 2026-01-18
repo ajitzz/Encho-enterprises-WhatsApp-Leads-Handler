@@ -4,6 +4,8 @@
 
 
 
+
+
 import { Driver, BotSettings, MessageButton, Message, DriverDocument } from '../types';
 
 // Determine Base URL
@@ -20,6 +22,18 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
     try {
         const response = await fetch(url, options);
         if (!response.ok) {
+             // CRITICAL FIX: Do not retry POST/PUT/DELETE requests to avoid duplication
+             const method = options?.method?.toUpperCase() || 'GET';
+             if (method !== 'GET' && method !== 'HEAD') {
+                 // Parse error immediately and throw
+                 let errMessage = `Request Failed: ${response.status}`;
+                 try {
+                     const errData = await response.json();
+                     if (errData.error) errMessage = errData.error;
+                 } catch(e) {}
+                 throw new Error(errMessage);
+             }
+
              if (response.status >= 500) {
                  if (retries > 0) {
                      await new Promise(res => setTimeout(res, delay));
@@ -43,7 +57,9 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
         }
         return response;
     } catch (err: any) {
-        if (retries > 0 && !err.message.includes('4')) { // Don't retry 4xx
+        // Only retry network errors for idempotent requests
+        const method = options?.method?.toUpperCase() || 'GET';
+        if (retries > 0 && !err.message.includes('4') && (method === 'GET' || method === 'HEAD')) { 
             await new Promise(res => setTimeout(res, delay));
             return fetchWithRetry(url, options, retries - 1, delay * 2); 
         }
@@ -139,12 +155,16 @@ export const liveApiService = {
   },
 
   sendMessage: async (driverId: string, text: string, attachments?: { mediaUrl?: string, mediaType?: string, options?: string[], headerImageUrl?: string, footerText?: string, buttons?: MessageButton[], templateName?: string }) => {
+    // Generate Idempotency Key
+    const clientMessageId = `web_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
     const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
           driverId, 
           text,
+          clientMessageId, // Send unique ID
           mediaUrl: attachments?.mediaUrl,
           mediaType: attachments?.mediaType,
           options: attachments?.options,

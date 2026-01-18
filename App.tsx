@@ -12,6 +12,7 @@ import { AssistantChat } from './components/AssistantChat';
 import { MediaLibrary } from './components/MediaLibrary';
 import { PublicShowcase } from './components/PublicShowcase'; 
 import { SystemMonitor } from './components/SystemMonitor'; 
+import { SettingsModal } from './components/SettingsModal'; // NEW
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
@@ -42,6 +43,7 @@ export default function App() {
   const [selectedBulkIds, setSelectedBulkIds] = useState<string[]>([]);
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [showWebhookModal, setShowWebhookModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false); // NEW STATE
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
   const [isRepeatToggling, setIsRepeatToggling] = useState(false);
@@ -137,12 +139,7 @@ export default function App() {
     if (selectedDriver && dataSource === 'live') {
       const updated = drivers.find(d => d.id === selectedDriver.id);
       if (updated && updated.lastMessageTime !== selectedDriver.lastMessageTime) {
-         // If a new message arrived while open, update the selected driver view
-         // We might need to fetch the message content if it was a delta update without body
          if (updated.messages.length === 0 && selectedDriver.messages.length > 0) {
-             // Preserve history, but fetch latest if needed. 
-             // Actually, usually the delta update for a driver row doesn't have messages.
-             // We should re-fetch messages if the driver updated.
              liveApiService.getDriverMessages(updated.id).then(msgs => {
                  setSelectedDriver({ ...updated, messages: msgs });
              });
@@ -271,7 +268,6 @@ export default function App() {
     }
   };
 
-  // Replaced with dedicated handler in LeadManager, but kept for Dashboard compatibility or legacy
   const handleBulkSendLegacy = () => {
     if (dataSource === 'mock') {
         selectedBulkIds.forEach(id => {
@@ -295,25 +291,22 @@ export default function App() {
     }
   };
   
-  // NEW: LeadManager Callback
   const handleBulkSendDirect = async (ids: string[], message: string, mediaUrl?: string, mediaType?: string, options?: string[], templateName?: string, scheduledTime?: number) => {
       if (dataSource === 'mock') {
-          // Mock doesn't support scheduling UI feedback well, just send immediately
           ids.forEach(id => {
               mockBackend.addMessage(id, {
                   id: Date.now().toString() + id,
                   sender: 'agent',
                   text: message,
-                  imageUrl: mediaUrl, // Used for any media in mock
+                  imageUrl: mediaUrl, 
                   options: options,
                   timestamp: Date.now(),
                   type: templateName ? 'template' : (mediaType ? (mediaType as any) : options ? 'options' : 'text'),
-                  templateName: templateName // Mock support
+                  templateName: templateName 
               });
           });
       } else {
           if (scheduledTime && scheduledTime > Date.now()) {
-              // SCHEDULE MODE
               try {
                   await fetch('/api/messages/schedule', {
                       method: 'POST',
@@ -334,13 +327,11 @@ export default function App() {
               } catch(e) { console.error(e); }
           }
 
-          // IMMEDIATE MODE
           let successCount = 0;
           for (const id of ids) {
               try {
                   await liveApiService.sendMessage(id, message, { mediaUrl, mediaType, options, templateName });
                   successCount++;
-                  // Small delay to prevent rate limit
                   await new Promise(r => setTimeout(r, 200));
               } catch(e) { console.error(e); }
           }
@@ -383,7 +374,11 @@ export default function App() {
 
   return (
     <>
-      <Layout activeTab={activeTab} onTabChange={setActiveTab}>
+      <Layout 
+        activeTab={activeTab} 
+        onTabChange={setActiveTab}
+        onOpenSettings={() => setShowSettingsModal(true)} // Wired Handler
+      >
         {/* DASHBOARD TAB */}
         {activeTab === 'dashboard' && (
         <div className="p-8 max-w-7xl mx-auto space-y-8">
@@ -535,6 +530,11 @@ export default function App() {
               });
             }}
           />
+        )}
+
+        {/* SETTINGS MODAL */}
+        {showSettingsModal && (
+          <SettingsModal onClose={() => setShowSettingsModal(false)} />
         )}
 
         {showBulkModal && (
