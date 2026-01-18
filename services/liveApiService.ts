@@ -1,5 +1,6 @@
 
 
+
 import { Driver, BotSettings, MessageButton, Message } from '../types';
 
 // Determine Base URL
@@ -21,13 +22,25 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
                      await new Promise(res => setTimeout(res, delay));
                      return fetchWithRetry(url, options, retries - 1, delay * 2);
                  }
-                 throw new Error(`Server Error: ${response.status}`);
+                 // Try to get JSON error body if available
+                 let errMessage = `Server Error: ${response.status}`;
+                 try {
+                     const errData = await response.json();
+                     if (errData.error) errMessage = errData.error;
+                 } catch(e) {}
+                 throw new Error(errMessage);
              }
-             return response;
+             // For 4xx errors, parse body immediately
+             let errMessage = `Request Failed: ${response.status}`;
+             try {
+                 const errData = await response.json();
+                 if (errData.error) errMessage = errData.error;
+             } catch(e) {}
+             throw new Error(errMessage);
         }
         return response;
-    } catch (err) {
-        if (retries > 0) {
+    } catch (err: any) {
+        if (retries > 0 && !err.message.includes('4')) { // Don't retry 4xx
             await new Promise(res => setTimeout(res, delay));
             return fetchWithRetry(url, options, retries - 1, delay * 2); 
         }
@@ -43,7 +56,6 @@ export const liveApiService = {
       lastSyncTimestamp = Date.now();
       const url = `${API_BASE_URL}/api/drivers`;
       const response = await fetchWithRetry(url);
-      if (!response.ok) throw new Error('API Error');
       return await response.json();
     } catch (error: any) {
       console.warn("Fetch Error (handled):", error);
@@ -56,7 +68,6 @@ export const liveApiService = {
       try {
           const url = `${API_BASE_URL}/api/sync?since=${lastSyncTimestamp}`;
           const response = await fetchWithRetry(url);
-          if (!response.ok) return [];
           
           const drivers = await response.json();
           if (drivers.length > 0) {
@@ -72,7 +83,6 @@ export const liveApiService = {
   getDriverMessages: async (driverId: string): Promise<Message[]> => {
       try {
           const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}/messages`);
-          if (!response.ok) return [];
           return await response.json();
       } catch (e) {
           return [];
@@ -93,7 +103,6 @@ export const liveApiService = {
 
   getBotSettings: async (): Promise<BotSettings> => {
     const response = await fetchWithRetry(`${API_BASE_URL}/api/bot-settings`);
-    if (!response.ok) throw new Error('Failed to fetch bot settings');
     return await response.json();
   },
 
@@ -103,7 +112,6 @@ export const liveApiService = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings)
     });
-    if (!response.ok) throw new Error('Failed to save settings');
     return await response.json();
   },
 
@@ -123,7 +131,6 @@ export const liveApiService = {
           templateName: attachments?.templateName 
       })
     });
-    if (!response.ok) throw new Error('Failed to send message');
     return await response.json();
   },
 
@@ -137,7 +144,6 @@ export const liveApiService = {
               ...content
           })
       });
-      if (!response.ok) throw new Error('Failed to schedule message');
       return await response.json();
   },
 
@@ -147,7 +153,6 @@ export const liveApiService = {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(updates)
       });
-      if (!response.ok) throw new Error('Failed to update driver');
       return await response.json();
   },
 
@@ -158,7 +163,6 @@ export const liveApiService = {
           body: JSON.stringify({ filename: file.name, fileType: file.type, folderPath })
       });
       
-      if (!presignResponse.ok) throw new Error('Failed to get upload permission');
       const { uploadUrl, key, publicUrl } = await presignResponse.json();
 
       const uploadResponse = await fetch(uploadUrl, {
@@ -176,25 +180,21 @@ export const liveApiService = {
           body: JSON.stringify({ key, url: publicUrl, filename: file.name, type: fileType, folderPath })
       });
 
-      if (!registerResponse.ok) throw new Error('Failed to register file');
       return { url: publicUrl, type: fileType };
   },
 
   syncFromS3: async () => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/media/sync`, { method: 'POST' });
-      if (!response.ok) throw new Error('Failed to sync S3');
       return await response.json();
   },
 
   setPublicFolder: async (folderId: string) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${folderId}/public`, { method: 'POST' });
-      if (!response.ok) throw new Error('Failed to set public folder');
       return await response.json();
   },
 
   unsetPublicFolder: async (folderId: string) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${folderId}/public`, { method: 'DELETE' });
-      if (!response.ok) throw new Error('Failed to unset public folder');
       return await response.json();
   },
 
@@ -203,26 +203,22 @@ export const liveApiService = {
         ? `${API_BASE_URL}/api/public/showcase?folder=${encodeURIComponent(folderName)}`
         : `${API_BASE_URL}/api/public/showcase`;
       const response = await fetchWithRetry(url);
-      if (!response.ok) throw new Error('Failed to fetch showcase');
       return await response.json();
   },
 
   getShowcaseStatus: async () => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/public/status`);
-      if (!response.ok) throw new Error('Failed to fetch status');
       return await response.json();
   },
 
   syncFileToWhatsApp: async (fileId: string) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/files/${fileId}/sync`, { method: 'POST' });
-      if (!response.ok) throw new Error('Sync failed');
       return await response.json();
   },
 
   getMediaLibrary: async (path: string = '/') => {
       const encodedPath = encodeURIComponent(path);
       const response = await fetchWithRetry(`${API_BASE_URL}/api/media?path=${encodedPath}`);
-      if (!response.ok) throw new Error('Failed to fetch media');
       return await response.json();
   },
 
@@ -232,7 +228,6 @@ export const liveApiService = {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name, parentPath })
       });
-      if (!response.ok) throw new Error(`Failed to create folder`);
       return await response.json();
   },
 
@@ -242,19 +237,16 @@ export const liveApiService = {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: newName })
       });
-      if (!response.ok) throw new Error(`Failed to rename folder`);
       return await response.json();
   },
 
   deleteMediaFile: async (id: string) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/files/${id}`, { method: 'DELETE' });
-      if (!response.ok) throw new Error('Failed to delete file');
       return await response.json();
   },
 
   deleteFolder: async (id: string) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${id}`, { method: 'DELETE' });
-      if (!response.ok) throw new Error('Failed to delete folder');
       return await response.json();
   },
 

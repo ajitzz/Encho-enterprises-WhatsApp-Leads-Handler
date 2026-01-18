@@ -27,6 +27,7 @@ app.use((req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3001;
+// CRITICAL: Ensure these match your valid environment variables or hardcoded fallbacks
 let META_API_TOKEN = process.env.META_API_TOKEN || "EAAkr7Y9S2qYBQfHTNZASIugAzOi8b2MZCBct4z4jZBHSmQ2KGlFduuDQQGEYC9NRDtZBUdhMPdeJ06OjYUiJYGfFkZCAxzyh4TdidN7ZA10K3XPOVEiQh01jo22xLsQjXrEtMHc5ZCHZBbRZAyA5d0pl26Jsg3IuNKY272QYmqEjHghf11OKJmbUZBfJLe5EvHzl48gAZDZD"; 
 let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "982841698238647"; 
 let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
@@ -75,6 +76,57 @@ const queryWithRetry = async (text, params, retries = 3) => {
 };
 
 let isDbInitialized = false;
+
+// --- DEFAULT BOT FLOW (Ensures bot works out-of-the-box) ---
+const DEFAULT_BOT_FLOW = {
+    isEnabled: true,
+    shouldRepeat: false,
+    entryPointId: "welcome",
+    steps: [
+        {
+            id: "welcome",
+            title: "Welcome Message",
+            message: "Hello! 👋 Welcome to Uber Fleet Recruitment.\nAre you interested in driving with us?",
+            inputType: "option",
+            options: ["Yes, I want to drive", "No, just inquiring"],
+            routes: {
+                "Yes": "collect_name",
+                "No": "end_conversation"
+            },
+            nextStepId: "collect_name"
+        },
+        {
+            id: "collect_name",
+            title: "Collect Name",
+            message: "Great! Please type your full name.",
+            inputType: "text",
+            saveToField: "name",
+            nextStepId: "collect_vehicle"
+        },
+        {
+            id: "collect_vehicle",
+            title: "Vehicle Check",
+            message: "Do you have a valid driving license and your own vehicle? (Yes/No)",
+            inputType: "text",
+            saveToField: "notes",
+            nextStepId: "qualify"
+        },
+        {
+            id: "qualify",
+            title: "Qualified",
+            message: "Perfect! A recruiter will contact you shortly to finalize your onboarding. 🚗",
+            inputType: "text",
+            nextStepId: "END"
+        },
+        {
+            id: "end_conversation",
+            title: "End",
+            message: "No problem! Feel free to contact us anytime if you change your mind.",
+            inputType: "text",
+            nextStepId: "END"
+        }
+    ]
+};
 
 const initDB = async () => {
     if (isDbInitialized) return;
@@ -151,9 +203,22 @@ const initDB = async () => {
             await queryWithRetry(migration, []);
         }
         
-        await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT DO NOTHING`, [JSON.stringify({ isEnabled: true, shouldRepeat: false, steps: [] })]);
+        // --- INITIALIZE DEFAULT BOT SETTINGS ---
+        // 1. Insert if missing
+        await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT DO NOTHING`, [JSON.stringify(DEFAULT_BOT_FLOW)]);
+
+        // 2. Self-Healing: If settings exist but steps are empty, update them
+        const sRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1', []);
+        if (sRes.rows.length > 0) {
+            const current = sRes.rows[0].settings;
+            if (!current.steps || current.steps.length === 0) {
+                console.log("⚠️ Empty bot flow detected. Seeding default flow...");
+                await queryWithRetry('UPDATE bot_settings SET settings = $1 WHERE id = 1', [JSON.stringify(DEFAULT_BOT_FLOW)]);
+            }
+        }
+
         isDbInitialized = true;
-        console.log("Database initialized (Lazy with Migrations)");
+        console.log("Database initialized (Lazy with Migrations & Default Flow)");
     } catch (e) {
         console.error("DB Init Failed:", e);
     }
@@ -213,12 +278,24 @@ const uploadToWhatsApp = async (fileUrl, fileType) => {
 };
 
 const sendWhatsAppMessage = async (to, body, options = null, templateName = null, language = 'en_US', mediaUrl = null, mediaType = 'image', headerImageUrl = null, footerText = null, buttons = null) => {
-   if (!META_API_TOKEN || !PHONE_NUMBER_ID) return false;
-   if (!templateName && !mediaUrl && !headerImageUrl && (!body || body.trim() === '')) return false;
-   if (body && !isContentSafe(body)) return false;
+   if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
+       console.error("[Meta] Missing credentials");
+       return { success: false, error: "Server missing Meta credentials" };
+   }
+   
+   if (!templateName && !mediaUrl && !headerImageUrl && (!body || body.trim() === '')) {
+       console.warn("[Meta] Attempted to send empty message");
+       return { success: false, error: "Empty message content" };
+   }
+   
+   if (body && !isContentSafe(body)) {
+       console.warn("[Meta] Blocked unsafe content");
+       return { success: false, error: "Content blocked (Placeholder text detected)" };
+   }
   
    let payload = { messaging_product: 'whatsapp', to: to };
 
+   // --- PAYLOAD CONSTRUCTION ---
    if (templateName) {
      payload.type = 'template';
      payload.template = { 
@@ -298,10 +375,17 @@ const sendWhatsAppMessage = async (to, body, options = null, templateName = null
    }
   
    try {
-     await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, payload, { headers: { Authorization: `Bearer ${META_API_TOKEN}` } });
-     return true;
+     const res = await axios.post(`https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`, payload, { headers: { Authorization: `Bearer ${META_API_TOKEN}` } });
+     console.log(`[Meta] Sent to ${to}: ${res.status}`);
+     return { success: true, data: res.data };
    } catch (error) { 
-       return false; 
+       const details = error.response ? error.response.data : error.message;
+       console.error(`[Meta] Failed to send to ${to}:`, JSON.stringify(details, null, 2));
+       return { 
+           success: false, 
+           error: error.response?.data?.error?.message || error.message,
+           code: error.response?.data?.error?.code
+       }; 
    }
 };
 
@@ -336,7 +420,7 @@ const runScheduler = async () => {
                 const dRes = await queryWithRetry("SELECT phone_number FROM drivers WHERE id = $1", [driverId]);
                 if (dRes.rows.length > 0) {
                     const phone = dRes.rows[0].phone_number;
-                    const sent = await sendWhatsAppMessage(
+                    const result = await sendWhatsAppMessage(
                         phone, 
                         content.text, 
                         content.options, 
@@ -349,7 +433,7 @@ const runScheduler = async () => {
                         content.buttons
                     );
                     
-                    if (sent) {
+                    if (result.success) {
                         successCount++;
                         // Insert log safely
                         await queryWithRetry(
@@ -369,6 +453,8 @@ const runScheduler = async () => {
                         ).catch(e => console.error("Scheduler Log Error:", e.message));
 
                         await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2, updated_at = $2 WHERE id = $3', [`[Scheduled]: ${content.text || content.templateName}`, Date.now(), driverId]).catch(e => {});
+                    } else {
+                        console.error(`[Scheduler] Failed to send to ${driverId}: ${result.error}`);
                     }
                 }
             }
@@ -466,9 +552,9 @@ router.post('/messages/send', async (req, res) => {
         const dRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
         if (dRes.rows.length === 0) return res.status(404).json({ error: "Driver not found" });
         
-        const sent = await sendWhatsAppMessage(dRes.rows[0].phone_number, text, options, templateName, 'en_US', mediaUrl, mediaType, headerImageUrl, footerText, buttons);
+        const result = await sendWhatsAppMessage(dRes.rows[0].phone_number, text, options, templateName, 'en_US', mediaUrl, mediaType, headerImageUrl, footerText, buttons);
         
-        if (sent) {
+        if (result.success) {
             let type = 'text';
             if (templateName) type = 'template';
             else if (buttons) type = 'rich_card';
@@ -499,7 +585,8 @@ router.post('/messages/send', async (req, res) => {
 
             res.json({ success: true });
         } else {
-            res.status(500).json({ error: "Meta API Failed" });
+            // Forward the specific Meta error to the frontend
+            res.status(500).json({ error: result.error, code: result.code });
         }
     } catch (e) { 
         console.error("Message Send Error:", e);
@@ -746,9 +833,17 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
         await client.query('COMMIT');
     } catch (e) { await client.query('ROLLBACK'); } finally { client.release(); }
 
-    if (driver.is_human_mode) return;
+    if (driver.is_human_mode) {
+        console.log(`[Bot] Skipped: ${from} is in Human Mode`);
+        return;
+    }
 
     const shouldProcess = botSettings.isEnabled && (driver.is_bot_active || botSettings.shouldRepeat);
+
+    if (!shouldProcess) {
+        console.log(`[Bot] Skipped: Bot Disabled or User Inactive. (Enabled: ${botSettings.isEnabled}, Active: ${driver.is_bot_active}, Repeat: ${botSettings.shouldRepeat})`);
+        return;
+    }
 
     if (shouldProcess) {
         let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
@@ -769,7 +864,7 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
                     }), scheduledTime, Date.now()]
                 );
             } else {
-                const sent = await sendWhatsAppMessage(
+                const result = await sendWhatsAppMessage(
                     from, 
                     step.message, 
                     step.options, 
@@ -781,7 +876,12 @@ const processIncomingMessage = async (from, name, msgBody, msgType = 'text') => 
                     step.footerText, 
                     step.buttons
                 );
-                if (sent) await logSystemMessage(targetId, step.message || `[Template]`, 'text', safeVal(step.headerImageUrl), safeVal(step.footerText), step.buttons, safeVal(step.templateName));
+                
+                if (result.success) {
+                    await logSystemMessage(targetId, step.message || `[Template]`, 'text', safeVal(step.headerImageUrl), safeVal(step.footerText), step.buttons, safeVal(step.templateName));
+                } else {
+                    console.error(`[Bot] Failed to send step: ${result.error}`);
+                }
             }
         };
 

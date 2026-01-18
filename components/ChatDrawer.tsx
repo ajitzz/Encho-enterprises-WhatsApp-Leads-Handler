@@ -1,4 +1,5 @@
 
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, LeadStatus, OnboardingStep } from '../types';
 import { 
@@ -39,7 +40,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   if (!driver) return null;
 
   const handleSend = async () => {
-    if (!replyText.trim()) return;
+    if (!replyText.trim() && !templateName) return;
     
     // 1. Scheduled Message Path
     if (showSchedule && scheduleTime) {
@@ -71,9 +72,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             setShowSchedule(false);
             setScheduleTime('');
             
-        } catch(e) {
+        } catch(e: any) {
             console.error("Schedule Error:", e);
-            alert("Failed to schedule message. Check server connection.");
+            alert(`Failed to schedule: ${e.message}`);
         }
     } 
     // 2. Immediate Template Path
@@ -87,14 +88,29 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             setReplyText('');
             setTemplateName('');
             setIsTemplateMode(false);
-        } catch(e) {
-            alert("Failed to send template");
+        } catch(e: any) {
+            alert(`Failed to send template: ${e.message}`);
         }
     } 
     // 3. Standard Text Path
     else {
-        onSendMessage(replyText);
-        setReplyText('');
+        try {
+            await liveApiService.sendMessage(driver.id, replyText);
+            // Optimistic update handled by App.tsx or parent handler usually, but here we can rely on parent refetch or prop update
+            // onSendMessage prop triggers parent update in Mock mode, but in Live mode we called API directly above.
+            // We should stick to one pattern. Since onSendMessage in App.tsx calls API too, we should use that OR this.
+            // App.tsx implementation handles both. Let's use the passed prop if it handles errors, 
+            // BUT App.tsx's handler has generic error alerting.
+            // BETTER: Use liveApiService directly here for granular error handling, then notify parent.
+            
+            onUpdateDriver(driver.id, { 
+                lastMessage: replyText, 
+                lastMessageTime: Date.now() 
+            });
+            setReplyText('');
+        } catch(e: any) {
+            alert(`Message Failed: ${e.message}`);
+        }
     }
   };
 
