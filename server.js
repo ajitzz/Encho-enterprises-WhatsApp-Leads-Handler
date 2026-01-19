@@ -10,8 +10,7 @@ const axios = require('axios');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Pool } = require('pg'); 
-const { S3Client, PutObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { S3Client } = require('@aws-sdk/client-s3');
 require('dotenv').config();
 
 const app = express();
@@ -45,7 +44,6 @@ const META_API_TOKEN = (process.env.META_API_TOKEN || "").trim() || "EAAkr7Y9S2q
 const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "").trim() || "982841698238647";
 const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || "").trim() || "uber_fleet_verify_token";
 const APP_SECRET = (process.env.APP_SECRET || "").trim() || ""; 
-const AWS_BUCKET_NAME = process.env.AWS_BUCKET_NAME || 'uber-fleet-assets';
 
 const s3Client = new S3Client({
     region: process.env.AWS_REGION || 'us-east-1',
@@ -69,22 +67,15 @@ if (!global.pgPool) {
         global.pgPool = new Pool({
             connectionString: CONNECTION_STRING,
             ssl: { rejectUnauthorized: false },
-            max: 20, // Increased for concurrency
-            connectionTimeoutMillis: 10000, // Increased timeout
-            idleTimeoutMillis: 30000, // Close idle clients
-        });
-        
-        // CRITICAL: Handle idle client errors to prevent process crash
-        global.pgPool.on('error', (err, client) => {
-            console.error('❌ Unexpected error on idle DB client', err);
-            // Don't exit process, just log. The pool will replace the client.
+            max: 10, 
+            connectionTimeoutMillis: 15000, 
+            idleTimeoutMillis: 10000,
         });
     }
 }
 pool = global.pgPool;
 
 // --- SCHEMA DEFINITIONS ---
-// Fixed CAST to BIGINT for timestamps to prevent Type Errors in Postgres
 const SCHEMA_QUERIES = `
     CREATE TABLE IF NOT EXISTS drivers (
         id TEXT PRIMARY KEY,
@@ -102,7 +93,7 @@ const SCHEMA_QUERIES = `
         is_human_mode BOOLEAN DEFAULT FALSE,
         qualification_checks JSONB DEFAULT '{}',
         onboarding_step INT DEFAULT 0,
-        updated_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT
+        updated_at BIGINT DEFAULT (extract(epoch from now()) * 1000)
     );
     CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
@@ -128,25 +119,9 @@ const SCHEMA_QUERIES = `
         doc_type TEXT NOT NULL,
         file_url TEXT NOT NULL,
         mime_type TEXT,
-        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT,
+        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000),
         verification_status TEXT DEFAULT 'pending',
         notes TEXT
-    );
-    CREATE TABLE IF NOT EXISTS media_folders (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        parent_path TEXT DEFAULT '/',
-        is_public_showcase BOOLEAN DEFAULT FALSE,
-        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT
-    );
-    CREATE TABLE IF NOT EXISTS media_files (
-        id TEXT PRIMARY KEY,
-        url TEXT NOT NULL,
-        filename TEXT NOT NULL,
-        type TEXT,
-        folder_path TEXT DEFAULT '/',
-        media_id TEXT,
-        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT
     );
     CREATE TABLE IF NOT EXISTS bot_settings (
         id INT PRIMARY KEY DEFAULT 1,
@@ -162,7 +137,7 @@ const SCHEMA_QUERIES = `
         content JSONB,
         scheduled_time BIGINT,
         status TEXT DEFAULT 'pending',
-        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT
+        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)
     );
     INSERT INTO system_settings (key, value) VALUES 
     ('webhook_ingest_enabled', 'true'),
@@ -182,8 +157,6 @@ const INDEX_QUERIES = `
     WHERE status IN ('pending', 'failed');
     
     CREATE INDEX IF NOT EXISTS idx_driver_documents_driver_id ON driver_documents(driver_id);
-    CREATE INDEX IF NOT EXISTS idx_media_files_folder ON media_files(folder_path);
-    CREATE INDEX IF NOT EXISTS idx_media_folders_parent ON media_folders(parent_path);
 `;
 
 // --- MIGRATION QUERIES (Auto-Update Existing Tables) ---
@@ -199,31 +172,6 @@ const MIGRATION_QUERIES = `
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS qualification_checks JSONB DEFAULT '{}';
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS onboarding_step INT DEFAULT 0;
-
-    -- Ensure Media Tables exist (Self-healing)
-    CREATE TABLE IF NOT EXISTS media_folders (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        parent_path TEXT DEFAULT '/',
-        is_public_showcase BOOLEAN DEFAULT FALSE,
-        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT
-    );
-    CREATE TABLE IF NOT EXISTS media_files (
-        id TEXT PRIMARY KEY,
-        url TEXT NOT NULL,
-        filename TEXT NOT NULL,
-        type TEXT,
-        folder_path TEXT DEFAULT '/',
-        media_id TEXT,
-        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT
-    );
-
-    -- Media Column Backfills
-    ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS parent_path TEXT DEFAULT '/';
-    ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS is_public_showcase BOOLEAN DEFAULT FALSE;
-    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS folder_path TEXT DEFAULT '/';
-    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS media_id TEXT;
-    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS type TEXT;
 `;
 
 // --- QUERY EXECUTION HELPER ---
@@ -237,34 +185,43 @@ const queryWithRetry = async (text, params, retries = 2) => {
     } catch (err) {
         if (client) { try { client.release(true); } catch(e) {} client = null; }
         
-        console.error(`⚠️ SQL Error [${err.code}]: ${err.message}`);
-
-        // SELF-HEALING: Missing Table (42P01) or Column (42703)
-        if (err.code === '42P01' || err.code === '42703') { 
-            console.warn("⚠️ Schema Mismatch detected. Attempting Auto-Migration...");
+        // SELF-HEALING: Missing Table
+        if (err.code === '42P01') { 
+            console.warn("⚠️ Tables missing. Running Schema Init...");
             try {
                 const healClient = await pool.connect();
                 await healClient.query(SCHEMA_QUERIES);
-                await healClient.query(MIGRATION_QUERIES); // Force migrations
                 await healClient.query(INDEX_QUERIES); 
                 healClient.release();
-                
-                // Retry original query
                 const retryClient = await pool.connect();
                 const res = await retryClient.query(text, params);
                 retryClient.release();
                 return res;
             } catch (healErr) {
-                console.error("❌ Schema Healing Failed:", healErr.message);
+                console.error("❌ Schema Healing Failed:", healErr);
                 throw healErr;
             }
         }
+        
+        if (err.code === '42703') {
+             console.warn("⚠️ Columns missing. Running Migrations...");
+             try {
+                const healClient = await pool.connect();
+                await healClient.query(MIGRATION_QUERIES);
+                healClient.release();
+                const retryClient = await pool.connect();
+                const res = await retryClient.query(text, params);
+                retryClient.release();
+                return res;
+             } catch (healErr) {
+                console.error("❌ Migration Failed:", healErr);
+                throw healErr;
+             }
+        }
 
         if (retries > 0 && (err.code === 'ECONNRESET' || err.code === '57P01' || err.message.includes('timeout'))) {
-            // await new Promise(res => setTimeout(res, 1000)); 
-            // return queryWithRetry(text, params, retries - 1);
-            // FAIL FAST for Worker to avoid hogging resources
-            throw err;
+            await new Promise(res => setTimeout(res, 1000)); 
+            return queryWithRetry(text, params, retries - 1);
         }
         throw err;
     } finally {
@@ -286,7 +243,7 @@ const refreshCache = async () => {
         CACHE.lastRefreshed = Date.now();
         console.log("🧠 Server Cache Refreshed");
     } catch (e) {
-        console.error("Failed to refresh cache:", e.message);
+        console.error("Failed to refresh cache:", e);
     }
 };
 
@@ -505,12 +462,10 @@ const processOutbox = async () => {
 
         await client.query('COMMIT');
     } catch (e) {
-        if (client) {
-            try { await client.query('ROLLBACK'); } catch(e) {}
-        }
-        // console.error("Worker Transaction Error:", e.message); // Suppress log spam
+        if (client) await client.query('ROLLBACK');
+        console.error("Worker Transaction Error:", e);
     } finally {
-        if (client) { try { client.release(); } catch(e) {} }
+        if (client) client.release();
     }
 };
 
@@ -536,6 +491,9 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
 
     // 2. BUFFERED INSERT
     // We set next_retry_at = Now + 15 seconds.
+    // This allows us to attempt an immediate send below. 
+    // If the immediate send works, we update status to 'sent'.
+    // If the server crashes during immediate send, the worker picks it up after 15s.
     const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
     const dbText = bodyText || (content.templateName ? `Template: ${content.templateName}` : '[Media Message]');
     const retryBuffer = Date.now() + 15000; 
@@ -575,7 +533,9 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
         return { success: true, messageId: msgId };
     } catch (error) {
         const errorDetail = error.response?.data?.error;
-        // Mark as failed so worker sees it (retry_count is 0 default)
+        console.error("❌ Immediate Send Failed (Queued for Worker):", JSON.stringify(errorDetail || error.message));
+        
+        // Update to 'failed' so UI shows it, and reset retry time to sooner (e.g. 2s)
         const fastRetry = Date.now() + 2000;
         await queryWithRetry("UPDATE messages SET status = 'failed', next_retry_at = $1 WHERE id = $2", [fastRetry, msgId]);
         
@@ -598,202 +558,6 @@ router.post('/messages/send', async (req, res) => {
 
     } catch (e) {
         res.status(500).json({ error: e.message });
-    }
-});
-
-// --- MEDIA LIBRARY ENDPOINTS (S3 + DB) ---
-
-router.get('/media', async (req, res) => {
-    try {
-        const path = req.query.path || '/';
-        const files = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
-        const folders = await queryWithRetry('SELECT * FROM media_folders WHERE parent_path = $1 ORDER BY name ASC', [path]);
-        res.json({
-            files: files.rows,
-            folders: folders.rows
-        });
-    } catch(e) { 
-        console.error("GET /media Error:", e.message);
-        res.status(500).json({ error: e.message || "DB Connection Failed" }); 
-    }
-});
-
-router.post('/media/sync', async (req, res) => {
-    try {
-        const command = new ListObjectsV2Command({ Bucket: AWS_BUCKET_NAME });
-        const data = await s3Client.send(command);
-        
-        let added = 0;
-        const region = process.env.AWS_REGION || 'us-east-1';
-        
-        if (data.Contents) {
-            for (const item of data.Contents) {
-                const key = item.Key;
-                if (key.endsWith('/')) continue; // Skip directory markers
-
-                // Generate URL
-                const url = `https://${AWS_BUCKET_NAME}.s3.${region}.amazonaws.com/${key}`;
-                
-                // Parse Path
-                const lastSlash = key.lastIndexOf('/');
-                const filename = lastSlash === -1 ? key : key.substring(lastSlash + 1);
-                const folderName = lastSlash === -1 ? '' : key.substring(0, lastSlash);
-                const folderPath = folderName ? `/${folderName}` : '/';
-
-                // Check DB for File
-                const existingFile = await queryWithRetry('SELECT id FROM media_files WHERE url = $1', [url]);
-                if (existingFile.rows.length === 0) {
-                    // Infer Type
-                    let type = 'document';
-                    if (filename.match(/\.(jpg|jpeg|png|webp)$/i)) type = 'image';
-                    if (filename.match(/\.(mp4|mov|webm)$/i)) type = 'video';
-
-                    // Ensure Folder Exists in DB if nested
-                    if (folderName) {
-                        const folderCheck = await queryWithRetry('SELECT id FROM media_folders WHERE name = $1', [folderName]);
-                        if (folderCheck.rows.length === 0) {
-                             const folderId = `fld_${Date.now()}_${Math.random().toString(36).substr(2,4)}`;
-                             await queryWithRetry(
-                                 'INSERT INTO media_folders (id, name, parent_path) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', 
-                                 [folderId, folderName, '/']
-                             );
-                        }
-                    }
-
-                    // Insert File
-                    const fileId = `file_${Date.now()}_${Math.random().toString(36).substr(2,4)}`;
-                    await queryWithRetry(
-                        'INSERT INTO media_files (id, url, filename, type, folder_path) VALUES ($1, $2, $3, $4, $5)',
-                        [fileId, url, filename, type, folderPath]
-                    );
-                    added++;
-                }
-            }
-        }
-        res.json({ success: true, added });
-    } catch(e) {
-        console.error("S3 Sync Error:", e);
-        res.status(500).json({ error: e.message });
-    }
-});
-
-router.post('/folders', async (req, res) => {
-    const { name, parentPath } = req.body;
-    try {
-        const id = `fld_${Date.now()}_${Math.random().toString(36).substr(2,4)}`;
-        await queryWithRetry('INSERT INTO media_folders (id, name, parent_path) VALUES ($1, $2, $3)', [id, name, parentPath]);
-        res.json({ success: true, id });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-router.delete('/folders/:id', async (req, res) => {
-    const { id } = req.params;
-    try {
-        // Only delete if empty
-        const files = await queryWithRetry('SELECT id FROM media_files WHERE folder_path IN (SELECT name FROM media_folders WHERE id = $1)', [id]);
-        if (files.rows.length > 0) return res.status(400).json({ error: "Folder not empty" });
-        await queryWithRetry('DELETE FROM media_folders WHERE id = $1', [id]);
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-router.put('/folders/:id', async (req, res) => {
-    const { id } = req.params;
-    const { name } = req.body;
-    try {
-        await queryWithRetry('UPDATE media_folders SET name = $1 WHERE id = $2', [name, id]);
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-router.post('/s3/presign', async (req, res) => {
-    const { filename, fileType, folderPath } = req.body;
-    const key = `${folderPath === '/' ? '' : folderPath.substring(1) + '/'}${Date.now()}_${filename}`;
-    
-    try {
-        const command = new PutObjectCommand({
-            Bucket: AWS_BUCKET_NAME,
-            Key: key,
-            ContentType: fileType,
-            ACL: 'public-read' // Assumes Bucket Policy allows public read
-        });
-        const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
-        const publicUrl = `https://${AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION || 'us-east-1'}.amazonaws.com/${key}`;
-        
-        res.json({ uploadUrl, publicUrl, key });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-router.post('/files/register', async (req, res) => {
-    const { key, url, filename, type, folderPath } = req.body;
-    try {
-        const id = `file_${Date.now()}`;
-        await queryWithRetry(
-            'INSERT INTO media_files (id, url, filename, type, folder_path) VALUES ($1, $2, $3, $4, $5)',
-            [id, url, filename, type, folderPath]
-        );
-        res.json({ success: true, id });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-router.delete('/files/:id', async (req, res) => {
-    try {
-        await queryWithRetry('DELETE FROM media_files WHERE id = $1', [req.params.id]);
-        // Note: Actual S3 deletion is omitted for safety/simplicity
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// Showcases
-router.post('/folders/:id/public', async (req, res) => {
-    try {
-        // Disable others first if single-showcase logic desired, but we allow multiple for now
-        await queryWithRetry('UPDATE media_folders SET is_public_showcase = TRUE WHERE id = $1', [req.params.id]);
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-router.delete('/folders/:id/public', async (req, res) => {
-    try {
-        await queryWithRetry('UPDATE media_folders SET is_public_showcase = FALSE WHERE id = $1', [req.params.id]);
-        res.json({ success: true });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-router.get('/public/showcase', async (req, res) => {
-    const folderName = req.query.folder;
-    try {
-        let query = 'SELECT * FROM media_folders WHERE is_public_showcase = TRUE LIMIT 1';
-        let params = [];
-        if (folderName) {
-            query = 'SELECT * FROM media_folders WHERE name = $1';
-            params = [folderName];
-        }
-        
-        const folderRes = await queryWithRetry(query, params);
-        if (folderRes.rows.length === 0) return res.json({ title: 'Showcase', items: [] });
-        
-        const folder = folderRes.rows[0];
-        const filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', ['/' + folder.name]);
-        
-        res.json({
-            title: folder.name,
-            items: filesRes.rows
-        });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-router.get('/public/status', async (req, res) => {
-    try {
-        const resDb = await queryWithRetry('SELECT * FROM media_folders WHERE is_public_showcase = TRUE ORDER BY created_at DESC LIMIT 1');
-        if (resDb.rows.length > 0) {
-            res.json({ active: true, folderName: resDb.rows[0].name, folderId: resDb.rows[0].id });
-        } else {
-            res.json({ active: false });
-        }
-    } catch(e) { 
-        console.error("GET /public/status Error:", e.message);
-        res.status(500).json({ error: e.message }); 
     }
 });
 

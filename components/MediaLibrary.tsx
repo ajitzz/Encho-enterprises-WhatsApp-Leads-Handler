@@ -84,13 +84,7 @@ export const MediaLibrary = () => {
             }
         } catch (e: any) {
             console.error("Failed to load media library", e);
-            // Specific error message for common 500 issue
-            const msg = e.message || "Unknown error";
-            if (msg.includes("500")) {
-                setLoadingError("Database Connection Failed. The server may be restarting or the database schema is updating. Please retry in a few seconds.");
-            } else {
-                setLoadingError("Could not connect to Media Server. Please check your connection.");
-            }
+            setLoadingError("Could not connect to Media Server. Please check your connection.");
             setFiles([]);
             setFolders([]);
         } finally {
@@ -427,15 +421,12 @@ export const MediaLibrary = () => {
                 <div className="mb-6 shrink-0">{renderBreadcrumbs()}</div>
                 
                 {loadingError && (
-                    <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between animate-in fade-in">
-                         <div className="flex items-center gap-3 text-red-700">
-                             <div className="bg-red-100 p-2 rounded-full"><AlertTriangle size={20} /></div>
-                             <div>
-                                 <span className="font-bold text-sm block">Error Loading Media</span>
-                                 <span className="text-xs">{loadingError}</span>
-                             </div>
+                    <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between">
+                         <div className="flex items-center gap-2 text-red-700">
+                             <AlertTriangle size={20} />
+                             <span className="font-medium text-sm">{loadingError}</span>
                          </div>
-                         <button onClick={() => loadMedia(currentPath)} className="text-xs bg-white border border-red-200 px-4 py-2 rounded-lg text-red-700 font-bold hover:bg-red-50 transition-colors">Retry Connection</button>
+                         <button onClick={() => loadMedia(currentPath)} className="text-xs bg-white border border-red-200 px-3 py-1.5 rounded-lg text-red-700 font-bold hover:bg-red-100">Retry Connection</button>
                     </div>
                 )}
 
@@ -568,7 +559,6 @@ export const MediaLibrary = () => {
                     )}
                 </div>
                 
-                {/* Modals omitted for brevity, they are unchanged from previous versions */}
                 {showCreateFolder && (
                     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
                         <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden animate-in fade-in zoom-in-95">
