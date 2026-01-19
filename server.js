@@ -67,7 +67,7 @@ if (!global.pgPool) {
         global.pgPool = new Pool({
             connectionString: CONNECTION_STRING,
             ssl: { rejectUnauthorized: false },
-            max: 10, // Increased max connections for concurrent operations
+            max: 10, 
             connectionTimeoutMillis: 15000, 
             idleTimeoutMillis: 10000,
         });
@@ -110,7 +110,8 @@ const SCHEMA_QUERIES = `
         client_message_id TEXT UNIQUE, 
         whatsapp_message_id TEXT UNIQUE,
         status TEXT DEFAULT 'sent',
-        retry_count INT DEFAULT 0
+        retry_count INT DEFAULT 0,
+        next_retry_at BIGINT DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS driver_documents (
         id TEXT PRIMARY KEY,
@@ -145,12 +146,16 @@ const SCHEMA_QUERIES = `
     ON CONFLICT (key) DO NOTHING;
 `;
 
-// --- ENTERPRISE INDEXES (PAGINATION + SYNC OPTIMIZED) ---
+// --- ENTERPRISE INDEXES (PAGINATION + SYNC + OUTBOX OPTIMIZED) ---
 const INDEX_QUERIES = `
     CREATE INDEX IF NOT EXISTS idx_drivers_updated_at ON drivers(updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_driver_timestamp ON messages(driver_id, timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_client_msg_id ON messages(client_message_id);
-    CREATE INDEX IF NOT EXISTS idx_messages_status_retry ON messages(status, retry_count) WHERE status IN ('pending', 'failed');
+    
+    -- Composite Index for Outbox Worker (Critical for Performance)
+    CREATE INDEX IF NOT EXISTS idx_messages_outbox_v2 ON messages(next_retry_at ASC, retry_count) 
+    WHERE status IN ('pending', 'failed');
+    
     CREATE INDEX IF NOT EXISTS idx_driver_documents_driver_id ON driver_documents(driver_id);
 `;
 
@@ -161,6 +166,7 @@ const MIGRATION_QUERIES = `
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS template_name TEXT;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'sent';
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS retry_count INT DEFAULT 0;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS next_retry_at BIGINT DEFAULT 0;
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS current_bot_step_id TEXT;
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_bot_active BOOLEAN DEFAULT TRUE;
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;
@@ -185,9 +191,8 @@ const queryWithRetry = async (text, params, retries = 2) => {
             try {
                 const healClient = await pool.connect();
                 await healClient.query(SCHEMA_QUERIES);
-                await healClient.query(INDEX_QUERIES); // Add Indexes
+                await healClient.query(INDEX_QUERIES); 
                 healClient.release();
-                // Retry original
                 const retryClient = await pool.connect();
                 const res = await retryClient.query(text, params);
                 retryClient.release();
@@ -198,14 +203,12 @@ const queryWithRetry = async (text, params, retries = 2) => {
             }
         }
         
-        // SELF-HEALING: Missing Column
         if (err.code === '42703') {
              console.warn("⚠️ Columns missing. Running Migrations...");
              try {
                 const healClient = await pool.connect();
                 await healClient.query(MIGRATION_QUERIES);
                 healClient.release();
-                // Retry original
                 const retryClient = await pool.connect();
                 const res = await retryClient.query(text, params);
                 retryClient.release();
@@ -216,7 +219,6 @@ const queryWithRetry = async (text, params, retries = 2) => {
              }
         }
 
-        // Connection Retries
         if (retries > 0 && (err.code === 'ECONNRESET' || err.code === '57P01' || err.message.includes('timeout'))) {
             await new Promise(res => setTimeout(res, 1000)); 
             return queryWithRetry(text, params, retries - 1);
@@ -258,11 +260,11 @@ const getCachedSystemSetting = async (key) => {
 // --- INIT DB ON STARTUP ---
 const initDB = async () => {
     try {
-        await queryWithRetry("SELECT 1"); // Warm up connection
+        await queryWithRetry("SELECT 1"); 
         await queryWithRetry(SCHEMA_QUERIES);
         await queryWithRetry(MIGRATION_QUERIES);
-        await queryWithRetry(INDEX_QUERIES); // Ensure Indexes exist
-        await refreshCache(); // Preload Cache
+        await queryWithRetry(INDEX_QUERIES); 
+        await refreshCache(); 
         console.log("✅ Database Initialized, Migrated & Cached");
     } catch (e) {
         console.error("⚠️ DB Init warning:", e.message);
@@ -342,7 +344,6 @@ const executeMetaSend = async (to, content) => {
         text: { body: safeBodyText }
     };
 
-    // Construct Payload based on Content Type
     if (content.buttons?.length > 0 || (content.options && content.options.length > 0)) {
         payload.type = "interactive";
         let headerObj = undefined;
@@ -395,33 +396,38 @@ const executeMetaSend = async (to, content) => {
     return response.data.messages?.[0]?.id;
 };
 
-// --- OUTBOX RETRY WORKER ---
-// Runs periodically to pick up failed/pending messages and retry them
+// --- OUTBOX RETRY WORKER (CONCURRENCY SAFE) ---
 const processOutbox = async () => {
-    try {
-        const sendingEnabled = await getCachedSystemSetting('sending_enabled');
-        if (!sendingEnabled) return;
+    if (!pool) return;
+    const sendingEnabled = await getCachedSystemSetting('sending_enabled');
+    if (!sendingEnabled) return;
 
-        // Pick up messages that are PENDING or FAILED (with < 3 retries) 
-        // AND are older than 10 seconds (to avoid racing with the immediate send attempt)
-        // AND match the index: status, retry_count
-        const timeThreshold = Date.now() - 10000;
-        
-        const result = await queryWithRetry(`
+    let client;
+    try {
+        client = await pool.connect();
+        await client.query('BEGIN');
+
+        // 1. LOCKING FETCH: Select rows that are due and lock them (SKIP LOCKED prevents duplicates)
+        // Only pick rows where next_retry_at <= now OR next_retry_at is NULL (legacy)
+        const fetchQuery = `
             SELECT m.id, m.text, m.buttons, m.template_name, m.image_url, m.header_image_url, m.footer_text, d.phone_number, m.retry_count
             FROM messages m
             JOIN drivers d ON m.driver_id = d.id
-            WHERE (m.status = 'pending' OR m.status = 'failed')
-            AND m.retry_count < 3
-            AND m.timestamp < $1
+            WHERE m.status IN ('pending', 'failed')
+            AND (m.next_retry_at IS NULL OR m.next_retry_at <= $1)
+            AND m.retry_count < 5
+            ORDER BY m.next_retry_at ASC
             LIMIT 10
-        `, [timeThreshold]);
+            FOR UPDATE SKIP LOCKED
+        `;
+        
+        const { rows } = await client.query(fetchQuery, [Date.now()]);
 
-        if (result.rows.length === 0) return;
+        if (rows.length > 0) {
+            console.log(`[OUTBOX] Worker picked up ${rows.length} messages.`);
+        }
 
-        console.log(`🔄 Worker: Processing ${result.rows.length} pending messages...`);
-
-        for (const row of result.rows) {
+        for (const row of rows) {
             const content = {
                 text: row.text,
                 buttons: row.buttons,
@@ -433,22 +439,40 @@ const processOutbox = async () => {
 
             try {
                 const wamid = await executeMetaSend(row.phone_number, content);
-                await queryWithRetry("UPDATE messages SET status = 'sent', whatsapp_message_id = $1, updated_at = $2 WHERE id = $3", [wamid, Date.now(), row.id]);
-                console.log(`✅ Worker: Sent ${row.id}`);
+                
+                // Mark Sent
+                await client.query(
+                    "UPDATE messages SET status = 'sent', whatsapp_message_id = $1, updated_at = $2 WHERE id = $3",
+                    [wamid, Date.now(), row.id]
+                );
+                console.log(`[OUTBOX] Sent: ${row.id}`);
             } catch (e) {
-                console.error(`❌ Worker: Failed to send ${row.id}`, e.message);
-                await queryWithRetry("UPDATE messages SET status = 'failed', retry_count = retry_count + 1 WHERE id = $1", [row.id]);
+                // Calculate Exponential Backoff: 2s, 4s, 8s, 16s...
+                const delay = Math.pow(2, row.retry_count + 1) * 2000;
+                const nextTry = Date.now() + delay;
+                
+                console.error(`[OUTBOX] Failed: ${row.id}. Retry in ${delay}ms`);
+                
+                await client.query(
+                    "UPDATE messages SET status = 'failed', retry_count = retry_count + 1, next_retry_at = $1 WHERE id = $2",
+                    [nextTry, row.id]
+                );
             }
         }
+
+        await client.query('COMMIT');
     } catch (e) {
-        console.error("Worker Error:", e);
+        if (client) await client.query('ROLLBACK');
+        console.error("Worker Transaction Error:", e);
+    } finally {
+        if (client) client.release();
     }
 };
 
-// Start Worker
-setInterval(processOutbox, 10000); // Run every 10 seconds
+// Run Worker every 10 seconds
+setInterval(processOutbox, 10000);
 
-// --- SEND MESSAGE HELPER (Immediate Attempt + DB) ---
+// --- SEND MESSAGE HELPER (BUFFERED INSERT) ---
 const queueAndSendMessage = async (to, content, clientMessageId = null, driverId) => {
     const sendingEnabled = await getCachedSystemSetting('sending_enabled');
     if (!sendingEnabled) return { success: false, error: "System Disabled" };
@@ -465,15 +489,19 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
          return { success: false, error: "Blocked: Empty Content" };
     }
 
-    // 2. IDEMPOTENT INSERT (Outbox Pattern)
+    // 2. BUFFERED INSERT
+    // We set next_retry_at = Now + 15 seconds.
+    // This allows us to attempt an immediate send below. 
+    // If the immediate send works, we update status to 'sent'.
+    // If the server crashes during immediate send, the worker picks it up after 15s.
     const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
     const dbText = bodyText || (content.templateName ? `Template: ${content.templateName}` : '[Media Message]');
+    const retryBuffer = Date.now() + 15000; 
     
     try {
-        // STRICT IDEMPOTENCY: Do nothing if ID exists
         const insertRes = await queryWithRetry(`
-            INSERT INTO messages (id, driver_id, sender, text, timestamp, type, client_message_id, buttons, template_name, image_url, status, header_image_url, footer_text)
-            VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11)
+            INSERT INTO messages (id, driver_id, sender, text, timestamp, type, client_message_id, buttons, template_name, image_url, status, header_image_url, footer_text, next_retry_at)
+            VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12)
             ON CONFLICT (client_message_id) DO NOTHING
             RETURNING id
         `, [
@@ -484,13 +512,11 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
             content.templateName,
             content.mediaUrl,
             content.headerImageUrl,
-            content.footerText
+            content.footerText,
+            retryBuffer
         ]);
 
-        // If no rows returned, it means duplicate was detected and ignored
-        if (insertRes.rows.length === 0) {
-            return { success: true, duplicate: true };
-        }
+        if (insertRes.rows.length === 0) return { success: true, duplicate: true };
 
     } catch(e) {
         console.error("DB Insert Failed:", e);
@@ -498,7 +524,6 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
     }
 
     // 3. IMMEDIATE SEND ATTEMPT (Best Effort)
-    // If this fails, the background worker picks it up later
     try {
         const wamid = await executeMetaSend(to, content);
         
@@ -510,11 +535,10 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
         const errorDetail = error.response?.data?.error;
         console.error("❌ Immediate Send Failed (Queued for Worker):", JSON.stringify(errorDetail || error.message));
         
-        // Mark as failed so worker sees it (retry_count is 0 default)
-        await queryWithRetry("UPDATE messages SET status = 'failed' WHERE id = $1", [msgId]);
+        // Update to 'failed' so UI shows it, and reset retry time to sooner (e.g. 2s)
+        const fastRetry = Date.now() + 2000;
+        await queryWithRetry("UPDATE messages SET status = 'failed', next_retry_at = $1 WHERE id = $2", [fastRetry, msgId]);
         
-        // Return success=true because we successfully Queued it. 
-        // The UI should show the message as "Pending" or "Sent" optimistically.
         return { success: true, messageId: msgId, queued: true };
     }
 };
