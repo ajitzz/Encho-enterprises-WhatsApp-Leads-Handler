@@ -1,5 +1,4 @@
 
-
 export enum LeadStatus {
   NEW = 'New',
   QUALIFIED = 'Qualified',
@@ -39,6 +38,9 @@ export interface Message {
   timestamp: number;
   type: 'text' | 'image' | 'video_link' | 'template' | 'options' | 'rich_card' | 'audio' | 'document' | 'video';
   options?: string[]; // Legacy for quick replies
+  
+  // Outbox Status
+  status?: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
 }
 
 export interface DriverDocument {
@@ -80,6 +82,9 @@ export interface Driver {
   
   // Human Handover
   isHumanMode?: boolean;
+  
+  // Internal tracking
+  updatedAt?: number;
 }
 
 export interface MetaTemplate {

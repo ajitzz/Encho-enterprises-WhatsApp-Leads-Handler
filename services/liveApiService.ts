@@ -15,11 +15,8 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
     try {
         const response = await fetch(url, options);
         if (!response.ok) {
-             // CRITICAL FIX: Do not retry POST/PUT/DELETE requests to avoid duplication
-             // If the server returns 500 for a POST, retrying immediately often causes double-sends in non-idempotent systems.
              const method = options?.method?.toUpperCase() || 'GET';
              if (method !== 'GET' && method !== 'HEAD') {
-                 // Parse error immediately and throw
                  let errMessage = `Request Failed: ${response.status}`;
                  try {
                      const errData = await response.json();
@@ -33,7 +30,6 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
                      await new Promise(res => setTimeout(res, delay));
                      return fetchWithRetry(url, options, retries - 1, delay * 2);
                  }
-                 // Try to get JSON error body if available
                  let errMessage = `Server Error: ${response.status}`;
                  try {
                      const errData = await response.json();
@@ -41,7 +37,6 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
                  } catch(e) {}
                  throw new Error(errMessage);
              }
-             // For 4xx errors, parse body immediately
              let errMessage = `Request Failed: ${response.status}`;
              try {
                  const errData = await response.json();
@@ -51,7 +46,6 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
         }
         return response;
     } catch (err: any) {
-        // Only retry network errors for idempotent requests (GET)
         const method = options?.method?.toUpperCase() || 'GET';
         if (retries > 0 && !err.message.includes('4') && (method === 'GET' || method === 'HEAD')) { 
             await new Promise(res => setTimeout(res, delay));
@@ -66,6 +60,7 @@ let lastSyncTimestamp = 0;
 export const liveApiService = {
   getDrivers: async (): Promise<Driver[]> => {
     try {
+      // Reset cursor on full fetch
       lastSyncTimestamp = Date.now();
       const url = `${API_BASE_URL}/api/drivers`;
       const response = await fetchWithRetry(url);
@@ -76,33 +71,36 @@ export const liveApiService = {
     }
   },
 
-  // New: Efficient Delta Sync
+  // Correct Sync Logic: Use Server Cursor
   syncDrivers: async (): Promise<Driver[]> => {
       try {
           const url = `${API_BASE_URL}/api/sync?since=${lastSyncTimestamp}`;
           const response = await fetchWithRetry(url);
           
-          const drivers = await response.json();
-          if (drivers.length > 0) {
-              lastSyncTimestamp = Date.now();
+          const data = await response.json();
+          // The server now returns { drivers: [], nextCursor: number }
+          if (data.nextCursor) {
+              lastSyncTimestamp = data.nextCursor;
           }
-          return drivers;
+          return data.drivers || [];
       } catch (e) {
           return [];
       }
   },
 
-  // New: On Demand Message Fetching
-  getDriverMessages: async (driverId: string): Promise<Message[]> => {
+  // Paginated Message Fetching
+  getDriverMessages: async (driverId: string, limit = 50, before?: number): Promise<Message[]> => {
       try {
-          const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}/messages`);
+          let url = `${API_BASE_URL}/api/drivers/${driverId}/messages?limit=${limit}`;
+          if (before) url += `&before=${before}`;
+          
+          const response = await fetchWithRetry(url);
           return await response.json();
       } catch (e) {
           return [];
       }
   },
 
-  // NEW: Get Documents
   getDriverDocuments: async (driverId: string): Promise<DriverDocument[]> => {
       try {
           const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}/documents`);
@@ -112,7 +110,6 @@ export const liveApiService = {
       }
   },
 
-  // NEW: Update Document
   updateDocumentStatus: async (docId: string, status?: string, notes?: string) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/documents/${docId}`, {
           method: 'PATCH',
@@ -123,6 +120,7 @@ export const liveApiService = {
   },
 
   subscribeToUpdates: (callback: (updatedDrivers: Driver[]) => void) => {
+    // Polling every 6 seconds to save DB load
     const interval = setInterval(async () => {
         try { 
             const updates = await liveApiService.syncDrivers();
@@ -130,7 +128,7 @@ export const liveApiService = {
                 callback(updates);
             }
         } catch(e) {}
-    }, 2000); 
+    }, 6000); 
     return () => clearInterval(interval);
   },
 
@@ -149,7 +147,6 @@ export const liveApiService = {
   },
 
   sendMessage: async (driverId: string, text: string, attachments?: { mediaUrl?: string, mediaType?: string, options?: string[], headerImageUrl?: string, footerText?: string, buttons?: MessageButton[], templateName?: string }) => {
-    // Generate Idempotency Key (Unique per message attempt)
     const clientMessageId = `web_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
     const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/send`, {
@@ -158,7 +155,7 @@ export const liveApiService = {
       body: JSON.stringify({ 
           driverId, 
           text,
-          clientMessageId, // IDEMPOTENCY KEY
+          clientMessageId,
           mediaUrl: attachments?.mediaUrl,
           mediaType: attachments?.mediaType,
           options: attachments?.options,

@@ -11,11 +11,17 @@ const cors = require('cors');
 const crypto = require('crypto');
 const { Pool } = require('pg'); 
 const { S3Client } = require('@aws-sdk/client-s3');
-const os = require('os');
 require('dotenv').config();
 
 const app = express();
 const router = express.Router(); 
+
+// --- SERVER SIDE CACHE (REDUCES DB LOAD) ---
+const CACHE = {
+    botSettings: null,
+    systemSettings: null,
+    lastRefreshed: 0
+};
 
 // Raw body needed for signature verification
 app.use(express.json({ 
@@ -34,7 +40,6 @@ app.use((req, res, next) => {
 });
 
 // --- DYNAMIC CREDENTIALS ---
-// Using specific values provided by user as robust fallbacks
 const META_API_TOKEN = (process.env.META_API_TOKEN || "").trim() || "EAAkr7Y9S2qYBQfHTNZASIugAzOi8b2MZCBct4z4jZBHSmQ2KGlFduuDQQGEYC9NRDtZBUdhMPdeJ06OjYUiJYGfFkZCAxzyh4TdidN7ZA10K3XPOVEiQh01jo22xLsQjXrEtMHc5ZCHZBbRZAyA5d0pl26Jsg3IuNKY272QYmqEjHghf11OKJmbUZBfJLe5EvHzl48gAZDZD";
 const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "").trim() || "982841698238647";
 const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || "").trim() || "uber_fleet_verify_token";
@@ -62,8 +67,8 @@ if (!global.pgPool) {
         global.pgPool = new Pool({
             connectionString: CONNECTION_STRING,
             ssl: { rejectUnauthorized: false },
-            max: 5, 
-            connectionTimeoutMillis: 15000, // INCREASED: 15s timeout to allow Neon DB to wake up from sleep
+            max: 10, // Increased max connections for concurrent operations
+            connectionTimeoutMillis: 15000, 
             idleTimeoutMillis: 10000,
         });
     }
@@ -103,7 +108,9 @@ const SCHEMA_QUERIES = `
         buttons JSONB,
         template_name TEXT,
         client_message_id TEXT UNIQUE, 
-        whatsapp_message_id TEXT UNIQUE
+        whatsapp_message_id TEXT UNIQUE,
+        status TEXT DEFAULT 'sent',
+        retry_count INT DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS driver_documents (
         id TEXT PRIMARY KEY,
@@ -115,7 +122,6 @@ const SCHEMA_QUERIES = `
         verification_status TEXT DEFAULT 'pending',
         notes TEXT
     );
-    CREATE INDEX IF NOT EXISTS idx_driver_documents_driver_id ON driver_documents(driver_id);
     CREATE TABLE IF NOT EXISTS bot_settings (
         id INT PRIMARY KEY DEFAULT 1,
         settings JSONB
@@ -139,11 +145,22 @@ const SCHEMA_QUERIES = `
     ON CONFLICT (key) DO NOTHING;
 `;
 
+// --- ENTERPRISE INDEXES (PAGINATION + SYNC OPTIMIZED) ---
+const INDEX_QUERIES = `
+    CREATE INDEX IF NOT EXISTS idx_drivers_updated_at ON drivers(updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_messages_driver_timestamp ON messages(driver_id, timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_messages_client_msg_id ON messages(client_message_id);
+    CREATE INDEX IF NOT EXISTS idx_messages_status_retry ON messages(status, retry_count) WHERE status IN ('pending', 'failed');
+    CREATE INDEX IF NOT EXISTS idx_driver_documents_driver_id ON driver_documents(driver_id);
+`;
+
 // --- MIGRATION QUERIES (Auto-Update Existing Tables) ---
 const MIGRATION_QUERIES = `
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS client_message_id TEXT UNIQUE;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS whatsapp_message_id TEXT UNIQUE;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS template_name TEXT;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'sent';
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS retry_count INT DEFAULT 0;
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS current_bot_step_id TEXT;
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_bot_active BOOLEAN DEFAULT TRUE;
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;
@@ -168,6 +185,7 @@ const queryWithRetry = async (text, params, retries = 2) => {
             try {
                 const healClient = await pool.connect();
                 await healClient.query(SCHEMA_QUERIES);
+                await healClient.query(INDEX_QUERIES); // Add Indexes
                 healClient.release();
                 // Retry original
                 const retryClient = await pool.connect();
@@ -180,7 +198,7 @@ const queryWithRetry = async (text, params, retries = 2) => {
             }
         }
         
-        // SELF-HEALING: Missing Column (Undefined Column)
+        // SELF-HEALING: Missing Column
         if (err.code === '42703') {
              console.warn("⚠️ Columns missing. Running Migrations...");
              try {
@@ -209,13 +227,43 @@ const queryWithRetry = async (text, params, retries = 2) => {
     }
 };
 
+// --- CACHING HELPERS ---
+const refreshCache = async () => {
+    try {
+        const botRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1');
+        CACHE.botSettings = botRes.rows[0]?.settings || { isEnabled: true, steps: [] };
+
+        const sysRes = await queryWithRetry('SELECT * FROM system_settings');
+        const settings = { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true };
+        sysRes.rows.forEach(r => { if (r.key in settings) settings[r.key] = r.value === 'true'; });
+        CACHE.systemSettings = settings;
+
+        CACHE.lastRefreshed = Date.now();
+        console.log("🧠 Server Cache Refreshed");
+    } catch (e) {
+        console.error("Failed to refresh cache:", e);
+    }
+};
+
+const getCachedBotSettings = async () => {
+    if (!CACHE.botSettings) await refreshCache();
+    return CACHE.botSettings;
+};
+
+const getCachedSystemSetting = async (key) => {
+    if (!CACHE.systemSettings) await refreshCache();
+    return CACHE.systemSettings[key];
+};
+
 // --- INIT DB ON STARTUP ---
 const initDB = async () => {
     try {
         await queryWithRetry("SELECT 1"); // Warm up connection
         await queryWithRetry(SCHEMA_QUERIES);
         await queryWithRetry(MIGRATION_QUERIES);
-        console.log("✅ Database Initialized & Migrated");
+        await queryWithRetry(INDEX_QUERIES); // Ensure Indexes exist
+        await refreshCache(); // Preload Cache
+        console.log("✅ Database Initialized, Migrated & Cached");
     } catch (e) {
         console.error("⚠️ DB Init warning:", e.message);
     }
@@ -231,6 +279,7 @@ const toDriverDTO = (row) => ({
     status: row.status,
     lastMessage: row.last_message,
     lastMessageTime: parseInt(row.last_message_time || '0'),
+    updatedAt: parseInt(row.updated_at || '0'),
     notes: row.notes,
     vehicleRegistration: row.vehicle_registration,
     availability: row.availability,
@@ -253,7 +302,8 @@ const toMessageDTO = (row) => ({
     headerImageUrl: row.header_image_url,
     footerText: row.footer_text,
     buttons: row.buttons, 
-    templateName: row.template_name
+    templateName: row.template_name,
+    status: row.status || 'sent'
 });
 
 const toDocumentDTO = (row) => ({
@@ -267,59 +317,21 @@ const toDocumentDTO = (row) => ({
     notes: row.notes
 });
 
-// --- HELPER FUNCTIONS ---
-const getSystemSetting = async (key) => {
-    try {
-        const res = await queryWithRetry('SELECT value FROM system_settings WHERE key = $1', [key]);
-        if (res.rows.length > 0) return res.rows[0].value === 'true';
-        return true; 
-    } catch (e) {
-        return true;
-    }
-};
-
 const updateDriverTimestamp = async (driverId) => {
     try {
         await queryWithRetry('UPDATE drivers SET updated_at = $1 WHERE id = $2', [Date.now(), driverId]);
     } catch (e) { console.error("Timestamp update failed", e); }
 };
 
-// --- OUTBOUND SENDING (WITH CONTENT FIREWALL) ---
-const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
-    // 1. CONTENT FIREWALL: BLOCK PLACEHOLDERS
-    const unsafeRegex = /replace\s+this|enter\s+your\s+message|type\s+your\s+message|sample\s+message/i;
-    const bodyText = (content.text || content.message || "").substring(0, 4096);
-    
-    if (unsafeRegex.test(bodyText)) {
-        console.error(`⛔ BLOCKED OUTBOUND MESSAGE: Detected placeholder text. Content: "${bodyText.substring(0, 50)}..."`);
-        return { success: false, error: "Blocked: Placeholder Text Detected" };
-    }
+// --- CORE WHATSAPP SEND LOGIC (META API) ---
+const executeMetaSend = async (to, content) => {
+    if (!META_API_TOKEN || !PHONE_NUMBER_ID) throw new Error("Missing Meta Credentials");
 
-    if (!bodyText.trim() && !content.templateName && !content.mediaUrl && !content.buttons) {
-         console.error("⛔ BLOCKED OUTBOUND MESSAGE: Empty Content");
-         return { success: false, error: "Blocked: Empty Content" };
-    }
-
-    // 2. Idempotency Check (Fast)
-    if (clientMessageId) {
-        try {
-            const existing = await queryWithRetry('SELECT id FROM messages WHERE client_message_id = $1', [clientMessageId]);
-            if (existing.rows.length > 0) return { success: true, duplicate: true };
-        } catch(e) { console.warn("Idempotency check skipped due to DB load"); }
-    }
-
-    if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
-        console.error("❌ Meta Credentials Missing.");
-        return { success: false, error: "Missing Credentials" };
-    }
-
-    // 3. Sanitize Phone Number
     let cleanTo = to.replace(/\D/g, ''); 
-    
-    // Use Graph API v21.0
     const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
     
-    // Fallback text if body is empty but strictly required
+    // Fallback safe body
+    const bodyText = (content.text || content.message || "").substring(0, 4096);
     const safeBodyText = bodyText.trim() || " ";
 
     let payload = {
@@ -330,6 +342,7 @@ const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
         text: { body: safeBodyText }
     };
 
+    // Construct Payload based on Content Type
     if (content.buttons?.length > 0 || (content.options && content.options.length > 0)) {
         payload.type = "interactive";
         let headerObj = undefined;
@@ -353,11 +366,10 @@ const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
             }))
         };
         
-        const interactiveBodyText = safeBodyText.trim() === "" ? "Please select an option below" : safeBodyText;
         payload.interactive = {
             type: "button",
             header: headerObj,
-            body: { text: interactiveBodyText }, 
+            body: { text: safeBodyText.trim() || "Select an option" }, 
             action: actionObj
         };
         if (content.footerText) payload.interactive.footer = { text: content.footerText };
@@ -375,25 +387,141 @@ const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
          delete payload.text;
     }
 
+    const response = await axios.post(url, payload, {
+        headers: { 'Authorization': `Bearer ${META_API_TOKEN}`, 'Content-Type': 'application/json' },
+        timeout: 10000 
+    });
+    
+    return response.data.messages?.[0]?.id;
+};
+
+// --- OUTBOX RETRY WORKER ---
+// Runs periodically to pick up failed/pending messages and retry them
+const processOutbox = async () => {
     try {
-        console.log(`📤 Sending to ${cleanTo}...`);
-        await axios.post(url, payload, {
-            headers: { 'Authorization': `Bearer ${META_API_TOKEN}`, 'Content-Type': 'application/json' },
-            timeout: 8000 
-        });
-        console.log(`✅ Message Sent to ${cleanTo}`);
-        return { success: true };
+        const sendingEnabled = await getCachedSystemSetting('sending_enabled');
+        if (!sendingEnabled) return;
+
+        // Pick up messages that are PENDING or FAILED (with < 3 retries) 
+        // AND are older than 10 seconds (to avoid racing with the immediate send attempt)
+        // AND match the index: status, retry_count
+        const timeThreshold = Date.now() - 10000;
+        
+        const result = await queryWithRetry(`
+            SELECT m.id, m.text, m.buttons, m.template_name, m.image_url, m.header_image_url, m.footer_text, d.phone_number, m.retry_count
+            FROM messages m
+            JOIN drivers d ON m.driver_id = d.id
+            WHERE (m.status = 'pending' OR m.status = 'failed')
+            AND m.retry_count < 3
+            AND m.timestamp < $1
+            LIMIT 10
+        `, [timeThreshold]);
+
+        if (result.rows.length === 0) return;
+
+        console.log(`🔄 Worker: Processing ${result.rows.length} pending messages...`);
+
+        for (const row of result.rows) {
+            const content = {
+                text: row.text,
+                buttons: row.buttons,
+                templateName: row.template_name,
+                mediaUrl: row.image_url,
+                headerImageUrl: row.header_image_url,
+                footerText: row.footer_text
+            };
+
+            try {
+                const wamid = await executeMetaSend(row.phone_number, content);
+                await queryWithRetry("UPDATE messages SET status = 'sent', whatsapp_message_id = $1, updated_at = $2 WHERE id = $3", [wamid, Date.now(), row.id]);
+                console.log(`✅ Worker: Sent ${row.id}`);
+            } catch (e) {
+                console.error(`❌ Worker: Failed to send ${row.id}`, e.message);
+                await queryWithRetry("UPDATE messages SET status = 'failed', retry_count = retry_count + 1 WHERE id = $1", [row.id]);
+            }
+        }
+    } catch (e) {
+        console.error("Worker Error:", e);
+    }
+};
+
+// Start Worker
+setInterval(processOutbox, 10000); // Run every 10 seconds
+
+// --- SEND MESSAGE HELPER (Immediate Attempt + DB) ---
+const queueAndSendMessage = async (to, content, clientMessageId = null, driverId) => {
+    const sendingEnabled = await getCachedSystemSetting('sending_enabled');
+    if (!sendingEnabled) return { success: false, error: "System Disabled" };
+
+    // 1. Content Firewall
+    const unsafeRegex = /replace\s+this|enter\s+your\s+message|type\s+your\s+message|sample\s+message/i;
+    const bodyText = (content.text || content.message || "").substring(0, 4096);
+    
+    if (unsafeRegex.test(bodyText)) {
+        return { success: false, error: "Blocked: Placeholder Text Detected" };
+    }
+
+    if (!bodyText.trim() && !content.templateName && !content.mediaUrl && !content.buttons) {
+         return { success: false, error: "Blocked: Empty Content" };
+    }
+
+    // 2. IDEMPOTENT INSERT (Outbox Pattern)
+    const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
+    const dbText = bodyText || (content.templateName ? `Template: ${content.templateName}` : '[Media Message]');
+    
+    try {
+        // STRICT IDEMPOTENCY: Do nothing if ID exists
+        const insertRes = await queryWithRetry(`
+            INSERT INTO messages (id, driver_id, sender, text, timestamp, type, client_message_id, buttons, template_name, image_url, status, header_image_url, footer_text)
+            VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11)
+            ON CONFLICT (client_message_id) DO NOTHING
+            RETURNING id
+        `, [
+            msgId, driverId, dbText, Date.now(),
+            content.templateName ? 'template' : (content.options ? 'options' : 'text'),
+            clientMessageId,
+            content.buttons ? JSON.stringify(content.buttons) : null,
+            content.templateName,
+            content.mediaUrl,
+            content.headerImageUrl,
+            content.footerText
+        ]);
+
+        // If no rows returned, it means duplicate was detected and ignored
+        if (insertRes.rows.length === 0) {
+            return { success: true, duplicate: true };
+        }
+
+    } catch(e) {
+        console.error("DB Insert Failed:", e);
+        throw e;
+    }
+
+    // 3. IMMEDIATE SEND ATTEMPT (Best Effort)
+    // If this fails, the background worker picks it up later
+    try {
+        const wamid = await executeMetaSend(to, content);
+        
+        await queryWithRetry("UPDATE messages SET status = 'sent', whatsapp_message_id = $1 WHERE id = $2", [wamid, msgId]);
+        await updateDriverTimestamp(driverId);
+        
+        return { success: true, messageId: msgId };
     } catch (error) {
         const errorDetail = error.response?.data?.error;
-        console.error("❌ Meta API Failed:", JSON.stringify(errorDetail || error.message, null, 2));
-        throw new Error(errorDetail?.message || error.message || "Meta API Unknown Error");
+        console.error("❌ Immediate Send Failed (Queued for Worker):", JSON.stringify(errorDetail || error.message));
+        
+        // Mark as failed so worker sees it (retry_count is 0 default)
+        await queryWithRetry("UPDATE messages SET status = 'failed' WHERE id = $1", [msgId]);
+        
+        // Return success=true because we successfully Queued it. 
+        // The UI should show the message as "Pending" or "Sent" optimistically.
+        return { success: true, messageId: msgId, queued: true };
     }
 };
 
 // --- API ENDPOINTS ---
 
 router.post('/messages/send', async (req, res) => {
-    const start = Date.now();
     const { driverId, text, clientMessageId, ...attachments } = req.body;
     
     try {
@@ -401,28 +529,10 @@ router.post('/messages/send', async (req, res) => {
         if (driverRes.rows.length === 0) return res.status(404).json({ error: "Driver not found" });
         const phone = driverRes.rows[0].phone_number;
 
-        await sendWhatsAppMessage(phone, { text, ...attachments }, clientMessageId);
-
-        const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
-        const dbText = text || (attachments.templateName ? `Template: ${attachments.templateName}` : '[Media Message]');
-        
-        await queryWithRetry(`
-            INSERT INTO messages (id, driver_id, sender, text, timestamp, type, client_message_id, buttons, template_name, image_url)
-            VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9)
-        `, [
-            msgId, driverId, dbText, Date.now(),
-            attachments.templateName ? 'template' : (attachments.options ? 'options' : 'text'),
-            clientMessageId,
-            attachments.buttons ? JSON.stringify(attachments.buttons) : null,
-            attachments.templateName,
-            attachments.mediaUrl
-        ]);
-
-        await updateDriverTimestamp(driverId);
-        res.json({ success: true, messageId: msgId });
+        const result = await queueAndSendMessage(phone, { text, ...attachments }, clientMessageId, driverId);
+        res.json(result);
 
     } catch (e) {
-        console.error("Outbound Send Error:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
@@ -445,6 +555,9 @@ app.get('/webhook', (req, res) => {
 });
 
 app.post('/webhook', async (req, res) => {
+    const enabled = await getCachedSystemSetting('webhook_ingest_enabled');
+    if (!enabled) return res.sendStatus(503); 
+
     if (APP_SECRET && req.headers['x-hub-signature-256']) {
         const signature = req.headers['x-hub-signature-256'].replace('sha256=', '');
         const expected = crypto.createHmac('sha256', APP_SECRET).update(req.rawBody).digest('hex');
@@ -462,6 +575,12 @@ app.post('/webhook', async (req, res) => {
                             promises.push(processIncomingMessage(msg, change.value.contacts));
                         }
                     }
+                    // Handle Status Updates (Sent/Delivered/Read)
+                    if (change.value.statuses) {
+                        for (const status of change.value.statuses) {
+                            promises.push(processStatusUpdate(status));
+                        }
+                    }
                 }
             }
             await Promise.all(promises);
@@ -472,6 +591,10 @@ app.post('/webhook', async (req, res) => {
         res.sendStatus(200); 
     }
 });
+
+async function processStatusUpdate(status) {
+    await queryWithRetry('UPDATE messages SET status = $1 WHERE whatsapp_message_id = $2', [status.status, status.id]);
+}
 
 async function processIncomingMessage(msg, contacts) {
     const from = msg.from;
@@ -495,51 +618,40 @@ async function processIncomingMessage(msg, contacts) {
         }
     }
 
-    let driverRes = await queryWithRetry('SELECT * FROM drivers WHERE phone_number = $1', [from]);
-    let driverId;
+    // UPSERT DRIVER
+    const driverId = `d_${Date.now()}_${Math.random().toString(36).substr(2,4)}`;
+    const name = contacts?.[0]?.profile?.name || 'Unknown Driver';
     
-    if (driverRes.rows.length === 0) {
-        driverId = `d_${Date.now()}_${Math.random().toString(36).substr(2,4)}`;
-        const name = contacts?.[0]?.profile?.name || 'Unknown Driver';
-        await queryWithRetry(`
-            INSERT INTO drivers (id, phone_number, name, status, last_message, last_message_time, updated_at)
-            VALUES ($1, $2, $3, 'New', $4, $5, $6)
-        `, [driverId, from, name, text, Date.now(), Date.now()]);
-    } else {
-        driverId = driverRes.rows[0].id;
-        await queryWithRetry(`UPDATE drivers SET last_message = $1, last_message_time = $2, updated_at = $2 WHERE id = $3`, [text, Date.now(), driverId]);
-    }
+    const driverRes = await queryWithRetry(`
+        INSERT INTO drivers (id, phone_number, name, status, last_message, last_message_time, updated_at)
+        VALUES ($1, $2, $3, 'New', $4, $5, $6)
+        ON CONFLICT (phone_number) 
+        DO UPDATE SET last_message = $4, last_message_time = $5, updated_at = $6
+        RETURNING id, current_bot_step_id, is_bot_active, is_human_mode
+    `, [driverId, from, name, text, Date.now(), Date.now()]);
+    
+    const currentDriver = driverRes.rows[0];
 
     const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
     await queryWithRetry(`
-        INSERT INTO messages (id, driver_id, sender, text, timestamp, whatsapp_message_id)
-        VALUES ($1, $2, 'driver', $3, $4, $5)
-    `, [msgId, driverId, text, Date.now(), wamid]);
+        INSERT INTO messages (id, driver_id, sender, text, timestamp, whatsapp_message_id, status)
+        VALUES ($1, $2, 'driver', $3, $4, $5, 'read')
+    `, [msgId, currentDriver.id, text, Date.now(), wamid]);
 
     try {
-        await runBotEngine(driverId, text, buttonId, from);
+        await runBotEngine(currentDriver, text, buttonId, from);
     } catch (e) {
         console.error("Bot Engine Crash:", e);
     }
 }
 
-async function runBotEngine(driverId, text, buttonId, from) {
-    const automationEnabled = await getSystemSetting('automation_enabled');
+async function runBotEngine(driver, text, buttonId, from) {
+    const automationEnabled = await getCachedSystemSetting('automation_enabled');
     if (!automationEnabled) return;
 
-    const driver = (await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [driverId])).rows[0];
     if (!driver.is_bot_active || driver.is_human_mode) return;
 
-    // SCHEMA HEALING FOR BOT SETTINGS
-    let botSettings;
-    try {
-        const botRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1');
-        botSettings = botRes.rows[0]?.settings;
-    } catch(e) {
-        // Use default if DB fetch fails
-        botSettings = { isEnabled: true, shouldRepeat: false, steps: [] };
-    }
-    
+    const botSettings = await getCachedBotSettings();
     if (!botSettings || !botSettings.isEnabled) return;
 
     let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
@@ -549,7 +661,7 @@ async function runBotEngine(driverId, text, buttonId, from) {
         const entryStep = botSettings.steps.find(s => s.id === botSettings.entryPointId) || botSettings.steps[0];
         if (entryStep) {
             replyContent = entryStep;
-            await queryWithRetry('UPDATE drivers SET current_bot_step_id = $1, updated_at = $3 WHERE id = $2', [entryStep.id, driverId, Date.now()]);
+            await queryWithRetry('UPDATE drivers SET current_bot_step_id = $1, updated_at = $3 WHERE id = $2', [entryStep.id, driver.id, Date.now()]);
         }
     } else {
         let matchedRouteId = null;
@@ -567,18 +679,22 @@ async function runBotEngine(driverId, text, buttonId, from) {
 
         if (matchedRouteId) {
             if (matchedRouteId === 'END') {
-                await queryWithRetry('UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = $1, updated_at = $3 WHERE id = $2', [botSettings.shouldRepeat, driverId, Date.now()]);
+                await queryWithRetry('UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = $1, updated_at = $3 WHERE id = $2', [botSettings.shouldRepeat, driver.id, Date.now()]);
             } else if (matchedRouteId === 'AI_HANDOFF') {
-                 await queryWithRetry('UPDATE drivers SET is_human_mode = TRUE, updated_at = $2 WHERE id = $1', [driverId, Date.now()]);
+                 await queryWithRetry('UPDATE drivers SET is_human_mode = TRUE, updated_at = $2 WHERE id = $1', [driver.id, Date.now()]);
             } else {
                 const nextStep = botSettings.steps.find(s => s.id === matchedRouteId);
                 if (nextStep) {
                     replyContent = nextStep;
-                    await queryWithRetry('UPDATE drivers SET current_bot_step_id = $1, updated_at = $3 WHERE id = $2', [nextStep.id, driverId, Date.now()]);
+                    await queryWithRetry('UPDATE drivers SET current_bot_step_id = $1, updated_at = $3 WHERE id = $2', [nextStep.id, driver.id, Date.now()]);
+                    
                     if (currentStep.saveToField) {
-                         try {
-                             await queryWithRetry(`UPDATE drivers SET ${currentStep.saveToField} = $1 WHERE id = $2`, [text, driverId]);
-                         } catch(e) {}
+                         const allowedFields = ['name', 'vehicle_registration', 'availability', 'email', 'notes'];
+                         if (allowedFields.includes(currentStep.saveToField)) {
+                             try {
+                                 await queryWithRetry(`UPDATE drivers SET ${currentStep.saveToField} = $1 WHERE id = $2`, [text, driver.id]);
+                             } catch(e) {}
+                         }
                     }
                 }
             }
@@ -594,20 +710,12 @@ async function runBotEngine(driverId, text, buttonId, from) {
 
     if (replyContent) {
         if (replyContent.delay) await new Promise(r => setTimeout(r, replyContent.delay * 1000));
-        await sendWhatsAppMessage(from, replyContent);
-        
-        const botMsgId = `bot_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
-        const dbText = replyContent.message || replyContent.text || '[Interactive Message]';
-        await queryWithRetry(`
-            INSERT INTO messages (id, driver_id, sender, text, timestamp, type)
-            VALUES ($1, $2, 'system', $3, $4, $5)
-        `, [botMsgId, driverId, dbText, Date.now(), replyContent.inputType || 'text']);
+        await queueAndSendMessage(from, replyContent, null, driver.id);
     }
 }
 
 // --- STANDARD GET ENDPOINTS ---
 router.get('/system/stats', async (req, res) => {
-    // Return mock stats quickly if DB is slow
     res.json({
         serverLoad: 0, dbLatency: 0, aiCredits: 100, aiModel: "Bot Logic",
         s3Status: 'ok', s3Load: 0, whatsappStatus: META_API_TOKEN ? 'ok' : 'error',
@@ -617,15 +725,32 @@ router.get('/system/stats', async (req, res) => {
 
 router.get('/drivers', async (req, res) => {
     try {
-        const result = await queryWithRetry('SELECT * FROM drivers ORDER BY updated_at DESC LIMIT 100');
+        const result = await queryWithRetry('SELECT * FROM drivers ORDER BY updated_at DESC LIMIT 50');
         res.json(result.rows.map(toDriverDTO));
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// PAGINATED MESSAGES
 router.get('/drivers/:id/messages', async (req, res) => {
     try {
-        const result = await queryWithRetry('SELECT * FROM messages WHERE driver_id = $1 ORDER BY timestamp ASC', [req.params.id]);
-        res.json(result.rows.map(toMessageDTO));
+        const limit = parseInt(req.query.limit || '50');
+        const before = parseInt(req.query.before || '0');
+        
+        let query = 'SELECT * FROM messages WHERE driver_id = $1';
+        let params = [req.params.id];
+        
+        if (before > 0) {
+            query += ' AND timestamp < $2';
+            params.push(before);
+        }
+        
+        // Add limit params dynamically based on whether 'before' was used
+        query += ` ORDER BY timestamp DESC LIMIT $${params.length + 1}`;
+        params.push(limit);
+
+        const result = await queryWithRetry(query, params);
+        // Reverse to show oldest -> newest in chat UI
+        res.json(result.rows.map(toMessageDTO).reverse());
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -636,35 +761,55 @@ router.get('/drivers/:id/documents', async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// SINGLE-QUERY ATOMIC PATCH
 router.patch('/drivers/:id', async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
     try {
         const allowed = ['status', 'notes', 'name', 'vehicle_registration', 'availability', 'is_bot_active', 'is_human_mode', 'qualification_checks'];
-        for (const key of Object.keys(updates)) {
-            if (allowed.includes(key)) {
-                let val = updates[key];
-                if (key === 'qualification_checks') val = JSON.stringify(val);
-                await queryWithRetry(`UPDATE drivers SET ${key} = $1, updated_at = $3 WHERE id = $2`, [val, id, Date.now()]);
-            }
-        }
+        
+        const keys = Object.keys(updates).filter(k => allowed.includes(k));
+        if (keys.length === 0) return res.json({ success: true, message: "No valid fields" });
+
+        const setClause = keys.map((k, i) => {
+            if (k === 'qualification_checks') return `${k} = $${i + 2}::jsonb`; 
+            return `${k} = $${i + 2}`;
+        }).join(', ');
+
+        const values = [id, ...keys.map(k => {
+             if (k === 'qualification_checks' && typeof updates[k] === 'object') return JSON.stringify(updates[k]);
+             return updates[k];
+        })];
+
+        const finalQuery = `UPDATE drivers SET ${setClause}, updated_at = ${Date.now()} WHERE id = $1`;
+
+        await queryWithRetry(finalQuery, values);
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// CORRECT SYNC LOGIC
 router.get('/sync', async (req, res) => {
     const since = parseInt(req.query.since || '0');
     try {
-        const result = await queryWithRetry('SELECT * FROM drivers WHERE updated_at > $1 ORDER BY updated_at DESC LIMIT 200', [since]);
-        res.json(result.rows.map(toDriverDTO));
-    } catch(e) { res.json([]); }
+        // Uses the NEW Index on updated_at
+        const result = await queryWithRetry('SELECT * FROM drivers WHERE updated_at > $1 ORDER BY updated_at ASC LIMIT 50', [since]);
+        const drivers = result.rows.map(toDriverDTO);
+        
+        let nextCursor = since;
+        if (drivers.length > 0) {
+            const maxTs = Math.max(...drivers.map(d => d.updatedAt));
+            nextCursor = maxTs;
+        }
+
+        res.json({ drivers, nextCursor });
+    } catch(e) { res.json({ drivers: [], nextCursor: since }); }
 });
 
 router.get('/bot-settings', async (req, res) => {
     try {
-        const result = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1');
-        if (result.rows.length > 0) res.json(result.rows[0].settings);
-        else res.json({ isEnabled: false, steps: [] });
+        const settings = await getCachedBotSettings();
+        res.json(settings);
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -674,6 +819,7 @@ router.post('/bot-settings', async (req, res) => {
             INSERT INTO bot_settings (id, settings) VALUES (1, $1)
             ON CONFLICT (id) DO UPDATE SET settings = $1
         `, [JSON.stringify(req.body)]);
+        await refreshCache(); 
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -696,6 +842,7 @@ router.post('/system/settings', async (req, res) => {
                 ON CONFLICT (key) DO UPDATE SET value = $2
             `, [key, String(val)]);
         }
+        await refreshCache(); 
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });

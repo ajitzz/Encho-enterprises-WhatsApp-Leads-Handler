@@ -1,16 +1,11 @@
 
-
-
-
-
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Driver, Message, LeadStatus, OnboardingStep, DriverDocument } from '../types';
 import { 
   X, Send, Image as ImageIcon, Video, CheckCircle, UserX, Car, Clock, 
   ShieldCheck, ChevronRight, Facebook, Globe, Headset, MicOff, Phone, 
   FileText, Sparkles, MapPin, ExternalLink, LayoutTemplate, Calendar,
-  Download, Eye, AlertCircle, File, List, Filter, AlertTriangle
+  Download, Eye, AlertCircle, File, List, Filter, AlertTriangle, ArrowUp
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
@@ -40,13 +35,20 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [docLoading, setDocLoading] = useState(false);
   const [docFilter, setDocFilter] = useState<'all' | 'license' | 'rc_book' | 'id_proof'>('all');
   
+  // Message History State
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   const messages = driver && Array.isArray(driver.messages) ? driver.messages : [];
 
+  // Scroll to bottom on initial load or new message
   useEffect(() => {
-    if (messagesEndRef.current) messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    if (messagesEndRef.current && !loadingHistory) {
+        messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages.length, driver?.id]);
 
   useEffect(() => {
     if (driver) {
@@ -64,6 +66,28 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
           console.error("Failed to load docs", e);
       } finally {
           setDocLoading(false);
+      }
+  };
+
+  const handleLoadMore = async () => {
+      if (!driver || messages.length === 0) return;
+      
+      const oldestMessage = messages[0];
+      const beforeTimestamp = oldestMessage.timestamp;
+      
+      setLoadingHistory(true);
+      try {
+          const olderMessages = await liveApiService.getDriverMessages(driver.id, 50, beforeTimestamp);
+          
+          if (olderMessages.length > 0) {
+              const newMessages = [...olderMessages, ...messages];
+              // Update parent state directly (optimistic update for visual)
+              onUpdateDriver(driver.id, { messages: newMessages });
+          }
+      } catch(e) {
+          console.error("Failed to load history", e);
+      } finally {
+          setLoadingHistory(false);
       }
   };
 
@@ -255,7 +279,23 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                   </div>
               )}
 
-              <div className={`flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4 ${driver.isHumanMode ? 'pt-10' : ''}`}>
+              <div 
+                ref={messagesContainerRef}
+                className={`flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4 ${driver.isHumanMode ? 'pt-10' : ''}`}
+              >
+                {/* Pagination Trigger */}
+                {messages.length >= 50 && (
+                    <div className="flex justify-center py-2">
+                        <button 
+                            onClick={handleLoadMore} 
+                            disabled={loadingHistory}
+                            className="text-xs bg-white border border-gray-300 rounded-full px-4 py-2 shadow-sm text-gray-600 hover:bg-gray-100 flex items-center gap-2 disabled:opacity-50"
+                        >
+                            {loadingHistory ? 'Loading...' : <><ArrowUp size={12} /> Load Previous Messages</>}
+                        </button>
+                    </div>
+                )}
+
                 {messages.length > 0 ? (
                     messages.map((msg) => (
                     <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
@@ -296,8 +336,13 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
                                 {msg.text && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
                                 {msg.footerText && <p className={`text-[10px] mt-2 pt-2 border-t opacity-70 ${msg.sender === 'driver' ? 'border-gray-100' : 'border-blue-500'}`}>{msg.footerText}</p>}
-                                <div className={`text-[10px] mt-1 text-right opacity-60`}>
+                                <div className={`text-[10px] mt-1 text-right opacity-60 flex items-center justify-end gap-1`}>
                                     {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                    {msg.sender !== 'driver' && msg.status && (
+                                        <span className={`capitalize ${msg.status === 'failed' ? 'text-red-300 font-bold' : ''}`}>
+                                            • {msg.status}
+                                        </span>
+                                    )}
                                 </div>
                             </div>
 
