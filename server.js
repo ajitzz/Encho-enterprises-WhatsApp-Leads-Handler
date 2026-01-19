@@ -199,6 +199,31 @@ const MIGRATION_QUERIES = `
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS qualification_checks JSONB DEFAULT '{}';
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS onboarding_step INT DEFAULT 0;
+
+    -- Ensure Media Tables exist (Self-healing)
+    CREATE TABLE IF NOT EXISTS media_folders (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        parent_path TEXT DEFAULT '/',
+        is_public_showcase BOOLEAN DEFAULT FALSE,
+        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT
+    );
+    CREATE TABLE IF NOT EXISTS media_files (
+        id TEXT PRIMARY KEY,
+        url TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        type TEXT,
+        folder_path TEXT DEFAULT '/',
+        media_id TEXT,
+        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT
+    );
+
+    -- Media Column Backfills
+    ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS parent_path TEXT DEFAULT '/';
+    ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS is_public_showcase BOOLEAN DEFAULT FALSE;
+    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS folder_path TEXT DEFAULT '/';
+    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS media_id TEXT;
+    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS type TEXT;
 `;
 
 // --- QUERY EXECUTION HELPER ---
@@ -212,38 +237,27 @@ const queryWithRetry = async (text, params, retries = 2) => {
     } catch (err) {
         if (client) { try { client.release(true); } catch(e) {} client = null; }
         
+        console.error(`⚠️ SQL Error [${err.code}]: ${err.message}`);
+
         // SELF-HEALING: Missing Table (42P01) or Column (42703)
-        if (err.code === '42P01') { 
-            console.warn("⚠️ Tables missing. Running Schema Init...");
+        if (err.code === '42P01' || err.code === '42703') { 
+            console.warn("⚠️ Schema Mismatch detected. Attempting Auto-Migration...");
             try {
                 const healClient = await pool.connect();
                 await healClient.query(SCHEMA_QUERIES);
+                await healClient.query(MIGRATION_QUERIES); // Force migrations
                 await healClient.query(INDEX_QUERIES); 
                 healClient.release();
+                
+                // Retry original query
                 const retryClient = await pool.connect();
                 const res = await retryClient.query(text, params);
                 retryClient.release();
                 return res;
             } catch (healErr) {
-                console.error("❌ Schema Healing Failed:", healErr);
+                console.error("❌ Schema Healing Failed:", healErr.message);
                 throw healErr;
             }
-        }
-        
-        if (err.code === '42703') {
-             console.warn("⚠️ Columns missing. Running Migrations...");
-             try {
-                const healClient = await pool.connect();
-                await healClient.query(MIGRATION_QUERIES);
-                healClient.release();
-                const retryClient = await pool.connect();
-                const res = await retryClient.query(text, params);
-                retryClient.release();
-                return res;
-             } catch (healErr) {
-                console.error("❌ Migration Failed:", healErr);
-                throw healErr;
-             }
         }
 
         if (retries > 0 && (err.code === 'ECONNRESET' || err.code === '57P01' || err.message.includes('timeout'))) {
