@@ -34,10 +34,10 @@ app.use((req, res, next) => {
 });
 
 // --- DYNAMIC CREDENTIALS (HARDCODED FALLBACKS FOR STABILITY) ---
-const META_API_TOKEN = process.env.META_API_TOKEN || "EAAkr7Y9S2qYBQfHTNZASIugAzOi8b2MZCBct4z4jZBHSmQ2KGlFduuDQQGEYC9NRDtZBUdhMPdeJ06OjYUiJYGfFkZCAxzyh4TdidN7ZA10K3XPOVEiQh01jo22xLsQjXrEtMHc5ZCHZBbRZAyA5d0pl26Jsg3IuNKY272QYmqEjHghf11OKJmbUZBfJLe5EvHzl48gAZDZD";
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "982841698238647";
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
-const APP_SECRET = process.env.APP_SECRET || ""; 
+const META_API_TOKEN = (process.env.META_API_TOKEN || "").trim() || "EAAkr7Y9S2qYBQfHTNZASIugAzOi8b2MZCBct4z4jZBHSmQ2KGlFduuDQQGEYC9NRDtZBUdhMPdeJ06OjYUiJYGfFkZCAxzyh4TdidN7ZA10K3XPOVEiQh01jo22xLsQjXrEtMHc5ZCHZBbRZAyA5d0pl26Jsg3IuNKY272QYmqEjHghf11OKJmbUZBfJLe5EvHzl48gAZDZD";
+const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "").trim() || "982841698238647";
+const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || "").trim() || "uber_fleet_verify_token";
+const APP_SECRET = (process.env.APP_SECRET || "").trim() || ""; 
 
 const s3Client = new S3Client({
     region: process.env.AWS_REGION || 'us-east-1',
@@ -262,9 +262,10 @@ app.get('/webhook', (req, res) => {
 
     if (mode && token) {
         if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-            console.log('WEBHOOK_VERIFIED');
+            console.log('✅ WEBHOOK_VERIFIED');
             res.status(200).send(challenge);
         } else {
+            console.warn('❌ Webhook Verification Failed: Token Mismatch');
             res.sendStatus(403);
         }
     } else {
@@ -276,11 +277,17 @@ app.post('/webhook', async (req, res) => {
     if (APP_SECRET && req.headers['x-hub-signature-256']) {
         const signature = req.headers['x-hub-signature-256'].replace('sha256=', '');
         const expected = crypto.createHmac('sha256', APP_SECRET).update(req.rawBody).digest('hex');
-        if (signature !== expected) return res.sendStatus(403);
+        if (signature !== expected) {
+            console.error("❌ Webhook Signature Invalid");
+            return res.sendStatus(403);
+        }
     }
 
     const ingestEnabled = await getSystemSetting('webhook_ingest_enabled');
-    if (!ingestEnabled) return res.status(200).send('Ingest Disabled');
+    if (!ingestEnabled) {
+        console.log('Webhook Ingest Disabled via Settings');
+        return res.status(200).send('Ingest Disabled');
+    }
 
     try {
         const body = req.body;
@@ -289,6 +296,7 @@ app.post('/webhook', async (req, res) => {
                 for (const change of entry.changes) {
                     if (change.value.messages) {
                         for (const msg of change.value.messages) {
+                            console.log(`📩 Received Message from ${msg.from}`);
                             await processIncomingMessage(msg, change.value.contacts);
                         }
                     }
@@ -297,7 +305,7 @@ app.post('/webhook', async (req, res) => {
         }
         res.sendStatus(200);
     } catch (e) {
-        console.error("Webhook Error:", e);
+        console.error("❌ Webhook Error:", e);
         res.sendStatus(500);
     }
 });
@@ -346,7 +354,12 @@ async function processIncomingMessage(msg, contacts) {
         VALUES ($1, $2, 'driver', $3, $4, $5)
     `, [msgId, driverId, text, Date.now(), wamid]);
 
-    await runBotEngine(driverId, text, buttonId, from);
+    // Pass detailed logs for debugging
+    try {
+        await runBotEngine(driverId, text, buttonId, from);
+    } catch (e) {
+        console.error("Bot Engine Crash:", e);
+    }
 }
 
 async function runBotEngine(driverId, text, buttonId, from) {
@@ -407,22 +420,26 @@ async function runBotEngine(driverId, text, buttonId, from) {
             if (currentStep.options || currentStep.buttons) {
                  replyContent = {
                      ...currentStep,
-                     text: `⚠️ Invalid selection.\n\n${currentStep.message}`
+                     // IMPORTANT: Ensure message is present for warning fallback
+                     message: `⚠️ Invalid selection.\n\n${currentStep.message || currentStep.title || "Please try again."}`
                  };
-                 // We do NOT update the current_bot_step_id because we are staying on the same step
             }
         }
     }
 
     if (replyContent) {
         if (replyContent.delay) await new Promise(r => setTimeout(r, replyContent.delay * 1000));
+        
+        console.log(`🤖 Bot sending step: ${replyContent.id} to ${from}`);
         await sendWhatsAppMessage(from, replyContent);
         
         const botMsgId = `bot_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
+        // Fix: Ensure text is not empty for DB insert
+        const dbText = replyContent.message || replyContent.text || '[Interactive Message]';
         await queryWithRetry(`
             INSERT INTO messages (id, driver_id, sender, text, timestamp, type)
             VALUES ($1, $2, 'system', $3, $4, $5)
-        `, [botMsgId, driverId, replyContent.message, Date.now(), replyContent.inputType || 'text']);
+        `, [botMsgId, driverId, dbText, Date.now(), replyContent.inputType || 'text']);
     }
 }
 
@@ -435,20 +452,24 @@ const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
     }
 
     if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
-        console.error("Meta Credentials Missing. Check Server Config.");
+        console.error("❌ Meta Credentials Missing. Check Server Config.");
         return { success: false, error: "Missing Credentials" };
     }
 
     // Use Graph API v21.0 for stability
     const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
     
+    // CRITICAL FIX: Ensure text body is NEVER empty.
+    // Bot steps use 'message' property, while direct API uses 'text'.
+    const bodyText = (content.text || content.message || " ").substring(0, 4096);
+
     // Base Payload
     let payload = {
         messaging_product: "whatsapp",
         recipient_type: "individual",
         to: to,
         type: "text",
-        text: { body: content.text || "" }
+        text: { body: bodyText }
     };
 
     // Construct Interactive Payload (Buttons/List)
@@ -476,16 +497,18 @@ const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
                 type: "reply",
                 reply: {
                     id: btn.payload || `btn_${i}`,
-                    title: btn.title.substring(0, 20) // STRICT LIMIT
+                    title: (btn.title || "Option").substring(0, 20) // STRICT LIMIT
                 }
             }))
         };
         
+        // Ensure interactive body text is not empty, fallback to "Select an option"
+        const interactiveBodyText = bodyText.trim() === "" ? "Please select an option below" : bodyText;
+
         payload.interactive = {
             type: "button",
             header: headerObj,
-            // CRITICAL: Body text is MANDATORY for interactive messages
-            body: { text: content.text || content.message || "Select an option below" }, 
+            body: { text: interactiveBodyText }, 
             action: actionObj
         };
 
@@ -512,22 +535,26 @@ const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
          payload.type = type;
          payload[type] = { 
              link: content.mediaUrl, 
-             caption: content.text || undefined 
+             caption: bodyText || undefined 
          };
          delete payload.text;
     }
 
     try {
+        console.log(`📤 Sending to ${to}...`);
         await axios.post(url, payload, {
             headers: { 'Authorization': `Bearer ${META_API_TOKEN}`, 'Content-Type': 'application/json' },
-            timeout: 8000 // 8s timeout to prevent hanging Vercel functions
+            timeout: 10000 
         });
+        console.log(`✅ Message Sent to ${to}`);
         return { success: true };
     } catch (error) {
         // Detailed Error Logging
         const errorDetail = error.response?.data?.error;
-        console.error("Meta API Failed:", JSON.stringify(errorDetail, null, 2));
-        throw new Error(errorDetail?.message || "Meta API Failed");
+        console.error("❌ Meta API Failed:", JSON.stringify(errorDetail, null, 2));
+        // Don't crash the server, just log and throw to caller
+        if (clientMessageId) throw new Error(errorDetail?.message || "Meta API Failed");
+        return { success: false, error: errorDetail };
     }
 };
 
@@ -657,11 +684,14 @@ router.post('/messages/send', async (req, res) => {
         await sendWhatsAppMessage(phone, { text, ...attachments }, clientMessageId);
 
         const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
+        // Ensure text is stored in DB even if it was just an attachment
+        const dbText = text || (attachments.templateName ? `Template: ${attachments.templateName}` : '[Media Message]');
+        
         await queryWithRetry(`
             INSERT INTO messages (id, driver_id, sender, text, timestamp, type, client_message_id, buttons, template_name, image_url)
             VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9)
         `, [
-            msgId, driverId, text, Date.now(),
+            msgId, driverId, dbText, Date.now(),
             attachments.templateName ? 'template' : (attachments.options ? 'options' : 'text'),
             clientMessageId,
             attachments.buttons ? JSON.stringify(attachments.buttons) : null,
@@ -714,10 +744,12 @@ const runScheduler = async () => {
                      await sendWhatsAppMessage(phone, content);
                      
                      const msgId = `sched_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
+                     const dbText = content.text || '[Scheduled Message]';
+                     
                      await queryWithRetry(`
                         INSERT INTO messages (id, driver_id, sender, text, timestamp, type)
                         VALUES ($1, $2, 'agent', $3, $4, 'text')
-                     `, [msgId, driverId, content.text || '[Scheduled]', Date.now()]);
+                     `, [msgId, driverId, dbText, Date.now()]);
                      
                      await updateDriverTimestamp(driverId);
                  }
