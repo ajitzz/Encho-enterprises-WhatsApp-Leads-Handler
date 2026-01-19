@@ -2,18 +2,17 @@
 /**
  * UBER FLEET RECRUITER - BACKEND SERVER
  * Enterprise-Grade Connection Handling for Vercel + Neon
- * FAIL-SAFE MODE ENABLED
- * MODE: STRICT BOT ONLY (NO AI)
+ * VERCEL-SAFE MODE ENABLED
  */
 
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const crypto = require('crypto'); // NEW: For signature verification
+const crypto = require('crypto');
 const { Pool } = require('pg'); 
 const { S3Client, PutObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
-const FormData = require('form-data'); 
+const os = require('os');
 require('dotenv').config();
 
 const app = express();
@@ -28,19 +27,18 @@ app.use(express.json({
 }));
 app.use(cors()); 
 
+// Vercel optimization: Disable ETag for dynamic API responses
 app.set('etag', false);
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     next();
 });
 
-const PORT = process.env.PORT || 3001;
-
 // --- DYNAMIC CREDENTIALS ---
-let META_API_TOKEN = process.env.META_API_TOKEN || ""; 
-let PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || ""; 
-let VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
-let APP_SECRET = process.env.APP_SECRET || ""; 
+const META_API_TOKEN = process.env.META_API_TOKEN || ""; 
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || ""; 
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
+const APP_SECRET = process.env.APP_SECRET || ""; 
 
 const s3Client = new S3Client({
     region: process.env.AWS_REGION || 'us-east-1',
@@ -51,22 +49,30 @@ const s3Client = new S3Client({
 });
 const BUCKET_NAME = process.env.AWS_BUCKET_NAME || 'uber-fleet-assets';
 
-const NEON_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
-const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL || NEON_DB_URL;
+// --- DATABASE CONNECTION ---
+const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL;
+
+if (!CONNECTION_STRING) {
+    console.error("❌ CRITICAL ERROR: POSTGRES_URL or DATABASE_URL environment variable is missing.");
+    // We don't crash the process in Vercel, but requests will fail gracefully.
+}
 
 let pool;
 if (!global.pgPool) {
-    global.pgPool = new Pool({
-        connectionString: CONNECTION_STRING,
-        ssl: { rejectUnauthorized: false },
-        max: 5,
-        idleTimeoutMillis: 1000, 
-        connectionTimeoutMillis: 5000, 
-    });
+    if (CONNECTION_STRING) {
+        global.pgPool = new Pool({
+            connectionString: CONNECTION_STRING,
+            ssl: { rejectUnauthorized: false },
+            max: 5, // Limit connections in serverless environment
+            connectionTimeoutMillis: 5000, 
+            idleTimeoutMillis: 10000,
+        });
+    }
 }
 pool = global.pgPool;
 
 const queryWithRetry = async (text, params, retries = 3) => {
+    if (!pool) throw new Error("Database connection not configured.");
     let client;
     try {
         client = await pool.connect();
@@ -82,18 +88,6 @@ const queryWithRetry = async (text, params, retries = 3) => {
         throw err;
     } finally {
         if (client) { try { client.release(); } catch(e) {} }
-    }
-};
-
-// --- HELPER: System Settings ---
-const getSystemSetting = async (key) => {
-    try {
-        const res = await queryWithRetry('SELECT value FROM system_settings WHERE key = $1', [key]);
-        if (res.rows.length > 0) return res.rows[0].value === 'true';
-        return true; 
-    } catch (e) {
-        // console.error(`Failed to fetch setting ${key}:`, e.message);
-        return true;
     }
 };
 
@@ -113,6 +107,8 @@ const toDriverDTO = (row) => ({
     isBotActive: row.is_bot_active,
     isHumanMode: row.is_human_mode,
     qualificationChecks: row.qualification_checks || {},
+    onboardingStep: row.onboarding_step || 0,
+    // Return empty arrays for list view to save bandwidth
     messages: [], 
     documents: [] 
 });
@@ -126,12 +122,24 @@ const toMessageDTO = (row) => ({
     imageUrl: row.image_url,
     headerImageUrl: row.header_image_url,
     footerText: row.footer_text,
-    buttons: row.buttons, 
+    buttons: row.buttons, // Already JSONB in DB
     templateName: row.template_name
+});
+
+const toDocumentDTO = (row) => ({
+    id: row.id,
+    driverId: row.driver_id,
+    docType: row.doc_type,
+    fileUrl: row.file_url,
+    mimeType: row.mime_type,
+    createdAt: parseInt(row.created_at || '0'),
+    verificationStatus: row.verification_status,
+    notes: row.notes
 });
 
 // --- DB INITIALIZATION ---
 const initDB = async () => {
+    if (!pool) return;
     try {
         // 1. Tables
         await queryWithRetry(`
@@ -149,8 +157,21 @@ const initDB = async () => {
                 current_bot_step_id TEXT,
                 is_bot_active BOOLEAN DEFAULT TRUE,
                 is_human_mode BOOLEAN DEFAULT FALSE,
-                qualification_checks JSONB DEFAULT '{}'
+                qualification_checks JSONB DEFAULT '{}',
+                onboarding_step INT DEFAULT 0,
+                updated_at BIGINT DEFAULT (extract(epoch from now()) * 1000)
             );
+            
+            -- Add updated_at if missing (migration)
+            DO $$ 
+            BEGIN 
+                BEGIN
+                    ALTER TABLE drivers ADD COLUMN updated_at BIGINT DEFAULT (extract(epoch from now()) * 1000);
+                EXCEPTION
+                    WHEN duplicate_column THEN NULL;
+                END;
+            END $$;
+
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
                 driver_id TEXT REFERENCES drivers(id),
@@ -163,9 +184,22 @@ const initDB = async () => {
                 footer_text TEXT,
                 buttons JSONB,
                 template_name TEXT,
-                client_message_id TEXT UNIQUE, -- Idempotency Key
-                whatsapp_message_id TEXT UNIQUE -- Webhook Idempotency Key
+                client_message_id TEXT UNIQUE, 
+                whatsapp_message_id TEXT UNIQUE
             );
+
+            CREATE TABLE IF NOT EXISTS driver_documents (
+                id TEXT PRIMARY KEY,
+                driver_id TEXT REFERENCES drivers(id) ON DELETE CASCADE,
+                doc_type TEXT NOT NULL,
+                file_url TEXT NOT NULL,
+                mime_type TEXT,
+                created_at BIGINT DEFAULT (extract(epoch from now()) * 1000),
+                verification_status TEXT DEFAULT 'pending',
+                notes TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_driver_documents_driver_id ON driver_documents(driver_id);
+
             CREATE TABLE IF NOT EXISTS bot_settings (
                 id INT PRIMARY KEY DEFAULT 1,
                 settings JSONB
@@ -206,22 +240,6 @@ const initDB = async () => {
                     inputType: "option",
                     options: ["Yes, I want to drive", "No, just inquiring"],
                     routes: { "Yes, I want to drive": "step_role", "No, just inquiring": "END" }
-                },
-                {
-                    id: "step_role",
-                    title: "Select Role",
-                    message: "Great! Do you have your own car or do you need to rent one?",
-                    inputType: "option",
-                    options: ["I have a car", "I need to rent"],
-                    routes: { "I have a car": "step_name", "I need to rent": "step_name" }
-                },
-                {
-                    id: "step_name",
-                    title: "Collect Name",
-                    message: "Please type your full name.",
-                    inputType: "text",
-                    saveToField: "name",
-                    nextStepId: "END"
                 }
             ]
         };
@@ -239,31 +257,219 @@ const initDB = async () => {
 
 initDB();
 
-// --- SEND WHATSAPP MESSAGE (CORE LOGIC) ---
-const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
-    // 1. Idempotency Check (Outbound)
-    if (clientMessageId) {
-        const existing = await queryWithRetry('SELECT id FROM messages WHERE client_message_id = $1', [clientMessageId]);
-        if (existing.rows.length > 0) {
-            console.log(`[Idempotency] Skipping duplicate send: ${clientMessageId}`);
-            return { success: true, duplicate: true };
+// --- HELPER FUNCTIONS ---
+const getSystemSetting = async (key) => {
+    try {
+        const res = await queryWithRetry('SELECT value FROM system_settings WHERE key = $1', [key]);
+        if (res.rows.length > 0) return res.rows[0].value === 'true';
+        return true; 
+    } catch (e) {
+        return true;
+    }
+};
+
+const updateDriverTimestamp = async (driverId) => {
+    await queryWithRetry('UPDATE drivers SET updated_at = $1 WHERE id = $2', [Date.now(), driverId]);
+};
+
+// --- WEBHOOK VERIFICATION & HANDLING (ROOT LEVEL) ---
+// Vercel rewrites /webhook -> /api/index.js -> app
+// So we must handle /webhook directly on app
+
+app.get('/webhook', (req, res) => {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+
+    if (mode && token) {
+        if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+            console.log('WEBHOOK_VERIFIED');
+            res.status(200).send(challenge);
+        } else {
+            res.sendStatus(403);
+        }
+    } else {
+        res.sendStatus(400);
+    }
+});
+
+app.post('/webhook', async (req, res) => {
+    // 1. Signature Verification (Optional but recommended)
+    if (APP_SECRET && req.headers['x-hub-signature-256']) {
+        const signature = req.headers['x-hub-signature-256'].replace('sha256=', '');
+        const expected = crypto.createHmac('sha256', APP_SECRET).update(req.rawBody).digest('hex');
+        if (signature !== expected) {
+            console.error("Webhook Signature Mismatch");
+            return res.sendStatus(403);
         }
     }
 
-    if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
-        console.warn("Missing Meta Credentials. Simulating send.");
-        return { success: true, simulated: true };
+    // 2. Kill Switch Check
+    const ingestEnabled = await getSystemSetting('webhook_ingest_enabled');
+    if (!ingestEnabled) return res.status(200).send('Ingest Disabled');
+
+    // 3. Process Logic
+    try {
+        const body = req.body;
+        if (body.object === 'whatsapp_business_account') {
+            for (const entry of body.entry) {
+                for (const change of entry.changes) {
+                    if (change.value.messages) {
+                        for (const msg of change.value.messages) {
+                            await processIncomingMessage(msg, change.value.contacts);
+                        }
+                    }
+                }
+            }
+        }
+        res.sendStatus(200);
+    } catch (e) {
+        console.error("Webhook Processing Error:", e);
+        res.sendStatus(500);
+    }
+});
+
+// Logic extracted for reuse
+async function processIncomingMessage(msg, contacts) {
+    const from = msg.from;
+    const wamid = msg.id; 
+    
+    // Idempotency
+    const existing = await queryWithRetry('SELECT id FROM messages WHERE whatsapp_message_id = $1', [wamid]);
+    if (existing.rows.length > 0) return;
+
+    let text = '';
+    let buttonId = null;
+    
+    if (msg.type === 'text') text = msg.text.body;
+    else if (msg.type === 'button') text = msg.button.text; 
+    else if (msg.type === 'interactive') {
+        if (msg.interactive.type === 'button_reply') {
+            text = msg.interactive.button_reply.title;
+            buttonId = msg.interactive.button_reply.id; 
+        } else if (msg.interactive.type === 'list_reply') {
+            text = msg.interactive.list_reply.title;
+            buttonId = msg.interactive.list_reply.id;
+        }
     }
 
-    const sendingEnabled = await getSystemSetting('sending_enabled');
-    if (!sendingEnabled) {
-        console.warn("Sending Disabled by System Setting.");
-        throw new Error("System is in Sleep Mode. Sending disabled.");
+    // Get/Create Driver
+    let driverRes = await queryWithRetry('SELECT * FROM drivers WHERE phone_number = $1', [from]);
+    let driverId;
+    
+    if (driverRes.rows.length === 0) {
+        driverId = `d_${Date.now()}_${Math.random().toString(36).substr(2,4)}`;
+        const name = contacts?.[0]?.profile?.name || 'Unknown Driver';
+        await queryWithRetry(`
+            INSERT INTO drivers (id, phone_number, name, status, last_message, last_message_time, updated_at)
+            VALUES ($1, $2, $3, 'New', $4, $5, $6)
+        `, [driverId, from, name, text, Date.now(), Date.now()]);
+    } else {
+        driverId = driverRes.rows[0].id;
+        await queryWithRetry(`UPDATE drivers SET last_message = $1, last_message_time = $2, updated_at = $2 WHERE id = $3`, [text, Date.now(), driverId]);
     }
+
+    // Save Message
+    const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
+    await queryWithRetry(`
+        INSERT INTO messages (id, driver_id, sender, text, timestamp, whatsapp_message_id)
+        VALUES ($1, $2, 'driver', $3, $4, $5)
+    `, [msgId, driverId, text, Date.now(), wamid]);
+
+    // Bot Trigger
+    await runBotEngine(driverId, text, buttonId, from);
+}
+
+// Bot Engine Logic
+async function runBotEngine(driverId, text, buttonId, from) {
+    const automationEnabled = await getSystemSetting('automation_enabled');
+    if (!automationEnabled) return;
+
+    const driver = (await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [driverId])).rows[0];
+    if (!driver.is_bot_active || driver.is_human_mode) return;
+
+    const botRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1');
+    const botSettings = botRes.rows[0]?.settings;
+    if (!botSettings || !botSettings.isEnabled) return;
+
+    let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
+    let replyContent = null;
+    let nextStepId = null;
+
+    if (!currentStep) {
+        // Start flow
+        const entryStep = botSettings.steps.find(s => s.id === botSettings.entryPointId) || botSettings.steps[0];
+        if (entryStep) {
+            replyContent = entryStep;
+            await queryWithRetry('UPDATE drivers SET current_bot_step_id = $1, updated_at = $3 WHERE id = $2', [entryStep.id, driverId, Date.now()]);
+        }
+    } else {
+        // Match Input
+        let matchedRouteId = null;
+        if (buttonId && currentStep.routes) matchedRouteId = currentStep.routes[buttonId];
+        
+        if (!matchedRouteId && currentStep.routes) {
+            const lowerInput = text.toLowerCase().trim();
+            const routeKey = Object.keys(currentStep.routes).find(k => k.toLowerCase() === lowerInput);
+            if (routeKey) matchedRouteId = currentStep.routes[routeKey];
+        }
+        
+        if (!matchedRouteId && !currentStep.routes && currentStep.nextStepId) {
+            matchedRouteId = currentStep.nextStepId;
+        }
+
+        if (matchedRouteId) {
+            if (matchedRouteId === 'END') {
+                await queryWithRetry('UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = $1, updated_at = $3 WHERE id = $2', [botSettings.shouldRepeat, driverId, Date.now()]);
+            } else if (matchedRouteId === 'AI_HANDOFF') {
+                 await queryWithRetry('UPDATE drivers SET is_human_mode = TRUE, updated_at = $2 WHERE id = $1', [driverId, Date.now()]);
+            } else {
+                const nextStep = botSettings.steps.find(s => s.id === matchedRouteId);
+                if (nextStep) {
+                    replyContent = nextStep;
+                    await queryWithRetry('UPDATE drivers SET current_bot_step_id = $1, updated_at = $3 WHERE id = $2', [nextStep.id, driverId, Date.now()]);
+                    
+                    if (currentStep.saveToField) {
+                        const validFields = ['name', 'vehicle_registration', 'availability', 'notes'];
+                        if (validFields.includes(currentStep.saveToField)) {
+                             // Use safe interpolation or multiple queries for field names
+                             await queryWithRetry(`UPDATE drivers SET ${currentStep.saveToField} = $1 WHERE id = $2`, [text, driverId]);
+                        }
+                    }
+                }
+            }
+        } else {
+            // Invalid Input
+            if (currentStep.options || currentStep.buttons) {
+                 await sendWhatsAppMessage(from, { text: "Please select one of the buttons below." });
+            }
+            return;
+        }
+    }
+
+    if (replyContent) {
+        if (replyContent.delay) await new Promise(r => setTimeout(r, replyContent.delay * 1000));
+        await sendWhatsAppMessage(from, replyContent);
+        
+        const botMsgId = `bot_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
+        await queryWithRetry(`
+            INSERT INTO messages (id, driver_id, sender, text, timestamp, type)
+            VALUES ($1, $2, 'system', $3, $4, $5)
+        `, [botMsgId, driverId, replyContent.message, Date.now(), replyContent.inputType || 'text']);
+    }
+}
+
+// --- OUTBOUND SENDING ---
+const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
+    // Idempotency
+    if (clientMessageId) {
+        const existing = await queryWithRetry('SELECT id FROM messages WHERE client_message_id = $1', [clientMessageId]);
+        if (existing.rows.length > 0) return { success: true, duplicate: true };
+    }
+
+    if (!META_API_TOKEN || !PHONE_NUMBER_ID) return { success: true, simulated: true };
 
     const url = `https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`;
-    
-    // Construct Payload
     let payload = {
         messaging_product: "whatsapp",
         recipient_type: "individual",
@@ -272,33 +478,22 @@ const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
         text: { body: content.text || "" }
     };
 
-    // TEMPLATE
     if (content.templateName) {
         payload.type = "template";
-        payload.template = {
-            name: content.templateName,
-            language: { code: "en_US" }, // Default
-            components: []
-        };
+        payload.template = { name: content.templateName, language: { code: "en_US" }, components: [] };
         delete payload.text;
     } 
-    // INTERACTIVE (Buttons / List)
-    // FIX: Allow buttons if options exist, even without header image
     else if (content.buttons?.length > 0 || (content.options && content.options.length > 0)) {
         payload.type = "interactive";
-        
         let headerObj = undefined;
-        if (content.headerImageUrl) {
-            headerObj = { type: "image", image: { link: content.headerImageUrl } };
-        }
+        if (content.headerImageUrl) headerObj = { type: "image", image: { link: content.headerImageUrl } };
 
-        // Convert Options to Buttons if not explicit buttons
         let finalButtons = content.buttons || [];
         if (finalButtons.length === 0 && content.options) {
             finalButtons = content.options.slice(0, 3).map((opt, i) => ({
                 type: 'reply',
                 title: opt,
-                payload: `btn_${i}_${opt.substring(0, 10)}` // Generate stable payload
+                payload: `btn_${i}_${opt.substring(0, 10)}`
             }));
         }
 
@@ -306,132 +501,192 @@ const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
             buttons: finalButtons.map((btn, i) => ({
                 type: "reply",
                 reply: {
-                    id: btn.payload || `btn_${i}`, // Use payload if available, else index
-                    title: btn.title.substring(0, 20) // Truncate for Meta limit
+                    id: btn.payload || `btn_${i}`,
+                    title: btn.title.substring(0, 20)
                 }
             }))
         };
         
-        // Use List if > 3 options
-        if (content.options && content.options.length > 3) {
-            actionObj.buttons = undefined;
-            actionObj.button = "Select Option";
-            actionObj.sections = [{
-                title: "Options",
-                rows: content.options.slice(0, 10).map((opt, i) => ({
-                    id: `opt_${i}`,
-                    title: opt.substring(0, 24)
-                }))
-            }];
-            payload.interactive = {
-                type: "list",
-                header: headerObj,
-                body: { text: content.text },
-                footer: content.footerText ? { text: content.footerText } : undefined,
-                action: actionObj
-            };
-        } else {
-            payload.interactive = {
-                type: "button",
-                header: headerObj,
-                body: { text: content.text },
-                footer: content.footerText ? { text: content.footerText } : undefined,
-                action: actionObj
-            };
-        }
+        payload.interactive = {
+            type: "button",
+            header: headerObj,
+            body: { text: content.text },
+            footer: content.footerText ? { text: content.footerText } : undefined,
+            action: actionObj
+        };
         delete payload.text;
-    } 
-    // MEDIA (Image/Video/Doc)
+    }
     else if (content.mediaUrl) {
-         const type = content.mediaType || 'image'; // Default to image
+         const type = content.mediaType || 'image';
          payload.type = type;
-         payload[type] = {
-             link: content.mediaUrl,
-             caption: content.text // Caption for media
-         };
+         payload[type] = { link: content.mediaUrl, caption: content.text };
          delete payload.text;
     }
 
     try {
-        const response = await axios.post(url, payload, {
-            headers: { 
-                'Authorization': `Bearer ${META_API_TOKEN}`,
-                'Content-Type': 'application/json'
-            }
+        await axios.post(url, payload, {
+            headers: { 'Authorization': `Bearer ${META_API_TOKEN}`, 'Content-Type': 'application/json' }
         });
-        return response.data;
+        return { success: true };
     } catch (error) {
         console.error("Meta API Error:", error.response?.data || error.message);
         throw new Error(error.response?.data?.error?.message || "Meta API Failed");
     }
 };
 
-// --- API ENDPOINTS ---
+// --- API ENDPOINTS (ROUTER) ---
 
-router.get('/drivers', async (req, res) => {
+// 1. SYSTEM
+router.get('/system/stats', async (req, res) => {
+    let dbLatency = 0;
+    let s3Status = 'error';
+    
     try {
-        const result = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC LIMIT 100');
-        const drivers = await Promise.all(result.rows.map(async (row) => {
-            const msgs = await queryWithRetry('SELECT * FROM messages WHERE driver_id = $1 ORDER BY timestamp ASC', [row.id]);
-            const docs = await queryWithRetry('SELECT * FROM driver_documents WHERE driver_id = $1', [row.id]);
-            const dto = toDriverDTO(row);
-            dto.messages = msgs.rows.map(toMessageDTO);
-            dto.documents = docs.rows ? docs.rows.map(toDocumentDTO) : [];
-            return dto;
-        }));
-        res.json(drivers);
-    } catch (e) {
+        const start = Date.now();
+        await queryWithRetry('SELECT 1');
+        dbLatency = Date.now() - start;
+    } catch(e) {}
+
+    if (process.env.AWS_ACCESS_KEY_ID) s3Status = 'ok';
+
+    res.json({
+        serverLoad: os.loadavg()[0] * 10,
+        dbLatency,
+        aiCredits: 100,
+        aiModel: "Bot Logic",
+        s3Status,
+        s3Load: 0,
+        whatsappStatus: META_API_TOKEN ? 'ok' : 'error',
+        whatsappUploadLoad: 0,
+        activeUploads: 0,
+        uptime: process.uptime()
+    });
+});
+
+router.get('/system/settings', async (req, res) => {
+    try {
+        const rows = await queryWithRetry('SELECT * FROM system_settings');
+        const settings = { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true };
+        rows.rows.forEach(r => {
+            if (r.key in settings) settings[r.key] = r.value === 'true';
+        });
+        res.json(settings);
+    } catch(e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// NEW: Send Message Endpoint
+router.post('/system/settings', async (req, res) => {
+    const { settings } = req.body;
+    try {
+        for (const [key, val] of Object.entries(settings)) {
+            await queryWithRetry(`
+                INSERT INTO system_settings (key, value) VALUES ($1, $2)
+                ON CONFLICT (key) DO UPDATE SET value = $2
+            `, [key, String(val)]);
+        }
+        res.json({ success: true });
+    } catch(e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 2. BOT SETTINGS
+router.get('/bot-settings', async (req, res) => {
+    try {
+        const result = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1');
+        if (result.rows.length > 0) res.json(result.rows[0].settings);
+        else res.json({ isEnabled: false, steps: [] });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/bot-settings', async (req, res) => {
+    try {
+        await queryWithRetry(`
+            INSERT INTO bot_settings (id, settings) VALUES (1, $1)
+            ON CONFLICT (id) DO UPDATE SET settings = $1
+        `, [JSON.stringify(req.body)]);
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 3. DRIVERS & MESSAGES
+router.get('/drivers', async (req, res) => {
+    try {
+        const result = await queryWithRetry('SELECT * FROM drivers ORDER BY updated_at DESC LIMIT 100');
+        // Return lightweight DTO (no messages array)
+        res.json(result.rows.map(toDriverDTO));
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/drivers/:id/messages', async (req, res) => {
+    try {
+        const result = await queryWithRetry('SELECT * FROM messages WHERE driver_id = $1 ORDER BY timestamp ASC', [req.params.id]);
+        res.json(result.rows.map(toMessageDTO));
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/drivers/:id/documents', async (req, res) => {
+    try {
+        const result = await queryWithRetry('SELECT * FROM driver_documents WHERE driver_id = $1 ORDER BY created_at DESC', [req.params.id]);
+        res.json(result.rows.map(toDocumentDTO));
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.patch('/drivers/:id', async (req, res) => {
+    const { id } = req.params;
+    const updates = req.body;
+    const allowed = ['status', 'notes', 'name', 'vehicle_registration', 'availability', 'is_bot_active', 'is_human_mode', 'qualification_checks'];
+    
+    try {
+        for (const key of Object.keys(updates)) {
+            if (allowed.includes(key)) {
+                let val = updates[key];
+                if (key === 'qualification_checks') val = JSON.stringify(val);
+                await queryWithRetry(`UPDATE drivers SET ${key} = $1, updated_at = $3 WHERE id = $2`, [val, id, Date.now()]);
+            }
+        }
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/sync', async (req, res) => {
+    const since = parseInt(req.query.since || '0');
+    try {
+        const result = await queryWithRetry('SELECT * FROM drivers WHERE updated_at > $1 ORDER BY updated_at DESC LIMIT 200', [since]);
+        res.json(result.rows.map(toDriverDTO));
+    } catch(e) { res.json([]); }
+});
+
 router.post('/messages/send', async (req, res) => {
     const { driverId, text, clientMessageId, ...attachments } = req.body;
     
-    // 1. Idempotency Check First
     if (clientMessageId) {
-        try {
-            const existing = await queryWithRetry('SELECT id FROM messages WHERE client_message_id = $1', [clientMessageId]);
-            if (existing.rows.length > 0) {
-                return res.json({ success: true, status: 'duplicate_skipped' });
-            }
-        } catch(e) {}
+        const existing = await queryWithRetry('SELECT id FROM messages WHERE client_message_id = $1', [clientMessageId]);
+        if (existing.rows.length > 0) return res.json({ success: true, status: 'duplicate_skipped' });
     }
 
     try {
-        // 2. Fetch Driver
-        const driverRes = await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [driverId]);
+        const driverRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
         if (driverRes.rows.length === 0) return res.status(404).json({ error: "Driver not found" });
-        const driver = driverRes.rows[0];
+        const phone = driverRes.rows[0].phone_number;
 
-        // 3. Send to Meta
-        await sendWhatsAppMessage(driver.phone_number, { text, ...attachments }, clientMessageId);
+        await sendWhatsAppMessage(phone, { text, ...attachments }, clientMessageId);
 
-        // 4. Save to DB
         const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
         await queryWithRetry(`
             INSERT INTO messages (id, driver_id, sender, text, timestamp, type, client_message_id, buttons, template_name, image_url)
             VALUES ($1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9)
         `, [
-            msgId, 
-            driverId, 
-            text, 
-            Date.now(), 
+            msgId, driverId, text, Date.now(),
             attachments.templateName ? 'template' : (attachments.options ? 'options' : 'text'),
             clientMessageId,
-            JSON.stringify(attachments.buttons),
+            attachments.buttons ? JSON.stringify(attachments.buttons) : null,
             attachments.templateName,
             attachments.mediaUrl
         ]);
 
-        // 5. Update Driver Last Message
-        await queryWithRetry('UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3', [
-            text || `[${attachments.templateName || 'Media'}]`, 
-            Date.now(), 
-            driverId
-        ]);
-
+        await updateDriverTimestamp(driverId);
         res.json({ success: true, messageId: msgId });
     } catch (e) {
         console.error(e);
@@ -439,275 +694,84 @@ router.post('/messages/send', async (req, res) => {
     }
 });
 
-// --- WEBHOOK HANDLER ---
-router.post('/webhook', async (req, res) => {
-    // 1. Verification
-    if (req.method === 'GET') {
-        if (req.query['hub.verify_token'] === VERIFY_TOKEN) {
-            return res.send(req.query['hub.challenge']);
-        }
-        return res.status(403).send('Invalid verify token');
-    }
-
-    // 2. Ingest Check
-    const ingestEnabled = await getSystemSetting('webhook_ingest_enabled');
-    if (!ingestEnabled) return res.status(200).send('Ingest Disabled');
-
-    // 3. Process Message
-    const body = req.body;
-    if (body.object === 'whatsapp_business_account') {
-        for (const entry of body.entry) {
-            for (const change of entry.changes) {
-                if (change.value.messages) {
-                    for (const msg of change.value.messages) {
-                        const from = msg.from;
-                        const wamid = msg.id; // WhatsApp Message ID
-                        
-                        // IDEMPOTENCY CHECK (Webhook)
-                        const existingWamid = await queryWithRetry('SELECT id FROM messages WHERE whatsapp_message_id = $1', [wamid]);
-                        if (existingWamid.rows.length > 0) {
-                            console.log(`[Webhook] Skipping duplicate wamid: ${wamid}`);
-                            continue;
-                        }
-
-                        // Extract content
-                        let text = '';
-                        let buttonId = null;
-                        
-                        if (msg.type === 'text') text = msg.text.body;
-                        else if (msg.type === 'button') text = msg.button.text; // Legacy
-                        else if (msg.type === 'interactive') {
-                            if (msg.interactive.type === 'button_reply') {
-                                text = msg.interactive.button_reply.title;
-                                buttonId = msg.interactive.button_reply.id; // Use ID for routing!
-                            } else if (msg.interactive.type === 'list_reply') {
-                                text = msg.interactive.list_reply.title;
-                                buttonId = msg.interactive.list_reply.id;
-                            }
-                        }
-
-                        // Get/Create Driver
-                        let driverRes = await queryWithRetry('SELECT * FROM drivers WHERE phone_number = $1', [from]);
-                        let driverId;
-                        
-                        if (driverRes.rows.length === 0) {
-                            driverId = `d_${Date.now()}`;
-                            const name = change.value.contacts?.[0]?.profile?.name || 'Unknown Driver';
-                            await queryWithRetry(`
-                                INSERT INTO drivers (id, phone_number, name, status, last_message, last_message_time)
-                                VALUES ($1, $2, $3, 'New', $4, $5)
-                            `, [driverId, from, name, text, Date.now()]);
-                        } else {
-                            driverId = driverRes.rows[0].id;
-                            await queryWithRetry(`UPDATE drivers SET last_message = $1, last_message_time = $2 WHERE id = $3`, [text, Date.now(), driverId]);
-                        }
-
-                        // Save User Message
-                        const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
-                        await queryWithRetry(`
-                            INSERT INTO messages (id, driver_id, sender, text, timestamp, whatsapp_message_id)
-                            VALUES ($1, $2, 'driver', $3, $4, $5)
-                        `, [msgId, driverId, text, Date.now(), wamid]);
-
-                        // --- BOT ENGINE EXECUTION ---
-                        const automationEnabled = await getSystemSetting('automation_enabled');
-                        const driver = (await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [driverId])).rows[0];
-                        
-                        if (automationEnabled && driver.is_bot_active && !driver.is_human_mode) {
-                            const botRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1');
-                            const botSettings = botRes.rows[0]?.settings;
-
-                            if (botSettings && botSettings.isEnabled) {
-                                let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
-                                let replyContent = null;
-                                let nextStepId = null;
-                                let shouldAdvance = false;
-
-                                // 1. INITIALIZE IF NEW
-                                if (!currentStep) {
-                                    const entryStep = botSettings.steps.find(s => s.id === botSettings.entryPointId) || botSettings.steps[0];
-                                    if (entryStep) {
-                                        currentStep = entryStep;
-                                        // Don't reply yet, we just found the start step. We need to match input or send greeting?
-                                        // Actually, if it's new, we should send the entry step immediately.
-                                        replyContent = entryStep; 
-                                        nextStepId = entryStep.id; // Stay on this step until valid input? No, usually advance.
-                                        // Wait, usually the user says "Hi", and we send "Welcome".
-                                        // So we reply with Entry Step content, and SET current step to Entry Step ID.
-                                        // But if we are *at* the step, we are waiting for input.
-                                        
-                                        // LOGIC: If current_step is NULL, we are starting.
-                                        // We send the welcome message.
-                                        // We set current_step = entryStep.id.
-                                        
-                                        // But here, the user *already sent* a message. 
-                                        // So we reply to that message with the Welcome.
-                                        replyContent = entryStep;
-                                        await queryWithRetry('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [entryStep.id, driverId]);
-                                    }
-                                } 
-                                // 2. PROCESS INPUT FOR CURRENT STEP
-                                else {
-                                    // We are at `currentStep`. The user just replied to it.
-                                    // Check routes.
-                                    
-                                    let matchedRouteId = null;
-                                    
-                                    // A) Check ID Match (Strongest)
-                                    if (buttonId && currentStep.routes) {
-                                        // Look for route key matching buttonId
-                                        // The keys in `routes` map might be Titles OR IDs depending on how BotBuilder saved them.
-                                        // BotBuilder now saves IDs/Payloads if available.
-                                        matchedRouteId = currentStep.routes[buttonId];
-                                    }
-
-                                    // B) Check Text Match (Fallback)
-                                    if (!matchedRouteId && currentStep.routes) {
-                                        const lowerInput = text.toLowerCase().trim();
-                                        const routeKey = Object.keys(currentStep.routes).find(k => k.toLowerCase() === lowerInput);
-                                        if (routeKey) matchedRouteId = currentStep.routes[routeKey];
-                                    }
-                                    
-                                    // C) Check "Any Input" (Next Step ID)
-                                    if (!matchedRouteId && !currentStep.routes && currentStep.nextStepId) {
-                                        matchedRouteId = currentStep.nextStepId;
-                                    }
-
-                                    if (matchedRouteId) {
-                                        // Valid Transition
-                                        if (matchedRouteId === 'END') {
-                                            // End Flow
-                                            await queryWithRetry('UPDATE drivers SET current_bot_step_id = NULL, is_bot_active = $1 WHERE id = $2', [botSettings.shouldRepeat, driverId]);
-                                            // Optional: Send goodbye?
-                                        } else {
-                                            const nextStep = botSettings.steps.find(s => s.id === matchedRouteId);
-                                            if (nextStep) {
-                                                replyContent = nextStep;
-                                                await queryWithRetry('UPDATE drivers SET current_bot_step_id = $1 WHERE id = $2', [nextStep.id, driverId]);
-                                                
-                                                // Handle "Save To Field"
-                                                if (currentStep.saveToField) {
-                                                    // Sanitize field name to prevent injection (though parameterized queries help)
-                                                    const validFields = ['name', 'vehicle_registration', 'availability', 'notes'];
-                                                    if (validFields.includes(currentStep.saveToField)) {
-                                                         await queryWithRetry(`UPDATE drivers SET ${currentStep.saveToField} = $1 WHERE id = $2`, [text, driverId]);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        // SOFT FAIL / INVALID INPUT
-                                        // Do not advance. Reply with "Invalid".
-                                        // Check if the current step HAS options. If so, re-state them.
-                                        if (currentStep.options || currentStep.buttons) {
-                                             await sendWhatsAppMessage(from, { text: "Please select one of the buttons below." });
-                                             // Return early to avoid sending "undefined" reply
-                                             return res.sendStatus(200);
-                                        }
-                                        // If it was a text input step and we didn't match (e.g. strict validation?), handle that.
-                                        // For now, if no route matched and no nextStepId, we're stuck.
-                                    }
-                                }
-
-                                if (replyContent) {
-                                    // Wait for Delay?
-                                    if (replyContent.delay) {
-                                        await new Promise(r => setTimeout(r, replyContent.delay * 1000));
-                                    }
-                                    await sendWhatsAppMessage(from, replyContent);
-                                    
-                                    // Log Bot Reply
-                                    const botMsgId = `bot_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
-                                    await queryWithRetry(`
-                                        INSERT INTO messages (id, driver_id, sender, text, timestamp, type)
-                                        VALUES ($1, $2, 'system', $3, $4, $5)
-                                    `, [botMsgId, driverId, replyContent.message, Date.now(), replyContent.inputType || 'text']);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    res.sendStatus(200);
-});
-
-// --- SCHEDULER (ROBUST) ---
-// Runs every 30 seconds to check for pending messages
-setInterval(async () => {
-    try {
-        const sendingEnabled = await getSystemSetting('sending_enabled');
-        if (!sendingEnabled) return;
-
-        // SKIP LOCKED prevents multiple instances from picking same job
-        const result = await queryWithRetry(`
-            SELECT * FROM scheduled_messages 
-            WHERE status = 'pending' 
-            AND scheduled_time <= $1
-            FOR UPDATE SKIP LOCKED
-            LIMIT 10
-        `, [Date.now()]);
-
-        for (const job of result.rows) {
-            console.log(`[Scheduler] Processing Job ${job.id}`);
-            const { driver_ids, content } = job.content; // Content wrapper due to how it was saved
-            
-            // Note: The structure in DB might be job.content directly if jsonb.
-            // Let's assume content is the actual message payload.
-            
-            // Update status to processing
-            await queryWithRetry('UPDATE scheduled_messages SET status = \'processing\' WHERE id = $1', [job.id]);
-
-            // Determine actual payload
-            const actualContent = job.content; 
-            const targets = job.driver_ids || [];
-
-            for (const driverId of targets) {
-                try {
-                     const driverRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
-                     if (driverRes.rows.length > 0) {
-                         const phone = driverRes.rows[0].phone_number;
-                         await sendWhatsAppMessage(phone, actualContent);
-                         
-                         // Log
-                         const msgId = `sched_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
-                         await queryWithRetry(`
-                            INSERT INTO messages (id, driver_id, sender, text, timestamp, type)
-                            VALUES ($1, $2, 'agent', $3, $4, 'text')
-                         `, [msgId, driverId, actualContent.text || '[Scheduled]', Date.now()]);
-                     }
-                } catch(e) {
-                    console.error(`Failed to send scheduled msg to ${driverId}`, e);
-                }
-            }
-
-            await queryWithRetry('UPDATE scheduled_messages SET status = \'completed\' WHERE id = $1', [job.id]);
-        }
-    } catch (e) {
-        console.error("[Scheduler] Error:", e);
-    }
-}, 30000); 
-
 router.post('/messages/schedule', async (req, res) => {
     const { driverIds, scheduledTime, ...content } = req.body;
     try {
         await queryWithRetry(`
             INSERT INTO scheduled_messages (driver_ids, content, scheduled_time, status)
             VALUES ($1, $2, $3, 'pending')
-        `, [driverIds, content, scheduledTime]);
+        `, [driverIds, JSON.stringify(content), scheduledTime]);
         res.json({ success: true });
     } catch(e) {
         res.status(500).json({ error: e.message });
     }
 });
 
-// Mount
+// --- SCHEDULER (Vercel Cron Compatible) ---
+const runScheduler = async () => {
+    const sendingEnabled = await getSystemSetting('sending_enabled');
+    if (!sendingEnabled) return { processed: 0, status: 'disabled' };
+
+    const result = await queryWithRetry(`
+        SELECT * FROM scheduled_messages 
+        WHERE status = 'pending' 
+        AND scheduled_time <= $1
+        FOR UPDATE SKIP LOCKED
+        LIMIT 10
+    `, [Date.now()]);
+
+    let processed = 0;
+    for (const job of result.rows) {
+        const content = job.content; 
+        await queryWithRetry('UPDATE scheduled_messages SET status = \'processing\' WHERE id = $1', [job.id]);
+
+        for (const driverId of job.driver_ids) {
+            try {
+                 const driverRes = await queryWithRetry('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
+                 if (driverRes.rows.length > 0) {
+                     const phone = driverRes.rows[0].phone_number;
+                     await sendWhatsAppMessage(phone, content);
+                     
+                     const msgId = `sched_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
+                     await queryWithRetry(`
+                        INSERT INTO messages (id, driver_id, sender, text, timestamp, type)
+                        VALUES ($1, $2, 'agent', $3, $4, 'text')
+                     `, [msgId, driverId, content.text || '[Scheduled]', Date.now()]);
+                     
+                     await updateDriverTimestamp(driverId);
+                 }
+            } catch(e) { console.error(`Failed to send scheduled msg to ${driverId}`, e); }
+        }
+        await queryWithRetry('UPDATE scheduled_messages SET status = \'completed\' WHERE id = $1', [job.id]);
+        processed++;
+    }
+    return { processed, status: 'ok' };
+};
+
+// Endpoint for Vercel Cron
+router.post('/cron/scheduler', async (req, res) => {
+    try {
+        const result = await runScheduler();
+        res.json(result);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Local Loop (Only for local dev, disabled on Vercel)
+if (!process.env.VERCEL) {
+    setInterval(() => {
+        runScheduler().catch(console.error);
+    }, 60000); // 1 min check
+}
+
 app.use('/api', router);
 
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+// --- STARTUP ---
+// On Vercel, the app is exported. Locally, we listen.
+if (require.main === module) {
+    const PORT = process.env.PORT || 3001;
+    app.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+    });
+}
 
 module.exports = app;
