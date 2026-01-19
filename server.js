@@ -10,8 +10,7 @@ const axios = require('axios');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Pool } = require('pg'); 
-const { S3Client, PutObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const { S3Client } = require('@aws-sdk/client-s3');
 const os = require('os');
 require('dotenv').config();
 
@@ -34,9 +33,9 @@ app.use((req, res, next) => {
     next();
 });
 
-// --- DYNAMIC CREDENTIALS ---
-const META_API_TOKEN = process.env.META_API_TOKEN || ""; 
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || ""; 
+// --- DYNAMIC CREDENTIALS (HARDCODED FALLBACKS FOR STABILITY) ---
+const META_API_TOKEN = process.env.META_API_TOKEN || "EAAkr7Y9S2qYBQfHTNZASIugAzOi8b2MZCBct4z4jZBHSmQ2KGlFduuDQQGEYC9NRDtZBUdhMPdeJ06OjYUiJYGfFkZCAxzyh4TdidN7ZA10K3XPOVEiQh01jo22xLsQjXrEtMHc5ZCHZBbRZAyA5d0pl26Jsg3IuNKY272QYmqEjHghf11OKJmbUZBfJLe5EvHzl48gAZDZD";
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "982841698238647";
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "uber_fleet_verify_token";
 const APP_SECRET = process.env.APP_SECRET || ""; 
 
@@ -47,14 +46,13 @@ const s3Client = new S3Client({
         secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || ''
     }
 });
-const BUCKET_NAME = process.env.AWS_BUCKET_NAME || 'uber-fleet-assets';
 
 // --- DATABASE CONNECTION ---
-const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL;
+const DEFAULT_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
+const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL || DEFAULT_DB_URL;
 
 if (!CONNECTION_STRING) {
     console.error("❌ CRITICAL ERROR: POSTGRES_URL or DATABASE_URL environment variable is missing.");
-    // We don't crash the process in Vercel, but requests will fail gracefully.
 }
 
 let pool;
@@ -108,7 +106,6 @@ const toDriverDTO = (row) => ({
     isHumanMode: row.is_human_mode,
     qualificationChecks: row.qualification_checks || {},
     onboardingStep: row.onboarding_step || 0,
-    // Return empty arrays for list view to save bandwidth
     messages: [], 
     documents: [] 
 });
@@ -122,7 +119,7 @@ const toMessageDTO = (row) => ({
     imageUrl: row.image_url,
     headerImageUrl: row.header_image_url,
     footerText: row.footer_text,
-    buttons: row.buttons, // Already JSONB in DB
+    buttons: row.buttons, 
     templateName: row.template_name
 });
 
@@ -141,7 +138,6 @@ const toDocumentDTO = (row) => ({
 const initDB = async () => {
     if (!pool) return;
     try {
-        // 1. Tables
         await queryWithRetry(`
             CREATE TABLE IF NOT EXISTS drivers (
                 id TEXT PRIMARY KEY,
@@ -161,17 +157,6 @@ const initDB = async () => {
                 onboarding_step INT DEFAULT 0,
                 updated_at BIGINT DEFAULT (extract(epoch from now()) * 1000)
             );
-            
-            -- Add updated_at if missing (migration)
-            DO $$ 
-            BEGIN 
-                BEGIN
-                    ALTER TABLE drivers ADD COLUMN updated_at BIGINT DEFAULT (extract(epoch from now()) * 1000);
-                EXCEPTION
-                    WHEN duplicate_column THEN NULL;
-                END;
-            END $$;
-
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
                 driver_id TEXT REFERENCES drivers(id),
@@ -187,7 +172,6 @@ const initDB = async () => {
                 client_message_id TEXT UNIQUE, 
                 whatsapp_message_id TEXT UNIQUE
             );
-
             CREATE TABLE IF NOT EXISTS driver_documents (
                 id TEXT PRIMARY KEY,
                 driver_id TEXT REFERENCES drivers(id) ON DELETE CASCADE,
@@ -199,7 +183,6 @@ const initDB = async () => {
                 notes TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_driver_documents_driver_id ON driver_documents(driver_id);
-
             CREATE TABLE IF NOT EXISTS bot_settings (
                 id INT PRIMARY KEY DEFAULT 1,
                 settings JSONB
@@ -218,7 +201,7 @@ const initDB = async () => {
             );
         `);
 
-        // 2. Default Settings
+        // Initialize Defaults
         await queryWithRetry(`
             INSERT INTO system_settings (key, value) VALUES 
             ('webhook_ingest_enabled', 'true'),
@@ -227,7 +210,7 @@ const initDB = async () => {
             ON CONFLICT (key) DO NOTHING;
         `);
 
-        // 3. Default Bot Settings
+        // Default Bot
         const defaultBot = {
             isEnabled: true,
             shouldRepeat: false,
@@ -243,7 +226,6 @@ const initDB = async () => {
                 }
             ]
         };
-        
         await queryWithRetry(`
             INSERT INTO bot_settings (id, settings) VALUES (1, $1)
             ON CONFLICT (id) DO NOTHING
@@ -273,9 +255,6 @@ const updateDriverTimestamp = async (driverId) => {
 };
 
 // --- WEBHOOK VERIFICATION & HANDLING (ROOT LEVEL) ---
-// Vercel rewrites /webhook -> /api/index.js -> app
-// So we must handle /webhook directly on app
-
 app.get('/webhook', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -294,21 +273,15 @@ app.get('/webhook', (req, res) => {
 });
 
 app.post('/webhook', async (req, res) => {
-    // 1. Signature Verification (Optional but recommended)
     if (APP_SECRET && req.headers['x-hub-signature-256']) {
         const signature = req.headers['x-hub-signature-256'].replace('sha256=', '');
         const expected = crypto.createHmac('sha256', APP_SECRET).update(req.rawBody).digest('hex');
-        if (signature !== expected) {
-            console.error("Webhook Signature Mismatch");
-            return res.sendStatus(403);
-        }
+        if (signature !== expected) return res.sendStatus(403);
     }
 
-    // 2. Kill Switch Check
     const ingestEnabled = await getSystemSetting('webhook_ingest_enabled');
     if (!ingestEnabled) return res.status(200).send('Ingest Disabled');
 
-    // 3. Process Logic
     try {
         const body = req.body;
         if (body.object === 'whatsapp_business_account') {
@@ -324,17 +297,16 @@ app.post('/webhook', async (req, res) => {
         }
         res.sendStatus(200);
     } catch (e) {
-        console.error("Webhook Processing Error:", e);
+        console.error("Webhook Error:", e);
         res.sendStatus(500);
     }
 });
 
-// Logic extracted for reuse
 async function processIncomingMessage(msg, contacts) {
     const from = msg.from;
     const wamid = msg.id; 
     
-    // Idempotency
+    // Webhook Idempotency
     const existing = await queryWithRetry('SELECT id FROM messages WHERE whatsapp_message_id = $1', [wamid]);
     if (existing.rows.length > 0) return;
 
@@ -353,7 +325,6 @@ async function processIncomingMessage(msg, contacts) {
         }
     }
 
-    // Get/Create Driver
     let driverRes = await queryWithRetry('SELECT * FROM drivers WHERE phone_number = $1', [from]);
     let driverId;
     
@@ -369,18 +340,15 @@ async function processIncomingMessage(msg, contacts) {
         await queryWithRetry(`UPDATE drivers SET last_message = $1, last_message_time = $2, updated_at = $2 WHERE id = $3`, [text, Date.now(), driverId]);
     }
 
-    // Save Message
     const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
     await queryWithRetry(`
         INSERT INTO messages (id, driver_id, sender, text, timestamp, whatsapp_message_id)
         VALUES ($1, $2, 'driver', $3, $4, $5)
     `, [msgId, driverId, text, Date.now(), wamid]);
 
-    // Bot Trigger
     await runBotEngine(driverId, text, buttonId, from);
 }
 
-// Bot Engine Logic
 async function runBotEngine(driverId, text, buttonId, from) {
     const automationEnabled = await getSystemSetting('automation_enabled');
     if (!automationEnabled) return;
@@ -394,17 +362,14 @@ async function runBotEngine(driverId, text, buttonId, from) {
 
     let currentStep = botSettings.steps.find(s => s.id === driver.current_bot_step_id);
     let replyContent = null;
-    let nextStepId = null;
 
     if (!currentStep) {
-        // Start flow
         const entryStep = botSettings.steps.find(s => s.id === botSettings.entryPointId) || botSettings.steps[0];
         if (entryStep) {
             replyContent = entryStep;
             await queryWithRetry('UPDATE drivers SET current_bot_step_id = $1, updated_at = $3 WHERE id = $2', [entryStep.id, driverId, Date.now()]);
         }
     } else {
-        // Match Input
         let matchedRouteId = null;
         if (buttonId && currentStep.routes) matchedRouteId = currentStep.routes[buttonId];
         
@@ -432,18 +397,20 @@ async function runBotEngine(driverId, text, buttonId, from) {
                     if (currentStep.saveToField) {
                         const validFields = ['name', 'vehicle_registration', 'availability', 'notes'];
                         if (validFields.includes(currentStep.saveToField)) {
-                             // Use safe interpolation or multiple queries for field names
                              await queryWithRetry(`UPDATE drivers SET ${currentStep.saveToField} = $1 WHERE id = $2`, [text, driverId]);
                         }
                     }
                 }
             }
         } else {
-            // Invalid Input
+            // INVALID INPUT: Resend the CURRENT step with a warning prefixed
             if (currentStep.options || currentStep.buttons) {
-                 await sendWhatsAppMessage(from, { text: "Please select one of the buttons below." });
+                 replyContent = {
+                     ...currentStep,
+                     text: `⚠️ Invalid selection.\n\n${currentStep.message}`
+                 };
+                 // We do NOT update the current_bot_step_id because we are staying on the same step
             }
-            return;
         }
     }
 
@@ -459,17 +426,23 @@ async function runBotEngine(driverId, text, buttonId, from) {
     }
 }
 
-// --- OUTBOUND SENDING ---
+// --- OUTBOUND SENDING (STRICT PAYLOAD) ---
 const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
-    // Idempotency
+    // 1. Idempotency Check
     if (clientMessageId) {
         const existing = await queryWithRetry('SELECT id FROM messages WHERE client_message_id = $1', [clientMessageId]);
         if (existing.rows.length > 0) return { success: true, duplicate: true };
     }
 
-    if (!META_API_TOKEN || !PHONE_NUMBER_ID) return { success: true, simulated: true };
+    if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
+        console.error("Meta Credentials Missing. Check Server Config.");
+        return { success: false, error: "Missing Credentials" };
+    }
 
-    const url = `https://graph.facebook.com/v17.0/${PHONE_NUMBER_ID}/messages`;
+    // Use Graph API v21.0 for stability
+    const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
+    
+    // Base Payload
     let payload = {
         messaging_product: "whatsapp",
         recipient_type: "individual",
@@ -478,17 +451,18 @@ const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
         text: { body: content.text || "" }
     };
 
-    if (content.templateName) {
-        payload.type = "template";
-        payload.template = { name: content.templateName, language: { code: "en_US" }, components: [] };
-        delete payload.text;
-    } 
-    else if (content.buttons?.length > 0 || (content.options && content.options.length > 0)) {
+    // Construct Interactive Payload (Buttons/List)
+    if (content.buttons?.length > 0 || (content.options && content.options.length > 0)) {
         payload.type = "interactive";
+        
         let headerObj = undefined;
-        if (content.headerImageUrl) headerObj = { type: "image", image: { link: content.headerImageUrl } };
+        // Ensure header has valid link if present
+        if (content.headerImageUrl && content.headerImageUrl.startsWith('http')) {
+            headerObj = { type: "image", image: { link: content.headerImageUrl } };
+        }
 
         let finalButtons = content.buttons || [];
+        // Convert Options to Buttons if necessary
         if (finalButtons.length === 0 && content.options) {
             finalButtons = content.options.slice(0, 3).map((opt, i) => ({
                 type: 'reply',
@@ -502,7 +476,7 @@ const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
                 type: "reply",
                 reply: {
                     id: btn.payload || `btn_${i}`,
-                    title: btn.title.substring(0, 20)
+                    title: btn.title.substring(0, 20) // STRICT LIMIT
                 }
             }))
         };
@@ -510,51 +484,69 @@ const sendWhatsAppMessage = async (to, content, clientMessageId = null) => {
         payload.interactive = {
             type: "button",
             header: headerObj,
-            body: { text: content.text },
-            footer: content.footerText ? { text: content.footerText } : undefined,
+            // CRITICAL: Body text is MANDATORY for interactive messages
+            body: { text: content.text || content.message || "Select an option below" }, 
             action: actionObj
         };
+
+        // Optional Footer
+        if (content.footerText) {
+            payload.interactive.footer = { text: content.footerText };
+        }
+
         delete payload.text;
     }
+    // Construct Template Payload
+    else if (content.templateName) {
+        payload.type = "template";
+        payload.template = { 
+            name: content.templateName, 
+            language: { code: "en_US" }, 
+            components: [] 
+        };
+        delete payload.text;
+    } 
+    // Construct Media Payload
     else if (content.mediaUrl) {
          const type = content.mediaType || 'image';
          payload.type = type;
-         payload[type] = { link: content.mediaUrl, caption: content.text };
+         payload[type] = { 
+             link: content.mediaUrl, 
+             caption: content.text || undefined 
+         };
          delete payload.text;
     }
 
     try {
         await axios.post(url, payload, {
-            headers: { 'Authorization': `Bearer ${META_API_TOKEN}`, 'Content-Type': 'application/json' }
+            headers: { 'Authorization': `Bearer ${META_API_TOKEN}`, 'Content-Type': 'application/json' },
+            timeout: 8000 // 8s timeout to prevent hanging Vercel functions
         });
         return { success: true };
     } catch (error) {
-        console.error("Meta API Error:", error.response?.data || error.message);
-        throw new Error(error.response?.data?.error?.message || "Meta API Failed");
+        // Detailed Error Logging
+        const errorDetail = error.response?.data?.error;
+        console.error("Meta API Failed:", JSON.stringify(errorDetail, null, 2));
+        throw new Error(errorDetail?.message || "Meta API Failed");
     }
 };
 
-// --- API ENDPOINTS (ROUTER) ---
+// --- API ENDPOINTS ---
 
-// 1. SYSTEM
 router.get('/system/stats', async (req, res) => {
     let dbLatency = 0;
-    let s3Status = 'error';
-    
     try {
         const start = Date.now();
         await queryWithRetry('SELECT 1');
         dbLatency = Date.now() - start;
     } catch(e) {}
 
-    if (process.env.AWS_ACCESS_KEY_ID) s3Status = 'ok';
-
     res.json({
         serverLoad: os.loadavg()[0] * 10,
         dbLatency,
         aiCredits: 100,
         aiModel: "Bot Logic",
-        s3Status,
+        s3Status: process.env.AWS_ACCESS_KEY_ID ? 'ok' : 'error',
         s3Load: 0,
         whatsappStatus: META_API_TOKEN ? 'ok' : 'error',
         whatsappUploadLoad: 0,
@@ -567,13 +559,9 @@ router.get('/system/settings', async (req, res) => {
     try {
         const rows = await queryWithRetry('SELECT * FROM system_settings');
         const settings = { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true };
-        rows.rows.forEach(r => {
-            if (r.key in settings) settings[r.key] = r.value === 'true';
-        });
+        rows.rows.forEach(r => { if (r.key in settings) settings[r.key] = r.value === 'true'; });
         res.json(settings);
-    } catch(e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 router.post('/system/settings', async (req, res) => {
@@ -586,12 +574,9 @@ router.post('/system/settings', async (req, res) => {
             `, [key, String(val)]);
         }
         res.json({ success: true });
-    } catch(e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 2. BOT SETTINGS
 router.get('/bot-settings', async (req, res) => {
     try {
         const result = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1');
@@ -610,11 +595,9 @@ router.post('/bot-settings', async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 3. DRIVERS & MESSAGES
 router.get('/drivers', async (req, res) => {
     try {
         const result = await queryWithRetry('SELECT * FROM drivers ORDER BY updated_at DESC LIMIT 100');
-        // Return lightweight DTO (no messages array)
         res.json(result.rows.map(toDriverDTO));
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -689,7 +672,7 @@ router.post('/messages/send', async (req, res) => {
         await updateDriverTimestamp(driverId);
         res.json({ success: true, messageId: msgId });
     } catch (e) {
-        console.error(e);
+        console.error("Outbound Send Error", e);
         res.status(500).json({ error: e.message });
     }
 });
@@ -702,12 +685,10 @@ router.post('/messages/schedule', async (req, res) => {
             VALUES ($1, $2, $3, 'pending')
         `, [driverIds, JSON.stringify(content), scheduledTime]);
         res.json({ success: true });
-    } catch(e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- SCHEDULER (Vercel Cron Compatible) ---
+// --- SCHEDULER ---
 const runScheduler = async () => {
     const sendingEnabled = await getSystemSetting('sending_enabled');
     if (!sendingEnabled) return { processed: 0, status: 'disabled' };
@@ -748,7 +729,6 @@ const runScheduler = async () => {
     return { processed, status: 'ok' };
 };
 
-// Endpoint for Vercel Cron
 router.post('/cron/scheduler', async (req, res) => {
     try {
         const result = await runScheduler();
@@ -756,17 +736,12 @@ router.post('/cron/scheduler', async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Local Loop (Only for local dev, disabled on Vercel)
 if (!process.env.VERCEL) {
-    setInterval(() => {
-        runScheduler().catch(console.error);
-    }, 60000); // 1 min check
+    setInterval(() => { runScheduler().catch(console.error); }, 60000);
 }
 
 app.use('/api', router);
 
-// --- STARTUP ---
-// On Vercel, the app is exported. Locally, we listen.
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;
     app.listen(PORT, () => {
