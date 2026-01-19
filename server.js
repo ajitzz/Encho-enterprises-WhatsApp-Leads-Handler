@@ -70,7 +70,7 @@ if (!global.pgPool) {
 }
 pool = global.pgPool;
 
-// --- SCHEMA DEFINITIONS (MOVED UP FOR SELF-HEALING) ---
+// --- SCHEMA DEFINITIONS ---
 const SCHEMA_QUERIES = `
     CREATE TABLE IF NOT EXISTS drivers (
         id TEXT PRIMARY KEY,
@@ -139,7 +139,19 @@ const SCHEMA_QUERIES = `
     ON CONFLICT (key) DO NOTHING;
 `;
 
-// --- SELF-HEALING QUERY EXECUTION ---
+// --- MIGRATION QUERIES (Auto-Update Existing Tables) ---
+const MIGRATION_QUERIES = `
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS client_message_id TEXT UNIQUE;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS whatsapp_message_id TEXT UNIQUE;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS template_name TEXT;
+    ALTER TABLE drivers ADD COLUMN IF NOT EXISTS current_bot_step_id TEXT;
+    ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_bot_active BOOLEAN DEFAULT TRUE;
+    ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;
+    ALTER TABLE drivers ADD COLUMN IF NOT EXISTS qualification_checks JSONB DEFAULT '{}';
+    ALTER TABLE drivers ADD COLUMN IF NOT EXISTS onboarding_step INT DEFAULT 0;
+`;
+
+// --- QUERY EXECUTION HELPER ---
 const queryWithRetry = async (text, params, retries = 2) => { 
     if (!pool) throw new Error("Database connection not configured.");
     let client;
@@ -150,15 +162,14 @@ const queryWithRetry = async (text, params, retries = 2) => {
     } catch (err) {
         if (client) { try { client.release(true); } catch(e) {} client = null; }
         
-        // SELF-HEALING: If table doesn't exist, create schema and retry
-        if (err.code === '42P01') { // PostgreSQL code for "undefined_table"
-            console.warn("⚠️ Tables missing. Running Self-Healing Schema Init...");
+        // SELF-HEALING: Missing Table
+        if (err.code === '42P01') { 
+            console.warn("⚠️ Tables missing. Running Schema Init...");
             try {
                 const healClient = await pool.connect();
                 await healClient.query(SCHEMA_QUERIES);
                 healClient.release();
-                console.log("✅ Schema Healed. Retrying original query...");
-                // Retry the original query once
+                // Retry original
                 const retryClient = await pool.connect();
                 const res = await retryClient.query(text, params);
                 retryClient.release();
@@ -168,19 +179,48 @@ const queryWithRetry = async (text, params, retries = 2) => {
                 throw healErr;
             }
         }
+        
+        // SELF-HEALING: Missing Column (Undefined Column)
+        if (err.code === '42703') {
+             console.warn("⚠️ Columns missing. Running Migrations...");
+             try {
+                const healClient = await pool.connect();
+                await healClient.query(MIGRATION_QUERIES);
+                healClient.release();
+                // Retry original
+                const retryClient = await pool.connect();
+                const res = await retryClient.query(text, params);
+                retryClient.release();
+                return res;
+             } catch (healErr) {
+                console.error("❌ Migration Failed:", healErr);
+                throw healErr;
+             }
+        }
 
         // Connection Retries
         if (retries > 0 && (err.code === 'ECONNRESET' || err.code === '57P01' || err.message.includes('timeout'))) {
-            console.warn(`⚠️ DB Retry ${retries} left... (${err.message})`);
             await new Promise(res => setTimeout(res, 1000)); 
             return queryWithRetry(text, params, retries - 1);
         }
-        console.error("DB Query Failed:", err.message);
         throw err;
     } finally {
         if (client) { try { client.release(); } catch(e) {} }
     }
 };
+
+// --- INIT DB ON STARTUP ---
+const initDB = async () => {
+    try {
+        await queryWithRetry("SELECT 1"); // Warm up connection
+        await queryWithRetry(SCHEMA_QUERIES);
+        await queryWithRetry(MIGRATION_QUERIES);
+        console.log("✅ Database Initialized & Migrated");
+    } catch (e) {
+        console.error("⚠️ DB Init warning:", e.message);
+    }
+};
+initDB();
 
 // --- DTO MAPPERS ---
 const toDriverDTO = (row) => ({
