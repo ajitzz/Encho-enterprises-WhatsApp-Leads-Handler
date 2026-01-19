@@ -70,7 +70,7 @@ if (!global.pgPool) {
             connectionString: CONNECTION_STRING,
             ssl: { rejectUnauthorized: false },
             max: 20, // Increased for concurrency
-            connectionTimeoutMillis: 5000, // Fail fast if DB is down
+            connectionTimeoutMillis: 10000, // Increased timeout
             idleTimeoutMillis: 30000, // Close idle clients
         });
         
@@ -84,6 +84,7 @@ if (!global.pgPool) {
 pool = global.pgPool;
 
 // --- SCHEMA DEFINITIONS ---
+// Fixed CAST to BIGINT for timestamps to prevent Type Errors in Postgres
 const SCHEMA_QUERIES = `
     CREATE TABLE IF NOT EXISTS drivers (
         id TEXT PRIMARY KEY,
@@ -101,7 +102,7 @@ const SCHEMA_QUERIES = `
         is_human_mode BOOLEAN DEFAULT FALSE,
         qualification_checks JSONB DEFAULT '{}',
         onboarding_step INT DEFAULT 0,
-        updated_at BIGINT DEFAULT (extract(epoch from now()) * 1000)
+        updated_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT
     );
     CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
@@ -127,7 +128,7 @@ const SCHEMA_QUERIES = `
         doc_type TEXT NOT NULL,
         file_url TEXT NOT NULL,
         mime_type TEXT,
-        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000),
+        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT,
         verification_status TEXT DEFAULT 'pending',
         notes TEXT
     );
@@ -136,7 +137,7 @@ const SCHEMA_QUERIES = `
         name TEXT NOT NULL,
         parent_path TEXT DEFAULT '/',
         is_public_showcase BOOLEAN DEFAULT FALSE,
-        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)
+        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT
     );
     CREATE TABLE IF NOT EXISTS media_files (
         id TEXT PRIMARY KEY,
@@ -145,7 +146,7 @@ const SCHEMA_QUERIES = `
         type TEXT,
         folder_path TEXT DEFAULT '/',
         media_id TEXT,
-        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)
+        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT
     );
     CREATE TABLE IF NOT EXISTS bot_settings (
         id INT PRIMARY KEY DEFAULT 1,
@@ -161,7 +162,7 @@ const SCHEMA_QUERIES = `
         content JSONB,
         scheduled_time BIGINT,
         status TEXT DEFAULT 'pending',
-        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)
+        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)::BIGINT
     );
     INSERT INTO system_settings (key, value) VALUES 
     ('webhook_ingest_enabled', 'true'),
@@ -211,7 +212,7 @@ const queryWithRetry = async (text, params, retries = 2) => {
     } catch (err) {
         if (client) { try { client.release(true); } catch(e) {} client = null; }
         
-        // SELF-HEALING: Missing Table
+        // SELF-HEALING: Missing Table (42P01) or Column (42703)
         if (err.code === '42P01') { 
             console.warn("⚠️ Tables missing. Running Schema Init...");
             try {
@@ -597,7 +598,10 @@ router.get('/media', async (req, res) => {
             files: files.rows,
             folders: folders.rows
         });
-    } catch(e) { res.status(500).json({ error: e.message }); }
+    } catch(e) { 
+        console.error("GET /media Error:", e.message);
+        res.status(500).json({ error: e.message || "DB Connection Failed" }); 
+    }
 });
 
 router.post('/media/sync', async (req, res) => {
@@ -773,7 +777,10 @@ router.get('/public/status', async (req, res) => {
         } else {
             res.json({ active: false });
         }
-    } catch(e) { res.status(500).json({ error: e.message }); }
+    } catch(e) { 
+        console.error("GET /public/status Error:", e.message);
+        res.status(500).json({ error: e.message }); 
+    }
 });
 
 // WEBHOOK
