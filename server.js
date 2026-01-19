@@ -10,7 +10,7 @@ const axios = require('axios');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Pool } = require('pg'); 
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 require('dotenv').config();
 
@@ -598,6 +598,65 @@ router.get('/media', async (req, res) => {
             folders: folders.rows
         });
     } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/media/sync', async (req, res) => {
+    try {
+        const command = new ListObjectsV2Command({ Bucket: AWS_BUCKET_NAME });
+        const data = await s3Client.send(command);
+        
+        let added = 0;
+        const region = process.env.AWS_REGION || 'us-east-1';
+        
+        if (data.Contents) {
+            for (const item of data.Contents) {
+                const key = item.Key;
+                if (key.endsWith('/')) continue; // Skip directory markers
+
+                // Generate URL
+                const url = `https://${AWS_BUCKET_NAME}.s3.${region}.amazonaws.com/${key}`;
+                
+                // Parse Path
+                const lastSlash = key.lastIndexOf('/');
+                const filename = lastSlash === -1 ? key : key.substring(lastSlash + 1);
+                const folderName = lastSlash === -1 ? '' : key.substring(0, lastSlash);
+                const folderPath = folderName ? `/${folderName}` : '/';
+
+                // Check DB for File
+                const existingFile = await queryWithRetry('SELECT id FROM media_files WHERE url = $1', [url]);
+                if (existingFile.rows.length === 0) {
+                    // Infer Type
+                    let type = 'document';
+                    if (filename.match(/\.(jpg|jpeg|png|webp)$/i)) type = 'image';
+                    if (filename.match(/\.(mp4|mov|webm)$/i)) type = 'video';
+
+                    // Ensure Folder Exists in DB if nested
+                    if (folderName) {
+                        const folderCheck = await queryWithRetry('SELECT id FROM media_folders WHERE name = $1', [folderName]);
+                        if (folderCheck.rows.length === 0) {
+                             const folderId = `fld_${Date.now()}_${Math.random().toString(36).substr(2,4)}`;
+                             await queryWithRetry(
+                                 'INSERT INTO media_folders (id, name, parent_path) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', 
+                                 [folderId, folderName, '/']
+                             );
+                        }
+                    }
+
+                    // Insert File
+                    const fileId = `file_${Date.now()}_${Math.random().toString(36).substr(2,4)}`;
+                    await queryWithRetry(
+                        'INSERT INTO media_files (id, url, filename, type, folder_path) VALUES ($1, $2, $3, $4, $5)',
+                        [fileId, url, filename, type, folderPath]
+                    );
+                    added++;
+                }
+            }
+        }
+        res.json({ success: true, added });
+    } catch(e) {
+        console.error("S3 Sync Error:", e);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 router.post('/folders', async (req, res) => {
