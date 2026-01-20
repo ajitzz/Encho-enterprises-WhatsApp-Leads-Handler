@@ -10,7 +10,8 @@ const axios = require('axios');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Pool } = require('pg'); 
-const { S3Client } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 require('dotenv').config();
 
 const app = express();
@@ -45,6 +46,8 @@ const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "").trim() || "982841698
 const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || "").trim() || "uber_fleet_verify_token";
 const APP_SECRET = (process.env.APP_SECRET || "").trim() || ""; 
 
+// --- AWS S3 CONFIG ---
+const BUCKET_NAME = process.env.AWS_BUCKET_NAME || process.env.BUCKET_NAME || 'uber-fleet-assets';
 const s3Client = new S3Client({
     region: process.env.AWS_REGION || 'us-east-1',
     credentials: {
@@ -123,6 +126,24 @@ const SCHEMA_QUERIES = `
         verification_status TEXT DEFAULT 'pending',
         notes TEXT
     );
+    CREATE TABLE IF NOT EXISTS media_folders (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        parent_path TEXT DEFAULT '/',
+        is_public_showcase BOOLEAN DEFAULT FALSE,
+        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000),
+        UNIQUE(name, parent_path)
+    );
+    CREATE TABLE IF NOT EXISTS media_files (
+        id TEXT PRIMARY KEY,
+        folder_path TEXT DEFAULT '/',
+        filename TEXT NOT NULL,
+        s3_key TEXT NOT NULL,
+        url TEXT NOT NULL,
+        type TEXT,
+        media_id TEXT, -- WhatsApp Media ID
+        created_at BIGINT DEFAULT (extract(epoch from now()) * 1000)
+    );
     CREATE TABLE IF NOT EXISTS bot_settings (
         id INT PRIMARY KEY DEFAULT 1,
         settings JSONB
@@ -151,12 +172,10 @@ const INDEX_QUERIES = `
     CREATE INDEX IF NOT EXISTS idx_drivers_updated_at ON drivers(updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_driver_timestamp ON messages(driver_id, timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_client_msg_id ON messages(client_message_id);
-    
-    -- Composite Index for Outbox Worker (Critical for Performance)
-    CREATE INDEX IF NOT EXISTS idx_messages_outbox_v2 ON messages(next_retry_at ASC, retry_count) 
-    WHERE status IN ('pending', 'failed');
-    
+    CREATE INDEX IF NOT EXISTS idx_messages_outbox_v2 ON messages(next_retry_at ASC, retry_count) WHERE status IN ('pending', 'failed');
     CREATE INDEX IF NOT EXISTS idx_driver_documents_driver_id ON driver_documents(driver_id);
+    CREATE INDEX IF NOT EXISTS idx_media_files_path ON media_files(folder_path);
+    CREATE INDEX IF NOT EXISTS idx_media_folders_parent ON media_folders(parent_path);
 `;
 
 // --- MIGRATION QUERIES (Auto-Update Existing Tables) ---
@@ -172,6 +191,10 @@ const MIGRATION_QUERIES = `
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS qualification_checks JSONB DEFAULT '{}';
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS onboarding_step INT DEFAULT 0;
+    
+    -- Ensure Media Tables Columns (Self-Healing)
+    ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS is_public_showcase BOOLEAN DEFAULT FALSE;
+    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS media_id TEXT;
 `;
 
 // --- QUERY EXECUTION HELPER ---
@@ -185,8 +208,7 @@ const queryWithRetry = async (text, params, retries = 2) => {
     } catch (err) {
         if (client) { try { client.release(true); } catch(e) {} client = null; }
         
-        // SELF-HEALING: Missing Table
-        if (err.code === '42P01') { 
+        if (err.code === '42P01') { // Table missing
             console.warn("⚠️ Tables missing. Running Schema Init...");
             try {
                 const healClient = await pool.connect();
@@ -203,7 +225,7 @@ const queryWithRetry = async (text, params, retries = 2) => {
             }
         }
         
-        if (err.code === '42703') {
+        if (err.code === '42703') { // Column missing
              console.warn("⚠️ Columns missing. Running Migrations...");
              try {
                 const healClient = await pool.connect();
@@ -312,6 +334,7 @@ const toDocumentDTO = (row) => ({
     id: row.id,
     driverId: row.driver_id,
     docType: row.doc_type,
+    file_url: row.file_url, // Keep raw for backwards compat
     fileUrl: row.file_url,
     mimeType: row.mime_type,
     createdAt: parseInt(row.created_at || '0'),
@@ -490,10 +513,6 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
     }
 
     // 2. BUFFERED INSERT
-    // We set next_retry_at = Now + 15 seconds.
-    // This allows us to attempt an immediate send below. 
-    // If the immediate send works, we update status to 'sent'.
-    // If the server crashes during immediate send, the worker picks it up after 15s.
     const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
     const dbText = bodyText || (content.templateName ? `Template: ${content.templateName}` : '[Media Message]');
     const retryBuffer = Date.now() + 15000; 
@@ -540,6 +559,43 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
         await queryWithRetry("UPDATE messages SET status = 'failed', next_retry_at = $1 WHERE id = $2", [fastRetry, msgId]);
         
         return { success: true, messageId: msgId, queued: true };
+    }
+};
+
+// --- SHOWCASE MANIFEST GENERATION ---
+const generateShowcaseManifest = async (folderId, folderName) => {
+    try {
+        // Fetch files for this folder
+        const path = `/${folderName}`; // Assuming simple structure for now, ideally recursive
+        const filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
+        
+        const items = filesRes.rows.map(row => ({
+            id: row.id,
+            url: row.url,
+            type: row.type || 'image',
+            filename: row.filename
+        }));
+
+        const manifest = {
+            title: folderName,
+            generatedAt: Date.now(),
+            items: items
+        };
+
+        const jsonString = JSON.stringify(manifest);
+        const command = new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: `manifests/${encodeURIComponent(folderName)}.json`,
+            ContentType: 'application/json',
+            Body: jsonString,
+            ACL: 'public-read' // Optional, depends on bucket policy
+        });
+
+        await s3Client.send(command);
+        console.log(`✅ Generated manifest for ${folderName}`);
+        return manifest;
+    } catch(e) {
+        console.error("Failed to generate manifest", e);
     }
 };
 
@@ -599,7 +655,6 @@ app.post('/webhook', async (req, res) => {
                             promises.push(processIncomingMessage(msg, change.value.contacts));
                         }
                     }
-                    // Handle Status Updates (Sent/Delivered/Read)
                     if (change.value.statuses) {
                         for (const status of change.value.statuses) {
                             promises.push(processStatusUpdate(status));
@@ -642,7 +697,6 @@ async function processIncomingMessage(msg, contacts) {
         }
     }
 
-    // UPSERT DRIVER
     const driverId = `d_${Date.now()}_${Math.random().toString(36).substr(2,4)}`;
     const name = contacts?.[0]?.profile?.name || 'Unknown Driver';
     
@@ -738,7 +792,8 @@ async function runBotEngine(driver, text, buttonId, from) {
     }
 }
 
-// --- STANDARD GET ENDPOINTS ---
+// --- STANDARD API ENDPOINTS ---
+
 router.get('/system/stats', async (req, res) => {
     res.json({
         serverLoad: 0, dbLatency: 0, aiCredits: 100, aiModel: "Bot Logic",
@@ -754,26 +809,16 @@ router.get('/drivers', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// PAGINATED MESSAGES
 router.get('/drivers/:id/messages', async (req, res) => {
     try {
         const limit = parseInt(req.query.limit || '50');
         const before = parseInt(req.query.before || '0');
-        
         let query = 'SELECT * FROM messages WHERE driver_id = $1';
         let params = [req.params.id];
-        
-        if (before > 0) {
-            query += ' AND timestamp < $2';
-            params.push(before);
-        }
-        
-        // Add limit params dynamically based on whether 'before' was used
+        if (before > 0) { query += ' AND timestamp < $2'; params.push(before); }
         query += ` ORDER BY timestamp DESC LIMIT $${params.length + 1}`;
         params.push(limit);
-
         const result = await queryWithRetry(query, params);
-        // Reverse to show oldest -> newest in chat UI
         res.json(result.rows.map(toMessageDTO).reverse());
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -785,47 +830,33 @@ router.get('/drivers/:id/documents', async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// SINGLE-QUERY ATOMIC PATCH
 router.patch('/drivers/:id', async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
     try {
         const allowed = ['status', 'notes', 'name', 'vehicle_registration', 'availability', 'is_bot_active', 'is_human_mode', 'qualification_checks'];
-        
         const keys = Object.keys(updates).filter(k => allowed.includes(k));
         if (keys.length === 0) return res.json({ success: true, message: "No valid fields" });
-
         const setClause = keys.map((k, i) => {
             if (k === 'qualification_checks') return `${k} = $${i + 2}::jsonb`; 
             return `${k} = $${i + 2}`;
         }).join(', ');
-
         const values = [id, ...keys.map(k => {
              if (k === 'qualification_checks' && typeof updates[k] === 'object') return JSON.stringify(updates[k]);
              return updates[k];
         })];
-
-        const finalQuery = `UPDATE drivers SET ${setClause}, updated_at = ${Date.now()} WHERE id = $1`;
-
-        await queryWithRetry(finalQuery, values);
+        await queryWithRetry(`UPDATE drivers SET ${setClause}, updated_at = ${Date.now()} WHERE id = $1`, values);
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// CORRECT SYNC LOGIC
 router.get('/sync', async (req, res) => {
     const since = parseInt(req.query.since || '0');
     try {
-        // Uses the NEW Index on updated_at
         const result = await queryWithRetry('SELECT * FROM drivers WHERE updated_at > $1 ORDER BY updated_at ASC LIMIT 50', [since]);
         const drivers = result.rows.map(toDriverDTO);
-        
         let nextCursor = since;
-        if (drivers.length > 0) {
-            const maxTs = Math.max(...drivers.map(d => d.updatedAt));
-            nextCursor = maxTs;
-        }
-
+        if (drivers.length > 0) nextCursor = Math.max(...drivers.map(d => d.updatedAt));
         res.json({ drivers, nextCursor });
     } catch(e) { res.json({ drivers: [], nextCursor: since }); }
 });
@@ -870,6 +901,275 @@ router.post('/system/settings', async (req, res) => {
         res.json({ success: true });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+
+// --- MEDIA LIBRARY & S3 ENDPOINTS ---
+
+// 1. Get Media Library Content (Files & Folders)
+router.get('/media', async (req, res) => {
+    const path = req.query.path || '/';
+    try {
+        const folders = await queryWithRetry('SELECT * FROM media_folders WHERE parent_path = $1 ORDER BY name ASC', [path]);
+        const files = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
+        res.json({
+            folders: folders.rows,
+            files: files.rows
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 2. Generate Presigned URL for Upload
+router.post('/s3/presign', async (req, res) => {
+    const { filename, fileType, folderPath = '/' } = req.body;
+    if (!filename) return res.status(400).json({ error: "Filename required" });
+
+    // Clean path logic
+    const safePath = folderPath.startsWith('/') ? folderPath.slice(1) : folderPath;
+    const prefix = safePath ? `${safePath}/` : '';
+    const key = `${prefix}${Date.now()}_${filename.replace(/\s+/g, '_')}`;
+
+    try {
+        const command = new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: key,
+            ContentType: fileType || 'application/octet-stream',
+            ACL: 'public-read' // Optional: Depends on bucket settings
+        });
+        const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
+        const publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${key}`;
+        
+        res.json({ uploadUrl, key, publicUrl });
+    } catch (e) {
+        console.error("S3 Presign Error:", e);
+        res.status(500).json({ error: "Failed to generate upload URL. Check server AWS credentials." });
+    }
+});
+
+// 3. Register File in DB (After Client Upload)
+router.post('/files/register', async (req, res) => {
+    const { key, url, filename, type, folderPath = '/' } = req.body;
+    const id = `file_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+    
+    // Simple MIME to type mapping
+    let mediaType = type || 'document';
+    if (filename.match(/\.(jpg|jpeg|png|gif|webp)$/i)) mediaType = 'image';
+    if (filename.match(/\.(mp4|mov|webm)$/i)) mediaType = 'video';
+
+    try {
+        await queryWithRetry(`
+            INSERT INTO media_files (id, folder_path, filename, s3_key, url, type, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [id, folderPath, filename, key, url, mediaType, Date.now()]);
+        res.json({ success: true, id });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 4. Create Folder
+router.post('/folders', async (req, res) => {
+    const { name, parentPath = '/' } = req.body;
+    if (!name) return res.status(400).json({ error: "Name required" });
+    
+    const id = `folder_${Date.now()}`;
+    try {
+        await queryWithRetry(`
+            INSERT INTO media_folders (id, name, parent_path, created_at)
+            VALUES ($1, $2, $3, $4)
+        `, [id, name, parentPath, Date.now()]);
+        res.json({ success: true, id });
+    } catch (e) {
+        if (e.code === '23505') return res.status(409).json({ error: "Folder already exists" });
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 5. Rename Folder
+router.put('/folders/:id', async (req, res) => {
+    const { name } = req.body;
+    try {
+        await queryWithRetry('UPDATE media_folders SET name = $1 WHERE id = $2', [name, req.params.id]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 6. Delete File
+router.delete('/files/:id', async (req, res) => {
+    try {
+        const fileRes = await queryWithRetry('SELECT s3_key FROM media_files WHERE id = $1', [req.params.id]);
+        if (fileRes.rows.length > 0) {
+            const key = fileRes.rows[0].s3_key;
+            // Delete from S3
+            await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: key }));
+            // Delete from DB
+            await queryWithRetry('DELETE FROM media_files WHERE id = $1', [req.params.id]);
+        }
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 7. Delete Folder
+router.delete('/folders/:id', async (req, res) => {
+    try {
+        // Check if empty
+        const folderRes = await queryWithRetry('SELECT name, parent_path FROM media_folders WHERE id = $1', [req.params.id]);
+        if (folderRes.rows.length === 0) return res.status(404).json({ error: "Folder not found" });
+        
+        const { name, parent_path } = folderRes.rows[0];
+        const fullPath = parent_path === '/' ? `/${name}` : `${parent_path}/${name}`;
+        
+        const filesCount = await queryWithRetry('SELECT COUNT(*) FROM media_files WHERE folder_path = $1', [fullPath]);
+        const foldersCount = await queryWithRetry('SELECT COUNT(*) FROM media_folders WHERE parent_path = $1', [fullPath]);
+        
+        if (parseInt(filesCount.rows[0].count) > 0 || parseInt(foldersCount.rows[0].count) > 0) {
+            return res.status(400).json({ error: "Folder must be empty to delete" });
+        }
+
+        await queryWithRetry('DELETE FROM media_folders WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 8. Public Showcase Toggle
+router.post('/folders/:id/public', async (req, res) => {
+    try {
+        const folderRes = await queryWithRetry('UPDATE media_folders SET is_public_showcase = TRUE WHERE id = $1 RETURNING name, id', [req.params.id]);
+        if (folderRes.rows.length > 0) {
+            // Generate S3 Manifest for fallback
+            await generateShowcaseManifest(folderRes.rows[0].id, folderRes.rows[0].name);
+        }
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+router.delete('/folders/:id/public', async (req, res) => {
+    try {
+        await queryWithRetry('UPDATE media_folders SET is_public_showcase = FALSE WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 9. Sync from S3 (Scan Bucket)
+router.post('/media/sync', async (req, res) => {
+    try {
+        const command = new ListObjectsV2Command({ Bucket: BUCKET_NAME });
+        const s3Res = await s3Client.send(command);
+        let addedCount = 0;
+
+        if (s3Res.Contents) {
+            for (const item of s3Res.Contents) {
+                if (item.Key.startsWith('manifests/')) continue; // Skip system files
+                
+                // Check DB
+                const exists = await queryWithRetry('SELECT id FROM media_files WHERE s3_key = $1', [item.Key]);
+                if (exists.rows.length === 0) {
+                    // Infer path and name
+                    const parts = item.Key.split('/');
+                    const filename = parts.pop();
+                    const folderPath = parts.length > 0 ? '/' + parts.join('/') : '/';
+                    
+                    // Auto-create folder if root level (simple logic)
+                    if (folderPath !== '/') {
+                        const folderName = parts[parts.length - 1];
+                        const parentPath = parts.length > 1 ? '/' + parts.slice(0, -1).join('/') : '/';
+                        await queryWithRetry(`
+                            INSERT INTO media_folders (id, name, parent_path, created_at)
+                            VALUES ($1, $2, $3, $4)
+                            ON CONFLICT (name, parent_path) DO NOTHING
+                        `, [`folder_auto_${Date.now()}_${Math.random()}`, folderName, parentPath, Date.now()]);
+                    }
+
+                    // Insert File
+                    let type = 'document';
+                    if (filename.match(/\.(jpg|jpeg|png|webp)$/i)) type = 'image';
+                    if (filename.match(/\.(mp4|mov)$/i)) type = 'video';
+
+                    const url = `https://${BUCKET_NAME}.s3.amazonaws.com/${item.Key}`;
+                    const id = `file_sync_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+                    
+                    await queryWithRetry(`
+                        INSERT INTO media_files (id, folder_path, filename, s3_key, url, type, created_at)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    `, [id, folderPath, filename, item.Key, url, type, Date.now()]);
+                    
+                    addedCount++;
+                }
+            }
+        }
+        res.json({ success: true, added: addedCount });
+    } catch (e) {
+        console.error("Sync Error", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 10. Public Showcase Data
+router.get('/public/showcase', async (req, res) => {
+    const folderName = req.query.folder;
+    try {
+        let folderQuery = 'SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE ORDER BY created_at DESC LIMIT 1';
+        let params = [];
+        
+        if (folderName) {
+            folderQuery = 'SELECT id, name FROM media_folders WHERE name = $1';
+            params = [folderName];
+        }
+
+        const folderRes = await queryWithRetry(folderQuery, params);
+        if (folderRes.rows.length === 0) return res.json({ items: [] });
+        
+        const folder = folderRes.rows[0];
+        const path = `/${folder.name}`;
+        
+        const filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
+        const items = filesRes.rows.map(row => ({
+            id: row.id,
+            url: row.url,
+            type: row.type || 'image',
+            filename: row.filename
+        }));
+        
+        res.json({
+            title: folder.name,
+            items: items
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+router.get('/public/status', async (req, res) => {
+    try {
+        const folderRes = await queryWithRetry('SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE ORDER BY created_at DESC LIMIT 1');
+        if (folderRes.rows.length > 0) {
+            res.json({ active: true, folderName: folderRes.rows[0].name, folderId: folderRes.rows[0].id });
+        } else {
+            res.json({ active: false });
+        }
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/files/:id/sync', async (req, res) => {
+    // Placeholder for WhatsApp Media Upload API
+    // In real scenario, download file stream -> upload to WhatsApp -> save media_id
+    try {
+        await queryWithRetry("UPDATE media_files SET media_id = 'synced_dummy_id' WHERE id = $1", [req.params.id]);
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 
 app.use('/api', router);
 
