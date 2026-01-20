@@ -225,10 +225,8 @@ const queryWithRetry = async (text, params, retries = 1) => {
         const res = await client.query(text, params);
         return res;
     } catch (err) {
-        // Release client immediately on error to prevent leaks
         if (client) { try { client.release(true); } catch(e) {} client = null; }
         
-        // Handle Table/Column missing errors (Schema Drift)
         if (err.code === '42P01') { 
             console.warn("⚠️ Tables missing. Running Schema Init...");
             try {
@@ -262,10 +260,8 @@ const queryWithRetry = async (text, params, retries = 1) => {
              }
         }
 
-        // Retry on Connection Timeout or Reset
         if (retries > 0 && (err.code === 'ECONNRESET' || err.code === '57P01' || err.message.includes('timeout') || err.message.includes('Connection terminated'))) {
-            console.warn(`Database connection glitch (${err.message}). Retrying...`);
-            await new Promise(res => setTimeout(res, 2000)); // Wait 2s for DB to recover
+            await new Promise(res => setTimeout(res, 2000)); 
             return queryWithRetry(text, params, retries - 1);
         }
         throw err;
@@ -305,18 +301,15 @@ const getCachedSystemSetting = async (key) => {
 // --- INIT DB ON STARTUP ---
 const initDB = async () => {
     try {
-        // Just run a simple query to wake up the DB and verify schema
         await queryWithRetry("SELECT 1"); 
         await queryWithRetry(SCHEMA_QUERIES);
         await queryWithRetry(MIGRATION_QUERIES);
-        // await queryWithRetry(INDEX_QUERIES); // Indices can take time, skip on hot path
         await refreshCache(); 
         console.log("✅ Database Initialized & Cached");
     } catch (e) {
         console.error("⚠️ DB Init warning (Non-fatal):", e.message);
     }
 };
-// Trigger initialization
 initDB();
 
 // --- DTO MAPPERS ---
@@ -445,7 +438,6 @@ const executeMetaSend = async (to, content) => {
 };
 
 // --- OUTBOX RETRY WORKER (CONCURRENCY SAFE) ---
-// Note: In serverless, this is called manually via /api/cron/outbox or lazily after send
 const processOutbox = async () => {
     if (!pool) return;
     const sendingEnabled = await getCachedSystemSetting('sending_enabled');
@@ -456,8 +448,6 @@ const processOutbox = async () => {
         client = await pool.connect();
         await client.query('BEGIN');
 
-        // 1. LOCKING FETCH: Select rows that are due and lock them (SKIP LOCKED prevents duplicates)
-        // Only pick rows where next_retry_at <= now OR next_retry_at is NULL (legacy)
         const fetchQuery = `
             SELECT m.id, m.text, m.buttons, m.template_name, m.image_url, m.header_image_url, m.footer_text, d.phone_number, m.retry_count
             FROM messages m
@@ -485,14 +475,11 @@ const processOutbox = async () => {
             try {
                 const wamid = await executeMetaSend(row.phone_number, content);
                 
-                // Mark Sent
                 await client.query(
                     "UPDATE messages SET status = 'sent', whatsapp_message_id = $1, updated_at = $2 WHERE id = $3",
                     [wamid, Date.now(), row.id]
                 );
-                console.log(`[OUTBOX] Sent: ${row.id}`);
             } catch (e) {
-                // Calculate Exponential Backoff: 2s, 4s, 8s, 16s...
                 const delay = Math.pow(2, row.retry_count + 1) * 2000;
                 const nextTry = Date.now() + delay;
                 
@@ -519,7 +506,6 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
     const sendingEnabled = await getCachedSystemSetting('sending_enabled');
     if (!sendingEnabled) return { success: false, error: "System Disabled" };
 
-    // 1. Content Firewall
     const unsafeRegex = /replace\s+this|enter\s+your\s+message|type\s+your\s+message|sample\s+message/i;
     const bodyText = (content.text || content.message || "").substring(0, 4096);
     
@@ -531,7 +517,6 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
          return { success: false, error: "Blocked: Empty Content" };
     }
 
-    // 2. BUFFERED INSERT
     const msgId = `msg_${Date.now()}_${Math.random().toString(36).substr(2,5)}`;
     const dbText = bodyText || (content.templateName ? `Template: ${content.templateName}` : '[Media Message]');
     const retryBuffer = Date.now() + 15000; 
@@ -561,7 +546,6 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
         throw e;
     }
 
-    // 3. IMMEDIATE SEND ATTEMPT (Best Effort)
     try {
         const wamid = await executeMetaSend(to, content);
         
@@ -570,16 +554,9 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
         
         return { success: true, messageId: msgId };
     } catch (error) {
-        const errorDetail = error.response?.data?.error;
-        console.error("❌ Immediate Send Failed (Queued for Worker):", JSON.stringify(errorDetail || error.message));
-        
-        // Update to 'failed' so UI shows it, and reset retry time to sooner (e.g. 2s)
         const fastRetry = Date.now() + 2000;
         await queryWithRetry("UPDATE messages SET status = 'failed', next_retry_at = $1 WHERE id = $2", [fastRetry, msgId]);
-        
-        // Trigger lazy processing if possible
         processOutbox().catch(console.error);
-
         return { success: true, messageId: msgId, queued: true };
     }
 };
@@ -587,8 +564,7 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
 // --- SHOWCASE MANIFEST GENERATION ---
 const generateShowcaseManifest = async (folderId, folderName) => {
     try {
-        // Fetch files for this folder
-        const path = `/${folderName}`; // Assuming simple structure for now, ideally recursive
+        const path = `/${folderName}`; 
         const filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
         
         const items = filesRes.rows.map(row => ({
@@ -610,7 +586,7 @@ const generateShowcaseManifest = async (folderId, folderName) => {
             Key: `manifests/${encodeURIComponent(folderName)}.json`,
             ContentType: 'application/json',
             Body: jsonString,
-            ACL: 'public-read' // Optional, depends on bucket policy
+            ACL: 'public-read' 
         });
 
         await s3Client.send(command);
@@ -632,10 +608,7 @@ router.post('/messages/send', async (req, res) => {
         const phone = driverRes.rows[0].phone_number;
 
         const result = await queueAndSendMessage(phone, { text, ...attachments }, clientMessageId, driverId);
-        
-        // Lazy trigger outbox cleanup
         processOutbox().catch(e => console.error("Lazy outbox error:", e));
-
         res.json(result);
 
     } catch (e) {
@@ -816,14 +789,12 @@ async function runBotEngine(driver, text, buttonId, from) {
         if (replyContent.delay) await new Promise(r => setTimeout(r, replyContent.delay * 1000));
         await queueAndSendMessage(from, replyContent, null, driver.id);
         
-        // Trigger another cycle if needed (optional)
         processOutbox().catch(console.error);
     }
 }
 
 // --- STANDARD API ENDPOINTS ---
 
-// Cron endpoint for retries (External Trigger)
 router.get('/cron/process-outbox', async (req, res) => {
     try {
         await processOutbox();
@@ -944,7 +915,6 @@ router.post('/system/settings', async (req, res) => {
 
 // --- MEDIA LIBRARY & S3 ENDPOINTS ---
 
-// 1. Get Media Library Content (Files & Folders)
 router.get('/media', async (req, res) => {
     const path = req.query.path || '/';
     try {
@@ -959,12 +929,10 @@ router.get('/media', async (req, res) => {
     }
 });
 
-// 2. Generate Presigned URL for Upload
 router.post('/s3/presign', async (req, res) => {
     const { filename, fileType, folderPath = '/' } = req.body;
     if (!filename) return res.status(400).json({ error: "Filename required" });
 
-    // Clean path logic
     const safePath = folderPath.startsWith('/') ? folderPath.slice(1) : folderPath;
     const prefix = safePath ? `${safePath}/` : '';
     const key = `${prefix}${Date.now()}_${filename.replace(/\s+/g, '_')}`;
@@ -974,11 +942,10 @@ router.post('/s3/presign', async (req, res) => {
             Bucket: BUCKET_NAME,
             Key: key,
             ContentType: fileType || 'application/octet-stream',
-            ACL: 'public-read' // Optional: Depends on bucket settings
+            ACL: 'public-read' 
         });
         const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
         
-        // Dynamic Public URL Construction (handles non-us-east-1 buckets)
         let publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${key}`;
         if (AWS_REGION && AWS_REGION !== 'us-east-1') {
             publicUrl = `https://${BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${key}`;
@@ -991,12 +958,10 @@ router.post('/s3/presign', async (req, res) => {
     }
 });
 
-// 3. Register File in DB (After Client Upload)
 router.post('/files/register', async (req, res) => {
     const { key, url, filename, type, folderPath = '/' } = req.body;
     const id = `file_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
     
-    // Simple MIME to type mapping
     let mediaType = type || 'document';
     if (filename.match(/\.(jpg|jpeg|png|gif|webp)$/i)) mediaType = 'image';
     if (filename.match(/\.(mp4|mov|webm)$/i)) mediaType = 'video';
@@ -1012,12 +977,10 @@ router.post('/files/register', async (req, res) => {
     }
 });
 
-// 4. Create Folder
 router.post('/folders', async (req, res) => {
     const { name, parentPath = '/' } = req.body;
     if (!name) return res.status(400).json({ error: "Name required" });
     
-    // Use crypto for robust ID generation
     const id = `folder_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     try {
         await queryWithRetry(`
@@ -1031,7 +994,6 @@ router.post('/folders', async (req, res) => {
     }
 });
 
-// 5. Rename Folder
 router.put('/folders/:id', async (req, res) => {
     const { name } = req.body;
     try {
@@ -1043,19 +1005,16 @@ router.put('/folders/:id', async (req, res) => {
     }
 });
 
-// 6. Delete File
 router.delete('/files/:id', async (req, res) => {
     try {
         const fileRes = await queryWithRetry('SELECT s3_key FROM media_files WHERE id = $1', [req.params.id]);
         if (fileRes.rows.length > 0) {
             const key = fileRes.rows[0].s3_key;
-            // Delete from S3
             try {
                 await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: key }));
             } catch(s3Err) {
                 console.warn("S3 Delete Warning:", s3Err);
             }
-            // Delete from DB
             await queryWithRetry('DELETE FROM media_files WHERE id = $1', [req.params.id]);
         }
         res.json({ success: true });
@@ -1064,10 +1023,8 @@ router.delete('/files/:id', async (req, res) => {
     }
 });
 
-// 7. Delete Folder
 router.delete('/folders/:id', async (req, res) => {
     try {
-        // Check if empty
         const folderRes = await queryWithRetry('SELECT name, parent_path FROM media_folders WHERE id = $1', [req.params.id]);
         if (folderRes.rows.length === 0) return res.status(404).json({ error: "Folder not found" });
         
@@ -1088,12 +1045,10 @@ router.delete('/folders/:id', async (req, res) => {
     }
 });
 
-// 8. Public Showcase Toggle
 router.post('/folders/:id/public', async (req, res) => {
     try {
         const folderRes = await queryWithRetry('UPDATE media_folders SET is_public_showcase = TRUE WHERE id = $1 RETURNING name, id', [req.params.id]);
         if (folderRes.rows.length > 0) {
-            // Generate S3 Manifest for fallback
             await generateShowcaseManifest(folderRes.rows[0].id, folderRes.rows[0].name);
         }
         res.json({ success: true });
@@ -1111,7 +1066,6 @@ router.delete('/folders/:id/public', async (req, res) => {
     }
 });
 
-// 9. Sync from S3 (Robust Pagination)
 router.post('/media/sync', async (req, res) => {
     try {
         let continuationToken = undefined;
@@ -1126,21 +1080,17 @@ router.post('/media/sync', async (req, res) => {
             
             if (s3Res.Contents) {
                 for (const item of s3Res.Contents) {
-                    if (item.Key.startsWith('manifests/')) continue; // Skip system files
+                    if (item.Key.startsWith('manifests/')) continue; 
                     
-                    // Check DB efficiently
                     const exists = await queryWithRetry('SELECT id FROM media_files WHERE s3_key = $1', [item.Key]);
                     if (exists.rows.length === 0) {
-                        // Infer path and name
                         const parts = item.Key.split('/');
                         const filename = parts.pop();
                         const folderPath = parts.length > 0 ? '/' + parts.join('/') : '/';
                         
-                        // Auto-create folder if root level (simple logic)
                         if (folderPath !== '/') {
                             const folderName = parts[parts.length - 1];
                             const parentPath = parts.length > 1 ? '/' + parts.slice(0, -1).join('/') : '/';
-                            // Safe insert folder
                             await queryWithRetry(`
                                 INSERT INTO media_folders (id, name, parent_path, created_at)
                                 VALUES ($1, $2, $3, $4)
@@ -1148,7 +1098,6 @@ router.post('/media/sync', async (req, res) => {
                             `, [`folder_auto_${Date.now()}_${Math.random()}`, folderName, parentPath, Date.now()]);
                         }
 
-                        // Insert File
                         let type = 'document';
                         if (filename.match(/\.(jpg|jpeg|png|webp)$/i)) type = 'image';
                         if (filename.match(/\.(mp4|mov)$/i)) type = 'video';
@@ -1179,7 +1128,7 @@ router.post('/media/sync', async (req, res) => {
     }
 });
 
-// 10. Public Showcase Data
+// 10. Public Showcase Data (WITH AUTO-SYNC FALLBACK)
 router.get('/public/showcase', async (req, res) => {
     const folderName = req.query.folder;
     try {
@@ -1187,7 +1136,7 @@ router.get('/public/showcase', async (req, res) => {
         let params = [];
         
         if (folderName) {
-            folderQuery = 'SELECT id, name FROM media_folders WHERE name = $1';
+            folderQuery = 'SELECT id, name FROM media_folders WHERE name = $1'; // Relaxed constraint for named requests
             params = [folderName];
         }
 
@@ -1197,7 +1146,65 @@ router.get('/public/showcase', async (req, res) => {
         const folder = folderRes.rows[0];
         const path = `/${folder.name}`;
         
-        const filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
+        let filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
+        
+        // --- JIT AUTO-SYNC ---
+        // If DB is empty, check S3 for files in this folder prefix immediately
+        if (filesRes.rows.length === 0) {
+            console.log(`[Showcase] Folder ${folder.name} empty in DB. Triggering JIT S3 Sync...`);
+            try {
+                const s3Prefix = `${folder.name}/`;
+                const command = new ListObjectsV2Command({ 
+                    Bucket: BUCKET_NAME,
+                    Prefix: s3Prefix
+                });
+                const s3Res = await s3Client.send(command);
+                
+                if (s3Res.Contents && s3Res.Contents.length > 0) {
+                    let addedCount = 0;
+                    for (const item of s3Res.Contents) {
+                        if (item.Key.endsWith('/')) continue; // Skip directory markers
+                        if (item.Key.includes('manifests/')) continue; // Skip manifests
+
+                        const parts = item.Key.split('/');
+                        const filename = parts.pop();
+                        const itemFolderPath = '/' + parts.join('/');
+                        
+                        // Only insert if it matches our current folder path exactly
+                        if (itemFolderPath === path) {
+                             let type = 'document';
+                             if (filename.match(/\.(jpg|jpeg|png|webp|gif)$/i)) type = 'image';
+                             if (filename.match(/\.(mp4|mov|webm)$/i)) type = 'video';
+
+                             let publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${item.Key}`;
+                             if (AWS_REGION && AWS_REGION !== 'us-east-1') {
+                                publicUrl = `https://${BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${item.Key}`;
+                             }
+
+                             // Silent Insert (Ignore conflict)
+                             await queryWithRetry(`
+                                INSERT INTO media_files (id, folder_path, filename, s3_key, url, type, created_at)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                ON CONFLICT DO NOTHING
+                            `, [`file_jit_${Date.now()}_${Math.random().toString(36).substr(2,4)}`, itemFolderPath, filename, item.Key, publicUrl, type, Date.now()]);
+                            addedCount++;
+                        }
+                    }
+                    if (addedCount > 0) {
+                        console.log(`[Showcase] JIT Sync added ${addedCount} files. Refreshing...`);
+                        // Re-fetch from DB
+                        filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
+                        
+                        // Async generate manifest for next time
+                        generateShowcaseManifest(folder.id, folder.name);
+                    }
+                }
+            } catch (s3Err) {
+                console.error("JIT Sync Failed:", s3Err);
+            }
+        }
+        // ---------------------
+
         const items = filesRes.rows.map(row => ({
             id: row.id,
             url: row.url,
@@ -1226,8 +1233,6 @@ router.get('/public/status', async (req, res) => {
 });
 
 router.post('/files/:id/sync', async (req, res) => {
-    // Placeholder for WhatsApp Media Upload API
-    // In real scenario, download file stream -> upload to WhatsApp -> save media_id
     try {
         await queryWithRetry("UPDATE media_files SET media_id = 'synced_dummy_id' WHERE id = $1", [req.params.id]);
         res.json({ success: true });

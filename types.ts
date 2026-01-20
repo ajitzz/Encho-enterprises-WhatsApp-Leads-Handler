@@ -50,7 +50,7 @@ export interface DriverDocument {
   fileUrl: string;
   mimeType: string;
   createdAt: number;
-  verificationStatus: 'pending' | 'approved' | 'rejected';
+  verificationStatus: 'pending' | 'approved' | 'rejected' | 'failed';
   notes?: string;
 }
 
