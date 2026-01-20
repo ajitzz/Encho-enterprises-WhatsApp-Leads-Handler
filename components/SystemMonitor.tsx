@@ -1,6 +1,5 @@
 
-
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { liveApiService } from '../services/liveApiService';
 import { Activity, Database, Brain, Cloud, Wifi, ArrowUpCircle, Clock, UploadCloud, MessageSquare, Shield, X, Power, AlertTriangle, Play, Pause, Lock } from 'lucide-react';
 import { SystemStats } from '../types';
@@ -20,19 +19,40 @@ export const SystemMonitor = () => {
     const [confirmInput, setConfirmInput] = useState('');
     const [actionType, setActionType] = useState<'DISABLE' | 'ENABLE'>('DISABLE');
 
+    // Sequential Polling Ref
+    const isFetching = useRef(false);
+    const timerRef = useRef<any>(null);
+
     useEffect(() => {
-        const fetchStats = async () => {
+        startPolling();
+        return () => stopPolling();
+    }, []);
+
+    const startPolling = async () => {
+        if (timerRef.current) clearTimeout(timerRef.current);
+        
+        const poll = async () => {
+            if (isFetching.current) return;
+            isFetching.current = true;
             try {
                 const response = await fetch('/api/system/stats');
                 if (response.ok) {
                     setStats(await response.json());
                 }
-            } catch(e) {}
+            } catch(e) {
+                // Silent fail
+            } finally {
+                isFetching.current = false;
+                // Schedule next poll only after current finishes
+                timerRef.current = setTimeout(poll, 5000); 
+            }
         };
-        fetchStats();
-        const interval = setInterval(fetchStats, 5000);
-        return () => clearInterval(interval);
-    }, []);
+        poll();
+    };
+
+    const stopPolling = () => {
+        if (timerRef.current) clearTimeout(timerRef.current);
+    };
 
     // Load Settings when opening controls
     useEffect(() => {

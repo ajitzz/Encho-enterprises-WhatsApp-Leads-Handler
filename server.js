@@ -70,13 +70,24 @@ if (!CONNECTION_STRING) {
 let pool;
 if (!global.pgPool) {
     if (CONNECTION_STRING) {
+        // Fix for SSL Warning: prefer verifying only what's necessary or standardizing the string
+        // We let pg handle the parsing but explicitly override SSL settings in the config
         global.pgPool = new Pool({
             connectionString: CONNECTION_STRING,
-            ssl: { rejectUnauthorized: false },
-            // ULTRA-CONSERVATIVE POOL FOR SERVERLESS
-            max: 2, 
-            connectionTimeoutMillis: 3000, 
-            idleTimeoutMillis: 1000, 
+            ssl: { 
+                rejectUnauthorized: false // Fixes "self signed certificate" errors in dev/some prod envs
+            },
+            // OPTIMIZED FOR VERCEL SERVERLESS & NEON COLD STARTS
+            max: 2, // Strict limit to prevent connection exhaustion
+            connectionTimeoutMillis: 15000, // Increased to 15s to allow Neon to wake up
+            idleTimeoutMillis: 30000, // Keep idle connections longer to reuse them between lambda invocations
+            keepAlive: true,
+        });
+        
+        // Handle unexpected errors on idle clients
+        global.pgPool.on('error', (err, client) => {
+            console.error('Unexpected error on idle DB client', err);
+            // process.exit(-1); // DO NOT EXIT in serverless, let the pool handle it
         });
     }
 }
@@ -217,43 +228,44 @@ const queryWithRetry = async (text, params, retries = 1) => {
         // Release client immediately on error to prevent leaks
         if (client) { try { client.release(true); } catch(e) {} client = null; }
         
-        if (err.code === '42P01') { // Table missing
+        // Handle Table/Column missing errors (Schema Drift)
+        if (err.code === '42P01') { 
             console.warn("⚠️ Tables missing. Running Schema Init...");
             try {
                 const healClient = await pool.connect();
                 await healClient.query(SCHEMA_QUERIES);
                 await healClient.query(INDEX_QUERIES); 
                 healClient.release();
-                // Retry original query
                 const retryClient = await pool.connect();
                 const res = await retryClient.query(text, params);
                 retryClient.release();
                 return res;
             } catch (healErr) {
-                console.error("❌ Schema Healing Failed:", healErr);
+                console.error("❌ Schema Healing Failed:", healErr.message);
                 throw healErr;
             }
         }
         
-        if (err.code === '42703') { // Column missing
+        if (err.code === '42703') {
              console.warn("⚠️ Columns missing. Running Migrations...");
              try {
                 const healClient = await pool.connect();
                 await healClient.query(MIGRATION_QUERIES);
                 healClient.release();
-                // Retry original query
                 const retryClient = await pool.connect();
                 const res = await retryClient.query(text, params);
                 retryClient.release();
                 return res;
              } catch (healErr) {
-                console.error("❌ Migration Failed:", healErr);
+                console.error("❌ Migration Failed:", healErr.message);
                 throw healErr;
              }
         }
 
-        if (retries > 0 && (err.code === 'ECONNRESET' || err.code === '57P01' || err.message.includes('timeout'))) {
-            await new Promise(res => setTimeout(res, 1500)); 
+        // Retry on Connection Timeout or Reset
+        if (retries > 0 && (err.code === 'ECONNRESET' || err.code === '57P01' || err.message.includes('timeout') || err.message.includes('Connection terminated'))) {
+            console.warn(`Database connection glitch (${err.message}). Retrying...`);
+            await new Promise(res => setTimeout(res, 2000)); // Wait 2s for DB to recover
             return queryWithRetry(text, params, retries - 1);
         }
         throw err;
@@ -265,7 +277,6 @@ const queryWithRetry = async (text, params, retries = 1) => {
 // --- CACHING HELPERS ---
 const refreshCache = async () => {
     try {
-        // Only run cache refresh if connection is healthy
         const botRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1');
         CACHE.botSettings = botRes.rows[0]?.settings || { isEnabled: true, steps: [] };
 
@@ -294,17 +305,18 @@ const getCachedSystemSetting = async (key) => {
 // --- INIT DB ON STARTUP ---
 const initDB = async () => {
     try {
+        // Just run a simple query to wake up the DB and verify schema
         await queryWithRetry("SELECT 1"); 
         await queryWithRetry(SCHEMA_QUERIES);
         await queryWithRetry(MIGRATION_QUERIES);
-        await queryWithRetry(INDEX_QUERIES); 
+        // await queryWithRetry(INDEX_QUERIES); // Indices can take time, skip on hot path
         await refreshCache(); 
-        console.log("✅ Database Initialized, Migrated & Cached");
+        console.log("✅ Database Initialized & Cached");
     } catch (e) {
-        console.error("⚠️ DB Init warning:", e.message);
+        console.error("⚠️ DB Init warning (Non-fatal):", e.message);
     }
 };
-// We trigger initDB but don't await it at top level to allow server to start
+// Trigger initialization
 initDB();
 
 // --- DTO MAPPERS ---
