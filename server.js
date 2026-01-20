@@ -235,10 +235,10 @@ const queryWithRetry = async (text, params, retries = 2) => {
                 const res = await retryClient.query(text, params);
                 retryClient.release();
                 return res;
-             } catch (healErr) {
+            } catch (healErr) {
                 console.error("❌ Migration Failed:", healErr);
                 throw healErr;
-             }
+            }
         }
 
         if (retries > 0 && (err.code === 'ECONNRESET' || err.code === '57P01' || err.message.includes('timeout'))) {
