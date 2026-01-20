@@ -581,12 +581,14 @@ const generateShowcaseManifest = async (folderId, folderName) => {
         };
 
         const jsonString = JSON.stringify(manifest);
+        
+        // FIX: Removed ACL to prevent "AccessControlListNotSupported" error on modern S3 buckets
         const command = new PutObjectCommand({
             Bucket: BUCKET_NAME,
             Key: `manifests/${encodeURIComponent(folderName)}.json`,
             ContentType: 'application/json',
-            Body: jsonString,
-            ACL: 'public-read' 
+            Body: jsonString
+            // ACL: 'public-read'  <-- REMOVED
         });
 
         await s3Client.send(command);
@@ -938,11 +940,12 @@ router.post('/s3/presign', async (req, res) => {
     const key = `${prefix}${Date.now()}_${filename.replace(/\s+/g, '_')}`;
 
     try {
+        // FIX: Removed ACL from PutObjectCommand to avoid AccessControlListNotSupported error
         const command = new PutObjectCommand({
             Bucket: BUCKET_NAME,
             Key: key,
-            ContentType: fileType || 'application/octet-stream',
-            ACL: 'public-read' 
+            ContentType: fileType || 'application/octet-stream'
+            // ACL: 'public-read'  <-- REMOVED
         });
         const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
         
