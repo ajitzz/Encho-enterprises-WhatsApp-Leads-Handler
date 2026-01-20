@@ -1136,7 +1136,7 @@ router.get('/public/showcase', async (req, res) => {
         let params = [];
         
         if (folderName) {
-            folderQuery = 'SELECT id, name FROM media_folders WHERE name = $1'; // Relaxed constraint for named requests
+            folderQuery = 'SELECT id, name FROM media_folders WHERE name = $1'; 
             params = [folderName];
         }
 
@@ -1148,17 +1148,28 @@ router.get('/public/showcase', async (req, res) => {
         
         let filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
         
-        // --- JIT AUTO-SYNC ---
+        // --- JIT AUTO-SYNC V2 (ROBUST) ---
         // If DB is empty, check S3 for files in this folder prefix immediately
         if (filesRes.rows.length === 0) {
             console.log(`[Showcase] Folder ${folder.name} empty in DB. Triggering JIT S3 Sync...`);
             try {
-                const s3Prefix = `${folder.name}/`;
-                const command = new ListObjectsV2Command({ 
+                // 1. Try exact Case Match First
+                let s3Prefix = `${folder.name}/`;
+                let command = new ListObjectsV2Command({ 
                     Bucket: BUCKET_NAME,
                     Prefix: s3Prefix
                 });
-                const s3Res = await s3Client.send(command);
+                let s3Res = await s3Client.send(command);
+                
+                // 2. Try Lowercase Match (Common S3 pattern)
+                if (!s3Res.Contents || s3Res.Contents.length === 0) {
+                     s3Prefix = `${folder.name.toLowerCase()}/`;
+                     command = new ListObjectsV2Command({ 
+                        Bucket: BUCKET_NAME,
+                        Prefix: s3Prefix
+                    });
+                    s3Res = await s3Client.send(command);
+                }
                 
                 if (s3Res.Contents && s3Res.Contents.length > 0) {
                     let addedCount = 0;
@@ -1166,29 +1177,30 @@ router.get('/public/showcase', async (req, res) => {
                         if (item.Key.endsWith('/')) continue; // Skip directory markers
                         if (item.Key.includes('manifests/')) continue; // Skip manifests
 
-                        const parts = item.Key.split('/');
-                        const filename = parts.pop();
-                        const itemFolderPath = '/' + parts.join('/');
+                        const filename = item.Key.split('/').pop();
                         
-                        // Only insert if it matches our current folder path exactly
-                        if (itemFolderPath === path) {
-                             let type = 'document';
-                             if (filename.match(/\.(jpg|jpeg|png|webp|gif)$/i)) type = 'image';
-                             if (filename.match(/\.(mp4|mov|webm)$/i)) type = 'video';
+                        // LOGIC UPDATE: We are relaxing the strict path check.
+                        // If it matches the S3 prefix, we ASSUME it belongs to this showcase folder.
+                        // We will insert it into the DB with the 'path' the showcase expects.
+                        
+                        let type = 'document';
+                        if (filename.match(/\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i)) type = 'image';
+                        else if (filename.match(/\.(mp4|mov|webm|mkv|avi)$/i)) type = 'video';
+                        else continue; // Skip non-media for showcase
 
-                             let publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${item.Key}`;
-                             if (AWS_REGION && AWS_REGION !== 'us-east-1') {
-                                publicUrl = `https://${BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${item.Key}`;
-                             }
-
-                             // Silent Insert (Ignore conflict)
-                             await queryWithRetry(`
-                                INSERT INTO media_files (id, folder_path, filename, s3_key, url, type, created_at)
-                                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                                ON CONFLICT DO NOTHING
-                            `, [`file_jit_${Date.now()}_${Math.random().toString(36).substr(2,4)}`, itemFolderPath, filename, item.Key, publicUrl, type, Date.now()]);
-                            addedCount++;
+                        let publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${item.Key}`;
+                        if (AWS_REGION && AWS_REGION !== 'us-east-1') {
+                            publicUrl = `https://${BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${item.Key}`;
                         }
+
+                        // Silent Insert (Ignore conflict)
+                        // CRITICAL: We force 'folder_path' to be 'path' so the subsequent query finds it.
+                        await queryWithRetry(`
+                            INSERT INTO media_files (id, folder_path, filename, s3_key, url, type, created_at)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            ON CONFLICT DO NOTHING
+                        `, [`file_jit_${Date.now()}_${Math.random().toString(36).substr(2,4)}`, path, filename, item.Key, publicUrl, type, Date.now()]);
+                        addedCount++;
                     }
                     if (addedCount > 0) {
                         console.log(`[Showcase] JIT Sync added ${addedCount} files. Refreshing...`);
