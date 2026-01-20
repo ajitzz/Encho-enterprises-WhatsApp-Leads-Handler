@@ -73,9 +73,10 @@ if (!global.pgPool) {
         global.pgPool = new Pool({
             connectionString: CONNECTION_STRING,
             ssl: { rejectUnauthorized: false },
-            max: 10, 
-            connectionTimeoutMillis: 15000, 
-            idleTimeoutMillis: 10000,
+            // OPTIMIZED FOR VERCEL SERVERLESS
+            max: 3, // Lower max connections to prevent exhaustion during cold starts
+            connectionTimeoutMillis: 5000, 
+            idleTimeoutMillis: 5000, // Release idle connections faster
         });
     }
 }
@@ -198,6 +199,10 @@ const MIGRATION_QUERIES = `
     -- Ensure Media Tables Columns (Self-Healing)
     ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS is_public_showcase BOOLEAN DEFAULT FALSE;
     ALTER TABLE media_files ADD COLUMN IF NOT EXISTS media_id TEXT;
+    
+    -- Critical Fix for "created_at does not exist" error
+    ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS created_at BIGINT DEFAULT (extract(epoch from now()) * 1000);
+    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS created_at BIGINT DEFAULT (extract(epoch from now()) * 1000);
 `;
 
 // --- QUERY EXECUTION HELPER ---
@@ -209,6 +214,7 @@ const queryWithRetry = async (text, params, retries = 2) => {
         const res = await client.query(text, params);
         return res;
     } catch (err) {
+        // Release client immediately on error to prevent leaks
         if (client) { try { client.release(true); } catch(e) {} client = null; }
         
         if (err.code === '42P01') { // Table missing
@@ -218,6 +224,7 @@ const queryWithRetry = async (text, params, retries = 2) => {
                 await healClient.query(SCHEMA_QUERIES);
                 await healClient.query(INDEX_QUERIES); 
                 healClient.release();
+                // Retry original query
                 const retryClient = await pool.connect();
                 const res = await retryClient.query(text, params);
                 retryClient.release();
@@ -234,6 +241,7 @@ const queryWithRetry = async (text, params, retries = 2) => {
                 const healClient = await pool.connect();
                 await healClient.query(MIGRATION_QUERIES);
                 healClient.release();
+                // Retry original query
                 const retryClient = await pool.connect();
                 const res = await retryClient.query(text, params);
                 retryClient.release();
