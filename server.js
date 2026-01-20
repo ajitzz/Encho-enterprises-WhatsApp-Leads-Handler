@@ -48,13 +48,16 @@ const APP_SECRET = (process.env.APP_SECRET || "").trim() || "";
 
 // --- AWS S3 CONFIG ---
 const BUCKET_NAME = process.env.AWS_BUCKET_NAME || process.env.BUCKET_NAME || 'uber-fleet-assets';
-const s3Client = new S3Client({
-    region: process.env.AWS_REGION || 'us-east-1',
-    credentials: {
-        accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
-        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || ''
-    }
-});
+const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
+
+const s3Config = { region: AWS_REGION };
+if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
+    s3Config.credentials = {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+    };
+}
+const s3Client = new S3Client(s3Config);
 
 // --- DATABASE CONNECTION ---
 const DEFAULT_DB_URL = "postgresql://neondb_owner:npg_4cbpQjKtym9n@ep-small-smoke-a1vjxk25-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require";
@@ -235,10 +238,10 @@ const queryWithRetry = async (text, params, retries = 2) => {
                 const res = await retryClient.query(text, params);
                 retryClient.release();
                 return res;
-            } catch (healErr) {
+             } catch (healErr) {
                 console.error("❌ Migration Failed:", healErr);
                 throw healErr;
-            }
+             }
         }
 
         if (retries > 0 && (err.code === 'ECONNRESET' || err.code === '57P01' || err.message.includes('timeout'))) {
@@ -938,7 +941,12 @@ router.post('/s3/presign', async (req, res) => {
             ACL: 'public-read' // Optional: Depends on bucket settings
         });
         const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
-        const publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${key}`;
+        
+        // Dynamic Public URL Construction (handles non-us-east-1 buckets)
+        let publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${key}`;
+        if (AWS_REGION && AWS_REGION !== 'us-east-1') {
+            publicUrl = `https://${BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${key}`;
+        }
         
         res.json({ uploadUrl, key, publicUrl });
     } catch (e) {
@@ -973,7 +981,8 @@ router.post('/folders', async (req, res) => {
     const { name, parentPath = '/' } = req.body;
     if (!name) return res.status(400).json({ error: "Name required" });
     
-    const id = `folder_${Date.now()}`;
+    // Use crypto for robust ID generation
+    const id = `folder_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     try {
         await queryWithRetry(`
             INSERT INTO media_folders (id, name, parent_path, created_at)
@@ -981,7 +990,7 @@ router.post('/folders', async (req, res) => {
         `, [id, name, parentPath, Date.now()]);
         res.json({ success: true, id });
     } catch (e) {
-        if (e.code === '23505') return res.status(409).json({ error: "Folder already exists" });
+        if (e.code === '23505') return res.status(409).json({ error: "Folder name already exists in this location" });
         res.status(500).json({ error: e.message });
     }
 });
@@ -993,6 +1002,7 @@ router.put('/folders/:id', async (req, res) => {
         await queryWithRetry('UPDATE media_folders SET name = $1 WHERE id = $2', [name, req.params.id]);
         res.json({ success: true });
     } catch (e) {
+        if (e.code === '23505') return res.status(409).json({ error: "Folder name already exists" });
         res.status(500).json({ error: e.message });
     }
 });
@@ -1004,7 +1014,11 @@ router.delete('/files/:id', async (req, res) => {
         if (fileRes.rows.length > 0) {
             const key = fileRes.rows[0].s3_key;
             // Delete from S3
-            await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: key }));
+            try {
+                await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: key }));
+            } catch(s3Err) {
+                console.warn("S3 Delete Warning:", s3Err);
+            }
             // Delete from DB
             await queryWithRetry('DELETE FROM media_files WHERE id = $1', [req.params.id]);
         }
@@ -1061,53 +1075,67 @@ router.delete('/folders/:id/public', async (req, res) => {
     }
 });
 
-// 9. Sync from S3 (Scan Bucket)
+// 9. Sync from S3 (Robust Pagination)
 router.post('/media/sync', async (req, res) => {
     try {
-        const command = new ListObjectsV2Command({ Bucket: BUCKET_NAME });
-        const s3Res = await s3Client.send(command);
+        let continuationToken = undefined;
         let addedCount = 0;
-
-        if (s3Res.Contents) {
-            for (const item of s3Res.Contents) {
-                if (item.Key.startsWith('manifests/')) continue; // Skip system files
-                
-                // Check DB
-                const exists = await queryWithRetry('SELECT id FROM media_files WHERE s3_key = $1', [item.Key]);
-                if (exists.rows.length === 0) {
-                    // Infer path and name
-                    const parts = item.Key.split('/');
-                    const filename = parts.pop();
-                    const folderPath = parts.length > 0 ? '/' + parts.join('/') : '/';
+        
+        do {
+            const command = new ListObjectsV2Command({ 
+                Bucket: BUCKET_NAME,
+                ContinuationToken: continuationToken
+            });
+            const s3Res = await s3Client.send(command);
+            
+            if (s3Res.Contents) {
+                for (const item of s3Res.Contents) {
+                    if (item.Key.startsWith('manifests/')) continue; // Skip system files
                     
-                    // Auto-create folder if root level (simple logic)
-                    if (folderPath !== '/') {
-                        const folderName = parts[parts.length - 1];
-                        const parentPath = parts.length > 1 ? '/' + parts.slice(0, -1).join('/') : '/';
+                    // Check DB efficiently
+                    const exists = await queryWithRetry('SELECT id FROM media_files WHERE s3_key = $1', [item.Key]);
+                    if (exists.rows.length === 0) {
+                        // Infer path and name
+                        const parts = item.Key.split('/');
+                        const filename = parts.pop();
+                        const folderPath = parts.length > 0 ? '/' + parts.join('/') : '/';
+                        
+                        // Auto-create folder if root level (simple logic)
+                        if (folderPath !== '/') {
+                            const folderName = parts[parts.length - 1];
+                            const parentPath = parts.length > 1 ? '/' + parts.slice(0, -1).join('/') : '/';
+                            // Safe insert folder
+                            await queryWithRetry(`
+                                INSERT INTO media_folders (id, name, parent_path, created_at)
+                                VALUES ($1, $2, $3, $4)
+                                ON CONFLICT (name, parent_path) DO NOTHING
+                            `, [`folder_auto_${Date.now()}_${Math.random()}`, folderName, parentPath, Date.now()]);
+                        }
+
+                        // Insert File
+                        let type = 'document';
+                        if (filename.match(/\.(jpg|jpeg|png|webp)$/i)) type = 'image';
+                        if (filename.match(/\.(mp4|mov)$/i)) type = 'video';
+
+                        let publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${item.Key}`;
+                        if (AWS_REGION && AWS_REGION !== 'us-east-1') {
+                            publicUrl = `https://${BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${item.Key}`;
+                        }
+
+                        const id = `file_sync_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+                        
                         await queryWithRetry(`
-                            INSERT INTO media_folders (id, name, parent_path, created_at)
-                            VALUES ($1, $2, $3, $4)
-                            ON CONFLICT (name, parent_path) DO NOTHING
-                        `, [`folder_auto_${Date.now()}_${Math.random()}`, folderName, parentPath, Date.now()]);
+                            INSERT INTO media_files (id, folder_path, filename, s3_key, url, type, created_at)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        `, [id, folderPath, filename, item.Key, publicUrl, type, Date.now()]);
+                        
+                        addedCount++;
                     }
-
-                    // Insert File
-                    let type = 'document';
-                    if (filename.match(/\.(jpg|jpeg|png|webp)$/i)) type = 'image';
-                    if (filename.match(/\.(mp4|mov)$/i)) type = 'video';
-
-                    const url = `https://${BUCKET_NAME}.s3.amazonaws.com/${item.Key}`;
-                    const id = `file_sync_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-                    
-                    await queryWithRetry(`
-                        INSERT INTO media_files (id, folder_path, filename, s3_key, url, type, created_at)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7)
-                    `, [id, folderPath, filename, item.Key, url, type, Date.now()]);
-                    
-                    addedCount++;
                 }
             }
-        }
+            continuationToken = s3Res.NextContinuationToken;
+        } while (continuationToken);
+
         res.json({ success: true, added: addedCount });
     } catch (e) {
         console.error("Sync Error", e);
