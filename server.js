@@ -73,10 +73,10 @@ if (!global.pgPool) {
         global.pgPool = new Pool({
             connectionString: CONNECTION_STRING,
             ssl: { rejectUnauthorized: false },
-            // OPTIMIZED FOR VERCEL SERVERLESS
-            max: 3, // Lower max connections to prevent exhaustion during cold starts
-            connectionTimeoutMillis: 5000, 
-            idleTimeoutMillis: 5000, // Release idle connections faster
+            // ULTRA-CONSERVATIVE POOL FOR SERVERLESS
+            max: 2, 
+            connectionTimeoutMillis: 3000, 
+            idleTimeoutMillis: 1000, 
         });
     }
 }
@@ -206,7 +206,7 @@ const MIGRATION_QUERIES = `
 `;
 
 // --- QUERY EXECUTION HELPER ---
-const queryWithRetry = async (text, params, retries = 2) => { 
+const queryWithRetry = async (text, params, retries = 1) => { 
     if (!pool) throw new Error("Database connection not configured.");
     let client;
     try {
@@ -253,7 +253,7 @@ const queryWithRetry = async (text, params, retries = 2) => {
         }
 
         if (retries > 0 && (err.code === 'ECONNRESET' || err.code === '57P01' || err.message.includes('timeout'))) {
-            await new Promise(res => setTimeout(res, 1000)); 
+            await new Promise(res => setTimeout(res, 1500)); 
             return queryWithRetry(text, params, retries - 1);
         }
         throw err;
@@ -265,6 +265,7 @@ const queryWithRetry = async (text, params, retries = 2) => {
 // --- CACHING HELPERS ---
 const refreshCache = async () => {
     try {
+        // Only run cache refresh if connection is healthy
         const botRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1');
         CACHE.botSettings = botRes.rows[0]?.settings || { isEnabled: true, steps: [] };
 
@@ -276,7 +277,7 @@ const refreshCache = async () => {
         CACHE.lastRefreshed = Date.now();
         console.log("🧠 Server Cache Refreshed");
     } catch (e) {
-        console.error("Failed to refresh cache:", e);
+        console.error("Failed to refresh cache (using defaults):", e.message);
     }
 };
 
@@ -303,6 +304,7 @@ const initDB = async () => {
         console.error("⚠️ DB Init warning:", e.message);
     }
 };
+// We trigger initDB but don't await it at top level to allow server to start
 initDB();
 
 // --- DTO MAPPERS ---
@@ -431,6 +433,7 @@ const executeMetaSend = async (to, content) => {
 };
 
 // --- OUTBOX RETRY WORKER (CONCURRENCY SAFE) ---
+// Note: In serverless, this is called manually via /api/cron/outbox or lazily after send
 const processOutbox = async () => {
     if (!pool) return;
     const sendingEnabled = await getCachedSystemSetting('sending_enabled');
@@ -451,15 +454,11 @@ const processOutbox = async () => {
             AND (m.next_retry_at IS NULL OR m.next_retry_at <= $1)
             AND m.retry_count < 5
             ORDER BY m.next_retry_at ASC
-            LIMIT 10
+            LIMIT 5
             FOR UPDATE SKIP LOCKED
         `;
         
         const { rows } = await client.query(fetchQuery, [Date.now()]);
-
-        if (rows.length > 0) {
-            console.log(`[OUTBOX] Worker picked up ${rows.length} messages.`);
-        }
 
         for (const row of rows) {
             const content = {
@@ -497,14 +496,11 @@ const processOutbox = async () => {
         await client.query('COMMIT');
     } catch (e) {
         if (client) await client.query('ROLLBACK');
-        console.error("Worker Transaction Error:", e);
+        console.error("Worker Transaction Error:", e.message);
     } finally {
         if (client) client.release();
     }
 };
-
-// Run Worker every 10 seconds
-setInterval(processOutbox, 10000);
 
 // --- SEND MESSAGE HELPER (BUFFERED INSERT) ---
 const queueAndSendMessage = async (to, content, clientMessageId = null, driverId) => {
@@ -569,6 +565,9 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
         const fastRetry = Date.now() + 2000;
         await queryWithRetry("UPDATE messages SET status = 'failed', next_retry_at = $1 WHERE id = $2", [fastRetry, msgId]);
         
+        // Trigger lazy processing if possible
+        processOutbox().catch(console.error);
+
         return { success: true, messageId: msgId, queued: true };
     }
 };
@@ -621,6 +620,10 @@ router.post('/messages/send', async (req, res) => {
         const phone = driverRes.rows[0].phone_number;
 
         const result = await queueAndSendMessage(phone, { text, ...attachments }, clientMessageId, driverId);
+        
+        // Lazy trigger outbox cleanup
+        processOutbox().catch(e => console.error("Lazy outbox error:", e));
+
         res.json(result);
 
     } catch (e) {
@@ -800,10 +803,23 @@ async function runBotEngine(driver, text, buttonId, from) {
     if (replyContent) {
         if (replyContent.delay) await new Promise(r => setTimeout(r, replyContent.delay * 1000));
         await queueAndSendMessage(from, replyContent, null, driver.id);
+        
+        // Trigger another cycle if needed (optional)
+        processOutbox().catch(console.error);
     }
 }
 
 // --- STANDARD API ENDPOINTS ---
+
+// Cron endpoint for retries (External Trigger)
+router.get('/cron/process-outbox', async (req, res) => {
+    try {
+        await processOutbox();
+        res.json({ status: 'ok', processed: true });
+    } catch(e) {
+        res.status(500).json({ error: e.message });
+    }
+});
 
 router.get('/system/stats', async (req, res) => {
     res.json({
