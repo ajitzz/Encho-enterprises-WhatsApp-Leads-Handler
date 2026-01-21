@@ -10,7 +10,7 @@ const axios = require('axios');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Pool } = require('pg'); 
-const { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 require('dotenv').config();
 
@@ -567,11 +567,25 @@ const generateShowcaseManifest = async (folderId, folderName) => {
         const path = `/${folderName}`; 
         const filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
         
-        const items = filesRes.rows.map(row => ({
-            id: row.id,
-            url: row.url,
-            type: row.type || 'image',
-            filename: row.filename
+        // Generate Signed URLs for the manifest to ensure robustness
+        const items = await Promise.all(filesRes.rows.map(async (row) => {
+            try {
+                const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: row.s3_key });
+                const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 86400 }); // 24 hours
+                return {
+                    id: row.id,
+                    url: signedUrl,
+                    type: row.type || 'image',
+                    filename: row.filename
+                };
+            } catch(e) {
+                return {
+                    id: row.id,
+                    url: row.url, // Fallback to static
+                    type: row.type || 'image',
+                    filename: row.filename
+                };
+            }
         }));
 
         const manifest = {
@@ -1131,7 +1145,7 @@ router.post('/media/sync', async (req, res) => {
     }
 });
 
-// 10. Public Showcase Data (WITH AUTO-SYNC FALLBACK)
+// 10. Public Showcase Data (WITH AUTO-SYNC FALLBACK & AUTO-HEAL)
 router.get('/public/showcase', async (req, res) => {
     const folderName = req.query.folder;
     try {
@@ -1143,7 +1157,7 @@ router.get('/public/showcase', async (req, res) => {
             params = [folderName];
         }
 
-        const folderRes = await queryWithRetry(folderQuery, params);
+        let folderRes = await queryWithRetry(folderQuery, params);
         
         // --- JIT AUTO-DISCOVERY & SYNC ---
         // If the folder is missing in DB (but potentially exists in S3), let's find it.
@@ -1219,13 +1233,9 @@ router.get('/public/showcase', async (req, res) => {
 
                         const filename = item.Key.split('/').pop();
                         
-                        // LOGIC UPDATE: Relaxed type checking. 
-                        // Allow anything that isn't explicitly system files.
-                        
                         let type = 'document';
                         if (filename.match(/\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i)) type = 'image';
                         else if (filename.match(/\.(mp4|mov|webm|mkv|avi)$/i)) type = 'video';
-                        // else default is document. Do NOT skip.
 
                         let publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${item.Key}`;
                         if (AWS_REGION && AWS_REGION !== 'us-east-1') {
@@ -1233,7 +1243,6 @@ router.get('/public/showcase', async (req, res) => {
                         }
 
                         // Silent Insert (Ignore conflict)
-                        // CRITICAL: We force 'folder_path' to be 'path' so the subsequent query finds it.
                         await queryWithRetry(`
                             INSERT INTO media_files (id, folder_path, filename, s3_key, url, type, created_at)
                             VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -1243,7 +1252,7 @@ router.get('/public/showcase', async (req, res) => {
                     }
                     if (addedCount > 0) {
                         console.log(`[Showcase] JIT Sync added ${addedCount} files. Refreshing...`);
-                        // Re-fetch from DB
+                        // CRITICAL FIX: Re-fetch the newly added files so the user sees them NOW
                         filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
                         
                         // Async generate manifest for next time
@@ -1256,11 +1265,26 @@ router.get('/public/showcase', async (req, res) => {
         }
         // ---------------------
 
-        const items = filesRes.rows.map(row => ({
-            id: row.id,
-            url: row.url,
-            type: row.type || 'image',
-            filename: row.filename
+        // CRITICAL FIX: Generate Signed URLs to bypass private bucket 403 errors
+        const items = await Promise.all(filesRes.rows.map(async (row) => {
+            try {
+                const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: row.s3_key });
+                const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 }); // Valid for 1 hour
+                return {
+                    id: row.id,
+                    url: signedUrl, // USE THE SIGNED URL
+                    type: row.type || 'image',
+                    filename: row.filename
+                };
+            } catch(e) {
+                console.error("Failed to sign url", e);
+                return {
+                    id: row.id,
+                    url: row.url, // Fallback to static
+                    type: row.type || 'image',
+                    filename: row.filename
+                };
+            }
         }));
         
         res.json({
