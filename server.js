@@ -1182,7 +1182,8 @@ router.get('/public/showcase', async (req, res) => {
             folderQuery += ' AND id = $1 LIMIT 1';
             params = [folderId];
         } else if (folder) {
-            folderQuery += ' AND name = $1 ORDER BY created_at DESC LIMIT 1';
+            // Robust lookup: Try matching Name OR ID to handle legacy/manual ID cases
+            folderQuery += ' AND (name = $1 OR id = $1) ORDER BY created_at DESC LIMIT 1';
             params = [folder];
         } else {
             folderQuery += ' ORDER BY created_at DESC LIMIT 1';
