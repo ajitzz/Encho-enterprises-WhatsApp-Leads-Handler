@@ -1144,6 +1144,43 @@ router.get('/public/showcase', async (req, res) => {
         }
 
         const folderRes = await queryWithRetry(folderQuery, params);
+        
+        // --- JIT AUTO-DISCOVERY & SYNC ---
+        // If the folder is missing in DB (but potentially exists in S3), let's find it.
+        if (folderRes.rows.length === 0 && folderName) {
+             console.log(`[Showcase] Folder "${folderName}" not found in DB. Checking S3...`);
+             try {
+                 const s3Prefix = `${folderName}/`;
+                 const command = new ListObjectsV2Command({ 
+                    Bucket: BUCKET_NAME,
+                    Prefix: s3Prefix,
+                    MaxKeys: 1 // We just need to know if it exists
+                 });
+                 const s3Res = await s3Client.send(command);
+                 
+                 if (s3Res.Contents && s3Res.Contents.length > 0) {
+                     // Found in S3! Create it in DB immediately.
+                     const newFolderId = `folder_jit_${Date.now()}_${Math.random().toString(36).substr(2,4)}`;
+                     await queryWithRetry(`
+                        INSERT INTO media_folders (id, name, parent_path, is_public_showcase, created_at)
+                        VALUES ($1, $2, '/', TRUE, $3)
+                        ON CONFLICT (name, parent_path) DO NOTHING
+                     `, [newFolderId, folderName, Date.now()]);
+                     
+                     // Re-fetch to get the official ID/Row
+                     const retryRes = await queryWithRetry(folderQuery, params);
+                     if (retryRes.rows.length > 0) {
+                         folderRes.rows = retryRes.rows; // Hack the response to continue execution below
+                     }
+                 } else {
+                     return res.json({ items: [] }); // Truly empty
+                 }
+             } catch(e) {
+                 console.error("JIT Folder Discovery Failed:", e);
+                 return res.json({ items: [] });
+             }
+        }
+        
         if (folderRes.rows.length === 0) return res.json({ items: [] });
         
         const folder = folderRes.rows[0];
@@ -1182,14 +1219,13 @@ router.get('/public/showcase', async (req, res) => {
 
                         const filename = item.Key.split('/').pop();
                         
-                        // LOGIC UPDATE: We are relaxing the strict path check.
-                        // If it matches the S3 prefix, we ASSUME it belongs to this showcase folder.
-                        // We will insert it into the DB with the 'path' the showcase expects.
+                        // LOGIC UPDATE: Relaxed type checking. 
+                        // Allow anything that isn't explicitly system files.
                         
                         let type = 'document';
                         if (filename.match(/\.(jpg|jpeg|png|webp|gif|bmp|svg)$/i)) type = 'image';
                         else if (filename.match(/\.(mp4|mov|webm|mkv|avi)$/i)) type = 'video';
-                        else continue; // Skip non-media for showcase
+                        // else default is document. Do NOT skip.
 
                         let publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${item.Key}`;
                         if (AWS_REGION && AWS_REGION !== 'us-east-1') {
