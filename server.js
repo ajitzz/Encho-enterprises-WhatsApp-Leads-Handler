@@ -129,7 +129,8 @@ const SCHEMA_QUERIES = `
         whatsapp_message_id TEXT UNIQUE,
         status TEXT DEFAULT 'sent',
         retry_count INT DEFAULT 0,
-        next_retry_at BIGINT DEFAULT 0
+        next_retry_at BIGINT DEFAULT 0,
+        updated_at BIGINT DEFAULT (extract(epoch from now()) * 1000)
     );
     CREATE TABLE IF NOT EXISTS driver_documents (
         id TEXT PRIMARY KEY,
@@ -201,6 +202,7 @@ const MIGRATION_QUERIES = `
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'sent';
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS retry_count INT DEFAULT 0;
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS next_retry_at BIGINT DEFAULT 0;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS updated_at BIGINT DEFAULT (extract(epoch from now()) * 1000);
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS current_bot_step_id TEXT;
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_bot_active BOOLEAN DEFAULT TRUE;
     ALTER TABLE drivers ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;
@@ -936,9 +938,23 @@ router.get('/media', async (req, res) => {
     try {
         const folders = await queryWithRetry('SELECT * FROM media_folders WHERE parent_path = $1 ORDER BY name ASC', [path]);
         const files = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
+        
+        // DYNAMIC SIGNING
+        const signedFiles = await Promise.all(files.rows.map(async (file) => {
+            try {
+                const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: file.s3_key });
+                // Sign for 1 hour
+                const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+                return { ...file, url: signedUrl };
+            } catch(e) {
+                console.warn(`Failed to sign ${file.s3_key}`, e.message);
+                return file; // Fallback to DB url
+            }
+        }));
+
         res.json({
             folders: folders.rows,
-            files: files.rows
+            files: signedFiles
         });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -1099,30 +1115,38 @@ router.post('/media/sync', async (req, res) => {
                 for (const item of s3Res.Contents) {
                     if (item.Key.startsWith('manifests/')) continue; 
                     
+                    // RECURSIVE FOLDER SYNC FIX
+                    const parts = item.Key.split('/');
+                    const filename = parts.pop();
+                    let currentParent = '/';
+
+                    // Ensure all intermediate folders exist
+                    for (const part of parts) {
+                        const folderName = part;
+                        const parentPath = currentParent;
+                        
+                        // Construct next path
+                        currentParent = currentParent === '/' ? `/${folderName}` : `${currentParent}/${folderName}`;
+
+                        // Optimistic Insert (Ignore if exists)
+                        await queryWithRetry(`
+                            INSERT INTO media_folders (id, name, parent_path, created_at)
+                            VALUES ($1, $2, $3, $4)
+                            ON CONFLICT (name, parent_path) DO NOTHING
+                        `, [`folder_sync_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`, folderName, parentPath, Date.now()]);
+                    }
+
+                    const folderPath = currentParent;
+
+                    // CHECK FILE EXISTENCE
                     const exists = await queryWithRetry('SELECT id FROM media_files WHERE s3_key = $1', [item.Key]);
                     if (exists.rows.length === 0) {
-                        const parts = item.Key.split('/');
-                        const filename = parts.pop();
-                        const folderPath = parts.length > 0 ? '/' + parts.join('/') : '/';
-                        
-                        if (folderPath !== '/') {
-                            const folderName = parts[parts.length - 1];
-                            const parentPath = parts.length > 1 ? '/' + parts.slice(0, -1).join('/') : '/';
-                            await queryWithRetry(`
-                                INSERT INTO media_folders (id, name, parent_path, created_at)
-                                VALUES ($1, $2, $3, $4)
-                                ON CONFLICT (name, parent_path) DO NOTHING
-                            `, [`folder_auto_${Date.now()}_${Math.random()}`, folderName, parentPath, Date.now()]);
-                        }
-
                         let type = 'document';
                         if (filename.match(/\.(jpg|jpeg|png|webp)$/i)) type = 'image';
                         if (filename.match(/\.(mp4|mov)$/i)) type = 'video';
 
-                        let publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${item.Key}`;
-                        if (AWS_REGION && AWS_REGION !== 'us-east-1') {
-                            publicUrl = `https://${BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${item.Key}`;
-                        }
+                        // DB URL is just a placeholder now, we sign on read
+                        const publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${item.Key}`;
 
                         const id = `file_sync_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
                         
