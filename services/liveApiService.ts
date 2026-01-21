@@ -232,10 +232,16 @@ export const liveApiService = {
       return await response.json();
   },
 
-  getPublicShowcase: async (folderName?: string) => {
-      const url = folderName 
-        ? `${API_BASE_URL}/api/public/showcase?folder=${encodeURIComponent(folderName)}`
-        : `${API_BASE_URL}/api/public/showcase`;
+  getPublicShowcase: async (token?: string) => {
+      let url = `${API_BASE_URL}/api/public/showcase`;
+      if (token) {
+          // Robust check: if it looks like an ID, send as folderId, else assume legacy name
+          if (token.startsWith('folder_')) {
+              url += `?folderId=${encodeURIComponent(token)}`;
+          } else {
+              url += `?folder=${encodeURIComponent(token)}`;
+          }
+      }
       const response = await fetchWithRetry(url);
       return await response.json();
   },

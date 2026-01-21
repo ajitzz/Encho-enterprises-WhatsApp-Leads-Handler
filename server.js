@@ -563,17 +563,16 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
     }
 };
 
-// --- SHOWCASE MANIFEST GENERATION ---
+// --- SHOWCASE MANIFEST GENERATION (LEGACY SUPPORT) ---
 const generateShowcaseManifest = async (folderId, folderName) => {
     try {
         const path = `/${folderName}`; 
         const filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
         
-        // Generate Signed URLs for the manifest to ensure robustness
         const items = await Promise.all(filesRes.rows.map(async (row) => {
             try {
                 const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: row.s3_key });
-                const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 86400 }); // 24 hours
+                const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 86400 }); 
                 return {
                     id: row.id,
                     url: signedUrl,
@@ -583,7 +582,7 @@ const generateShowcaseManifest = async (folderId, folderName) => {
             } catch(e) {
                 return {
                     id: row.id,
-                    url: row.url, // Fallback to static
+                    url: row.url, 
                     type: row.type || 'image',
                     filename: row.filename
                 };
@@ -598,18 +597,14 @@ const generateShowcaseManifest = async (folderId, folderName) => {
 
         const jsonString = JSON.stringify(manifest);
         
-        // FIX: Removed ACL to prevent "AccessControlListNotSupported" error on modern S3 buckets
         const command = new PutObjectCommand({
             Bucket: BUCKET_NAME,
             Key: `manifests/${encodeURIComponent(folderName)}.json`,
             ContentType: 'application/json',
             Body: jsonString
-            // ACL: 'public-read'  <-- REMOVED
         });
 
         await s3Client.send(command);
-        console.log(`✅ Generated manifest for ${folderName}`);
-        return manifest;
     } catch(e) {
         console.error("Failed to generate manifest", e);
     }
@@ -1169,26 +1164,38 @@ router.post('/media/sync', async (req, res) => {
     }
 });
 
+// Helper for full path construction
+const getFolderFullPath = (parentPath, folderName) => {
+    if (!parentPath || parentPath === '/') return `/${folderName}`;
+    return `${parentPath}/${folderName}`;
+};
+
 // 10. Public Showcase Data (WITH AUTO-SYNC FALLBACK & AUTO-HEAL)
 router.get('/public/showcase', async (req, res) => {
-    const folderName = req.query.folder;
+    const { folder, folderId } = req.query; // Support new ID param
+    
     try {
-        let folderQuery = 'SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE ORDER BY created_at DESC LIMIT 1';
+        let folderQuery = 'SELECT id, name, parent_path, is_public_showcase FROM media_folders WHERE is_public_showcase = TRUE';
         let params = [];
         
-        if (folderName) {
-            folderQuery = 'SELECT id, name FROM media_folders WHERE name = $1'; 
-            params = [folderName];
+        if (folderId) {
+            folderQuery += ' AND id = $1 LIMIT 1';
+            params = [folderId];
+        } else if (folder) {
+            folderQuery += ' AND name = $1 ORDER BY created_at DESC LIMIT 1';
+            params = [folder];
+        } else {
+            folderQuery += ' ORDER BY created_at DESC LIMIT 1';
         }
 
         let folderRes = await queryWithRetry(folderQuery, params);
         
-        // --- JIT AUTO-DISCOVERY & SYNC ---
-        // If the folder is missing in DB (but potentially exists in S3), let's find it.
-        if (folderRes.rows.length === 0 && folderName) {
-             console.log(`[Showcase] Folder "${folderName}" not found in DB. Checking S3...`);
+        // --- JIT AUTO-DISCOVERY (Legacy Name Support Only) ---
+        // Only run this if we searched by name and failed. ID searches imply we already know it exists in DB.
+        if (folderRes.rows.length === 0 && folder && !folderId) {
+             console.log(`[Showcase] Folder "${folder}" not found in DB. Checking S3...`);
              try {
-                 const s3Prefix = `${folderName}/`;
+                 const s3Prefix = `${folder}/`;
                  const command = new ListObjectsV2Command({ 
                     Bucket: BUCKET_NAME,
                     Prefix: s3Prefix,
@@ -1203,51 +1210,42 @@ router.get('/public/showcase', async (req, res) => {
                         INSERT INTO media_folders (id, name, parent_path, is_public_showcase, created_at)
                         VALUES ($1, $2, '/', TRUE, $3)
                         ON CONFLICT (name, parent_path) DO NOTHING
-                     `, [newFolderId, folderName, Date.now()]);
+                     `, [newFolderId, folder, Date.now()]);
                      
                      // Re-fetch to get the official ID/Row
                      const retryRes = await queryWithRetry(folderQuery, params);
                      if (retryRes.rows.length > 0) {
                          folderRes.rows = retryRes.rows; // Hack the response to continue execution below
                      }
-                 } else {
-                     return res.json({ items: [] }); // Truly empty
                  }
              } catch(e) {
                  console.error("JIT Folder Discovery Failed:", e);
-                 return res.json({ items: [] });
              }
         }
         
         if (folderRes.rows.length === 0) return res.json({ items: [] });
         
-        const folder = folderRes.rows[0];
-        const path = `/${folder.name}`;
+        const folderRow = folderRes.rows[0];
+        
+        // FIX: Construct correct full path for nested folders
+        const path = getFolderFullPath(folderRow.parent_path, folderRow.name);
         
         let filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
         
         // --- JIT AUTO-SYNC V2 (ROBUST) ---
         // If DB is empty, check S3 for files in this folder prefix immediately
         if (filesRes.rows.length === 0) {
-            console.log(`[Showcase] Folder ${folder.name} empty in DB. Triggering JIT S3 Sync...`);
+            console.log(`[Showcase] Folder ${path} empty in DB. Triggering JIT S3 Sync...`);
             try {
-                // 1. Try exact Case Match First
-                let s3Prefix = `${folder.name}/`;
+                // Correct S3 Prefix: remove leading slash, ensure trailing slash
+                let s3Prefix = path.startsWith('/') ? path.slice(1) : path;
+                if (!s3Prefix.endsWith('/')) s3Prefix += '/';
+
                 let command = new ListObjectsV2Command({ 
                     Bucket: BUCKET_NAME,
                     Prefix: s3Prefix
                 });
                 let s3Res = await s3Client.send(command);
-                
-                // 2. Try Lowercase Match (Common S3 pattern)
-                if (!s3Res.Contents || s3Res.Contents.length === 0) {
-                     s3Prefix = `${folder.name.toLowerCase()}/`;
-                     command = new ListObjectsV2Command({ 
-                        Bucket: BUCKET_NAME,
-                        Prefix: s3Prefix
-                    });
-                    s3Res = await s3Client.send(command);
-                }
                 
                 if (s3Res.Contents && s3Res.Contents.length > 0) {
                     let addedCount = 0;
@@ -1280,7 +1278,7 @@ router.get('/public/showcase', async (req, res) => {
                         filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
                         
                         // Async generate manifest for next time
-                        generateShowcaseManifest(folder.id, folder.name);
+                        generateShowcaseManifest(folderRow.id, folderRow.name);
                     }
                 }
             } catch (s3Err) {
@@ -1312,7 +1310,7 @@ router.get('/public/showcase', async (req, res) => {
         }));
         
         res.json({
-            title: folder.name,
+            title: folderRow.name,
             items: items
         });
     } catch (e) {

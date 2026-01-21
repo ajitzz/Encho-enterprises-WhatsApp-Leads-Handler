@@ -20,7 +20,7 @@ import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Set
 
 export default function App() {
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
-  const [showcaseFolderName, setShowcaseFolderName] = useState<string | undefined>(undefined);
+  const [showcaseToken, setShowcaseToken] = useState<string | undefined>(undefined);
 
   useEffect(() => {
       const path = window.location.pathname;
@@ -28,7 +28,7 @@ export default function App() {
           setIsShowcaseMode(true);
           const parts = path.split('/showcase/');
           if (parts.length > 1 && parts[1].trim() !== '') {
-              setShowcaseFolderName(decodeURIComponent(parts[1]));
+              setShowcaseToken(decodeURIComponent(parts[1]));
           }
       }
       
@@ -369,7 +369,7 @@ export default function App() {
   };
 
   if (isShowcaseMode) {
-      return <PublicShowcase folderName={showcaseFolderName} />;
+      return <PublicShowcase folderName={showcaseToken} />;
   }
 
   return (
