@@ -750,6 +750,16 @@ async function runBotEngine(driver, text, buttonId, from) {
     if (!currentStep) {
         const entryStep = botSettings.steps.find(s => s.id === botSettings.entryPointId) || botSettings.steps[0];
         if (entryStep) {
+            // FIX: Validate Entry Step Content Before Updating DB State
+            const rawText = entryStep.message || "";
+            const isPlaceholder = /replace\s+this|enter\s+your|type\s+your|sample\s+message/i.test(rawText);
+            const isEmpty = !rawText.trim() && !entryStep.mediaUrl && !entryStep.templateName && (!entryStep.buttons || entryStep.buttons.length === 0);
+
+            if (isPlaceholder || isEmpty) {
+                console.warn(`[Bot Engine] Entry step '${entryStep.id}' blocked due to invalid/empty content. Fix Bot Flow.`);
+                return; // ABORT: Do not update DB state. Driver remains at NULL step.
+            }
+
             replyContent = entryStep;
             await queryWithRetry('UPDATE drivers SET current_bot_step_id = $1, updated_at = $3 WHERE id = $2', [entryStep.id, driver.id, Date.now()]);
         }
