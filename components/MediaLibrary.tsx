@@ -170,8 +170,8 @@ export const MediaLibrary = () => {
                 await liveApiService.setPublicFolder(folder.id);
                 await loadMedia(currentPath);
                 checkGlobalStatus();
-                // Generate deep link with ID for stability
-                setShareUrl(`${window.location.origin}/showcase/${encodeURIComponent(folder.id)}`); 
+                // Generate deep link with NAME for better readability
+                setShareUrl(`${window.location.origin}/showcase/${encodeURIComponent(folder.name)}`); 
             } catch(e) { alert("Failed to start showcase"); }
         }
     };
@@ -190,8 +190,8 @@ export const MediaLibrary = () => {
         }
     };
 
-    const handleOpenShare = (folderId: string) => {
-        setShareUrl(`${window.location.origin}/showcase/${encodeURIComponent(folderId)}`);
+    const handleOpenShare = (folderName: string) => {
+        setShareUrl(`${window.location.origin}/showcase/${encodeURIComponent(folderName)}`);
     };
 
     // Shared handler for Create and Rename
@@ -470,7 +470,7 @@ export const MediaLibrary = () => {
                                             
                                             {folder.is_public_showcase && (
                                                 <button
-                                                    onClick={(e) => { e.stopPropagation(); handleOpenShare(folder.id); }}
+                                                    onClick={(e) => { e.stopPropagation(); handleOpenShare(folder.name); }}
                                                     className="p-1.5 rounded-full transition-colors text-blue-500 bg-blue-50 hover:bg-blue-100"
                                                     title="Get Share Link"
                                                 >

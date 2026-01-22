@@ -235,12 +235,9 @@ export const liveApiService = {
   getPublicShowcase: async (token?: string) => {
       let url = `${API_BASE_URL}/api/public/showcase`;
       if (token) {
-          // Robust check: if it looks like an ID, send as folderId, else assume legacy name
-          if (token.startsWith('folder_')) {
-              url += `?folderId=${encodeURIComponent(token)}`;
-          } else {
-              url += `?folder=${encodeURIComponent(token)}`;
-          }
+          // Changed to always use generic 'folder' param, letting backend handle Name OR ID resolution.
+          // This supports both human-readable names and stable IDs.
+          url += `?folder=${encodeURIComponent(token)}`;
       }
       const response = await fetchWithRetry(url);
       return await response.json();
