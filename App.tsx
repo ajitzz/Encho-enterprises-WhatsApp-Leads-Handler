@@ -11,9 +11,11 @@ import { BotBuilder } from './components/BotBuilder';
 import { AssistantChat } from './components/AssistantChat';
 import { MediaLibrary } from './components/MediaLibrary';
 import { PublicShowcase } from './components/PublicShowcase'; 
-import { PrivacyPolicy } from './components/PrivacyPolicy'; // NEW
+import { PrivacyPolicy } from './components/PrivacyPolicy'; 
+import { TermsOfService } from './components/TermsOfService'; // NEW
+import { DataDeletion } from './components/DataDeletion'; // NEW
 import { SystemMonitor } from './components/SystemMonitor'; 
-import { SettingsModal } from './components/SettingsModal'; // NEW
+import { SettingsModal } from './components/SettingsModal'; 
 import { mockBackend } from './services/mockBackend';
 import { liveApiService } from './services/liveApiService';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
@@ -21,15 +23,23 @@ import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Set
 
 export default function App() {
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
-  const [isPrivacyMode, setIsPrivacyMode] = useState(false);
+  const [activePublicPage, setActivePublicPage] = useState<'none' | 'privacy' | 'terms' | 'deletion'>('none');
   const [showcaseToken, setShowcaseToken] = useState<string | undefined>(undefined);
 
   useEffect(() => {
       const path = window.location.pathname;
       
-      // Privacy Policy Route
+      // Public Pages Routing
       if (path === '/privacy-policy') {
-          setIsPrivacyMode(true);
+          setActivePublicPage('privacy');
+          return;
+      }
+      if (path === '/terms' || path === '/terms-of-service') {
+          setActivePublicPage('terms');
+          return;
+      }
+      if (path === '/data-deletion') {
+          setActivePublicPage('deletion');
           return;
       }
 
@@ -53,7 +63,7 @@ export default function App() {
   const [selectedBulkIds, setSelectedBulkIds] = useState<string[]>([]);
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [showWebhookModal, setShowWebhookModal] = useState(false);
-  const [showSettingsModal, setShowSettingsModal] = useState(false); // NEW STATE
+  const [showSettingsModal, setShowSettingsModal] = useState(false); 
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
   const [isRepeatToggling, setIsRepeatToggling] = useState(false);
@@ -72,7 +82,7 @@ export default function App() {
   }, [activeTab, dataSource]);
 
   useEffect(() => {
-    if (isShowcaseMode || isPrivacyMode) return; 
+    if (isShowcaseMode || activePublicPage !== 'none') return; 
 
     let unsubscribe: () => void = () => {};
 
@@ -124,7 +134,7 @@ export default function App() {
 
     fetchData();
     return () => unsubscribe();
-  }, [dataSource, activeTab, isShowcaseMode, isPrivacyMode]); 
+  }, [dataSource, activeTab, isShowcaseMode, activePublicPage]); 
 
   // Updated Driver Selection with Lazy Loading
   const handleSelectDriver = async (driver: Driver) => {
@@ -378,13 +388,11 @@ export default function App() {
     new: drivers.filter(d => d.status === LeadStatus.NEW).length
   };
 
-  if (isPrivacyMode) {
-      return <PrivacyPolicy />;
-  }
-
-  if (isShowcaseMode) {
-      return <PublicShowcase folderName={showcaseToken} />;
-  }
+  // --- ROUTING HANDLERS ---
+  if (activePublicPage === 'privacy') return <PrivacyPolicy />;
+  if (activePublicPage === 'terms') return <TermsOfService />;
+  if (activePublicPage === 'deletion') return <DataDeletion />;
+  if (isShowcaseMode) return <PublicShowcase folderName={showcaseToken} />;
 
   return (
     <>
