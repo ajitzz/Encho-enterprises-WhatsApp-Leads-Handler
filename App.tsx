@@ -11,6 +11,7 @@ import { BotBuilder } from './components/BotBuilder';
 import { AssistantChat } from './components/AssistantChat';
 import { MediaLibrary } from './components/MediaLibrary';
 import { PublicShowcase } from './components/PublicShowcase'; 
+import { PrivacyPolicy } from './components/PrivacyPolicy'; // NEW
 import { SystemMonitor } from './components/SystemMonitor'; 
 import { SettingsModal } from './components/SettingsModal'; // NEW
 import { mockBackend } from './services/mockBackend';
@@ -20,10 +21,19 @@ import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Set
 
 export default function App() {
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
+  const [isPrivacyMode, setIsPrivacyMode] = useState(false);
   const [showcaseToken, setShowcaseToken] = useState<string | undefined>(undefined);
 
   useEffect(() => {
       const path = window.location.pathname;
+      
+      // Privacy Policy Route
+      if (path === '/privacy-policy') {
+          setIsPrivacyMode(true);
+          return;
+      }
+
+      // Public Showcase Route
       if (path.startsWith('/showcase')) {
           setIsShowcaseMode(true);
           const parts = path.split('/showcase/');
@@ -62,7 +72,7 @@ export default function App() {
   }, [activeTab, dataSource]);
 
   useEffect(() => {
-    if (isShowcaseMode) return; 
+    if (isShowcaseMode || isPrivacyMode) return; 
 
     let unsubscribe: () => void = () => {};
 
@@ -114,7 +124,7 @@ export default function App() {
 
     fetchData();
     return () => unsubscribe();
-  }, [dataSource, activeTab, isShowcaseMode]); 
+  }, [dataSource, activeTab, isShowcaseMode, isPrivacyMode]); 
 
   // Updated Driver Selection with Lazy Loading
   const handleSelectDriver = async (driver: Driver) => {
@@ -367,6 +377,10 @@ export default function App() {
     qualified: drivers.filter(d => d.status === LeadStatus.QUALIFIED).length,
     new: drivers.filter(d => d.status === LeadStatus.NEW).length
   };
+
+  if (isPrivacyMode) {
+      return <PrivacyPolicy />;
+  }
 
   if (isShowcaseMode) {
       return <PublicShowcase folderName={showcaseToken} />;
