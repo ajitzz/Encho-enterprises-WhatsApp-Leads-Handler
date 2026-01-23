@@ -191,8 +191,38 @@ export const liveApiService = {
   },
 
   uploadMedia: async (file: File, folderPath: string = '/') => {
+      // STRATEGY: Smart Routing based on File Size
+      // Files < 4.5MB: Use Proxy (Bypasses CORS entirely, no AWS config needed by user)
+      // Files > 4.5MB: Use Direct Upload (Requires AWS CORS config)
+      
+      const PROXY_LIMIT = 4.5 * 1024 * 1024; // 4.5 MB (Vercel limit)
+
+      if (file.size < PROXY_LIMIT) {
+          try {
+              const formData = new FormData();
+              formData.append('file', file);
+              formData.append('folderPath', folderPath);
+
+              const response = await fetch(`${API_BASE_URL}/api/s3/proxy-upload`, {
+                  method: 'POST',
+                  body: formData
+              });
+
+              if (!response.ok) {
+                  const err = await response.json();
+                  throw new Error(err.error || "Proxy upload failed");
+              }
+              
+              const result = await response.json();
+              return { url: result.url, type: result.type };
+          } catch (e: any) {
+              console.warn("Proxy upload failed, falling back to direct...", e);
+              // Fallthrough to Direct Upload if proxy server is down
+          }
+      }
+
+      // Direct Upload Logic (For large files OR if proxy failed)
       try {
-          // 1. Try Direct Upload (Preferred for speed & large files)
           const presignResponse = await fetchWithRetry(`${API_BASE_URL}/api/s3/presign`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -220,30 +250,8 @@ export const liveApiService = {
           return { url: publicUrl, type: fileType };
 
       } catch (error: any) {
-          console.warn("Direct upload failed, attempting proxy fallback...", error);
-          
-          // 2. Fallback to Proxy Upload (Bypasses CORS, supports files < 4.5MB)
-          // We limit this check to ensure we don't crash Vercel/Node with huge files
-          if (file.size < 4.5 * 1024 * 1024) {
-              const formData = new FormData();
-              formData.append('file', file);
-              formData.append('folderPath', folderPath);
-
-              const response = await fetch(`${API_BASE_URL}/api/s3/proxy-upload`, {
-                  method: 'POST',
-                  body: formData
-              });
-
-              if (!response.ok) {
-                  const err = await response.json();
-                  throw new Error(err.error || "Proxy upload failed");
-              }
-              
-              const result = await response.json();
-              return { url: result.url, type: result.type };
-          }
-          
-          // If file too big or proxy failed, throw original error
+          // If we are here, both Proxy (if attempted) and Direct failed.
+          // This is likely a CORS issue for the Direct Upload.
           throw error;
       }
   },
