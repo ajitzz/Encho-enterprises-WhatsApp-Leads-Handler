@@ -1,5 +1,6 @@
+
 import React, { useState } from 'react';
-import { X, CheckCircle, AlertCircle, Loader2, Globe, Shield, Key, Smartphone, Lock, HelpCircle } from 'lucide-react';
+import { X, CheckCircle, AlertCircle, Loader2, Globe, Shield, Key, Smartphone, Lock, HelpCircle, AlertTriangle, ExternalLink } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface WebhookConfigModalProps {
@@ -107,6 +108,22 @@ export const WebhookConfigModal: React.FC<WebhookConfigModalProps> = ({ onClose,
 
         {activeTab === 'creds' ? (
              <form onSubmit={handleUpdateCreds} className="p-6 space-y-4">
+                
+                {/* TROUBLESHOOTING TIP */}
+                <div className="bg-red-50 text-red-900 text-xs p-3 rounded-lg border border-red-200 shadow-sm">
+                    <h4 className="font-bold flex items-center gap-1 mb-1 text-red-700"><AlertTriangle size={14} /> Only working for you?</h4>
+                    <p>Your app is Live, but you likely have "Standard Access" permissions.</p>
+                    <ol className="list-decimal pl-4 mt-2 space-y-1">
+                        <li>Go to <strong>Meta App Dashboard</strong> &gt; <strong>App Review</strong>.</li>
+                        <li>Click <strong>Permissions and Features</strong>.</li>
+                        <li>Find <strong>whatsapp_business_messaging</strong>.</li>
+                        <li>It must say <strong>Advanced Access</strong>. If it says Standard, click <strong>Request Advanced Access</strong>.</li>
+                    </ol>
+                    <a href="https://developers.facebook.com/apps" target="_blank" className="flex items-center gap-1 mt-2 font-bold underline">
+                        Open Dashboard <ExternalLink size={10} />
+                    </a>
+                </div>
+
                 <div className="bg-blue-50 text-blue-800 text-xs p-3 rounded-lg border border-blue-100 mb-2">
                     <h4 className="font-bold flex items-center gap-1 mb-1"><HelpCircle size={12} /> Finding the Correct ID:</h4>
                     <p className="mb-2">Go to <strong>Meta Developers &gt; WhatsApp &gt; API Setup</strong>.</p>

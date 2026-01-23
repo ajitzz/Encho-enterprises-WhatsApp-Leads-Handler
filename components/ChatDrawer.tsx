@@ -5,7 +5,8 @@ import {
   X, Send, Image as ImageIcon, Video, CheckCircle, UserX, Car, Clock, 
   ShieldCheck, ChevronRight, Facebook, Globe, Headset, MicOff, Phone, 
   FileText, Sparkles, MapPin, ExternalLink, LayoutTemplate, Calendar,
-  Download, Eye, AlertCircle, File, List, Filter, AlertTriangle, ArrowUp
+  Download, Eye, AlertCircle, File, List, Filter, AlertTriangle, ArrowUp,
+  Check, CheckCheck
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
@@ -339,8 +340,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                                 <div className={`text-[10px] mt-1 text-right opacity-60 flex items-center justify-end gap-1`}>
                                     {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                                     {msg.sender !== 'driver' && msg.status && (
-                                        <span className={`capitalize ${msg.status === 'failed' ? 'text-red-300 font-bold' : ''}`}>
-                                            • {msg.status}
+                                        <span className={`capitalize flex items-center gap-1 ${msg.status === 'failed' ? 'text-red-300 font-bold' : ''}`}>
+                                            {/* WhatsApp Style Ticks */}
+                                            {msg.status === 'sent' && <Check size={12} />}
+                                            {msg.status === 'delivered' && <CheckCheck size={12} />}
+                                            {msg.status === 'read' && <CheckCheck size={12} className="text-blue-300" />}
+                                            {msg.status}
                                         </span>
                                     )}
                                 </div>

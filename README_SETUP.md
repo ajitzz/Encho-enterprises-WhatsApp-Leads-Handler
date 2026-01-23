@@ -61,6 +61,28 @@ Now send a WhatsApp message to the test number. It will appear on your dashboard
 
 ---
 
+# 🌍 GOING LIVE (CRITICAL FOR PUBLIC ACCESS)
+
+### Step 1: Switch to Live Mode
+1.  Go to [developers.facebook.com/apps](https://developers.facebook.com/apps).
+2.  Select your App (**Encho Messanger**).
+3.  Ensure the top toggle says **"App Mode: Live"**.
+
+### Step 2: Request Advanced Access (THE FIX)
+Even if your app is "Live", you might be restricted to "Standard Access", which only allows messaging admins/testers.
+
+1.  In the left sidebar of your App Dashboard, click **App Review** > **Permissions and Features**.
+2.  Search for **`whatsapp_business_messaging`**.
+3.  Check the **Access Level** column.
+    *   If it says **Standard Access**, the bot will **IGNORE** customers.
+    *   Click **Request Advanced Access**.
+4.  Once it says **Advanced Access**, your bot will reply to everyone.
+
+### Step 3: Add Payment Method
+To avoid messaging limits, ensure a payment method is added to your WhatsApp Business Account in [Business Manager](https://business.facebook.com/settings/whatsapp-accounts).
+
+---
+
 # 🚀 24/7 Hosting Guide (Always On)
 
 To keep the automation running while you sleep, use one of these methods:
