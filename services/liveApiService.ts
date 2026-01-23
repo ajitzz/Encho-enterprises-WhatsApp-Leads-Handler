@@ -191,30 +191,61 @@ export const liveApiService = {
   },
 
   uploadMedia: async (file: File, folderPath: string = '/') => {
-      const presignResponse = await fetchWithRetry(`${API_BASE_URL}/api/s3/presign`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filename: file.name, fileType: file.type, folderPath })
-      });
-      
-      const { uploadUrl, key, publicUrl } = await presignResponse.json();
+      try {
+          // 1. Try Direct Upload (Preferred for speed & large files)
+          const presignResponse = await fetchWithRetry(`${API_BASE_URL}/api/s3/presign`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ filename: file.name, fileType: file.type, folderPath })
+          });
+          
+          const { uploadUrl, key, publicUrl } = await presignResponse.json();
 
-      const uploadResponse = await fetch(uploadUrl, {
-          method: 'PUT',
-          body: file,
-          headers: { 'Content-Type': file.type }
-      });
+          const uploadResponse = await fetch(uploadUrl, {
+              method: 'PUT',
+              body: file,
+              headers: { 'Content-Type': file.type }
+          });
 
-      if (!uploadResponse.ok) throw new Error(`Upload failed: ${uploadResponse.statusText}`);
+          if (!uploadResponse.ok) throw new Error(`Direct upload failed: ${uploadResponse.statusText}`);
 
-      const fileType = file.type.split('/')[0];
-      const registerResponse = await fetchWithRetry(`${API_BASE_URL}/api/files/register`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key, url: publicUrl, filename: file.name, type: fileType, folderPath })
-      });
+          // Register in DB
+          const fileType = file.type.split('/')[0];
+          await fetchWithRetry(`${API_BASE_URL}/api/files/register`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ key, url: publicUrl, filename: file.name, type: fileType, folderPath })
+          });
 
-      return { url: publicUrl, type: fileType };
+          return { url: publicUrl, type: fileType };
+
+      } catch (error: any) {
+          console.warn("Direct upload failed, attempting proxy fallback...", error);
+          
+          // 2. Fallback to Proxy Upload (Bypasses CORS, supports files < 4.5MB)
+          // We limit this check to ensure we don't crash Vercel/Node with huge files
+          if (file.size < 4.5 * 1024 * 1024) {
+              const formData = new FormData();
+              formData.append('file', file);
+              formData.append('folderPath', folderPath);
+
+              const response = await fetch(`${API_BASE_URL}/api/s3/proxy-upload`, {
+                  method: 'POST',
+                  body: formData
+              });
+
+              if (!response.ok) {
+                  const err = await response.json();
+                  throw new Error(err.error || "Proxy upload failed");
+              }
+              
+              const result = await response.json();
+              return { url: result.url, type: result.type };
+          }
+          
+          // If file too big or proxy failed, throw original error
+          throw error;
+      }
   },
 
   syncFromS3: async () => {

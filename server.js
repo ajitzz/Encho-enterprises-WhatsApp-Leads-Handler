@@ -9,6 +9,7 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const crypto = require('crypto');
+const multer = require('multer'); // Added for Proxy Upload
 const { Pool } = require('pg'); 
 const { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
@@ -38,6 +39,12 @@ app.set('etag', false);
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     next();
+});
+
+// --- FILE UPLOAD CONFIG (PROXY FALLBACK) ---
+const upload = multer({ 
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 4.5 * 1024 * 1024 } // 4.5MB limit for Vercel Serverless
 });
 
 // --- DYNAMIC CREDENTIALS ---
@@ -611,6 +618,48 @@ const generateShowcaseManifest = async (folderId, folderName) => {
 };
 
 // --- API ENDPOINTS ---
+
+// PROXY UPLOAD ENDPOINT (CORS BYPASS)
+router.post('/s3/proxy-upload', upload.single('file'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: "No file provided" });
+    
+    const { folderPath = '/' } = req.body;
+    const safePath = folderPath.startsWith('/') ? folderPath.slice(1) : folderPath;
+    const prefix = safePath ? `${safePath}/` : '';
+    const key = `${prefix}${Date.now()}_${req.file.originalname.replace(/\s+/g, '_')}`;
+
+    try {
+        const command = new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: key,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype
+        });
+        await s3Client.send(command);
+
+        let publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${key}`;
+        if (AWS_REGION && AWS_REGION !== 'us-east-1') {
+            publicUrl = `https://${BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${key}`;
+        }
+
+        // Auto-register in DB for consistency
+        const id = `file_proxy_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+        
+        let mediaType = 'document';
+        if (req.file.mimetype.match(/^image\//)) mediaType = 'image';
+        if (req.file.mimetype.match(/^video\//)) mediaType = 'video';
+
+        await queryWithRetry(`
+            INSERT INTO media_files (id, folder_path, filename, s3_key, url, type, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [id, folderPath, req.file.originalname, key, publicUrl, mediaType, Date.now()]);
+        
+        res.json({ success: true, url: publicUrl, type: mediaType });
+    } catch(e) {
+        console.error("Proxy Upload Error:", e);
+        res.status(500).json({ error: e.message || "Proxy upload failed" });
+    }
+});
 
 router.post('/messages/send', async (req, res) => {
     const { driverId, text, clientMessageId, ...attachments } = req.body;
