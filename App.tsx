@@ -243,7 +243,8 @@ export default function App() {
                 sender: 'agent',
                 text: text,
                 timestamp: Date.now(),
-                type: 'text'
+                type: 'text',
+                status: 'sent' // Explicitly set SENT status for optimistic UI (Checkmark)
             };
             // Manually append the message locally so we don't need to re-fetch immediately
             const updatedDriver = {

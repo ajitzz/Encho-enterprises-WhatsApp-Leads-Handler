@@ -185,11 +185,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     // 3. Standard Text Path
     else {
         try {
-            await liveApiService.sendMessage(driver.id, replyText);
-            onUpdateDriver(driver.id, { 
-                lastMessage: replyText, 
-                lastMessageTime: Date.now() 
-            });
+            // FIX: Use parent prop handler to ensure immediate UI update (optimistic)
+            await onSendMessage(replyText);
             setReplyText('');
         } catch(e: any) {
             alert(`Message Failed: ${e.message}`);
