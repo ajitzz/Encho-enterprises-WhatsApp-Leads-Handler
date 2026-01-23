@@ -218,14 +218,7 @@ const MIGRATION_QUERIES = `
     
     -- Ensure Media Tables Columns (Self-Healing)
     ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS is_public_showcase BOOLEAN DEFAULT FALSE;
-    
-    -- CRITICAL MEDIA FILES MIGRATIONS (Fixes Proxy Upload 500 Error)
     ALTER TABLE media_files ADD COLUMN IF NOT EXISTS media_id TEXT;
-    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS s3_key TEXT;
-    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS url TEXT;
-    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS type TEXT;
-    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS folder_path TEXT DEFAULT '/';
-    ALTER TABLE media_files ADD COLUMN IF NOT EXISTS filename TEXT;
     
     -- Critical Fix for "created_at does not exist" error
     ALTER TABLE media_folders ADD COLUMN IF NOT EXISTS created_at BIGINT DEFAULT (extract(epoch from now()) * 1000);
