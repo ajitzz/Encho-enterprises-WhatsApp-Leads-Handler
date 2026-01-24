@@ -27,7 +27,7 @@ import {
   GripVertical, MousePointerClick, FileCode, Brush, Eye, 
   ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, 
   HelpCircle, Split, GitBranch, ArrowRight, AlertTriangle, File, 
-  Loader2, RefreshCw, Bold, Italic, CreditCard, MapPin, Phone, Globe, Clock
+  Loader2, RefreshCw, Bold, Italic, CreditCard, MapPin, Phone, Globe, Clock, FileText
 } from 'lucide-react';
 
 // --- STYLES ---
@@ -49,6 +49,7 @@ const getIconForLabel = (label: string) => {
         case 'Rich Card': return <CreditCard size={14} />;
         case 'Image': return <ImageIcon size={14} />;
         case 'Video': return <Video size={14} />;
+        case 'Document': return <FileText size={14} />;
         case 'Question':
         case 'Quick Reply': 
         case 'List': return <GitBranch size={14} />;
@@ -61,6 +62,7 @@ const getIconForLabel = (label: string) => {
 // --- NODE PREVIEW CARD ---
 const NodePreviewCard = ({ data, id, selected }: any) => {
   const isMediaType = ['Image', 'Video'].includes(data.label);
+  const isDocType = data.label === 'Document';
   const isOptionType = ['Quick Reply', 'List', 'Question'].includes(data.label) || data.inputType === 'option';
   const isCardType = data.label === 'Rich Card';
   const isLinkType = data.label === 'Link';
@@ -68,13 +70,15 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
   // Validation Checks
   const hasPlaceholder = data.message && /replace\s+this|enter\s+your|type\s+your|sample\s+message/i.test(data.message);
   const isEmptyOptions = isOptionType && (!data.options || data.options.length === 0);
-  const isDanger = hasPlaceholder || isEmptyOptions;
+  const isEmptyMedia = (isMediaType || isDocType) && !data.mediaUrl;
+  const isDanger = hasPlaceholder || isEmptyOptions || isEmptyMedia;
 
   let borderColor = 'border-gray-200';
   let accentColor = 'bg-gray-50';
   let iconColor = 'text-gray-500';
 
   if (isMediaType) { borderColor = 'border-amber-200'; accentColor = 'bg-amber-50'; iconColor = 'text-amber-600'; }
+  else if (isDocType) { borderColor = 'border-orange-200'; accentColor = 'bg-orange-50'; iconColor = 'text-orange-600'; }
   else if (isOptionType) { borderColor = 'border-violet-300'; accentColor = 'bg-violet-50'; iconColor = 'text-violet-600'; }
   else if (isCardType) { borderColor = 'border-pink-300'; accentColor = 'bg-pink-50'; iconColor = 'text-pink-600'; }
   else if (isLinkType) { borderColor = 'border-sky-200'; accentColor = 'bg-sky-50'; iconColor = 'text-sky-600'; }
@@ -123,6 +127,39 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
                 </div>
             )}
 
+            {/* MEDIA PREVIEW (Image/Video) */}
+            {isMediaType && (
+                <div className="mb-3 rounded-lg bg-gray-100 border border-gray-200 aspect-video overflow-hidden relative flex items-center justify-center">
+                    {data.mediaUrl ? (
+                        data.label === 'Video' ? (
+                            <video src={data.mediaUrl} className="w-full h-full object-cover" muted />
+                        ) : (
+                            <img src={data.mediaUrl} className="w-full h-full object-cover" alt="media" />
+                        )
+                    ) : (
+                        <div className="flex flex-col items-center text-gray-400">
+                            {data.label === 'Video' ? <Video size={24} /> : <ImageIcon size={24} />}
+                            <span className="text-[10px] mt-1">No {data.label} Selected</span>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* DOCUMENT PREVIEW */}
+            {isDocType && (
+                <div className="mb-3 p-3 rounded-lg bg-orange-50 border border-orange-200 flex items-center gap-3">
+                    <div className="bg-white p-2 rounded border border-orange-100">
+                        <FileText size={20} className="text-orange-500" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <span className="text-xs font-bold text-gray-800 block truncate">
+                            {data.mediaUrl ? data.mediaUrl.split('/').pop() : 'No Document Selected'}
+                        </span>
+                        <span className="text-[10px] text-gray-500 uppercase">PDF / DOC</span>
+                    </div>
+                </div>
+            )}
+
             {/* RICH CARD HEADER IMAGE */}
             {isCardType && data.headerImageUrl && (
                 <div className="mb-3 rounded-t-lg bg-gray-100 border border-gray-200 aspect-video overflow-hidden relative">
@@ -141,7 +178,7 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
             )}
 
             {/* Message Text */}
-            {data.label !== 'Image' && data.label !== 'Video' && (
+            {data.label !== 'Image' && data.label !== 'Video' && data.label !== 'Document' && (
                 <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 mb-3 relative overflow-hidden">
                     <p className={`text-xs leading-relaxed font-medium whitespace-pre-wrap ${hasPlaceholder ? 'text-red-600 font-bold' : 'text-gray-700'}`}>
                         {data.message || <span className="italic text-gray-300">No content...</span>}
@@ -149,6 +186,13 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
                     {isCardType && data.footerText && (
                         <p className="text-[10px] text-gray-400 mt-2 border-t border-gray-200 pt-1">{data.footerText}</p>
                     )}
+                </div>
+            )}
+
+            {/* Caption for Media Nodes */}
+            {(isMediaType || isDocType) && data.message && (
+                <div className="bg-gray-50 p-2 rounded border border-gray-100 mb-3">
+                    <p className="text-xs text-gray-600 italic">Caption: {data.message}</p>
                 </div>
             )}
 
@@ -194,7 +238,7 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
 const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onChange: (id: string, data: any) => void }) => {
     const [localData, setLocalData] = useState<any>(selectedNode.data);
     const [showMediaPicker, setShowMediaPicker] = useState(false);
-    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const [pickerTarget, setPickerTarget] = useState<'header' | 'main'>('main');
 
     useEffect(() => { setLocalData(selectedNode.data); }, [selectedNode]);
 
@@ -220,7 +264,18 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
         update('buttons', newButtons);
     };
 
+    const handleMediaSelect = (url: string, type: string) => {
+        if (pickerTarget === 'header') {
+            update('headerImageUrl', url);
+        } else {
+            update('mediaUrl', url);
+            update('mediaType', type);
+        }
+        setShowMediaPicker(false);
+    };
+
     const isCardType = localData.label === 'Rich Card';
+    const isMediaNode = ['Image', 'Video', 'Document'].includes(localData.label);
 
     return (
         <div className="w-80 bg-white border-l border-gray-200 flex flex-col h-full shadow-xl z-20">
@@ -269,9 +324,45 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                                 <button onClick={() => update('headerImageUrl', '')} className="absolute top-1 right-1 bg-red-500 text-white p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={12} /></button>
                             </div>
                         ) : (
-                            <button onClick={() => setShowMediaPicker(true)} className="w-full py-6 border-2 border-dashed border-gray-200 rounded-lg text-gray-400 hover:border-blue-300 hover:text-blue-500 flex flex-col items-center gap-2">
+                            <button 
+                                onClick={() => { setPickerTarget('header'); setShowMediaPicker(true); }} 
+                                className="w-full py-6 border-2 border-dashed border-gray-200 rounded-lg text-gray-400 hover:border-blue-300 hover:text-blue-500 flex flex-col items-center gap-2 transition-colors"
+                            >
                                 <ImageIcon size={20} />
-                                <span className="text-xs font-medium">Add Header Image</span>
+                                <span className="text-xs font-medium">Select Header from Library</span>
+                            </button>
+                        )}
+                    </div>
+                )}
+
+                {/* MAIN MEDIA SELECTOR (Image, Video, Document) */}
+                {isMediaNode && (
+                    <div className="space-y-2 pb-4 border-b border-gray-100">
+                        <label className="text-xs font-bold text-gray-500 uppercase">{localData.label} Source</label>
+                        {localData.mediaUrl ? (
+                            <div className="relative rounded-lg bg-gray-50 border border-gray-200 p-2 flex items-center gap-2 group">
+                                {localData.label === 'Video' ? <Video size={16} className="text-purple-500" /> : 
+                                 localData.label === 'Document' ? <FileText size={16} className="text-orange-500" /> : 
+                                 <ImageIcon size={16} className="text-blue-500" />}
+                                
+                                <span className="text-xs text-gray-700 truncate flex-1" title={localData.mediaUrl}>
+                                    {localData.mediaUrl.split('/').pop()}
+                                </span>
+                                
+                                <button 
+                                    onClick={() => { update('mediaUrl', ''); update('mediaType', ''); }} 
+                                    className="text-red-500 p-1 hover:bg-red-50 rounded"
+                                >
+                                    <Trash2 size={14} />
+                                </button>
+                            </div>
+                        ) : (
+                            <button 
+                                onClick={() => { setPickerTarget('main'); setShowMediaPicker(true); }}
+                                className="w-full py-4 border-2 border-dashed border-gray-200 rounded-lg text-gray-500 hover:border-blue-400 hover:text-blue-600 hover:bg-blue-50 transition-all flex flex-col items-center gap-1"
+                            >
+                                <Cloud size={20} />
+                                <span className="text-xs font-bold">Select {localData.label} from S3 Library</span>
                             </button>
                         )}
                     </div>
@@ -279,7 +370,9 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
 
                 {/* Body Text */}
                 <div className="space-y-2">
-                    <label className="text-xs font-bold text-gray-500 uppercase">Message Body</label>
+                    <label className="text-xs font-bold text-gray-500 uppercase">
+                        {isMediaNode ? 'Caption (Optional)' : 'Message Body'}
+                    </label>
                     <textarea 
                         className="w-full h-32 p-3 bg-white border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none"
                         value={localData.message || ''}
@@ -356,8 +449,13 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
             <MediaSelectorModal 
                 isOpen={showMediaPicker} 
                 onClose={() => setShowMediaPicker(false)}
-                onSelect={(url: string) => { update('headerImageUrl', url); setShowMediaPicker(false); }}
-                allowedType="Image"
+                onSelect={handleMediaSelect}
+                allowedType={
+                    pickerTarget === 'header' ? 'Image' : 
+                    localData.label === 'Image' ? 'Image' : 
+                    localData.label === 'Video' ? 'Video' : 
+                    localData.label === 'Document' ? 'Document' : 'All'
+                }
             />
         </div>
     );
@@ -449,6 +547,8 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 inputType,
                 buttons: [], // Init for cards
                 headerImageUrl: '',
+                mediaUrl: '',
+                mediaType: '',
                 templateName: '',
                 delay: 0
             },
@@ -521,6 +621,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 nextStepId, 
                 routes: Object.keys(routes).length > 0 ? routes : undefined, 
                 mediaUrl: cleanData.mediaUrl,
+                mediaType: cleanData.mediaType,
                 linkLabel: cleanData.linkLabel
             });
         });
@@ -562,6 +663,7 @@ const FlowEditor = ({ isLiveMode }: { isLiveMode: boolean }) => {
                             <DraggableSidebarItem type="card" inputType="card" label="Rich Card" icon={<CreditCard size={16} />} />
                             <DraggableSidebarItem type="image" label="Image" icon={<ImageIcon size={16} />} />
                             <DraggableSidebarItem type="video" label="Video" icon={<Video size={16} />} />
+                            <DraggableSidebarItem type="document" label="Document" icon={<FileText size={16} />} />
                         </div>
                     </div>
                     <div>

@@ -6,9 +6,10 @@ import {
   ShieldCheck, ChevronRight, Facebook, Globe, Headset, MicOff, Phone, 
   FileText, Sparkles, MapPin, ExternalLink, LayoutTemplate, Calendar,
   Download, Eye, AlertCircle, File, List, Filter, AlertTriangle, ArrowUp,
-  Check, CheckCheck, Timer
+  Check, CheckCheck, Timer, Paperclip, Cloud
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
+import { MediaSelectorModal } from './MediaSelectorModal';
 
 interface ChatDrawerProps {
   driver: Driver | null;
@@ -32,6 +33,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [scheduleTime, setScheduleTime] = useState('');
   const [timeLeft, setTimeLeft] = useState<string>('');
   
+  // Media Attachment State
+  const [showMediaPicker, setShowMediaPicker] = useState(false);
+  const [selectedMedia, setSelectedMedia] = useState<{url: string, type: 'image' | 'video' | 'document'} | null>(null);
+
   // Document State
   const [documents, setDocuments] = useState<DriverDocument[]>([]);
   const [docLoading, setDocLoading] = useState(false);
@@ -160,7 +165,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   if (!driver) return null;
 
   const handleSend = async () => {
-    if (!replyText.trim() && !templateName) return;
+    if (!replyText.trim() && !templateName && !selectedMedia) return;
     
     // 1. Scheduled Message Path
     if (showSchedule && scheduleTime) {
@@ -176,6 +181,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                 {
                     text: replyText,
                     templateName: isTemplateMode ? templateName : undefined,
+                    mediaUrl: selectedMedia?.url,
+                    mediaType: selectedMedia?.type
                 }, 
                 timestamp
             );
@@ -191,6 +198,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             setIsTemplateMode(false);
             setShowSchedule(false);
             setScheduleTime('');
+            setSelectedMedia(null);
             
         } catch(e: any) {
             console.error("Schedule Error:", e);
@@ -212,7 +220,21 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             alert(`Failed to send template: ${e.message}`);
         }
     } 
-    // 3. Standard Text Path
+    // 3. Media + Text Path
+    else if (selectedMedia) {
+        try {
+            await liveApiService.sendMessage(driver.id, replyText, { mediaUrl: selectedMedia.url, mediaType: selectedMedia.type });
+            onUpdateDriver(driver.id, {
+                lastMessage: `[Sent ${selectedMedia.type}] ${replyText}`,
+                lastMessageTime: Date.now()
+            });
+            setReplyText('');
+            setSelectedMedia(null);
+        } catch(e: any) {
+            alert(`Failed to send media: ${e.message}`);
+        }
+    }
+    // 4. Standard Text Path
     else {
         try {
             // FIX: Use parent prop handler to ensure immediate UI update (optimistic)
@@ -457,7 +479,30 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     </div>
                 )}
 
+                {/* MEDIA ATTACHMENT PREVIEW */}
+                {selectedMedia && (
+                    <div className="mb-2 bg-gray-100 p-2 rounded-lg border border-gray-200 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-2">
+                        {selectedMedia.type === 'image' ? <ImageIcon size={20} className="text-blue-500" /> : 
+                         selectedMedia.type === 'video' ? <Video size={20} className="text-purple-500" /> : 
+                         <FileText size={20} className="text-orange-500" />}
+                        <div className="flex-1 min-w-0">
+                            <span className="text-xs font-bold text-gray-800 block truncate">{selectedMedia.url.split('/').pop()}</span>
+                            <span className="text-[10px] text-gray-500 uppercase">{selectedMedia.type}</span>
+                        </div>
+                        <button onClick={() => setSelectedMedia(null)} className="text-gray-400 hover:text-red-500 transition-colors"><X size={16} /></button>
+                    </div>
+                )}
+
                 <div className="flex gap-2 mb-3">
+                    {/* Media Picker Toggle */}
+                    <button 
+                        onClick={() => setShowMediaPicker(true)}
+                        className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1 transition-all border bg-white text-gray-600 border-gray-200 hover:bg-gray-50`}
+                        title="Attach Media"
+                    >
+                        <Paperclip size={12} /> Attach
+                    </button>
+
                     {/* Template Toggle */}
                     <button 
                         onClick={() => setIsTemplateMode(!isTemplateMode)}
@@ -482,7 +527,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                   
                   <button 
                     onClick={handleSend} 
-                    disabled={(!replyText.trim() && !templateName) || (showSchedule && !scheduleTime)} 
+                    disabled={(!replyText.trim() && !templateName && !selectedMedia) || (showSchedule && !scheduleTime)} 
                     className={`self-end p-3 rounded-xl shadow-lg disabled:opacity-50 transition-all flex items-center justify-center w-12 h-12 ${showSchedule ? 'bg-amber-500 hover:bg-amber-600 text-white' : 'bg-black hover:bg-gray-800 text-white'}`}
                     title={showSchedule ? "Schedule Message" : "Send Now"}
                   >
@@ -629,6 +674,13 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
           </div>
         </div>
       </div>
+      
+      <MediaSelectorModal 
+          isOpen={showMediaPicker} 
+          onClose={() => setShowMediaPicker(false)}
+          onSelect={(url, type) => { setSelectedMedia({ url, type }); setShowMediaPicker(false); }}
+          allowedType="All"
+      />
     </div>
   );
 };
