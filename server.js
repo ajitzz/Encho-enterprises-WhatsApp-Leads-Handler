@@ -717,8 +717,8 @@ const executeMetaSend = async (to, content) => {
     let cleanTo = to.replace(/\D/g, ''); 
     const url = `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`;
     
-    const bodyText = (content.text || content.message || "").substring(0, 4096);
-    const safeBodyText = bodyText.trim() || " ";
+    let bodyText = (content.text || content.message || "").substring(0, 4096);
+    let safeBodyText = bodyText.trim() || " ";
 
     let payload = {
         messaging_product: "whatsapp",
@@ -728,43 +728,94 @@ const executeMetaSend = async (to, content) => {
         text: { body: safeBodyText }
     };
 
-    if (content.buttons?.length > 0 || (content.options && content.options.length > 0)) {
-        payload.type = "interactive";
-        let headerObj = undefined;
-        if (content.headerImageUrl && content.headerImageUrl.startsWith('http')) {
-            headerObj = { type: "image", image: { link: content.headerImageUrl } };
+    // --- TEMPLATE MODE (Primary for Links/Calls) ---
+    if (content.templateName) {
+        payload.type = "template";
+        payload.template = { 
+            name: content.templateName, 
+            language: { code: "en_US" }, 
+            components: [] 
+        };
+        
+        // If template + Header Image, map it
+        if (content.headerImageUrl) {
+            payload.template.components.push({
+                type: "header",
+                parameters: [{ type: "image", image: { link: content.headerImageUrl } }]
+            });
         }
-
-        let finalButtons = content.buttons || [];
-        if (finalButtons.length === 0 && content.options) {
-            finalButtons = content.options.slice(0, 3).map((opt, i) => ({
+        
+        delete payload.text;
+    }
+    // --- INTERACTIVE MODE (Standard) ---
+    else if (content.buttons?.length > 0 || (content.options && content.options.length > 0)) {
+        
+        let allButtons = content.buttons || [];
+        
+        // Legacy Options -> Buttons
+        if (allButtons.length === 0 && content.options) {
+            allButtons = content.options.slice(0, 3).map((opt, i) => ({
                 type: 'reply',
                 title: opt,
                 payload: `btn_${i}_${opt.substring(0, 10)}`
             }));
         }
 
-        const actionObj = {
-            buttons: finalButtons.map((btn, i) => ({
-                type: "reply",
-                reply: { id: btn.payload || `btn_${i}`, title: (btn.title || "Option").substring(0, 20) }
-            }))
-        };
+        // SMART FALLBACK STRATEGY:
+        // Interactive Messages DO NOT support 'phone' or arbitrary 'url' buttons easily without templates.
+        // Filter out non-reply buttons and append them as TEXT LINKS to the body.
         
-        payload.interactive = {
-            type: "button",
-            header: headerObj,
-            body: { text: safeBodyText.trim() || "Select an option" }, 
-            action: actionObj
-        };
-        if (content.footerText) payload.interactive.footer = { text: content.footerText };
-        delete payload.text;
-    }
-    else if (content.templateName) {
-        payload.type = "template";
-        payload.template = { name: content.templateName, language: { code: "en_US" }, components: [] };
-        delete payload.text;
+        const replyButtons = allButtons.filter(b => b.type === 'reply');
+        const actionButtons = allButtons.filter(b => b.type !== 'reply');
+
+        if (actionButtons.length > 0) {
+            let appendText = "\n";
+            actionButtons.forEach(btn => {
+                if (btn.type === 'url') appendText += `\n🔗 ${btn.title}: ${btn.payload}`;
+                if (btn.type === 'phone') appendText += `\n📞 ${btn.title}: ${btn.payload}`;
+                if (btn.type === 'location') appendText += `\n📍 ${btn.title}`;
+            });
+            safeBodyText += appendText;
+        }
+
+        if (replyButtons.length > 0) {
+            // Send Interactive Message with Reply Buttons Only
+            payload.type = "interactive";
+            
+            let headerObj = undefined;
+            if (content.headerImageUrl && content.headerImageUrl.startsWith('http')) {
+                headerObj = { type: "image", image: { link: content.headerImageUrl } };
+            }
+
+            const actionObj = {
+                buttons: replyButtons.map((btn, i) => ({
+                    type: "reply",
+                    reply: { id: btn.payload || `btn_${i}`, title: (btn.title || "Option").substring(0, 20) }
+                }))
+            };
+            
+            payload.interactive = {
+                type: "button",
+                header: headerObj,
+                body: { text: safeBodyText.trim() }, 
+                action: actionObj
+            };
+            
+            if (content.footerText) payload.interactive.footer = { text: content.footerText };
+            delete payload.text;
+        } else {
+            // No Reply Buttons left (only Actions)? Send as standard TEXT with appended links.
+            // If image exists, send as Image + Caption
+            if (content.headerImageUrl) {
+                payload.type = "image";
+                payload.image = { link: content.headerImageUrl, caption: safeBodyText };
+                delete payload.text;
+            } else {
+                payload.text = { body: safeBodyText };
+            }
+        }
     } 
+    // --- MEDIA MODE ---
     else if (content.mediaUrl) {
          const type = content.mediaType || 'image';
          payload.type = type;
@@ -1189,7 +1240,7 @@ async function runBotEngine(driver, text, buttonId) {
     }
 }
 
-// ... (Existing API Routes) ...
+// ... (Rest of existing endpoints) ...
 
 router.get('/cron/process-outbox', async (req, res) => {
     try {
