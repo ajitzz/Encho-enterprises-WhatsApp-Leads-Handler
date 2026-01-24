@@ -242,8 +242,15 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
 
     useEffect(() => { setLocalData(selectedNode.data); }, [selectedNode]);
 
-    const update = (field: string, value: any) => {
-        const newData = { ...localData, [field]: value };
+    // Atomic Update (Fixes Double-Update Race Condition)
+    const update = (updates: Record<string, any> | string, value?: any) => {
+        let newData;
+        if (typeof updates === 'string') {
+            newData = { ...localData, [updates]: value };
+        } else {
+            newData = { ...localData, ...updates };
+        }
+        
         setLocalData(newData);
         onChange(selectedNode.id, newData);
     };
@@ -268,8 +275,8 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
         if (pickerTarget === 'header') {
             update('headerImageUrl', url);
         } else {
-            update('mediaUrl', url);
-            update('mediaType', type);
+            // Batch update to ensure both URL and Type are saved before re-render
+            update({ mediaUrl: url, mediaType: type });
         }
         setShowMediaPicker(false);
     };
@@ -350,7 +357,7 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                                 </span>
                                 
                                 <button 
-                                    onClick={() => { update('mediaUrl', ''); update('mediaType', ''); }} 
+                                    onClick={() => update({ mediaUrl: '', mediaType: '' })} 
                                     className="text-red-500 p-1 hover:bg-red-50 rounded"
                                 >
                                     <Trash2 size={14} />
@@ -461,7 +468,7 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
     );
 };
 
-// --- DRAGGABLE SIDEBAR ---
+// ... (Rest of file including DraggableSidebarItem and FlowEditor remains the same) ...
 const DraggableSidebarItem = ({ type, inputType, label, icon }: any) => {
     const onDragStart = (event: React.DragEvent) => {
       event.dataTransfer.setData('application/reactflow/type', type);

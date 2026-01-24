@@ -282,6 +282,11 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       alert("Video Call Request Sent to Driver's WhatsApp");
   };
 
+  const handleMediaSelect = (url: string, type: 'image' | 'video' | 'document') => {
+      setSelectedMedia({ url, type });
+      setShowMediaPicker(false);
+  };
+
   return (
     <div className="fixed inset-0 z-50 overflow-hidden">
       <div className="absolute inset-0 bg-black/30 backdrop-blur-sm transition-opacity" onClick={onClose} />
@@ -678,7 +683,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       <MediaSelectorModal 
           isOpen={showMediaPicker} 
           onClose={() => setShowMediaPicker(false)}
-          onSelect={(url, type) => { setSelectedMedia({ url, type }); setShowMediaPicker(false); }}
+          onSelect={handleMediaSelect}
           allowedType="All"
       />
     </div>
