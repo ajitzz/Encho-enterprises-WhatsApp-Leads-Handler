@@ -48,10 +48,21 @@ const upload = multer({
 });
 
 // --- DYNAMIC CREDENTIALS ---
-const META_API_TOKEN = (process.env.META_API_TOKEN || "").trim() || "EAAkr7Y9S2qYBQfHTNZASIugAzOi8b2MZCBct4z4jZBHSmQ2KGlFduuDQQGEYC9NRDtZBUdhMPdeJ06OjYUiJYGfFkZCAxzyh4TdidN7ZA10K3XPOVEiQh01jo22xLsQjXrEtMHc5ZCHZBbRZAyA5d0pl26Jsg3IuNKY272QYmqEjHghf11OKJmbUZBfJLe5EvHzl48gAZDZD";
-const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "").trim() || "982841698238647";
-const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || "").trim() || "uber_fleet_verify_token";
-const APP_SECRET = (process.env.APP_SECRET || "").trim() || ""; 
+// IMPORTANT:
+// Never ship hard-coded tokens/IDs. If Vercel env vars are missing, the server would silently fall back to a
+// dev/test WhatsApp number/token and ONLY whitelisted tester numbers would receive bot replies.
+const META_API_TOKEN = (process.env.META_API_TOKEN || "").trim();
+const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "").trim();
+const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || "").trim();
+const APP_SECRET = (process.env.APP_SECRET || "").trim();
+
+if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
+  console.error("❌ Missing META_API_TOKEN and/or PHONE_NUMBER_ID. WhatsApp sending will not work.");
+}
+if (!VERIFY_TOKEN) {
+  console.warn("⚠️ VERIFY_TOKEN is missing. Webhook verification may fail.");
+}
+
 
 // --- AWS S3 CONFIG ---
 const BUCKET_NAME = process.env.AWS_BUCKET_NAME || process.env.BUCKET_NAME || 'uber-fleet-assets';
@@ -724,7 +735,7 @@ async function processIncomingMessage(msg, contacts) {
         VALUES ($1, $2, $3, 'New', $4, $5, $6)
         ON CONFLICT (phone_number) 
         DO UPDATE SET last_message = $4, last_message_time = $5, updated_at = $6
-        RETURNING id, current_bot_step_id, is_bot_active, is_human_mode
+        RETURNING id, phone_number, current_bot_step_id, is_bot_active, is_human_mode
     `, [driverId, from, name, text, Date.now(), Date.now()]);
     
     const currentDriver = driverRes.rows[0];
@@ -736,13 +747,14 @@ async function processIncomingMessage(msg, contacts) {
     `, [msgId, currentDriver.id, text, Date.now(), wamid]);
 
     try {
-        await runBotEngine(currentDriver, text, buttonId, from);
+        await runBotEngine(currentDriver, text, buttonId);
     } catch (e) {
         console.error("Bot Engine Crash:", e);
     }
 }
 
-async function runBotEngine(driver, text, buttonId, from) {
+async function runBotEngine(driver, text, buttonId) {
+    const from = driver.phone_number;
     const automationEnabled = await getCachedSystemSetting('automation_enabled');
     if (!automationEnabled) {
         console.log(`[Bot Engine] Skipped ${from}: Automation Disabled globally.`);
