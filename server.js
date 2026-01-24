@@ -430,6 +430,265 @@ const updateDriverTimestamp = async (driverId) => {
     } catch (e) { console.error("Timestamp update failed", e); }
 };
 
+// --- MEDIA LIBRARY ROUTES ---
+
+// 1. Get Media Library Content (Files & Folders)
+router.get('/media', async (req, res) => {
+    const { path = '/' } = req.query;
+    try {
+        const folderRes = await queryWithRetry('SELECT * FROM media_folders WHERE parent_path = $1 ORDER BY name ASC', [path]);
+        const fileRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
+        
+        res.json({
+            folders: folderRes.rows,
+            files: fileRes.rows
+        });
+    } catch (e) {
+        console.error("Get Media Error:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 2. Create Folder
+router.post('/folders', async (req, res) => {
+    const { name, parentPath } = req.body;
+    const id = `folder_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+    try {
+        await queryWithRetry('INSERT INTO media_folders (id, name, parent_path, created_at) VALUES ($1, $2, $3, $4)', [id, name, parentPath, Date.now()]);
+        res.json({ success: true, id });
+    } catch (e) {
+        if (e.code === '23505') return res.status(409).json({ error: "Folder name already exists" });
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 3. Rename Folder
+router.put('/folders/:id', async (req, res) => {
+    const { name } = req.body;
+    try {
+        await queryWithRetry('UPDATE media_folders SET name = $1 WHERE id = $2', [name, req.params.id]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 4. Delete Folder
+router.delete('/folders/:id', async (req, res) => {
+    try {
+        // Check emptiness
+        const folderRes = await queryWithRetry('SELECT name, parent_path FROM media_folders WHERE id = $1', [req.params.id]);
+        if (folderRes.rows.length === 0) return res.status(404).json({ error: "Folder not found" });
+        
+        const folder = folderRes.rows[0];
+        const fullPath = folder.parent_path === '/' ? `/${folder.name}` : `${folder.parent_path}/${folder.name}`;
+
+        // Check if subfolders or files exist
+        const subFolders = await queryWithRetry('SELECT 1 FROM media_folders WHERE parent_path = $1', [fullPath]);
+        const files = await queryWithRetry('SELECT 1 FROM media_files WHERE folder_path = $1', [fullPath]);
+
+        if (subFolders.rows.length > 0 || files.rows.length > 0) {
+            return res.status(400).json({ error: "Folder must be empty before deletion" });
+        }
+
+        await queryWithRetry('DELETE FROM media_folders WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 5. Delete File
+router.delete('/files/:id', async (req, res) => {
+    try {
+        const fileRes = await queryWithRetry('SELECT s3_key FROM media_files WHERE id = $1', [req.params.id]);
+        if (fileRes.rows.length > 0) {
+            const key = fileRes.rows[0].s3_key;
+            // Delete from S3
+            try {
+                await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: key }));
+            } catch (s3Err) {
+                console.warn("S3 Delete Failed (might not exist):", s3Err.message);
+            }
+        }
+        await queryWithRetry('DELETE FROM media_files WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 6. Sync from S3
+router.post('/media/sync', async (req, res) => {
+    try {
+        const command = new ListObjectsV2Command({ Bucket: BUCKET_NAME });
+        const data = await s3Client.send(command);
+        const contents = data.Contents || [];
+        
+        let added = 0;
+        for (const item of contents) {
+            const key = item.Key;
+            if (!key || key.endsWith('/')) continue; // Skip folders or empty keys
+
+            const exists = await queryWithRetry('SELECT 1 FROM media_files WHERE s3_key = $1', [key]);
+            if (exists.rows.length === 0) {
+                // Infer details from key
+                // Structure assumption: /Folder/Subfolder/File.ext or just File.ext
+                const parts = key.split('/');
+                const filename = parts.pop();
+                const folderPath = parts.length > 0 ? '/' + parts.join('/') : '/';
+                
+                // Ensure folders exist? Ideally yes, but for sync simplified we might just register file or create root folders.
+                // For simplicity, if folder path is complex, we might just put it in root or ignore folder structure creation in this lightweight sync.
+                // Let's assume root for simplicity or try to match.
+                
+                let publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${key}`;
+                if (AWS_REGION && AWS_REGION !== 'us-east-1') {
+                    publicUrl = `https://${BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${key}`;
+                }
+
+                const id = `file_sync_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+                let type = 'document';
+                if (filename.match(/\.(jpg|jpeg|png|gif|webp)$/i)) type = 'image';
+                if (filename.match(/\.(mp4|mov|webm)$/i)) type = 'video';
+
+                await queryWithRetry(`
+                    INSERT INTO media_files (id, folder_path, filename, s3_key, url, type, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                `, [id, folderPath, filename, key, publicUrl, type, Date.now()]);
+                added++;
+            }
+        }
+        res.json({ success: true, added });
+    } catch (e) {
+        console.error("Sync Error:", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 7. Get Presigned URL (Direct Upload)
+router.post('/s3/presign', async (req, res) => {
+    const { filename, fileType, folderPath = '/' } = req.body;
+    const safePath = folderPath.startsWith('/') ? folderPath.slice(1) : folderPath;
+    const prefix = safePath ? `${safePath}/` : '';
+    const key = `${prefix}${Date.now()}_${filename.replace(/\s+/g, '_')}`;
+
+    try {
+        const command = new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: key,
+            ContentType: fileType
+        });
+        const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+        
+        let publicUrl = `https://${BUCKET_NAME}.s3.amazonaws.com/${key}`;
+        if (AWS_REGION && AWS_REGION !== 'us-east-1') {
+            publicUrl = `https://${BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${key}`;
+        }
+
+        res.json({ uploadUrl, key, publicUrl });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 8. Register File (After Direct Upload)
+router.post('/files/register', async (req, res) => {
+    const { key, url, filename, type, folderPath } = req.body;
+    const id = `file_direct_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+    try {
+        await queryWithRetry(`
+            INSERT INTO media_files (id, folder_path, filename, s3_key, url, type, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [id, folderPath, filename, key, url, type, Date.now()]);
+        res.json({ success: true, id });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 9. Public Showcase Endpoints
+router.post('/folders/:id/public', async (req, res) => {
+    try {
+        // Reset others (Single Showcase Mode logic, or allow multiple? Frontend implies multiple toggles but banner shows active one)
+        // Let's allow multiple in DB but maybe UI only tracks one global active.
+        // For consistency with typical "Showcase", usually one folder is active.
+        // Let's unset all first.
+        await queryWithRetry('UPDATE media_folders SET is_public_showcase = FALSE');
+        await queryWithRetry('UPDATE media_folders SET is_public_showcase = TRUE WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+router.delete('/folders/:id/public', async (req, res) => {
+    try {
+        await queryWithRetry('UPDATE media_folders SET is_public_showcase = FALSE WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+router.get('/public/status', async (req, res) => {
+    try {
+        const result = await queryWithRetry('SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE LIMIT 1');
+        if (result.rows.length > 0) {
+            res.json({ active: true, folderId: result.rows[0].id, folderName: result.rows[0].name });
+        } else {
+            res.json({ active: false });
+        }
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+router.get('/public/showcase', async (req, res) => {
+    const { folder } = req.query; // Name or Token
+    try {
+        let folderQuery = 'SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE LIMIT 1';
+        let params = [];
+        
+        if (folder) {
+            // Find by name if provided, else rely on is_public_showcase
+            folderQuery = 'SELECT id, name FROM media_folders WHERE name = $1 LIMIT 1';
+            params = [decodeURIComponent(folder)];
+        }
+
+        const folderRes = await queryWithRetry(folderQuery, params);
+        if (folderRes.rows.length === 0) return res.json({ title: 'Not Found', items: [] });
+
+        const activeFolder = folderRes.rows[0];
+        const fullPath = `/${activeFolder.name}`; // Assumption: Root level folders
+
+        // Recursively find files? Or just flat for now. Flat is safer for V1.
+        // If we want recursive, we need a recursive CTE or just grab direct children.
+        // Let's grab files in this folder.
+        const filesRes = await queryWithRetry('SELECT id, url, type, filename FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [fullPath]);
+        
+        res.json({
+            title: activeFolder.name,
+            items: filesRes.rows
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// 10. Sync File to WhatsApp (Placeholder / Mock for now as actual media upload API requires fetching bytes)
+router.post('/files/:id/sync', async (req, res) => {
+    // In a real app, this would fetch the file from S3, upload to Meta Media API, and store the media_id
+    // For this demo, we will just mark it as synced with a mock ID.
+    try {
+        const mediaId = `media_${Date.now()}`;
+        await queryWithRetry('UPDATE media_files SET media_id = $1 WHERE id = $2', [mediaId, req.params.id]);
+        res.json({ success: true, media_id: mediaId });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // --- CRON: AUTO REVERT HUMAN MODE ---
 // Checks every minute for expired human sessions and reverts them to Bot Mode
 setInterval(async () => {
