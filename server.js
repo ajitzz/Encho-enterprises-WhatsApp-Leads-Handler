@@ -958,8 +958,6 @@ const queueAndSendMessage = async (to, content, clientMessageId = null, driverId
     }
 };
 
-// ... (Rest of S3 and Media endpoints remain the same) ...
-
 router.post('/s3/proxy-upload', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file provided" });
     
@@ -997,6 +995,38 @@ router.post('/s3/proxy-upload', upload.single('file'), async (req, res) => {
     } catch(e) {
         console.error("Proxy Upload Error:", e);
         res.status(500).json({ error: e.message || "Proxy upload failed" });
+    }
+});
+
+// NEW ROUTE: Schedule Message (Moved here)
+router.post('/messages/schedule', async (req, res) => {
+    const { driverIds, text, mediaUrl, mediaType, options, headerImageUrl, footerText, buttons, templateName, scheduledTime } = req.body;
+
+    if (!driverIds || !Array.isArray(driverIds) || driverIds.length === 0) {
+        return res.status(400).json({ error: "No recipients provided" });
+    }
+
+    const content = {
+        text,
+        mediaUrl,
+        mediaType,
+        options,
+        headerImageUrl,
+        footerText,
+        buttons,
+        templateName
+    };
+
+    try {
+        await queryWithRetry(`
+            INSERT INTO scheduled_messages (driver_ids, content, scheduled_time, status)
+            VALUES ($1, $2, $3, 'pending')
+        `, [driverIds, JSON.stringify(content), scheduledTime]);
+
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Schedule Error:", e);
+        res.status(500).json({ error: e.message });
     }
 });
 
@@ -1239,6 +1269,57 @@ async function runBotEngine(driver, text, buttonId) {
         processOutbox().catch(console.error);
     }
 }
+
+// NEW WORKER: Process Scheduled Messages
+const processScheduledMessages = async () => {
+    if (!pool) return;
+    // Check global sending switch
+    const sendingEnabled = await getCachedSystemSetting('sending_enabled');
+    if (!sendingEnabled) return;
+
+    let client;
+    try {
+        client = await pool.connect();
+        
+        // Fetch jobs due
+        const { rows } = await client.query(`
+            SELECT id, driver_ids, content
+            FROM scheduled_messages
+            WHERE status = 'pending' AND scheduled_time <= $1
+            LIMIT 5
+            FOR UPDATE SKIP LOCKED
+        `, [Date.now()]);
+
+        for (const job of rows) {
+            const content = job.content;
+            const driverIds = job.driver_ids || [];
+
+            console.log(`[Scheduler] Processing Job ${job.id} for ${driverIds.length} drivers.`);
+
+            for (const driverId of driverIds) {
+                try {
+                    const driverRes = await client.query('SELECT phone_number FROM drivers WHERE id = $1', [driverId]);
+                    if (driverRes.rows.length > 0) {
+                        const phone = driverRes.rows[0].phone_number;
+                        // Use existing queue function (assumed to be in scope)
+                        await queueAndSendMessage(phone, content, null, driverId);
+                    }
+                } catch (e) {
+                    console.error(`[Scheduler] Failed for driver ${driverId}:`, e.message);
+                }
+            }
+
+            await client.query("UPDATE scheduled_messages SET status = 'completed' WHERE id = $1", [job.id]);
+        }
+    } catch (e) {
+        console.error("Scheduler Worker Error:", e.message);
+    } finally {
+        if (client) client.release();
+    }
+};
+
+// Check every 30 seconds
+setInterval(processScheduledMessages, 30000);
 
 // ... (Rest of existing endpoints) ...
 
