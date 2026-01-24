@@ -731,11 +731,13 @@ async function processIncomingMessage(msg, contacts) {
     const name = contacts?.[0]?.profile?.name || 'Unknown Driver';
     
     const driverRes = await queryWithRetry(`
-        INSERT INTO drivers (id, phone_number, name, status, last_message, last_message_time, updated_at)
-        VALUES ($1, $2, $3, 'New', $4, $5, $6)
-        ON CONFLICT (phone_number) 
-        DO UPDATE SET last_message = $4, last_message_time = $5, updated_at = $6
-        RETURNING id, phone_number, current_bot_step_id, is_bot_active, is_human_mode
+        INSERT INTO drivers (phone_number, last_message_at, is_bot_active, is_human_mode, current_bot_step_id)
+VALUES ($1, NOW(), true, false, NULL)
+ON CONFLICT (phone_number)
+DO UPDATE SET
+  last_message_at = NOW()
+RETURNING id, phone_number, current_bot_step_id, is_bot_active, is_human_mode;
+
     `, [driverId, from, name, text, Date.now(), Date.now()]);
     
     const currentDriver = driverRes.rows[0];
