@@ -336,6 +336,44 @@ const initDB = async () => {
 };
 initDB();
 
+// --- NEW ROUTE: BOT SETTINGS (GET) ---
+router.get('/bot-settings', async (req, res) => {
+    try {
+        const result = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1');
+        if (result.rows.length > 0) {
+            res.json(result.rows[0].settings);
+        } else {
+            // Return defaults if not configured
+            res.json({
+                isEnabled: true,
+                shouldRepeat: false,
+                routingStrategy: 'BOT_ONLY',
+                systemInstruction: "You are a helpful assistant.",
+                steps: []
+            });
+        }
+    } catch(e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- NEW ROUTE: BOT SETTINGS (POST) ---
+router.post('/bot-settings', async (req, res) => {
+    const settings = req.body;
+    try {
+        await queryWithRetry(`
+            INSERT INTO bot_settings (id, settings) 
+            VALUES (1, $1) 
+            ON CONFLICT (id) DO UPDATE SET settings = $1
+        `, [JSON.stringify(settings)]);
+        
+        CACHE.botSettings = settings; // Update cache immediately
+        res.json({ success: true });
+    } catch(e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 const toDriverDTO = (row) => ({
     id: row.id,
     phoneNumber: row.phone_number,
