@@ -82,6 +82,7 @@ export interface Driver {
   
   // Human Handover
   isHumanMode?: boolean;
+  humanModeEndsAt?: number; // Timestamp when human mode expires
   
   // Internal tracking
   updatedAt?: number;

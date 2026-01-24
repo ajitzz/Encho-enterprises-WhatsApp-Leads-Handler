@@ -6,7 +6,7 @@ import {
   ShieldCheck, ChevronRight, Facebook, Globe, Headset, MicOff, Phone, 
   FileText, Sparkles, MapPin, ExternalLink, LayoutTemplate, Calendar,
   Download, Eye, AlertCircle, File, List, Filter, AlertTriangle, ArrowUp,
-  Check, CheckCheck
+  Check, CheckCheck, Timer
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
@@ -30,6 +30,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [templateName, setTemplateName] = useState('');
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
+  const [timeLeft, setTimeLeft] = useState<string>('');
   
   // Document State
   const [documents, setDocuments] = useState<DriverDocument[]>([]);
@@ -57,6 +58,35 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
         loadDocuments(driver.id);
     }
   }, [driver]);
+
+  // COUNTDOWN TIMER LOGIC
+  useEffect(() => {
+      if (!driver?.isHumanMode || !driver?.humanModeEndsAt) {
+          setTimeLeft('');
+          return;
+      }
+
+      const updateTimer = () => {
+          const now = Date.now();
+          const diff = (driver.humanModeEndsAt || 0) - now;
+          
+          if (diff <= 0) {
+              setTimeLeft('00:00');
+              // Optionally trigger an update locally if backend hasn't synced yet
+              if (driver.isHumanMode) {
+                  onUpdateDriver(driver.id, { isHumanMode: false });
+              }
+          } else {
+              const minutes = Math.floor(diff / 60000);
+              const seconds = Math.floor((diff % 60000) / 1000);
+              setTimeLeft(`${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`);
+          }
+      };
+
+      updateTimer(); // Initial call
+      const interval = setInterval(updateTimer, 1000);
+      return () => clearInterval(interval);
+  }, [driver?.isHumanMode, driver?.humanModeEndsAt, driver?.id]);
 
   const loadDocuments = async (driverId: string) => {
       setDocLoading(true);
@@ -211,8 +241,13 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   
   const toggleHumanMode = () => {
       const newState = !driver.isHumanMode;
+      // If turning ON, backend will set the timer. If OFF, it clears it.
       onUpdateDriver(driver.id, { isHumanMode: newState });
-      if (newState) onSendMessage("Now our executive on the line to connect");
+      
+      if (newState) {
+          // Send a system note (not a WhatsApp message) locally to show start
+          // onSendMessage("System: Human Agent Mode Activated (30min Timer Started)");
+      }
   };
 
   const handleVoiceCall = () => {
@@ -255,7 +290,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                </div>
 
                <div className="flex items-center gap-2 bg-gray-900 rounded-lg p-1 border border-gray-800">
-                    <button onClick={toggleHumanMode} className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${driver.isHumanMode ? 'bg-amber-500 text-black' : 'text-gray-400 hover:text-white'}`} title={driver.isHumanMode ? 'Bot is Stopped' : 'Bot is Active'}>
+                    <button onClick={toggleHumanMode} className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${driver.isHumanMode ? 'bg-amber-500 text-black' : 'text-gray-400 hover:text-white'}`} title={driver.isHumanMode ? 'Click to Stop Human Mode' : 'Click to Takeover (30 mins)'}>
                         {driver.isHumanMode ? <Headset size={14} /> : <MicOff size={14} />}
                         {driver.isHumanMode ? 'Human Agent Mode' : 'Automation Active'}
                     </button>
@@ -271,15 +306,24 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
           <div className="flex-1 flex overflow-hidden">
             {/* Left: Chat History */}
             <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px] relative">
+              
+              {/* HUMAN MODE BANNER & COUNTDOWN */}
               {driver.isHumanMode && (
-                  <div className="absolute top-0 left-0 right-0 bg-amber-50 border-b border-amber-200 p-2 z-10 flex items-center justify-center gap-2 text-xs font-bold text-amber-800 shadow-sm">
-                      <Headset size={14} /> Automation Paused. You are in manual control.
+                  <div className="absolute top-0 left-0 right-0 bg-amber-50 border-b border-amber-200 p-3 z-20 flex items-center justify-between text-xs font-bold text-amber-900 shadow-sm animate-in slide-in-from-top-2">
+                      <div className="flex items-center gap-2">
+                          <Headset size={16} className="text-amber-600 animate-pulse" />
+                          <span>Automation Paused. You are in manual control.</span>
+                      </div>
+                      <div className="flex items-center gap-2 bg-amber-100 px-3 py-1 rounded-full border border-amber-200 font-mono">
+                          <Timer size={14} />
+                          <span>{timeLeft} remaining</span>
+                      </div>
                   </div>
               )}
 
               <div 
                 ref={messagesContainerRef}
-                className={`flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4 ${driver.isHumanMode ? 'pt-10' : ''}`}
+                className={`flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4 ${driver.isHumanMode ? 'pt-16' : ''}`}
               >
                 {/* Pagination Trigger */}
                 {messages.length >= 50 && (
