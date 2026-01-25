@@ -17,15 +17,14 @@ import { TermsOfService } from './components/TermsOfService';
 import { DataDeletion } from './components/DataDeletion'; 
 import { SystemMonitor } from './components/SystemMonitor'; 
 import { SettingsModal } from './components/SettingsModal'; 
-import { Login } from './components/Login'; // NEW
+import { Login } from './components/Login'; 
 import { mockBackend } from './services/mockBackend';
 import { liveApiService, setAuthToken } from './services/liveApiService';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle } from 'lucide-react';
 
-// Get Client ID from Env
-// Fix: Safely access import.meta.env using optional chaining to prevent runtime crashes
-const GOOGLE_CLIENT_ID = (import.meta as any)?.env?.VITE_GOOGLE_CLIENT_ID || "";
+// Get Client ID from Env and TRIM whitespace
+const GOOGLE_CLIENT_ID = ((import.meta as any)?.env?.VITE_GOOGLE_CLIENT_ID || "").trim();
 
 export default function App() {
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
@@ -55,14 +54,11 @@ export default function App() {
       // 2. AUTH CHECK (For Dashboard)
       const token = localStorage.getItem('uber_fleet_auth_token');
       if (token) {
-          // In a real app, verify token validity here or wait for 401 response
           setAuthToken(token);
           setIsAuthenticated(true);
       }
       
-      if ("Notification" in window) {
-          Notification.requestPermission();
-      }
+      // REMOVED: Automatic Notification.requestPermission() to fix console error
   }, []);
 
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -142,7 +138,10 @@ export default function App() {
       setAuthToken(token);
       setUserProfile(user);
       setIsAuthenticated(true);
-      // Data will be fetched by the effect above
+      // Ask for notification permission explicitly on login
+      if ("Notification" in window) {
+          Notification.requestPermission();
+      }
   };
 
   // --- ROUTING HANDLERS (PUBLIC) ---
@@ -152,29 +151,45 @@ export default function App() {
   if (isShowcaseMode) return <PublicShowcase folderName={showcaseToken} />;
 
   // --- AUTHENTICATION GATE ---
-  // If not on a public page and not authenticated, show Login
   if (!isAuthenticated) {
-      // Safety Check: If Client ID is missing, show instructions instead of crashing in the Google Provider
-      if (!GOOGLE_CLIENT_ID) {
+      // Validate Client ID format (must not be empty and must look like a Google Client ID)
+      const isValidClientId = GOOGLE_CLIENT_ID.length > 10 && GOOGLE_CLIENT_ID.endsWith('.apps.googleusercontent.com');
+
+      if (!isValidClientId) {
+          const isVercel = window.location.hostname.includes('vercel.app');
           return (
               <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4 font-sans text-center">
                   <div className="bg-white p-8 rounded-2xl shadow-xl border border-red-100 max-w-lg">
                       <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-6">
                           <AlertTriangle size={32} />
                       </div>
-                      <h2 className="text-2xl font-bold text-gray-900 mb-3">Missing Configuration</h2>
-                      <p className="text-gray-600 mb-6 leading-relaxed">
-                          The <code>VITE_GOOGLE_CLIENT_ID</code> is missing from your environment variables. 
-                          Google Authentication cannot start without it.
+                      <h2 className="text-2xl font-bold text-gray-900 mb-3">Google Auth Config Missing</h2>
+                      <p className="text-gray-600 mb-6 leading-relaxed text-sm">
+                          The <code>VITE_GOOGLE_CLIENT_ID</code> environment variable is missing or invalid.
                       </p>
-                      <div className="bg-gray-100 p-4 rounded-lg text-left overflow-x-auto mb-6 border border-gray-200">
-                          <code className="text-xs font-mono text-gray-800">
-                              # .env<br/>
-                              VITE_GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
-                          </code>
-                      </div>
+                      
+                      {isVercel ? (
+                          <div className="bg-blue-50 text-blue-900 p-4 rounded-lg text-left text-xs mb-6 border border-blue-100">
+                              <strong>Fix for Vercel:</strong>
+                              <ol className="list-decimal pl-4 mt-2 space-y-1">
+                                  <li>Go to Vercel Project Dashboard.</li>
+                                  <li>Click <strong>Settings</strong> {'>'} <strong>Environment Variables</strong>.</li>
+                                  <li>Add Key: <code>VITE_GOOGLE_CLIENT_ID</code></li>
+                                  <li>Add Value: (Your Google Cloud Client ID)</li>
+                                  <li><strong>Redeploy</strong> the app for changes to take effect.</li>
+                              </ol>
+                          </div>
+                      ) : (
+                          <div className="bg-gray-100 p-4 rounded-lg text-left overflow-x-auto mb-6 border border-gray-200">
+                              <code className="text-xs font-mono text-gray-800">
+                                  # .env file in root<br/>
+                                  VITE_GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
+                              </code>
+                          </div>
+                      )}
+                      
                       <p className="text-xs text-gray-400">
-                          Check your <code>.env</code> file in the project root and restart the server.
+                          Current Value: {GOOGLE_CLIENT_ID ? `"${GOOGLE_CLIENT_ID}" (Invalid)` : "(Empty)"}
                       </p>
                   </div>
               </div>
