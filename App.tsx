@@ -21,7 +21,7 @@ import { Login } from './components/Login'; // NEW
 import { mockBackend } from './services/mockBackend';
 import { liveApiService, setAuthToken } from './services/liveApiService';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
-import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat } from 'lucide-react';
+import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle } from 'lucide-react';
 
 // Get Client ID from Env
 // Fix: Safely access import.meta.env using optional chaining to prevent runtime crashes
@@ -154,6 +154,33 @@ export default function App() {
   // --- AUTHENTICATION GATE ---
   // If not on a public page and not authenticated, show Login
   if (!isAuthenticated) {
+      // Safety Check: If Client ID is missing, show instructions instead of crashing in the Google Provider
+      if (!GOOGLE_CLIENT_ID) {
+          return (
+              <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4 font-sans text-center">
+                  <div className="bg-white p-8 rounded-2xl shadow-xl border border-red-100 max-w-lg">
+                      <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                          <AlertTriangle size={32} />
+                      </div>
+                      <h2 className="text-2xl font-bold text-gray-900 mb-3">Missing Configuration</h2>
+                      <p className="text-gray-600 mb-6 leading-relaxed">
+                          The <code>VITE_GOOGLE_CLIENT_ID</code> is missing from your environment variables. 
+                          Google Authentication cannot start without it.
+                      </p>
+                      <div className="bg-gray-100 p-4 rounded-lg text-left overflow-x-auto mb-6 border border-gray-200">
+                          <code className="text-xs font-mono text-gray-800">
+                              # .env<br/>
+                              VITE_GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
+                          </code>
+                      </div>
+                      <p className="text-xs text-gray-400">
+                          Check your <code>.env</code> file in the project root and restart the server.
+                      </p>
+                  </div>
+              </div>
+          );
+      }
+
       return (
           <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
               <Login onLoginSuccess={handleLoginSuccess} />
