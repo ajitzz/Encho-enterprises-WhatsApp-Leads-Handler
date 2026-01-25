@@ -3,9 +3,8 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { LeadStatus, AuditReport, AuditIssue } from "../types";
 
 // NOTE: In a real production app, this key should be in process.env and calls proxied through a backend.
-const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0"; 
-
-const ai = new GoogleGenAI({ apiKey });
+// Fix: Use process.env.API_KEY exclusively
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 // --- COST SAVING STRATEGY ---
 // Automatic Downgrade: If Pro hits limits, switch to Flash instantly.
@@ -63,7 +62,7 @@ const generateWithFallback = async (params: any) => {
 };
 
 export const analyzeMessage = async (text: string, imageUrl?: string, systemInstruction?: string): Promise<AIAnalysisResult> => {
-  if (!apiKey) {
+  if (!process.env.API_KEY) {
     console.warn("No API Key provided for Gemini. Returning mock AI response.");
     return {
       intent: "Inquiry about joining",
@@ -169,7 +168,7 @@ const runLocalAudit = (nodes: any[]): AuditReport => {
 
 // --- SYSTEM AUDITOR (JSON CONFIG) ---
 export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
-    if (!apiKey) return runLocalAudit(nodes);
+    if (!process.env.API_KEY) return runLocalAudit(nodes);
 
     try {
         const prompt = `
@@ -214,7 +213,7 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
 };
 
 export const analyzeSystemCode = async (files: Array<{path: string, content: string}>, issueDescription: string): Promise<{ diagnosis: string, changes: Array<{filePath: string, content: string, explanation: string}> }> => {
-    if (!apiKey) throw new Error("No API Key");
+    if (!process.env.API_KEY) throw new Error("No API Key");
 
     const fileContext = files.map(f => `--- START OF FILE ${f.path} ---\n${f.content}\n--- END OF FILE ${f.path} ---`).join("\n");
 

@@ -11,32 +11,48 @@ const getBaseUrl = () => {
 
 const API_BASE_URL = getBaseUrl();
 
+// --- AUTHENTICATION TOKEN MANAGEMENT ---
+let authToken: string | null = localStorage.getItem('uber_fleet_auth_token');
+
+export const setAuthToken = (token: string | null) => {
+    authToken = token;
+    if (token) localStorage.setItem('uber_fleet_auth_token', token);
+    else localStorage.removeItem('uber_fleet_auth_token');
+};
+
 const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, delay = 500): Promise<Response> => {
+    const headers = {
+        ...(options?.headers || {}),
+        // Inject Auth Token if available
+        ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {})
+    };
+
+    const config = {
+        ...options,
+        headers
+    };
+
     try {
-        const response = await fetch(url, options);
+        const response = await fetch(url, config);
+        
+        // Handle Auth Failures Globally
+        if (response.status === 401 || response.status === 403) {
+            console.warn("Unauthorized Access. Redirecting to login...");
+            setAuthToken(null);
+            // Optional: window.location.reload() to force login screen, but React state handling is smoother
+            throw new Error("Unauthorized");
+        }
+
         if (!response.ok) {
              const method = options?.method?.toUpperCase() || 'GET';
-             if (method !== 'GET' && method !== 'HEAD') {
-                 let errMessage = `Request Failed: ${response.status}`;
-                 try {
-                     const errData = await response.json();
-                     if (errData.error) errMessage = errData.error;
-                 } catch(e) {}
-                 throw new Error(errMessage);
-             }
-
+             // Don't throw immediately on HEAD/GET 404s if handled by caller, but 500s usually need retry
              if (response.status >= 500) {
                  if (retries > 0) {
                      await new Promise(res => setTimeout(res, delay));
                      return fetchWithRetry(url, options, retries - 1, delay * 2);
                  }
-                 let errMessage = `Server Error: ${response.status}`;
-                 try {
-                     const errData = await response.json();
-                     if (errData.error) errMessage = errData.error;
-                 } catch(e) {}
-                 throw new Error(errMessage);
              }
+             
              let errMessage = `Request Failed: ${response.status}`;
              try {
                  const errData = await response.json();
@@ -46,8 +62,8 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
         }
         return response;
     } catch (err: any) {
-        const method = options?.method?.toUpperCase() || 'GET';
-        if (retries > 0 && !err.message.includes('4') && (method === 'GET' || method === 'HEAD')) { 
+        // Retry logic for network errors
+        if (retries > 0 && !err.message.includes('40') && !err.message.includes('Unauthorized')) { 
             await new Promise(res => setTimeout(res, delay));
             return fetchWithRetry(url, options, retries - 1, delay * 2); 
         }
@@ -58,9 +74,22 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
 let lastSyncTimestamp = 0;
 
 export const liveApiService = {
+  // --- AUTH ENDPOINTS ---
+  verifyLogin: async (credential: string) => {
+      const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: credential })
+      });
+      if (!response.ok) {
+          const err = await response.json();
+          throw new Error(err.error || "Authentication failed");
+      }
+      return await response.json();
+  },
+
   getDrivers: async (): Promise<Driver[]> => {
     try {
-      // Reset cursor on full fetch
       lastSyncTimestamp = Date.now();
       const url = `${API_BASE_URL}/api/drivers`;
       const response = await fetchWithRetry(url);
@@ -71,14 +100,11 @@ export const liveApiService = {
     }
   },
 
-  // Correct Sync Logic: Use Server Cursor
   syncDrivers: async (): Promise<Driver[]> => {
       try {
           const url = `${API_BASE_URL}/api/sync?since=${lastSyncTimestamp}`;
           const response = await fetchWithRetry(url);
-          
           const data = await response.json();
-          // The server now returns { drivers: [], nextCursor: number }
           if (data.nextCursor) {
               lastSyncTimestamp = data.nextCursor;
           }
@@ -88,12 +114,10 @@ export const liveApiService = {
       }
   },
 
-  // Paginated Message Fetching
   getDriverMessages: async (driverId: string, limit = 50, before?: number): Promise<Message[]> => {
       try {
           let url = `${API_BASE_URL}/api/drivers/${driverId}/messages?limit=${limit}`;
           if (before) url += `&before=${before}`;
-          
           const response = await fetchWithRetry(url);
           return await response.json();
       } catch (e) {
@@ -120,7 +144,6 @@ export const liveApiService = {
   },
 
   subscribeToUpdates: (callback: (updatedDrivers: Driver[]) => void) => {
-    // Polling every 6 seconds to save DB load
     const interval = setInterval(async () => {
         try { 
             const updates = await liveApiService.syncDrivers();
@@ -148,7 +171,6 @@ export const liveApiService = {
 
   sendMessage: async (driverId: string, text: string, attachments?: { mediaUrl?: string, mediaType?: string, options?: string[], headerImageUrl?: string, footerText?: string, buttons?: MessageButton[], templateName?: string }) => {
     const clientMessageId = `web_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
     const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -168,7 +190,7 @@ export const liveApiService = {
     return await response.json();
   },
 
-  scheduleMessage: async (driverIds: string[], content: { text: string, mediaUrl?: string, mediaType?: string, options?: string[], headerImageUrl?: string, footerText?: string, buttons?: MessageButton[], templateName?: string }, scheduledTime: number) => {
+  scheduleMessage: async (driverIds: string[], content: any, scheduledTime: number) => {
       const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/schedule`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -191,11 +213,11 @@ export const liveApiService = {
   },
 
   uploadMedia: async (file: File, folderPath: string = '/') => {
-      // STRATEGY: Smart Routing based on File Size
-      // Files < 4.5MB: Use Proxy (Bypasses CORS entirely, no AWS config needed by user)
-      // Files > 4.5MB: Use Direct Upload (Requires AWS CORS config)
+      const PROXY_LIMIT = 4.5 * 1024 * 1024; 
       
-      const PROXY_LIMIT = 4.5 * 1024 * 1024; // 4.5 MB (Vercel limit)
+      // Inject Auth Token into Proxy Upload if used
+      const headers: Record<string, string> = {};
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
 
       if (file.size < PROXY_LIMIT) {
           try {
@@ -205,24 +227,23 @@ export const liveApiService = {
 
               const response = await fetch(`${API_BASE_URL}/api/s3/proxy-upload`, {
                   method: 'POST',
-                  body: formData
+                  body: formData,
+                  headers: headers // Attach Auth
               });
 
               if (!response.ok) {
                   const err = await response.json();
                   throw new Error(err.error || "Proxy upload failed");
               }
-              
               const result = await response.json();
               return { url: result.url, type: result.type };
           } catch (e: any) {
               console.warn("Proxy upload failed, falling back to direct...", e);
-              // Fallthrough to Direct Upload if proxy server is down
           }
       }
 
-      // Direct Upload Logic (For large files OR if proxy failed)
       try {
+          // Protected Presign
           const presignResponse = await fetchWithRetry(`${API_BASE_URL}/api/s3/presign`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -231,6 +252,7 @@ export const liveApiService = {
           
           const { uploadUrl, key, publicUrl } = await presignResponse.json();
 
+          // Direct to S3 (No Auth needed for S3 itself, only for presign)
           const uploadResponse = await fetch(uploadUrl, {
               method: 'PUT',
               body: file,
@@ -239,7 +261,7 @@ export const liveApiService = {
 
           if (!uploadResponse.ok) throw new Error(`Direct upload failed: ${uploadResponse.statusText}`);
 
-          // Register in DB
+          // Register in DB (Protected)
           const fileType = file.type.split('/')[0];
           await fetchWithRetry(`${API_BASE_URL}/api/files/register`, {
               method: 'POST',
@@ -250,8 +272,6 @@ export const liveApiService = {
           return { url: publicUrl, type: fileType };
 
       } catch (error: any) {
-          // If we are here, both Proxy (if attempted) and Direct failed.
-          // This is likely a CORS issue for the Direct Upload.
           throw error;
       }
   },
@@ -271,19 +291,18 @@ export const liveApiService = {
       return await response.json();
   },
 
+  // PUBLIC ENDPOINT - No Auth Required
   getPublicShowcase: async (token?: string) => {
       let url = `${API_BASE_URL}/api/public/showcase`;
-      if (token) {
-          // Changed to always use generic 'folder' param, letting backend handle Name OR ID resolution.
-          // This supports both human-readable names and stable IDs.
-          url += `?folder=${encodeURIComponent(token)}`;
-      }
-      const response = await fetchWithRetry(url);
+      if (token) url += `?folder=${encodeURIComponent(token)}`;
+      // Use standard fetch, NO RETRY with Auth header
+      const response = await fetch(url);
       return await response.json();
   },
 
+  // PUBLIC ENDPOINT - No Auth Required
   getShowcaseStatus: async () => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/public/status`);
+      const response = await fetch(`${API_BASE_URL}/api/public/status`);
       return await response.json();
   },
 

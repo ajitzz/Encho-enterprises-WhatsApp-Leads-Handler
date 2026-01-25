@@ -13,6 +13,7 @@ const multer = require('multer'); // Added for Proxy Upload
 const { Pool } = require('pg'); 
 const { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { OAuth2Client } = require('google-auth-library'); // Google Auth
 require('dotenv').config();
 
 const app = express();
@@ -40,6 +41,11 @@ app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     next();
 });
+
+// --- AUTHENTICATION CONFIG ---
+const SUPER_ADMIN_EMAILS = (process.env.SUPER_ADMIN_EMAILS || "").split(',').map(e => e.trim().toLowerCase());
+const GOOGLE_CLIENT_ID = process.env.VITE_GOOGLE_CLIENT_ID;
+const authClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // --- FILE UPLOAD CONFIG (PROXY FALLBACK) ---
 const upload = multer({ 
@@ -335,6 +341,78 @@ const initDB = async () => {
     }
 };
 initDB();
+
+// --- MIDDLEWARE: AUTHENTICATION ---
+// Protects all dashboard routes. Skips specific public endpoints.
+const requireAuth = async (req, res, next) => {
+    // 1. Define Public Whitelist (Regex for dynamic paths)
+    const publicPaths = [
+        /^\/auth\/login$/,
+        /^\/public\/status$/,
+        /^\/public\/showcase/, // Matches ?folder=... query params too
+    ];
+
+    if (publicPaths.some(p => p.test(req.path))) {
+        return next();
+    }
+
+    // 2. Extract Token
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: "Unauthorized: Missing Token" });
+    }
+    const token = authHeader.split(' ')[1];
+
+    // 3. Verify Token with Google
+    try {
+        const ticket = await authClient.verifyIdToken({
+            idToken: token,
+            audience: GOOGLE_CLIENT_ID
+        });
+        const payload = ticket.getPayload();
+        const email = payload.email.toLowerCase();
+
+        // 4. Check Super Admin Whitelist
+        if (!SUPER_ADMIN_EMAILS.includes(email)) {
+            console.warn(`⛔ Blocked access attempt from unauthorized email: ${email}`);
+            return res.status(403).json({ error: "Access Denied: Email not authorized." });
+        }
+
+        // 5. Attach User & Proceed
+        req.user = { email, name: payload.name };
+        next();
+    } catch (error) {
+        console.error("Auth Verification Failed:", error.message);
+        return res.status(401).json({ error: "Invalid Session" });
+    }
+};
+
+// Apply Middleware to Router
+router.use(requireAuth);
+
+// --- ROUTE: AUTH LOGIN ---
+// Used by frontend to verify credential and get initial session confirmation
+router.post('/auth/login', async (req, res) => {
+    // Logic handled by middleware for verification, but explicit check here for initial handshake
+    // Since middleware allows this path, we do the check manually to return user data
+    const { token } = req.body;
+    try {
+        const ticket = await authClient.verifyIdToken({
+            idToken: token,
+            audience: GOOGLE_CLIENT_ID
+        });
+        const payload = ticket.getPayload();
+        const email = payload.email.toLowerCase();
+
+        if (SUPER_ADMIN_EMAILS.includes(email)) {
+            res.json({ success: true, user: { email, name: payload.name, picture: payload.picture } });
+        } else {
+            res.status(403).json({ error: "Unauthorized Email" });
+        }
+    } catch (e) {
+        res.status(401).json({ error: "Invalid Token" });
+    }
+});
 
 // --- NEW ROUTE: BOT SETTINGS (GET) ---
 router.get('/bot-settings', async (req, res) => {
