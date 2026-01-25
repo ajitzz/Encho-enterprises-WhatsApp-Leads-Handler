@@ -24,8 +24,8 @@ import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './typ
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat } from 'lucide-react';
 
 // Get Client ID from Env
-// Fix: Cast import.meta to any to avoid TS error about missing env property
-const GOOGLE_CLIENT_ID = (import.meta as any).env.VITE_GOOGLE_CLIENT_ID || "";
+// Fix: Safely access import.meta.env using optional chaining to prevent runtime crashes
+const GOOGLE_CLIENT_ID = (import.meta as any)?.env?.VITE_GOOGLE_CLIENT_ID || "";
 
 export default function App() {
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
