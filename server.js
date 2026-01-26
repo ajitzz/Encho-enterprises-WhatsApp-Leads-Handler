@@ -12,7 +12,7 @@ require('dotenv').config();
 
 const app = express();
 const apiRouter = express.Router(); 
-const publicRouter = express.Router(); // Dedicated router for public endpoints
+const publicRouter = express.Router(); 
 
 // --- CONFIGURATION ---
 const CACHE = {
@@ -29,7 +29,6 @@ app.use(express.json({
 }));
 app.use(cors()); 
 
-// Disable Caching
 app.set('etag', false);
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -193,13 +192,117 @@ const mapDocument = (row) => ({
     notes: row.notes
 });
 
-// --- WHATSAPP SENDING UTILS ---
-const sendToMeta = async (to, data) => {
+// --- ADVANCED WHATSAPP PAYLOAD ENGINE ---
+const generateWhatsAppPayload = (content) => {
+    // 1. Template Message (Highest Priority)
+    if (content.templateName) {
+        return { type: 'template', template: { name: content.templateName, language: { code: 'en_US' } } };
+    }
+
+    // 2. Normalize Buttons / Options
+    let buttons = [];
+    
+    // Convert legacy string options to button objects
+    if (content.options && Array.isArray(content.options) && content.options.length > 0) {
+        buttons = content.options.map(opt => ({ type: 'reply', title: opt, payload: opt }));
+    } 
+    // Or use explicit buttons if available
+    else if (content.buttons && Array.isArray(content.buttons) && content.buttons.length > 0) {
+        buttons = content.buttons.filter(b => b.type === 'reply' || b.type === 'list');
+    }
+
+    // 3. Determine Format based on Count
+    // Constraint: Buttons <= 3. Lists <= 10.
+    const buttonCount = buttons.length;
+    const useListMessage = buttonCount > 3 && buttonCount <= 10;
+    const useSimpleText = buttonCount > 10; // Fallback for too many options
+
+    // Common Header Media (for both Buttons and Lists)
+    let header = undefined;
+    if (content.headerImageUrl || (content.mediaUrl && ['image', 'video', 'document'].includes(content.mediaType))) {
+        if (content.mediaType === 'video') header = { type: 'video', video: { link: content.mediaUrl } };
+        else if (content.mediaType === 'document') header = { type: 'document', document: { link: content.mediaUrl } };
+        else header = { type: 'image', image: { link: content.headerImageUrl || content.mediaUrl } };
+    }
+
+    const bodyText = content.message || "Please select an option:";
+    const footerText = content.footerText || "Uber Fleet";
+
+    // A. INTERACTIVE LIST (4-10 Options)
+    if (useListMessage) {
+        return {
+            type: "interactive",
+            interactive: {
+                type: "list",
+                header: header,
+                body: { text: bodyText },
+                footer: { text: footerText },
+                action: {
+                    button: "Select Option",
+                    sections: [
+                        {
+                            title: "Available Options",
+                            rows: buttons.map(b => ({
+                                id: (b.payload || b.title).substring(0, 200), // ID can be long
+                                title: b.title.substring(0, 24), // List Title Limit: 24 chars
+                                description: "" 
+                            }))
+                        }
+                    ]
+                }
+            }
+        };
+    }
+
+    // B. INTERACTIVE BUTTONS (1-3 Options)
+    if (buttonCount > 0 && !useSimpleText) {
+        return {
+            type: "interactive",
+            interactive: {
+                type: "button",
+                header: header,
+                body: { text: bodyText },
+                footer: { text: footerText },
+                action: {
+                    buttons: buttons.map(b => ({
+                        type: "reply",
+                        reply: {
+                            id: (b.payload || b.title).substring(0, 256),
+                            title: b.title.substring(0, 20) // CRITICAL: Strict 20 char limit for buttons
+                        }
+                    }))
+                }
+            }
+        };
+    }
+
+    // C. SIMPLE MEDIA (Image/Video/Doc only)
+    if (!buttonCount && content.mediaUrl) {
+        const type = content.mediaType === 'video' ? 'video' : (content.mediaType === 'document' ? 'document' : 'image');
+        return { 
+            type, 
+            [type]: { 
+                link: content.mediaUrl, 
+                caption: bodyText // Caption is the message body here
+            } 
+        };
+    }
+
+    // D. FALLBACK / TEXT ONLY (or > 10 options)
+    let finalBody = bodyText;
+    if (useSimpleText) {
+        finalBody += "\n\n" + buttons.map((b, i) => `${i+1}. ${b.title}`).join('\n');
+    }
+    
+    return { type: 'text', text: { body: finalBody } };
+};
+
+const sendToMeta = async (to, payload) => {
     if (!META_API_TOKEN || !PHONE_NUMBER_ID) return { success: false, error: "Missing Credentials" };
     try {
         await axios.post(
             `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-            { messaging_product: 'whatsapp', recipient_type: 'individual', to, ...data },
+            { messaging_product: 'whatsapp', recipient_type: 'individual', to, ...payload },
             { headers: { 'Authorization': `Bearer ${META_API_TOKEN}`, 'Content-Type': 'application/json' } }
         );
         return { success: true };
@@ -212,7 +315,7 @@ const sendToMeta = async (to, data) => {
 // ROUTES
 // ============================================================================
 
-// 1. PUBLIC ROUTES (Showcase, Status, Webhook)
+// 1. PUBLIC ROUTES
 app.get('/webhook', (req, res) => {
     if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
         res.status(200).send(req.query['hub.challenge']);
@@ -237,8 +340,26 @@ app.post('/webhook', async (req, res) => {
                     if (value.messages && value.messages.length > 0) {
                         const message = value.messages[0];
                         const from = message.from;
-                        const msgBody = message.text?.body || (message.button ? message.button.text : (message.interactive ? (message.interactive.button_reply ? message.interactive.button_reply.title : '') : (message.type === 'image' ? '[Image]' : '[Media]')));
-                        const btnId = message.interactive?.button_reply?.id; // For button clicks
+                        
+                        // Parse Content: Handle Text, Button Reply, AND List Reply
+                        let msgBody = '';
+                        let btnId = null;
+
+                        if (message.type === 'text') {
+                            msgBody = message.text.body;
+                        } else if (message.type === 'interactive') {
+                            if (message.interactive.type === 'button_reply') {
+                                msgBody = message.interactive.button_reply.title;
+                                btnId = message.interactive.button_reply.id;
+                            } else if (message.interactive.type === 'list_reply') {
+                                msgBody = message.interactive.list_reply.title; // User sees title
+                                btnId = message.interactive.list_reply.id;      // System uses ID
+                            }
+                        } else if (message.type === 'image') {
+                            msgBody = '[Image]';
+                        } else {
+                            msgBody = '[Media]';
+                        }
 
                         // 1. UPSERT DRIVER
                         let driverRes = await queryWithRetry('SELECT * FROM drivers WHERE phone_number = $1', [from]);
@@ -284,14 +405,19 @@ app.post('/webhook', async (req, res) => {
                                     
                                     // Handle Branching
                                     if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
-                                        // Priority 1: Match Button ID (Exact)
+                                        // Priority 1: Match Button/List ID (Exact)
                                         if (btnId && currentStep.routes[btnId]) {
                                             nextId = currentStep.routes[btnId];
                                         } 
                                         // Priority 2: Match Text (Fuzzy)
                                         else {
                                             const inputLower = msgBody.toLowerCase();
-                                            const matchedKey = Object.keys(currentStep.routes).find(key => inputLower.includes(key.toLowerCase()));
+                                            // Direct match first (for "English" vs "English ")
+                                            let matchedKey = Object.keys(currentStep.routes).find(key => key.toLowerCase() === inputLower);
+                                            // Fallback to substring
+                                            if (!matchedKey) {
+                                                matchedKey = Object.keys(currentStep.routes).find(key => inputLower.includes(key.toLowerCase()));
+                                            }
                                             if (matchedKey) {
                                                 nextId = currentStep.routes[matchedKey];
                                             }
@@ -304,10 +430,9 @@ app.post('/webhook', async (req, res) => {
                                         if (nextStep) replyToSend = nextStep;
                                     } else if (nextId === 'END') {
                                         newBotStepId = null; 
-                                        // End of flow
                                     }
                                 } else {
-                                    // Current step somehow lost in config? Restart.
+                                    // Step lost? Restart.
                                     newBotStepId = entryPointId;
                                     const step = botSettings.steps.find(s => s.id === entryPointId);
                                     if (step) replyToSend = step;
@@ -318,38 +443,13 @@ app.post('/webhook', async (req, res) => {
                         // 4. SEND REPLY
                         if (replyToSend && isSendingEnabled) {
                             const rawText = replyToSend.message || "";
-                            // Filter placeholders
                             const isPlaceholder = /replace\s+this\s+sample|type\s+your\s+message/i.test(rawText);
                             const isEmpty = !rawText.trim() && !replyToSend.mediaUrl;
 
                             if (!isPlaceholder && !isEmpty) {
-                                let metaPayload = {};
+                                // USE THE INDUSTRIAL ENGINE
+                                const metaPayload = generateWhatsAppPayload(replyToSend);
                                 
-                                // Delay Handling (Simulate typing if delay > 0) - Note: Real delay not possible in synchronous webhook, but we send anyway
-                                
-                                if (replyToSend.templateName) {
-                                    metaPayload = { type: 'template', template: { name: replyToSend.templateName, language: { code: 'en_US' } } };
-                                } else if (replyToSend.mediaUrl) {
-                                    const type = replyToSend.mediaType === 'video' ? 'video' : (replyToSend.mediaType === 'document' ? 'document' : 'image');
-                                    metaPayload = { type, [type]: { link: replyToSend.mediaUrl, caption: replyToSend.message } };
-                                } else if (replyToSend.buttons && replyToSend.buttons.length > 0) {
-                                    metaPayload = {
-                                        type: "interactive",
-                                        interactive: {
-                                            type: "button",
-                                            body: { text: replyToSend.message },
-                                            action: {
-                                                buttons: replyToSend.buttons.slice(0, 3).map((b, i) => ({
-                                                    type: "reply",
-                                                    reply: { id: b.payload || b.title, title: b.title.substring(0, 20) } 
-                                                }))
-                                            }
-                                        }
-                                    };
-                                } else {
-                                    metaPayload = { type: 'text', text: { body: replyToSend.message } };
-                                }
-
                                 const sendRes = await sendToMeta(driver.phoneNumber, metaPayload);
                                 if (sendRes.success) {
                                     driver.messages.push({
@@ -384,6 +484,8 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
+// ... (Rest of existing API routes for Public Showcase, Documents, etc. remain unchanged below) ...
+
 // PUBLIC SHOWCASE API
 publicRouter.get('/status', async (req, res) => {
     try {
@@ -402,65 +504,46 @@ publicRouter.get('/showcase', async (req, res) => {
         await ensureSchema();
         const folderName = req.query.folder;
         let folderTitle = "Showcase";
-        
         let query = 'SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE ORDER BY created_at DESC LIMIT 1';
         let params = [];
-        
         if (folderName && folderName !== 'undefined') {
             query = 'SELECT id, name FROM media_folders WHERE name = $1';
             params = [decodeURIComponent(folderName)];
         }
-
         const fRes = await queryWithRetry(query, params);
-        
         if (fRes.rows.length === 0) return res.json({ items: [], title: 'Showcase Offline' });
-        
         folderTitle = fRes.rows[0].name;
         const filesRes = await queryWithRetry(
             'SELECT * FROM media_files WHERE folder_path = $1 OR folder_path = $2 ORDER BY created_at DESC', 
             [`/${folderTitle}`, folderTitle]
         );
-        
         res.json({ items: filesRes.rows, title: folderTitle });
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 2. AUTH ROUTER
 apiRouter.post('/auth/login', async (req, res) => {
     const { token } = req.body;
     try {
         const ticket = await authClient.verifyIdToken({ idToken: token, audience: GOOGLE_CLIENT_ID });
         const payload = ticket.getPayload();
         const email = payload.email.toLowerCase();
-        
         if (SUPER_ADMIN_EMAILS.length > 0 && !SUPER_ADMIN_EMAILS.includes(email)) {
-            return res.status(403).json({ success: false, error: "Access Denied: Email not in allowlist." });
+            return res.status(403).json({ success: false, error: "Access Denied" });
         }
-        
         res.json({ success: true, user: { email, name: payload.name, picture: payload.picture } });
-    } catch (e) { 
-        res.status(401).json({ success: false, error: "Invalid Token" }); 
-    }
+    } catch (e) { res.status(401).json({ success: false, error: "Invalid Token" }); }
 });
 
-// 3. API MIDDLEWARE (Protected Routes)
 const requireAuth = async (req, res, next) => {
     await ensureSchema();
     if (req.path === '/auth/login') return next();
-    
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: "Unauthorized" });
-    
-    // In production, verify token again or check session cache. 
-    // Trusted for now based on login flow.
     next();
 };
 
 apiRouter.use(requireAuth);
 
-// 4. PROTECTED API ENDPOINTS
-
-// DOCUMENTS (Fixing 404)
 apiRouter.get('/drivers/:id/documents', async (req, res) => {
     try {
         const result = await queryWithRetry('SELECT * FROM driver_documents WHERE driver_id = $1 ORDER BY created_at DESC', [req.params.id]);
@@ -471,10 +554,7 @@ apiRouter.get('/drivers/:id/documents', async (req, res) => {
 apiRouter.patch('/documents/:id', async (req, res) => {
     const { status, notes } = req.body;
     try {
-        await queryWithRetry(
-            'UPDATE driver_documents SET verification_status = COALESCE($1, verification_status), notes = COALESCE($2, notes) WHERE id = $3',
-            [status, notes, req.params.id]
-        );
+        await queryWithRetry('UPDATE driver_documents SET verification_status = COALESCE($1, verification_status), notes = COALESCE($2, notes) WHERE id = $3', [status, notes, req.params.id]);
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -483,10 +563,8 @@ apiRouter.get('/media', async (req, res) => {
     try {
         const path = req.query.path || '/';
         const decodedPath = decodeURIComponent(path);
-        
         const filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [decodedPath]);
         const foldersRes = await queryWithRetry('SELECT * FROM media_folders WHERE parent_path = $1 ORDER BY name ASC', [decodedPath]);
-        
         res.json({ files: filesRes.rows, folders: foldersRes.rows });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -496,7 +574,6 @@ apiRouter.post('/folders', async (req, res) => {
     try {
         const dup = await queryWithRetry('SELECT id FROM media_folders WHERE name = $1', [name]);
         if (dup.rows.length > 0) return res.status(409).json({ error: "Folder exists" });
-
         const id = crypto.randomUUID();
         await queryWithRetry('INSERT INTO media_folders (id, name, parent_path, created_at) VALUES ($1, $2, $3, $4)', [id, name, parentPath || '/', Date.now()]);
         res.json({ success: true });
@@ -516,43 +593,33 @@ apiRouter.delete('/files/:id', async (req, res) => {
 });
 
 apiRouter.post('/messages/schedule', async (req, res) => {
-    const { driverIds, text, scheduledTime, mediaUrl, mediaType } = req.body;
-    console.log(`[Scheduler] Queued message for ${driverIds.length} drivers at ${new Date(scheduledTime)}`);
     res.json({ success: true, message: "Scheduled successfully" });
 });
 
 apiRouter.post('/messages/send', async (req, res) => {
     const { driverId, text, templateName, mediaUrl, mediaType } = req.body;
     if (!(await getCachedSystemSetting('sending_enabled'))) return res.status(503).json({ error: "Sending Disabled" });
-
     try {
         const driverRes = await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [driverId]);
         if (driverRes.rows.length === 0) return res.status(404).json({ error: "Driver not found" });
         const driver = driverRes.rows[0];
-
-        let metaPayload = {};
-        if (templateName) {
-            metaPayload = { type: 'template', template: { name: templateName, language: { code: 'en_US' } } };
-        } else if (mediaUrl) {
-            const type = mediaType === 'video' ? 'video' : 'image';
-            metaPayload = { type, [type]: { link: mediaUrl, caption: text } };
-        } else {
-            metaPayload = { type: 'text', text: { body: text } };
-        }
+        
+        // Use the same robust payload generator for manual sends
+        const metaPayload = generateWhatsAppPayload({
+            message: text,
+            templateName,
+            mediaUrl,
+            mediaType
+        });
 
         const metaRes = await sendToMeta(driver.phone_number, metaPayload);
         if (!metaRes.success) throw new Error(JSON.stringify(metaRes.error));
 
         let msgs = typeof driver.messages === 'string' ? JSON.parse(driver.messages) : (driver.messages || []);
         msgs.push({ id: `agent_${Date.now()}`, sender: 'agent', text: text || `[${templateName || mediaType}]`, timestamp: Date.now(), type: 'text', status: 'sent' });
-
-        await queryWithRetry('UPDATE drivers SET messages = $1, last_message = $2, last_message_time = $3 WHERE id = $4',
-            [JSON.stringify(msgs), "Agent Reply", Date.now(), driverId]);
-
+        await queryWithRetry('UPDATE drivers SET messages = $1, last_message = $2, last_message_time = $3 WHERE id = $4', [JSON.stringify(msgs), "Agent Reply", Date.now(), driverId]);
         res.json({ success: true });
-    } catch (e) { 
-        res.status(500).json({ error: e.message }); 
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 apiRouter.get('/sync', async (req, res) => {
@@ -588,11 +655,8 @@ apiRouter.patch('/drivers/:id', async (req, res) => {
         if (driverRes.rows.length === 0) return res.status(404).json({ error: "Not Found" });
         const driver = driverRes.rows[0];
         let metadata = typeof driver.metadata === 'string' ? JSON.parse(driver.metadata) : (driver.metadata || {});
-        
         if (isHumanMode !== undefined) metadata.isHumanMode = isHumanMode;
-        
-        await queryWithRetry('UPDATE drivers SET status = COALESCE($1, status), notes = COALESCE($2, notes), metadata = $3 WHERE id = $4',
-            [status, notes, JSON.stringify(metadata), req.params.id]);
+        await queryWithRetry('UPDATE drivers SET status = COALESCE($1, status), notes = COALESCE($2, notes), metadata = $3 WHERE id = $4', [status, notes, JSON.stringify(metadata), req.params.id]);
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -612,8 +676,7 @@ apiRouter.post('/files/register', async (req, res) => {
     const { key, url, filename, type, folderPath } = req.body;
     try {
         const id = crypto.randomUUID();
-        await queryWithRetry('INSERT INTO media_files (id, key, url, filename, type, folder_path, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-            [id, key, url, filename, type, folderPath || '/', Date.now()]);
+        await queryWithRetry('INSERT INTO media_files (id, key, url, filename, type, folder_path, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)', [id, key, url, filename, type, folderPath || '/', Date.now()]);
         res.json({ success: true, id });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -653,13 +716,9 @@ apiRouter.post('/system/settings', async (req, res) => {
     res.json({ success: true });
 });
 
-// MOUNT ROUTERS
-// Public routes first to avoid auth checks
 app.use('/api/public', publicRouter); 
-// Auth protected routes
 app.use('/api', apiRouter); 
 
-// START SERVER
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;
     app.listen(PORT, () => {
