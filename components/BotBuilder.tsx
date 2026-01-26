@@ -27,7 +27,7 @@ import {
   GripVertical, MousePointerClick, FileCode, Brush, Eye, 
   ChevronRight, Folder, ArrowLeft, Search, Cloud, Plus, Link, 
   HelpCircle, Split, GitBranch, ArrowRight, AlertTriangle, File, 
-  Loader2, RefreshCw, Bold, Italic, CreditCard, MapPin, Phone, Globe, Clock, FileText, Info
+  Loader2, RefreshCw, Bold, Italic, CreditCard, MapPin, Phone, Globe, Clock, FileText
 } from 'lucide-react';
 
 // --- STYLES ---
@@ -36,10 +36,10 @@ const INPUT_HANDLE_STYLE = { ...HANDLE_STYLE_COMMON, background: '#94a3b8', left
 const OUTPUT_HANDLE_STYLE = { ...HANDLE_STYLE_COMMON, background: '#3b82f6', right: -5 };
 const OPTION_HANDLE_STYLE = { 
     ...HANDLE_STYLE_COMMON,
-    width: 12, 
-    height: 12, 
+    width: 14, 
+    height: 14, 
     background: '#8b5cf6', // Violet
-    right: -6,
+    right: -7,
     borderRadius: '50%',
     boxShadow: '0 0 0 2px rgba(139, 92, 246, 0.2)'
 };
@@ -198,46 +198,16 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
 
             {/* RICH CARD BUTTONS */}
             {isCardType && data.buttons && data.buttons.length > 0 && (
-                <div className="space-y-2">
-                    {data.buttons.map((btn: MessageButton, i: number) => {
-                        // Logic: Only "Reply" buttons get handles because they continue the flow.
-                        // Link/Call/Location buttons are actions that leave the chat or open native apps.
-                        const isReply = btn.type === 'reply';
-                        
-                        return (
-                            <div key={i} className={`flex items-center justify-between p-2 rounded-md border text-xs font-bold relative transition-colors ${
-                                isReply 
-                                    ? 'bg-white border-violet-200 text-violet-700 hover:border-violet-300' 
-                                    : 'bg-gray-50 border-gray-200 text-gray-600'
-                            }`}>
-                                <div className="flex items-center gap-2">
-                                    {btn.type === 'location' && <MapPin size={12} />}
-                                    {btn.type === 'url' && <Globe size={12} />}
-                                    {btn.type === 'phone' && <Phone size={12} />}
-                                    {btn.type === 'reply' && <div className="w-1.5 h-1.5 rounded-full bg-violet-400" />}
-                                    
-                                    <span>{btn.title}</span>
-                                </div>
-                                
-                                {isReply ? (
-                                    // Handle for linking next step
-                                    <div className="absolute right-[-10px] top-1/2 -translate-y-1/2">
-                                        <Handle 
-                                            type="source" 
-                                            position={Position.Right} 
-                                            id={`btn-${i}`} 
-                                            style={OPTION_HANDLE_STYLE} 
-                                        />
-                                    </div>
-                                ) : (
-                                    // Indicator for Terminal Action (External Link/Call)
-                                    <span className="text-[9px] uppercase bg-gray-200 px-1.5 py-0.5 rounded text-gray-500">
-                                        {btn.type}
-                                    </span>
-                                )}
-                            </div>
-                        );
-                    })}
+                <div className="space-y-1">
+                    {data.buttons.map((btn: MessageButton, i: number) => (
+                        <div key={i} className="flex items-center justify-center gap-2 w-full py-2 bg-white border border-gray-200 rounded-md shadow-sm text-xs font-bold text-blue-600 group/btn relative">
+                            {btn.type === 'location' && <MapPin size={10} />}
+                            {btn.type === 'url' && <Globe size={10} />}
+                            {btn.type === 'phone' && <Phone size={10} />}
+                            {btn.type === 'reply' && <div className="absolute right-[-10px]"><Handle type="source" position={Position.Right} id={`btn-${i}`} style={OPTION_HANDLE_STYLE} /></div>}
+                            {btn.title}
+                        </div>
+                    ))}
                 </div>
             )}
 
@@ -313,7 +283,6 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
 
     const isCardType = localData.label === 'Rich Card';
     const isMediaNode = ['Image', 'Video', 'Document'].includes(localData.label);
-    const hasSpecialButtons = localData.buttons?.some((b: any) => b.type === 'url' || b.type === 'phone');
 
     return (
         <div className="w-80 bg-white border-l border-gray-200 flex flex-col h-full shadow-xl z-20">
@@ -348,7 +317,7 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                             onChange={(e) => update('templateName', e.target.value)}
                             placeholder="e.g. welcome_offer_v2"
                         />
-                        <p className="text-[9px] text-gray-400">Required for advanced features like Authentication.</p>
+                        <p className="text-[9px] text-gray-400">Required if using Link/Location buttons.</p>
                     </div>
                 )}
 
@@ -384,7 +353,7 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                                  <ImageIcon size={16} className="text-blue-500" />}
                                 
                                 <span className="text-xs text-gray-700 truncate flex-1" title={localData.mediaUrl}>
-                                    {localData.mediaUrl.split('/').pop() || 'File'}
+                                    {localData.mediaUrl.split('/').pop()}
                                 </span>
                                 
                                 <button 
@@ -439,25 +408,18 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                             <label className="text-xs font-bold text-gray-500 uppercase">Buttons</label>
                             <button onClick={addButton} className="text-xs text-blue-600 font-bold hover:underline">+ Add Button</button>
                         </div>
-                        
-                        {hasSpecialButtons && !localData.templateName && (
-                            <div className="bg-amber-50 text-amber-800 text-[10px] p-2 rounded border border-amber-200 flex items-start gap-2 leading-tight">
-                                <Info size={12} className="shrink-0 mt-0.5" />
-                                <span>Note: Without a template, Link/Call buttons will be sent as appended text links for compatibility.</span>
-                            </div>
-                        )}
-
                         <div className="space-y-3">
                             {(localData.buttons || []).map((btn: MessageButton, i: number) => (
-                                <div key={i} className="bg-gray-50 p-2 rounded-lg border border-gray-200 space-y-2 transition-all hover:bg-gray-100">
+                                <div key={i} className="bg-gray-50 p-2 rounded-lg border border-gray-200 space-y-2">
                                     <div className="flex gap-2">
                                         <select 
                                             value={btn.type}
                                             onChange={(e) => updateButton(i, 'type', e.target.value)}
-                                            className="bg-white border border-gray-200 text-xs rounded p-1 w-24 outline-none font-medium"
+                                            className="bg-white border border-gray-200 text-xs rounded p-1 w-24 outline-none"
                                         >
                                             <option value="reply">Reply</option>
                                             <option value="url">Link</option>
+                                            <option value="location">Location</option>
                                             <option value="phone">Call</option>
                                         </select>
                                         <input 
@@ -468,40 +430,21 @@ const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onC
                                         />
                                         <button onClick={() => removeButton(i)} className="text-red-400 hover:text-red-600"><X size={14} /></button>
                                     </div>
-                                    
-                                    {/* Conditional Inputs based on Type */}
-                                    {btn.type === 'url' && (
-                                        <div className="flex items-center gap-2">
-                                            <Globe size={12} className="text-gray-400" />
-                                            <input 
-                                                value={btn.payload || ''}
-                                                onChange={(e) => updateButton(i, 'payload', e.target.value)}
-                                                className="w-full bg-white border border-gray-200 text-xs rounded p-1 outline-none font-mono text-[10px]"
-                                                placeholder="https://example.com"
-                                            />
-                                        </div>
+                                    {btn.type !== 'reply' && btn.type !== 'location' && (
+                                        <input 
+                                            value={btn.payload || ''}
+                                            onChange={(e) => updateButton(i, 'payload', e.target.value)}
+                                            className="w-full bg-white border border-gray-200 text-xs rounded p-1 outline-none"
+                                            placeholder={btn.type === 'url' ? 'https://...' : 'Payload/ID...'}
+                                        />
                                     )}
-                                    {btn.type === 'phone' && (
-                                        <div className="flex items-center gap-2">
-                                            <Phone size={12} className="text-gray-400" />
-                                            <input 
-                                                value={btn.payload || ''}
-                                                onChange={(e) => updateButton(i, 'payload', e.target.value)}
-                                                className="w-full bg-white border border-gray-200 text-xs rounded p-1 outline-none font-mono text-[10px]"
-                                                placeholder="+919876543210"
-                                            />
-                                        </div>
-                                    )}
-                                    {btn.type === 'reply' && (
-                                        <div className="flex items-center gap-2">
-                                            <GitBranch size={12} className="text-gray-400" />
-                                            <input 
-                                                value={btn.payload || ''}
-                                                onChange={(e) => updateButton(i, 'payload', e.target.value)}
-                                                className="w-full bg-white border border-gray-200 text-xs rounded p-1 outline-none"
-                                                placeholder="ID (Optional, e.g. btn_yes)"
-                                            />
-                                        </div>
+                                     {btn.type === 'reply' && (
+                                        <input 
+                                            value={btn.payload || ''}
+                                            onChange={(e) => updateButton(i, 'payload', e.target.value)}
+                                            className="w-full bg-white border border-gray-200 text-xs rounded p-1 outline-none"
+                                            placeholder="Optional ID (e.g. btn_yes)"
+                                        />
                                     )}
                                 </div>
                             ))}

@@ -1,9 +1,14 @@
 
-import { Type } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { LeadStatus, AuditReport, AuditIssue } from "../types";
-import { liveApiService } from './liveApiService';
+
+// NOTE: In a real production app, this key should be in process.env and calls proxied through a backend.
+const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0"; 
+
+const ai = new GoogleGenAI({ apiKey });
 
 // --- COST SAVING STRATEGY ---
+// Automatic Downgrade: If Pro hits limits, switch to Flash instantly.
 const MODELS = {
     BEST: "gemini-3-pro-preview",
     ECONOMY: "gemini-3-flash-preview"
@@ -30,49 +35,46 @@ export interface AIAnalysisResult {
   };
 }
 
-// Wrapper to call Backend Proxy
-const generateWithBackend = async (params: any) => {
-    // We send the auth token via headers in liveApiService implicitly, 
-    // but here we need to manually fetch using the proxy pattern if not using the service wrapper.
-    // However, since we are inside the frontend service, we can use fetch directly.
-    const token = localStorage.getItem('uber_fleet_auth_token');
-    
+// Wrapper to handle Rate Limits and Model Switching
+const generateWithFallback = async (params: any) => {
     try {
-        const response = await fetch('/api/ai/generate', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify({
+        const response = await ai.models.generateContent({
+            ...params,
+            model: currentModel
+        });
+        
+        // If successful and we are on economy, try to upgrade back after a success (or keep it simple and stay economy for session)
+        // For now, we stick to the working model.
+        return response;
+    } catch (error: any) {
+        // Check for Quota/Rate Limit Errors (429)
+        if (error.message?.includes('429') || error.status === 429) {
+            console.warn(`[AI] Rate Limit Hit on ${currentModel}. Switching to Economy Model.`);
+            currentModel = MODELS.ECONOMY;
+            
+            // Retry immediately with cheaper model
+            return await ai.models.generateContent({
                 ...params,
                 model: currentModel
-            })
-        });
-
-        if (!response.ok) {
-            // Handle Rate Limits (429) via Backend Status
-            if (response.status === 429) {
-                console.warn(`[AI] Rate Limit Hit on ${currentModel}. Switching to Economy Model.`);
-                currentModel = MODELS.ECONOMY;
-                // Retry
-                return await fetch('/api/ai/generate', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                    body: JSON.stringify({ ...params, model: currentModel })
-                }).then(r => r.json());
-            }
-            throw new Error(`AI Service Error: ${response.statusText}`);
+            });
         }
-
-        return await response.json();
-    } catch (error) {
-        console.error("AI Proxy Error", error);
         throw error;
     }
 };
 
 export const analyzeMessage = async (text: string, imageUrl?: string, systemInstruction?: string): Promise<AIAnalysisResult> => {
+  if (!apiKey) {
+    console.warn("No API Key provided for Gemini. Returning mock AI response.");
+    return {
+      intent: "Inquiry about joining",
+      isInterested: true,
+      containsDocument: !!imageUrl,
+      suggestedReply: "Thanks! We've received your info.",
+      recommendedStatus: LeadStatus.NEW,
+      extractedData: {}
+    };
+  }
+
   try {
     const persona = systemInstruction || `You are an AI recruiter for Uber Fleet. Your goal is to be helpful, professional, and encourage drivers to apply.`;
 
@@ -81,10 +83,10 @@ export const analyzeMessage = async (text: string, imageUrl?: string, systemInst
     Has Image Attachment: ${imageUrl ? 'Yes' : 'No'}
     Tasks: 1. Reply to the user. 2. Extract data. 3. Determine status.`;
 
-    const response = await generateWithBackend({
+    const response = await generateWithFallback({
       contents: prompt,
       config: {
-        systemInstruction: persona, 
+        systemInstruction: persona, // Updated to use systemInstruction config
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
@@ -167,6 +169,8 @@ const runLocalAudit = (nodes: any[]): AuditReport => {
 
 // --- SYSTEM AUDITOR (JSON CONFIG) ---
 export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
+    if (!apiKey) return runLocalAudit(nodes);
+
     try {
         const prompt = `
         You are a Quality Assurance AI for a Chatbot Flow.
@@ -174,7 +178,7 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
         INPUT DATA: ${JSON.stringify(nodes.map(n => ({ id: n.id, type: n.data.label, message: n.data.message })))}
         `;
 
-        const response = await generateWithBackend({
+        const response = await generateWithFallback({
             contents: prompt,
             config: {
                 responseMimeType: "application/json",
@@ -210,6 +214,8 @@ export const auditBotFlow = async (nodes: any[]): Promise<AuditReport> => {
 };
 
 export const analyzeSystemCode = async (files: Array<{path: string, content: string}>, issueDescription: string): Promise<{ diagnosis: string, changes: Array<{filePath: string, content: string, explanation: string}> }> => {
+    if (!apiKey) throw new Error("No API Key");
+
     const fileContext = files.map(f => `--- START OF FILE ${f.path} ---\n${f.content}\n--- END OF FILE ${f.path} ---`).join("\n");
 
     const prompt = `
@@ -218,7 +224,7 @@ export const analyzeSystemCode = async (files: Array<{path: string, content: str
     PROJECT CONTEXT: ${fileContext}
     `;
 
-    const response = await generateWithBackend({
+    const response = await generateWithFallback({
         contents: prompt,
         config: {
             responseMimeType: "application/json",

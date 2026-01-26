@@ -1,7 +1,7 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import { liveApiService } from '../services/liveApiService';
-import { Activity, Database, Brain, Cloud, Wifi, ArrowUpCircle, Clock, UploadCloud, MessageSquare, Shield, X, Power, AlertTriangle, Play, Pause, Lock, Slash } from 'lucide-react';
+import { Activity, Database, Brain, Cloud, Wifi, ArrowUpCircle, Clock, UploadCloud, MessageSquare, Shield, X, Power, AlertTriangle, Play, Pause, Lock } from 'lucide-react';
 import { SystemStats } from '../types';
 
 export const SystemMonitor = () => {
@@ -13,7 +13,6 @@ export const SystemMonitor = () => {
         automation_enabled: true,
         sending_enabled: true
     });
-    const [authError, setAuthError] = useState(false);
     
     // Kill Switch Modal
     const [showConfirmModal, setShowConfirmModal] = useState(false);
@@ -36,27 +35,16 @@ export const SystemMonitor = () => {
             if (isFetching.current) return;
             isFetching.current = true;
             try {
-                const response = await fetch('/api/system/stats', {
-                    headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }
-                });
-                
-                if (response.status === 401 || response.status === 403) {
-                    setAuthError(true);
-                    return; // Stop polling on auth fail
-                }
-
+                const response = await fetch('/api/system/stats');
                 if (response.ok) {
                     setStats(await response.json());
-                    setAuthError(false);
                 }
             } catch(e) {
                 // Silent fail
             } finally {
                 isFetching.current = false;
-                // Schedule next poll only if no auth error
-                if (!authError) {
-                    timerRef.current = setTimeout(poll, 5000); 
-                }
+                // Schedule next poll only after current finishes
+                timerRef.current = setTimeout(poll, 5000); 
             }
         };
         poll();
@@ -120,14 +108,6 @@ export const SystemMonitor = () => {
         const m = Math.floor((seconds % 3600) / 60);
         return `${h}h ${m}m`;
     };
-
-    if (authError) {
-        return (
-            <div className="fixed bottom-0 left-0 right-0 z-40 bg-red-900/90 backdrop-blur text-red-200 text-xs px-4 py-1 text-center font-bold">
-                ⚠️ Monitor Disconnected: Authentication Failed
-            </div>
-        );
-    }
 
     if (!stats) return null;
 
