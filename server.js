@@ -155,10 +155,11 @@ const requireAuth = async (req, res, next) => {
     const publicPaths = [
         /^\/auth\/login$/,
         /^\/public\/status$/,
-        /^\/public\/showcase/,
+        /^\/public\/showcase$/,
         // CRITICAL FIX: Allow Webhook endpoints to bypass Google Auth
-        /^\/webhook(\/.*)?$/,
-        /^\/api\/webhook(\/.*)?$/ 
+        // Removed '$' anchor to allow query parameters like ?hub.mode=subscribe
+        /^\/webhook/,
+        /^\/api\/webhook/ 
     ];
 
     // Check if path matches any public pattern
