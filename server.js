@@ -54,8 +54,10 @@ app.use((req, res, next) => {
     next();
 });
 
-const SUPER_ADMIN_EMAILS = (process.env.SUPER_ADMIN_EMAILS || "").split(',').map(e => e.trim().toLowerCase());
-const GOOGLE_CLIENT_ID = process.env.VITE_GOOGLE_CLIENT_ID;
+const SUPER_ADMIN_EMAILS = (process.env.SUPER_ADMIN_EMAILS || "").split(',').map(e => e.trim().toLowerCase()).filter(e => e);
+const FALLBACK_CLIENT_ID = "764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.googleusercontent.com";
+const GOOGLE_CLIENT_ID = process.env.VITE_GOOGLE_CLIENT_ID || FALLBACK_CLIENT_ID;
+
 const authClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 const upload = multer({ 
@@ -157,9 +159,8 @@ const requireAuth = async (req, res, next) => {
         /^\/public\/status$/,
         /^\/public\/showcase$/,
         // CRITICAL FIX: Allow Webhook endpoints to bypass Google Auth
-        // Removed '$' anchor to allow query parameters like ?hub.mode=subscribe
-        /^\/webhook/,
-        /^\/api\/webhook/ 
+        /^\/webhook(\/.*)?$/,
+        /^\/api\/webhook(\/.*)?$/ 
     ];
 
     // Check if path matches any public pattern
@@ -181,27 +182,52 @@ const requireAuth = async (req, res, next) => {
         const payload = ticket.getPayload();
         const email = payload.email.toLowerCase();
 
-        if (!SUPER_ADMIN_EMAILS.length || (SUPER_ADMIN_EMAILS.length === 1 && !SUPER_ADMIN_EMAILS[0])) {
-             console.error("⛔ SUPER_ADMIN_EMAILS is not configured. Blocking all access.");
-             return res.status(403).json({ error: "Configuration Error: No Admins Defined" });
-        }
-
-        if (!SUPER_ADMIN_EMAILS.includes(email)) {
-            console.warn(`⛔ Blocked access: ${email}`);
-            return res.status(403).json({ error: "Access Denied: Email not authorized." });
+        // AUTH CHECK LOGIC
+        // If SUPER_ADMIN_EMAILS is configured, restrict access.
+        // If NOT configured, allow everyone (Demo Mode).
+        if (SUPER_ADMIN_EMAILS.length > 0) {
+            if (!SUPER_ADMIN_EMAILS.includes(email)) {
+                console.warn(`⛔ Blocked access: ${email}`);
+                return res.status(403).json({ error: "Access Denied: Email not authorized." });
+            }
+        } else {
+             // Optional: Log that we are in open mode
+             // console.log(`Access allowed (Demo Mode): ${email}`);
         }
 
         req.user = { email, name: payload.name };
         next();
     } catch (error) {
         console.error("Auth Verification Failed:", error.message);
-        return res.status(401).json({ error: "Invalid Session" });
+        return res.status(401).json({ error: "Invalid Session or Client ID Mismatch" });
     }
 };
 
 router.use(requireAuth);
 
 // --- ROUTES ---
+
+// 0. AUTH LOGIN
+router.post('/auth/login', async (req, res) => {
+    const { token } = req.body;
+    try {
+        const ticket = await authClient.verifyIdToken({
+            idToken: token,
+            audience: GOOGLE_CLIENT_ID
+        });
+        const payload = ticket.getPayload();
+        const email = payload.email.toLowerCase();
+
+        if (SUPER_ADMIN_EMAILS.length > 0 && !SUPER_ADMIN_EMAILS.includes(email)) {
+            return res.status(403).json({ success: false, error: "Email not in whitelist." });
+        }
+
+        res.json({ success: true, user: { email, name: payload.name, picture: payload.picture } });
+    } catch (e) {
+        console.error("Login verification failed:", e.message);
+        res.status(401).json({ success: false, error: "Invalid Google Token. Check Client ID." });
+    }
+});
 
 // 1. WEBHOOK VERIFICATION (GET)
 router.get('/webhook', (req, res) => {
@@ -240,8 +266,6 @@ router.post('/webhook', async (req, res) => {
                         const from = message.from;
                         const msgBody = message.text?.body || '';
                         
-                        // Process logic here...
-                        // (Due to file size limits, assuming existing processing logic is hooked up here via internal modules or direct code)
                         console.log(`Received message from ${from}: ${msgBody}`);
                     }
                 }

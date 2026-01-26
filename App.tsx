@@ -24,14 +24,11 @@ import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './typ
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle } from 'lucide-react';
 
 // --- CONFIGURATION ---
-// 1. Try Environment Variable (Best Practice)
-// 2. Fallback to Hardcoded ID (Immediate Fix for Vercel Deployment)
-const ENV_CLIENT_ID = (import.meta as any)?.env?.VITE_GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || "";
 const FALLBACK_CLIENT_ID = "764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.googleusercontent.com";
+const ENV_CLIENT_ID = (import.meta as any)?.env?.VITE_GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
 
-// Select the first valid ID found
-const RAW_CLIENT_ID = ENV_CLIENT_ID || FALLBACK_CLIENT_ID;
-const GOOGLE_CLIENT_ID = RAW_CLIENT_ID.replace(/^['"]|['"]$/g, '').trim();
+// Use Env ID if available, otherwise use Fallback
+const GOOGLE_CLIENT_ID = (ENV_CLIENT_ID || FALLBACK_CLIENT_ID).replace(/^['"]|['"]$/g, '').trim();
 
 export default function App() {
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
@@ -161,22 +158,20 @@ export default function App() {
       const isValidClientId = GOOGLE_CLIENT_ID.length > 10 && GOOGLE_CLIENT_ID.endsWith('.apps.googleusercontent.com');
 
       if (!isValidClientId) {
-          const isVercel = window.location.hostname.includes('vercel.app');
-          
           return (
               <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4 font-sans text-center">
                   <div className="bg-white p-8 rounded-2xl shadow-xl border border-red-100 max-w-lg">
                       <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-6">
                           <AlertTriangle size={32} />
                       </div>
-                      <h2 className="text-2xl font-bold text-gray-900 mb-3">Google Auth Config Missing</h2>
+                      <h2 className="text-2xl font-bold text-gray-900 mb-3">Google Auth Config Error</h2>
                       <p className="text-gray-600 mb-6 leading-relaxed text-sm">
-                          Unable to load Google Client ID from Environment or Fallback.
+                          Unable to load a valid Google Client ID. Please check your .env file or server configuration.
                       </p>
                       
                       <div className="bg-gray-100 p-4 rounded-lg text-left overflow-x-auto mb-6 border border-gray-200">
                           <p className="text-xs font-mono text-gray-800 break-all">
-                              Current Value: {GOOGLE_CLIENT_ID || "(Empty)"}
+                              ID: {GOOGLE_CLIENT_ID || "(Empty)"}
                           </p>
                       </div>
                   </div>
