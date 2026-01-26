@@ -23,8 +23,15 @@ import { liveApiService, setAuthToken } from './services/liveApiService';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle } from 'lucide-react';
 
-// Get Client ID from Env and TRIM whitespace
-const GOOGLE_CLIENT_ID = ((import.meta as any)?.env?.VITE_GOOGLE_CLIENT_ID || "").trim();
+// --- CONFIGURATION ---
+// 1. Try Environment Variable (Best Practice)
+// 2. Fallback to Hardcoded ID (Immediate Fix for Vercel Deployment)
+const ENV_CLIENT_ID = (import.meta as any)?.env?.VITE_GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || "";
+const FALLBACK_CLIENT_ID = "764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.googleusercontent.com";
+
+// Select the first valid ID found
+const RAW_CLIENT_ID = ENV_CLIENT_ID || FALLBACK_CLIENT_ID;
+const GOOGLE_CLIENT_ID = RAW_CLIENT_ID.replace(/^['"]|['"]$/g, '').trim();
 
 export default function App() {
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
@@ -57,8 +64,6 @@ export default function App() {
           setAuthToken(token);
           setIsAuthenticated(true);
       }
-      
-      // REMOVED: Automatic Notification.requestPermission() to fix console error
   }, []);
 
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -152,11 +157,12 @@ export default function App() {
 
   // --- AUTHENTICATION GATE ---
   if (!isAuthenticated) {
-      // Validate Client ID format (must not be empty and must look like a Google Client ID)
+      // Validate Client ID format
       const isValidClientId = GOOGLE_CLIENT_ID.length > 10 && GOOGLE_CLIENT_ID.endsWith('.apps.googleusercontent.com');
 
       if (!isValidClientId) {
           const isVercel = window.location.hostname.includes('vercel.app');
+          
           return (
               <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4 font-sans text-center">
                   <div className="bg-white p-8 rounded-2xl shadow-xl border border-red-100 max-w-lg">
@@ -165,32 +171,14 @@ export default function App() {
                       </div>
                       <h2 className="text-2xl font-bold text-gray-900 mb-3">Google Auth Config Missing</h2>
                       <p className="text-gray-600 mb-6 leading-relaxed text-sm">
-                          The <code>VITE_GOOGLE_CLIENT_ID</code> environment variable is missing or invalid.
+                          Unable to load Google Client ID from Environment or Fallback.
                       </p>
                       
-                      {isVercel ? (
-                          <div className="bg-blue-50 text-blue-900 p-4 rounded-lg text-left text-xs mb-6 border border-blue-100">
-                              <strong>Fix for Vercel:</strong>
-                              <ol className="list-decimal pl-4 mt-2 space-y-1">
-                                  <li>Go to Vercel Project Dashboard.</li>
-                                  <li>Click <strong>Settings</strong> {'>'} <strong>Environment Variables</strong>.</li>
-                                  <li>Add Key: <code>VITE_GOOGLE_CLIENT_ID</code></li>
-                                  <li>Add Value: (Your Google Cloud Client ID)</li>
-                                  <li><strong>Redeploy</strong> the app for changes to take effect.</li>
-                              </ol>
-                          </div>
-                      ) : (
-                          <div className="bg-gray-100 p-4 rounded-lg text-left overflow-x-auto mb-6 border border-gray-200">
-                              <code className="text-xs font-mono text-gray-800">
-                                  # .env file in root<br/>
-                                  VITE_GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
-                              </code>
-                          </div>
-                      )}
-                      
-                      <p className="text-xs text-gray-400">
-                          Current Value: {GOOGLE_CLIENT_ID ? `"${GOOGLE_CLIENT_ID}" (Invalid)` : "(Empty)"}
-                      </p>
+                      <div className="bg-gray-100 p-4 rounded-lg text-left overflow-x-auto mb-6 border border-gray-200">
+                          <p className="text-xs font-mono text-gray-800 break-all">
+                              Current Value: {GOOGLE_CLIENT_ID || "(Empty)"}
+                          </p>
+                      </div>
                   </div>
               </div>
           );
