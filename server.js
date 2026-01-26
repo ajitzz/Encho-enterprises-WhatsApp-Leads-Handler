@@ -12,7 +12,7 @@ const { GoogleGenAI } = require('@google/genai');
 require('dotenv').config();
 
 const app = express();
-const router = express.Router(); 
+const apiRouter = express.Router(); 
 
 // --- CONFIGURATION & CONSTANTS ---
 const BLOCKED_PHRASES = [
@@ -39,13 +39,14 @@ const CACHE = {
 
 // --- MIDDLEWARE SETUP ---
 app.use(express.json({ 
-    limit: '50mb', // Increased for media uploads
+    limit: '50mb', 
     verify: (req, res, buf) => {
         req.rawBody = buf;
     }
 }));
 app.use(cors()); 
 
+// Disable caching for dynamic API responses
 app.set('etag', false);
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -54,7 +55,7 @@ app.use((req, res, next) => {
 
 const upload = multer({ 
     storage: multer.memoryStorage(),
-    limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit for proxy uploads
+    limits: { fileSize: 10 * 1024 * 1024 } 
 });
 
 // --- ENV VARS ---
@@ -63,11 +64,10 @@ const FALLBACK_CLIENT_ID = "764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.g
 const GOOGLE_CLIENT_ID = process.env.VITE_GOOGLE_CLIENT_ID || FALLBACK_CLIENT_ID;
 const authClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
-// Credential Fallbacks to prompt values if env missing
-const META_API_TOKEN = (process.env.META_API_TOKEN || "EAAkr7Y9S2qYBQfHTNZASIugAzOi8b2MZCBct4z4jZBHSmQ2KGlFduuDQQGEYC9NRDtZBUdhMPdeJ06OjYUiJYGfFkZCAxzyh4TdidN7ZA10K3XPOVEiQh01jo22xLsQjXrEtMHc5ZCHZBbRZAyA5d0pl26Jsg3IuNKY272QYmqEjHghf11OKJmbUZBfJLe5EvHzl48gAZDZD").trim();
-const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "982841698238647").trim();
+const META_API_TOKEN = (process.env.META_API_TOKEN || "").trim();
+const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "").trim();
 const VERIFY_TOKEN = (process.env.VERIFY_TOKEN || "uber_fleet_verify_token").trim();
-const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "AIzaSyDujw0ovB1bLtQJK8DKy1b__LT5aqGurz0").trim();
+const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim();
 
 const aiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
@@ -126,17 +126,25 @@ const queryWithRetry = async (text, params, retries = 1) => {
     }
 };
 
+// --- MIGRATION & CACHE ---
 const refreshCache = async () => {
     try {
-        // Ensure tables exist
+        // 1. Ensure Basic Tables
         await queryWithRetry(`CREATE TABLE IF NOT EXISTS bot_settings (id SERIAL PRIMARY KEY, settings JSONB)`);
         await queryWithRetry(`CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)`);
-        await queryWithRetry(`CREATE TABLE IF NOT EXISTS drivers (id TEXT PRIMARY KEY, phone_number TEXT, name TEXT, status TEXT, last_message TEXT, last_message_time BIGINT, metadata JSONB, messages JSONB)`);
+        await queryWithRetry(`CREATE TABLE IF NOT EXISTS drivers (id TEXT PRIMARY KEY, phone_number TEXT, name TEXT, status TEXT, last_message TEXT, last_message_time BIGINT)`);
         
-        // Media Tables
+        // 2. CRITICAL FIX: Add missing columns if they don't exist (Schema Migration)
+        // This prevents the "column does not exist" error without deleting data
+        await queryWithRetry(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS metadata JSONB`);
+        await queryWithRetry(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS messages JSONB`);
+        await queryWithRetry(`ALTER TABLE drivers ADD COLUMN IF NOT EXISTS email TEXT`);
+        
+        // 3. Media Tables
         await queryWithRetry(`CREATE TABLE IF NOT EXISTS media_folders (id UUID PRIMARY KEY, name TEXT, parent_path TEXT, created_at BIGINT, is_public_showcase BOOLEAN DEFAULT FALSE)`);
         await queryWithRetry(`CREATE TABLE IF NOT EXISTS media_files (id UUID PRIMARY KEY, key TEXT, url TEXT, filename TEXT, type TEXT, folder_path TEXT, created_at BIGINT, media_id TEXT)`);
 
+        // 4. Load Cache
         const botRes = await queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1');
         CACHE.botSettings = botRes.rows[0]?.settings || { isEnabled: true, steps: [] };
 
@@ -147,7 +155,7 @@ const refreshCache = async () => {
 
         CACHE.lastRefreshed = Date.now();
     } catch (e) {
-        console.error("Cache Refresh Error:", e.message);
+        console.error("Cache/Migration Error:", e.message);
     }
 };
 
@@ -163,7 +171,6 @@ const getCachedSystemSetting = async (key) => {
 // --- WHATSAPP API HELPERS ---
 const sendToMeta = async (to, data) => {
     if (!META_API_TOKEN || !PHONE_NUMBER_ID) {
-        console.error("Missing Meta Credentials");
         return { success: false, error: "Missing Credentials" };
     }
     try {
@@ -183,46 +190,15 @@ const sendTextMessage = (to, text) => sendToMeta(to, { type: 'text', text: { bod
 const sendTemplateMessage = (to, name, language = 'en_US') => sendToMeta(to, { type: 'template', template: { name, language: { code: language } } });
 const sendMediaMessage = (to, type, link, caption) => sendToMeta(to, { type, [type]: { link, caption } });
 
-// --- AUTH MIDDLEWARE ---
-const requireAuth = async (req, res, next) => {
-    const publicPaths = [
-        /^\/auth\/login$/,
-        /^\/public\/status$/,
-        /^\/public\/showcase$/,
-        /^\/webhook(\/.*)?$/,
-        /^\/api\/webhook(\/.*)?$/ 
-    ];
+// ============================================================================
+// PUBLIC WEBHOOK ROUTES (Root Level)
+// These must be on `app` directly to match Vercel's /webhook rewrite correctly
+// ============================================================================
 
-    if (publicPaths.some(p => p.test(req.path) || p.test(req.originalUrl))) return next();
-
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: "Unauthorized" });
-    const token = authHeader.split(' ')[1];
-
-    try {
-        const ticket = await authClient.verifyIdToken({ idToken: token, audience: GOOGLE_CLIENT_ID });
-        const payload = ticket.getPayload();
-        const email = payload.email.toLowerCase();
-
-        if (SUPER_ADMIN_EMAILS.length > 0 && !SUPER_ADMIN_EMAILS.includes(email)) {
-            return res.status(403).json({ error: "Access Denied" });
-        }
-        req.user = { email, name: payload.name };
-        next();
-    } catch (error) {
-        // Fallback for demo/dev mode if configured to allow
-        if (SUPER_ADMIN_EMAILS.length === 0) return next();
-        return res.status(401).json({ error: "Invalid Token" });
-    }
-};
-
-router.use(requireAuth);
-
-// --- CORE ROUTES ---
-
-// 1. WEBHOOK VERIFY
-router.get('/webhook', (req, res) => {
+// 1. WEBHOOK VERIFICATION
+app.get('/webhook', (req, res) => {
     if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
+        console.log("WEBHOOK_VERIFIED");
         res.status(200).send(req.query['hub.challenge']);
     } else {
         res.sendStatus(403);
@@ -230,7 +206,7 @@ router.get('/webhook', (req, res) => {
 });
 
 // 2. WEBHOOK INGEST (THE BOT ENGINE)
-router.post('/webhook', async (req, res) => {
+app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
 
     const isIngestEnabled = await getCachedSystemSetting('webhook_ingest_enabled');
@@ -255,6 +231,7 @@ router.post('/webhook', async (req, res) => {
                         
                         if (driverRes.rows.length === 0) {
                              const newId = Date.now().toString();
+                             // Use safe insert in case columns missing (though auto-migration should fix)
                              await queryWithRetry(
                                  `INSERT INTO drivers (id, phone_number, name, status, last_message, last_message_time, metadata, messages) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
                                  [newId, from, 'New Lead', 'New', msgBody, Date.now(), { isBotActive: true }, '[]']
@@ -286,9 +263,13 @@ router.post('/webhook', async (req, res) => {
                         const isAutomationEnabled = await getCachedSystemSetting('automation_enabled');
                         const botSettings = await getCachedBotSettings();
                         
-                        if (isAutomationEnabled && botSettings.isEnabled && driver.metadata?.isBotActive) {
+                        // Check if metadata exists (migration safety)
+                        const metadata = driver.metadata || {};
+                        const isBotActive = metadata.isBotActive !== false; // Default true if undefined
+
+                        if (isAutomationEnabled && botSettings.isEnabled && isBotActive) {
                             
-                            let currentStepId = driver.metadata.currentBotStepId;
+                            let currentStepId = metadata.currentBotStepId;
                             let nextStepId = null;
                             let replyMessage = null;
                             let replyOptions = null;
@@ -333,7 +314,7 @@ router.post('/webhook', async (req, res) => {
                                 const botMsg = { id: `bot_${Date.now()}`, sender: 'system', text: replyMessage, timestamp: Date.now(), type: 'text' };
                                 currentMessages.push(botMsg);
                                 
-                                const newMetadata = { ...driver.metadata, currentBotStepId: nextStepId };
+                                const newMetadata = { ...metadata, currentBotStepId: nextStepId };
                                 if (nextStepId === 'END' || nextStepId === 'AI_HANDOFF') newMetadata.isBotActive = false;
 
                                 await queryWithRetry(
@@ -351,8 +332,39 @@ router.post('/webhook', async (req, res) => {
     }
 });
 
-// 3. SEND MESSAGE
-router.post('/messages/send', async (req, res) => {
+// ============================================================================
+// PROTECTED API ROUTES (Authenticated Dashboard)
+// ============================================================================
+
+const requireAuth = async (req, res, next) => {
+    // Skip auth for login and public endpoints inside /api if any (e.g. public showcase)
+    if (req.path === '/auth/login' || req.path.startsWith('/public/')) return next();
+
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: "Unauthorized" });
+    const token = authHeader.split(' ')[1];
+
+    try {
+        const ticket = await authClient.verifyIdToken({ idToken: token, audience: GOOGLE_CLIENT_ID });
+        const payload = ticket.getPayload();
+        const email = payload.email.toLowerCase();
+
+        if (SUPER_ADMIN_EMAILS.length > 0 && !SUPER_ADMIN_EMAILS.includes(email)) {
+            return res.status(403).json({ error: "Access Denied" });
+        }
+        req.user = { email, name: payload.name };
+        next();
+    } catch (error) {
+        // Fallback for demo mode
+        if (SUPER_ADMIN_EMAILS.length === 0) return next();
+        return res.status(401).json({ error: "Invalid Token" });
+    }
+};
+
+apiRouter.use(requireAuth);
+
+// 3. SEND MESSAGE (Manual)
+apiRouter.post('/messages/send', async (req, res) => {
     const { driverId, text, templateName, mediaUrl, mediaType } = req.body;
     
     const isSendingEnabled = await getCachedSystemSetting('sending_enabled');
@@ -401,11 +413,9 @@ router.post('/messages/send', async (req, res) => {
     }
 });
 
-// 4. SCHEDULE / BULK SEND (FIXED)
-router.post('/messages/schedule', async (req, res) => {
+// 4. BULK BROADCAST
+apiRouter.post('/messages/schedule', async (req, res) => {
     const { driverIds, text, templateName, mediaUrl, mediaType } = req.body;
-    // NOTE: In this basic implementation, we iterate and send IMMEDIATELY to support bulk broadcast
-    // A proper implementation would use a job queue (like BullMQ)
     
     try {
         let sentCount = 0;
@@ -421,7 +431,6 @@ router.post('/messages/schedule', async (req, res) => {
                  else metaResponse = await sendTextMessage(to, text);
                  
                  if (metaResponse.success) {
-                     // Log to DB
                      let currentMessages = typeof driver.messages === 'string' ? JSON.parse(driver.messages) : (driver.messages || []);
                      currentMessages.push({
                         id: `broadcast_${Date.now()}`,
@@ -436,8 +445,7 @@ router.post('/messages/schedule', async (req, res) => {
                      sentCount++;
                  }
              }
-             // Rate limit protection
-             await new Promise(r => setTimeout(r, 100)); 
+             await new Promise(r => setTimeout(r, 100)); // Rate limit
         }
         res.json({ success: true, count: sentCount });
     } catch(e) {
@@ -445,12 +453,10 @@ router.post('/messages/schedule', async (req, res) => {
     }
 });
 
-// --- MEDIA LIBRARY ROUTES (RESTORED) ---
-
-// Get Media Library
-router.get('/media', async (req, res) => {
+// 5. MEDIA LIBRARY ROUTES
+apiRouter.get('/media', async (req, res) => {
     try {
-        await refreshCache(); // Ensure tables exist
+        await refreshCache(); 
         const path = req.query.path || '/';
         const filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
         const foldersRes = await queryWithRetry('SELECT * FROM media_folders WHERE parent_path = $1 ORDER BY name ASC', [path]);
@@ -458,8 +464,7 @@ router.get('/media', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Create Folder
-router.post('/folders', async (req, res) => {
+apiRouter.post('/folders', async (req, res) => {
     const { name, parentPath } = req.body;
     try {
         const id = crypto.randomUUID();
@@ -468,16 +473,14 @@ router.post('/folders', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Delete Folder
-router.delete('/folders/:id', async (req, res) => {
+apiRouter.delete('/folders/:id', async (req, res) => {
     try {
         await queryWithRetry('DELETE FROM media_folders WHERE id = $1', [req.params.id]);
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Delete File
-router.delete('/files/:id', async (req, res) => {
+apiRouter.delete('/files/:id', async (req, res) => {
     try {
         const fileRes = await queryWithRetry('SELECT key FROM media_files WHERE id = $1', [req.params.id]);
         if (fileRes.rows.length > 0) {
@@ -493,11 +496,9 @@ router.delete('/files/:id', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// S3 Presigned URL
-router.post('/s3/presign', async (req, res) => {
+apiRouter.post('/s3/presign', async (req, res) => {
     const { filename, fileType, folderPath } = req.body;
     const key = `${folderPath === '/' ? '' : folderPath + '/'}${Date.now()}-${filename}`.replace(/^\//, '');
-    
     try {
         const command = new PutObjectCommand({ Bucket: BUCKET_NAME, Key: key, ContentType: fileType });
         const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
@@ -506,8 +507,7 @@ router.post('/s3/presign', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Register File in DB
-router.post('/files/register', async (req, res) => {
+apiRouter.post('/files/register', async (req, res) => {
     const { key, url, filename, type, folderPath } = req.body;
     try {
         const id = crypto.randomUUID();
@@ -517,8 +517,7 @@ router.post('/files/register', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Proxy Upload (Fallback)
-router.post('/s3/proxy-upload', upload.single('file'), async (req, res) => {
+apiRouter.post('/s3/proxy-upload', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file" });
     const folderPath = req.body.folderPath || '/';
     const key = `${folderPath === '/' ? '' : folderPath + '/'}${Date.now()}-${req.file.originalname}`.replace(/^\//, '');
@@ -542,8 +541,7 @@ router.post('/s3/proxy-upload', upload.single('file'), async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Sync from S3 (Recovery)
-router.post('/media/sync', async (req, res) => {
+apiRouter.post('/media/sync', async (req, res) => {
     try {
         const command = new ListObjectsV2Command({ Bucket: BUCKET_NAME });
         const s3Res = await s3Client.send(command);
@@ -567,8 +565,8 @@ router.post('/media/sync', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- EXISTING ROUTES ---
-router.get('/drivers', async (req, res) => {
+// 6. GENERAL DATA ROUTES
+apiRouter.get('/drivers', async (req, res) => {
     try {
         const result = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC LIMIT 100');
         const drivers = result.rows.map(d => ({
@@ -580,19 +578,19 @@ router.get('/drivers', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/bot-settings', async (req, res) => {
+apiRouter.get('/bot-settings', async (req, res) => {
     const s = await getCachedBotSettings();
     res.json(s);
 });
 
-router.post('/bot-settings', async (req, res) => {
+apiRouter.post('/bot-settings', async (req, res) => {
     const settings = req.body;
     await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET settings = $1`, [settings]);
     await refreshCache();
     res.json({ success: true });
 });
 
-router.get('/system/stats', async (req, res) => {
+apiRouter.get('/system/stats', async (req, res) => {
     await getCachedSystemSetting('automation_enabled'); 
     res.json({ 
         serverLoad: Math.floor(Math.random() * 20) + 5, 
@@ -604,7 +602,7 @@ router.get('/system/stats', async (req, res) => {
     });
 });
 
-router.post('/auth/login', async (req, res) => {
+apiRouter.post('/auth/login', async (req, res) => {
     const { token } = req.body;
     try {
         const ticket = await authClient.verifyIdToken({ idToken: token, audience: GOOGLE_CLIENT_ID });
@@ -621,7 +619,8 @@ router.post('/auth/login', async (req, res) => {
     }
 });
 
-app.use('/api', router);
+// MOUNT API ROUTER
+app.use('/api', apiRouter);
 
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;
