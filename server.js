@@ -18,10 +18,10 @@ const publicRouter = express.Router();
 const SYSTEM_CONFIG = {
     MAX_BUTTONS: 3,
     MAX_LIST_ITEMS: 10,
-    META_TIMEOUT: 8000, // 8s timeout for Meta API calls
-    DB_CONNECTION_TIMEOUT: 10000, // 10s for Cold Start DB wake-up
-    BATCH_SIZE: 10, // Number of messages to process per tick
-    PROCESS_INTERVAL: 5000, // Check queue every 5 seconds
+    META_TIMEOUT: 12000, // Increased timeout for Meta API
+    DB_CONNECTION_TIMEOUT: 20000, // 20s for DB connection (Cold Start buffer)
+    BATCH_SIZE: 10, 
+    PROCESS_INTERVAL: 5000,
     MAX_RETRIES: 3
 };
 
@@ -32,7 +32,7 @@ app.use(express.json({
 }));
 app.use(cors()); 
 
-// Disable Caching for API responses to ensure freshness
+// Disable Caching
 app.set('etag', false);
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -71,19 +71,47 @@ const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL |
 const IS_SERVERLESS = process.env.VERCEL === '1' || process.env.NODE_ENV === 'production';
 
 let pool;
-if (!global.pgPool) {
-    if (CONNECTION_STRING) {
-        global.pgPool = new Pool({
-            connectionString: CONNECTION_STRING,
-            ssl: { rejectUnauthorized: false }, 
-            max: IS_SERVERLESS ? 2 : 20, 
-            connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT, 
-            idleTimeoutMillis: 30000 
-        });
-        global.pgPool.on('error', (err) => console.error('🔥 DB Error (Pool Level):', err.message));
+
+const initializePool = () => {
+    if (!CONNECTION_STRING) {
+        console.error("❌ CRITICAL: No Database Connection String found in env vars.");
+        return null;
     }
+
+    // Mask password for logging
+    const maskedUrl = CONNECTION_STRING.replace(/:([^:@]+)@/, ':****@');
+    console.log(`🔌 Initializing DB Pool... URL: ${maskedUrl} (Serverless Mode: ${IS_SERVERLESS})`);
+
+    return new Pool({
+        connectionString: CONNECTION_STRING,
+        ssl: { rejectUnauthorized: false }, // Required for Neon
+        max: IS_SERVERLESS ? 5 : 20, // Increased limits to prevent worker starvation
+        connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT, 
+        idleTimeoutMillis: 30000 
+    });
+};
+
+if (!global.pgPool) {
+    global.pgPool = initializePool();
 }
 pool = global.pgPool;
+
+// Specific Startup Probe to debug connection issues
+const testDbConnection = async () => {
+    if (!pool) return;
+    let client;
+    try {
+        console.log("🟡 Testing Database Connection...");
+        client = await pool.connect();
+        const res = await client.query('SELECT NOW() as now');
+        console.log(`✅ Database Connected! Server Time: ${res.rows[0].now}`);
+    } catch (err) {
+        console.error("🔥 DATABASE CONNECTION FAILED:", err.message);
+        console.error("   Hint: Check your IP Whitelist on Neon or your internet connection.");
+    } finally {
+        if (client) client.release();
+    }
+};
 
 // --- INDUSTRIAL GRADE QUERY HELPER ---
 const queryWithRetry = async (text, params, retries = 2) => { 
@@ -100,7 +128,7 @@ const queryWithRetry = async (text, params, retries = 2) => {
         
         if (retries > 0 && isConnectionError) {
             console.warn(`[DB] Connection lost. Retrying... (${retries} attempts left)`);
-            await new Promise(res => setTimeout(res, 1000)); 
+            await new Promise(res => setTimeout(res, 1500)); 
             return queryWithRetry(text, params, retries - 1);
         }
         throw err;
@@ -279,8 +307,6 @@ const processMessageQueue = async () => {
         await ensureSchema();
         const now = Date.now();
         
-        // 1. ATOMIC LOCKING & FETCHING (SKIP LOCKED)
-        // This ensures multiple workers (or rapid polling) don't grab the same job.
         const jobsRes = await queryWithRetry(
             `UPDATE message_queue 
              SET status = 'processing' 
@@ -303,7 +329,6 @@ const processMessageQueue = async () => {
         const config = await fetchRuntimeConfig();
         if (!config.systemSettings.sending_enabled) {
             console.log("[Worker] Sending Disabled. Reverting locked items.");
-            // Revert status safely
             await queryWithRetry(`UPDATE message_queue SET status = 'pending' WHERE id = ANY($1)`, [jobsRes.rows.map(j => j.id)]);
             isProcessingQueue = false;
             return;
@@ -311,9 +336,7 @@ const processMessageQueue = async () => {
 
         console.log(`[Worker] Processing ${jobsRes.rows.length} messages...`);
 
-        // 2. Process Batch
         for (const job of jobsRes.rows) {
-            // Safety check for retries
             if (job.attempts >= SYSTEM_CONFIG.MAX_RETRIES) {
                 await queryWithRetry(`UPDATE message_queue SET status = 'failed', last_error = 'Max retries exceeded' WHERE id = $1`, [job.id]);
                 continue;
@@ -327,14 +350,12 @@ const processMessageQueue = async () => {
                 }
                 const driver = driverRes.rows[0];
 
-                // Generate Payload & Send
                 const metaPayload = generateWhatsAppPayload(job.payload);
                 const sendRes = await sendToMeta(driver.phone_number, metaPayload);
 
                 if (sendRes.success) {
                     await queryWithRetry(`UPDATE message_queue SET status = 'completed' WHERE id = $1`, [job.id]);
                     
-                    // Update Chat History
                     let msgs = [];
                     try { msgs = typeof driver.messages === 'string' ? JSON.parse(driver.messages) : (driver.messages || []); } catch(e) {}
                     
@@ -360,7 +381,6 @@ const processMessageQueue = async () => {
                         [errorMsg, SYSTEM_CONFIG.MAX_RETRIES, job.id]
                     );
                 }
-                // Rate Limit Pause (100ms) to be nice to Meta API
                 await new Promise(r => setTimeout(r, 100));
 
             } catch (e) {
@@ -376,7 +396,6 @@ const processMessageQueue = async () => {
     }
 };
 
-// Start Worker Interval
 setInterval(processMessageQueue, SYSTEM_CONFIG.PROCESS_INTERVAL);
 
 // ============================================================================
@@ -551,7 +570,6 @@ const requireAuth = async (req, res, next) => {
 };
 apiRouter.use(requireAuth);
 
-// BULK & SCHEDULE API
 apiRouter.post('/messages/schedule', async (req, res) => {
     const { driverIds, scheduledTime, ...content } = req.body;
     const time = scheduledTime || Date.now();
@@ -576,7 +594,6 @@ apiRouter.post('/messages/schedule', async (req, res) => {
             ]);
         }
 
-        // Trigger processing immediately if scheduled for now/past
         if (time <= Date.now()) {
             processMessageQueue(); 
         }
@@ -618,14 +635,11 @@ apiRouter.delete('/messages/scheduled/:id', async (req, res) => {
     }
 });
 
-// Update Scheduled Message (Supports Send Now)
 apiRouter.patch('/messages/scheduled/:id', async (req, res) => {
     const { text, scheduledTime, sendNow } = req.body;
     try {
-        // If Send Now is requested, we update the time to NOW
         const newTime = sendNow ? Date.now() : scheduledTime;
 
-        // 1. Fetch current to check existence and status
         const currentRes = await queryWithRetry(
             `SELECT payload FROM message_queue WHERE id = $1 AND status IN ('pending', 'failed')`, 
             [req.params.id]
@@ -639,13 +653,11 @@ apiRouter.patch('/messages/scheduled/:id', async (req, res) => {
         const newPayload = { ...currentPayload };
         if (text !== undefined) newPayload.message = text;
 
-        // 2. Update
         await queryWithRetry(
             `UPDATE message_queue SET payload = $1, scheduled_time = COALESCE($2, scheduled_time) WHERE id = $3`,
             [JSON.stringify(newPayload), newTime, req.params.id]
         );
         
-        // If Send Now, trigger worker
         if (sendNow) {
             processMessageQueue();
         }
@@ -656,8 +668,6 @@ apiRouter.patch('/messages/scheduled/:id', async (req, res) => {
     }
 });
 
-// ... (Rest of existing routes for drivers, sync, media, etc. unchanged) ...
-
 apiRouter.get('/cron/process-queue', async (req, res) => {
     processMessageQueue();
     res.json({ success: true, message: "Worker triggered" });
@@ -666,10 +676,50 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
 apiRouter.get('/drivers', async (req, res) => {
     try {
         const result = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC LIMIT 100');
-        res.json(result.rows.map(mapDriver));
+        res.json(result.rows.map(mapDriver)); // mapDriver assumed defined previously or imported
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ... (Rest of existing API routes remain the same, just ensuring queryWithRetry is used) ...
+
+// Mappers (re-included for completeness within this file scope if not hoisting)
+const mapDriver = (row) => {
+    let messages = [];
+    let metadata = {};
+    try { messages = typeof row.messages === 'string' ? JSON.parse(row.messages) : (row.messages || []); } catch(e) {}
+    try { metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {}); } catch(e) {}
+
+    return {
+        id: row.id,
+        phoneNumber: row.phone_number,
+        name: row.name,
+        status: row.status,
+        source: row.source || 'Organic',
+        lastMessage: row.last_message,
+        lastMessageTime: parseInt(row.last_message_time || '0'),
+        messages: messages,
+        documents: [],
+        notes: row.notes || '',
+        onboardingStep: metadata.onboardingStep || 0,
+        isBotActive: metadata.isBotActive !== false,
+        currentBotStepId: metadata.currentBotStepId,
+        isHumanMode: metadata.isHumanMode === true,
+        humanModeEndsAt: metadata.humanModeEndsAt
+    };
+};
+
+const mapDocument = (row) => ({
+    id: row.id,
+    driverId: row.driver_id,
+    docType: row.doc_type,
+    fileUrl: row.file_url,
+    mimeType: row.mime_type,
+    createdAt: parseInt(row.created_at || '0'),
+    verificationStatus: row.verification_status,
+    notes: row.notes
+});
+
+// Re-include basic GET routes used by frontend poller
 apiRouter.get('/sync', async (req, res) => {
     const since = parseInt(req.query.since || '0');
     try {
@@ -824,8 +874,10 @@ app.use('/api', apiRouter);
 
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;
-    app.listen(PORT, () => {
+    app.listen(PORT, async () => {
         console.log(`Server running on port ${PORT}`);
+        // Run probe immediately
+        await testDbConnection();
         ensureSchema(); 
     });
 }
