@@ -1,5 +1,5 @@
 
-import { Driver, BotSettings, MessageButton, Message, DriverDocument } from '../types';
+import { Driver, BotSettings, MessageButton, Message, DriverDocument, ScheduledMessage } from '../types';
 
 // Determine Base URL
 const getBaseUrl = () => {
@@ -125,6 +125,35 @@ export const liveApiService = {
       }
   },
 
+  // NEW: Get Pending Scheduled Messages
+  getScheduledMessages: async (driverId: string): Promise<ScheduledMessage[]> => {
+      try {
+          const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}/scheduled-messages`);
+          return await response.json();
+      } catch (e) {
+          console.warn("Failed to fetch scheduled messages", e);
+          return [];
+      }
+  },
+
+  // NEW: Cancel Scheduled Message
+  cancelScheduledMessage: async (messageId: string) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/scheduled/${messageId}`, {
+          method: 'DELETE'
+      });
+      return await response.json();
+  },
+
+  // NEW: Update Scheduled Message
+  updateScheduledMessage: async (messageId: string, updates: { text?: string, scheduledTime?: number }) => {
+      const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/scheduled/${messageId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updates)
+      });
+      return await response.json();
+  },
+
   getDriverDocuments: async (driverId: string): Promise<DriverDocument[]> => {
       try {
           const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}/documents`);
@@ -215,7 +244,6 @@ export const liveApiService = {
   uploadMedia: async (file: File, folderPath: string = '/') => {
       const PROXY_LIMIT = 4.5 * 1024 * 1024; 
       
-      // Inject Auth Token into Proxy Upload if used
       const headers: Record<string, string> = {};
       if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
 
@@ -243,7 +271,6 @@ export const liveApiService = {
       }
 
       try {
-          // Protected Presign
           const presignResponse = await fetchWithRetry(`${API_BASE_URL}/api/s3/presign`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -252,7 +279,6 @@ export const liveApiService = {
           
           const { uploadUrl, key, publicUrl } = await presignResponse.json();
 
-          // Direct to S3 (No Auth needed for S3 itself, only for presign)
           const uploadResponse = await fetch(uploadUrl, {
               method: 'PUT',
               body: file,
@@ -261,7 +287,6 @@ export const liveApiService = {
 
           if (!uploadResponse.ok) throw new Error(`Direct upload failed: ${uploadResponse.statusText}`);
 
-          // Register in DB (Protected)
           const fileType = file.type.split('/')[0];
           await fetchWithRetry(`${API_BASE_URL}/api/files/register`, {
               method: 'POST',
@@ -291,16 +316,13 @@ export const liveApiService = {
       return await response.json();
   },
 
-  // PUBLIC ENDPOINT - No Auth Required
   getPublicShowcase: async (token?: string) => {
       let url = `${API_BASE_URL}/api/public/showcase`;
       if (token) url += `?folder=${encodeURIComponent(token)}`;
-      // Use standard fetch, NO RETRY with Auth header
       const response = await fetch(url);
       return await response.json();
   },
 
-  // PUBLIC ENDPOINT - No Auth Required
   getShowcaseStatus: async () => {
       const response = await fetch(`${API_BASE_URL}/api/public/status`);
       return await response.json();

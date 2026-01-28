@@ -43,6 +43,23 @@ export interface Message {
   status?: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
 }
 
+// NEW: Queue Item Definition
+export interface ScheduledMessage {
+  id: string;
+  driverId: string;
+  payload: {
+    text?: string;
+    templateName?: string;
+    mediaUrl?: string;
+    mediaType?: 'image' | 'video' | 'document';
+    buttons?: MessageButton[];
+  };
+  scheduledTime: number;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  createdAt: number;
+  error?: string;
+}
+
 export interface DriverDocument {
   id: string;
   driverId: string;

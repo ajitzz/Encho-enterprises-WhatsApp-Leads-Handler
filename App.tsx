@@ -23,44 +23,30 @@ import { liveApiService, setAuthToken } from './services/liveApiService';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle } from 'lucide-react';
 
-// --- CONFIGURATION ---
 const FALLBACK_CLIENT_ID = "764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.googleusercontent.com";
 const ENV_CLIENT_ID = (import.meta as any)?.env?.VITE_GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
-
-// Use Env ID if available, otherwise use Fallback
 const GOOGLE_CLIENT_ID = (ENV_CLIENT_ID || FALLBACK_CLIENT_ID).replace(/^['"]|['"]$/g, '').trim();
 
 export default function App() {
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
   const [activePublicPage, setActivePublicPage] = useState<'none' | 'privacy' | 'terms' | 'deletion'>('none');
   const [showcaseToken, setShowcaseToken] = useState<string | undefined>(undefined);
-  
-  // Authentication State
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [userProfile, setUserProfile] = useState<any>(null);
 
   useEffect(() => {
       const path = window.location.pathname;
-      
-      // 1. PUBLIC PAGES CHECK (No Auth Required)
       if (path === '/privacy-policy') { setActivePublicPage('privacy'); return; }
       if (path === '/terms' || path === '/terms-of-service') { setActivePublicPage('terms'); return; }
       if (path === '/data-deletion') { setActivePublicPage('deletion'); return; }
       if (path.startsWith('/showcase')) {
           setIsShowcaseMode(true);
           const parts = path.split('/showcase/');
-          if (parts.length > 1 && parts[1].trim() !== '') {
-              setShowcaseToken(decodeURIComponent(parts[1]));
-          }
+          if (parts.length > 1 && parts[1].trim() !== '') setShowcaseToken(decodeURIComponent(parts[1]));
           return;
       }
-
-      // 2. AUTH CHECK (For Dashboard)
       const token = localStorage.getItem('uber_fleet_auth_token');
-      if (token) {
-          setAuthToken(token);
-          setIsAuthenticated(true);
-      }
+      if (token) { setAuthToken(token); setIsAuthenticated(true); }
   }, []);
 
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -73,10 +59,8 @@ export default function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
   const [isRepeatToggling, setIsRepeatToggling] = useState(false);
-  
   const [dataSource, setDataSource] = useState<'mock' | 'live'>('mock');
 
-  // Load Settings for Dashboard Toggle
   useEffect(() => {
       if (!isAuthenticated) return;
       const loadSettings = async () => {
@@ -89,11 +73,8 @@ export default function App() {
   }, [activeTab, dataSource, isAuthenticated]);
 
   useEffect(() => {
-    // Skip data fetch if not authenticated or on public page
     if (isShowcaseMode || activePublicPage !== 'none' || !isAuthenticated) return; 
-
     let unsubscribe: () => void = () => {};
-
     const fetchData = async () => {
       if (dataSource === 'mock') {
          setDrivers(mockBackend.getDrivers());
@@ -108,7 +89,6 @@ export default function App() {
          try {
            const data = await liveApiService.getDrivers();
            setDrivers(data);
-
            unsubscribe = liveApiService.subscribeToUpdates((updatedDrivers) => {
                setDrivers(prevDrivers => {
                    const driverMap = new Map<string, Driver>(prevDrivers.map(d => [d.id, d]));
@@ -122,7 +102,6 @@ export default function App() {
                    return Array.from(driverMap.values()).sort((a, b) => b.lastMessageTime - a.lastMessageTime);
                });
            });
-           
            addNotification({ type: 'info', title: 'Connected to Live Server', message: 'Delta-Sync Active' });
          } catch (e: any) {
              if (e.message !== "Unauthorized") {
@@ -131,7 +110,6 @@ export default function App() {
          }
       }
     };
-
     fetchData();
     return () => unsubscribe();
   }, [dataSource, activeTab, isShowcaseMode, activePublicPage, isAuthenticated]); 
@@ -140,54 +118,21 @@ export default function App() {
       setAuthToken(token);
       setUserProfile(user);
       setIsAuthenticated(true);
-      // Ask for notification permission explicitly on login
-      if ("Notification" in window) {
-          Notification.requestPermission();
-      }
+      if ("Notification" in window) Notification.requestPermission();
   };
 
-  // --- ROUTING HANDLERS (PUBLIC) ---
   if (activePublicPage === 'privacy') return <PrivacyPolicy />;
   if (activePublicPage === 'terms') return <TermsOfService />;
   if (activePublicPage === 'deletion') return <DataDeletion />;
   if (isShowcaseMode) return <PublicShowcase folderName={showcaseToken} />;
 
-  // --- AUTHENTICATION GATE ---
   if (!isAuthenticated) {
-      // Validate Client ID format
-      const isValidClientId = GOOGLE_CLIENT_ID.length > 10 && GOOGLE_CLIENT_ID.endsWith('.apps.googleusercontent.com');
-
-      if (!isValidClientId) {
-          return (
-              <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4 font-sans text-center">
-                  <div className="bg-white p-8 rounded-2xl shadow-xl border border-red-100 max-w-lg">
-                      <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-6">
-                          <AlertTriangle size={32} />
-                      </div>
-                      <h2 className="text-2xl font-bold text-gray-900 mb-3">Google Auth Config Error</h2>
-                      <p className="text-gray-600 mb-6 leading-relaxed text-sm">
-                          Unable to load a valid Google Client ID. Please check your .env file or server configuration.
-                      </p>
-                      
-                      <div className="bg-gray-100 p-4 rounded-lg text-left overflow-x-auto mb-6 border border-gray-200">
-                          <p className="text-xs font-mono text-gray-800 break-all">
-                              ID: {GOOGLE_CLIENT_ID || "(Empty)"}
-                          </p>
-                      </div>
-                  </div>
-              </div>
-          );
-      }
-
       return (
           <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
               <Login onLoginSuccess={handleLoginSuccess} />
           </GoogleOAuthProvider>
       );
   }
-
-  // --- PROTECTED APPLICATION ---
-  // If we reach here, user is authenticated and viewing the dashboard
   
   const handleSelectDriver = async (driver: Driver) => {
       setSelectedDriver(driver);
@@ -276,24 +221,15 @@ export default function App() {
           ids.forEach(id => {
               mockBackend.addMessage(id, { id: Date.now().toString() + id, sender: 'agent', text: message, imageUrl: mediaUrl, options: options, timestamp: Date.now(), type: templateName ? 'template' : (mediaType ? (mediaType as any) : options ? 'options' : 'text'), templateName: templateName });
           });
-      } else {
-          if (scheduledTime && scheduledTime > Date.now()) {
-              try {
-                  await liveApiService.scheduleMessage(ids, { text: message, mediaUrl, mediaType, options, templateName }, scheduledTime);
-                  addNotification({ type: 'success', title: 'Broadcast Scheduled', message: `Message queued for ${new Date(scheduledTime).toLocaleString()}` });
-                  return;
-              } catch(e) { console.error(e); }
-          }
-          let successCount = 0;
-          for (const id of ids) {
-              try {
-                  await liveApiService.sendMessage(id, message, { mediaUrl, mediaType, options, templateName });
-                  successCount++;
-                  await new Promise(r => setTimeout(r, 200));
-              } catch(e) { console.error(e); }
-          }
       }
-      if (!scheduledTime) addNotification({ type: 'success', title: 'Broadcast Sent', message: `Message sent to ${ids.length} recipients.` });
+      
+      // In LIVE mode, the LeadManager calls the API directly to queue messages on backend.
+      // We just show the notification here.
+      if (scheduledTime && scheduledTime > Date.now()) {
+          addNotification({ type: 'success', title: 'Broadcast Scheduled', message: `Message queued for ${new Date(scheduledTime).toLocaleString()}` });
+      } else {
+          addNotification({ type: 'success', title: 'Broadcast Queued', message: `Processing ${ids.length} messages in background...` });
+      }
   };
 
   const handleToggleRepeat = async () => {

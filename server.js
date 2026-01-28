@@ -20,6 +20,9 @@ const SYSTEM_CONFIG = {
     MAX_LIST_ITEMS: 10,
     META_TIMEOUT: 8000, // 8s timeout for Meta API calls
     DB_CONNECTION_TIMEOUT: 10000, // 10s for Cold Start DB wake-up
+    BATCH_SIZE: 10, // Number of messages to process per tick
+    PROCESS_INTERVAL: 5000, // Check queue every 5 seconds
+    MAX_RETRIES: 3
 };
 
 // --- MIDDLEWARE ---
@@ -73,9 +76,9 @@ if (!global.pgPool) {
         global.pgPool = new Pool({
             connectionString: CONNECTION_STRING,
             ssl: { rejectUnauthorized: false }, 
-            max: IS_SERVERLESS ? 2 : 10, // Restrict connections in serverless to prevent exhaustion
+            max: IS_SERVERLESS ? 2 : 20, // Increased pool for worker threads
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT, 
-            idleTimeoutMillis: 30000 // Close idle clients quickly
+            idleTimeoutMillis: 30000 
         });
         global.pgPool.on('error', (err) => console.error('🔥 DB Error (Pool Level):', err.message));
     }
@@ -83,7 +86,6 @@ if (!global.pgPool) {
 pool = global.pgPool;
 
 // --- INDUSTRIAL GRADE QUERY HELPER ---
-// Handles retries, cold starts, and connection drops automatically
 const queryWithRetry = async (text, params, retries = 2) => { 
     if (!pool) throw new Error("Database connection not configured.");
     let client;
@@ -92,14 +94,13 @@ const queryWithRetry = async (text, params, retries = 2) => {
         const res = await client.query(text, params);
         return res;
     } catch (err) {
-        // Release client if it exists but failed
         if (client) { try { client.release(true); } catch(e) {} client = null; }
         
         const isConnectionError = err.code === 'ECONNRESET' || err.code === '57P01' || err.message.includes('timeout') || err.message.includes('closed');
         
         if (retries > 0 && isConnectionError) {
             console.warn(`[DB] Connection lost. Retrying... (${retries} attempts left)`);
-            await new Promise(res => setTimeout(res, 1000)); // Wait 1s for DB to recover
+            await new Promise(res => setTimeout(res, 1000)); 
             return queryWithRetry(text, params, retries - 1);
         }
         throw err;
@@ -109,7 +110,6 @@ const queryWithRetry = async (text, params, retries = 2) => {
 };
 
 // --- SCHEMA & CACHE MANAGEMENT ---
-// Global promise to prevent race conditions during schema init
 let schemaPromise = null;
 
 const ensureSchema = async () => {
@@ -124,7 +124,22 @@ const ensureSchema = async () => {
             await queryWithRetry(`CREATE TABLE IF NOT EXISTS media_folders (id UUID PRIMARY KEY, name TEXT, parent_path TEXT, created_at BIGINT, is_public_showcase BOOLEAN DEFAULT FALSE)`);
             await queryWithRetry(`CREATE TABLE IF NOT EXISTS media_files (id UUID PRIMARY KEY, key TEXT, url TEXT, filename TEXT, type TEXT, folder_path TEXT, created_at BIGINT, media_id TEXT)`);
             
-            // Safe column additions (Non-blocking)
+            // QUEUE TABLE FOR BULK/SCHEDULED MESSAGES
+            await queryWithRetry(`CREATE TABLE IF NOT EXISTS message_queue (
+                id UUID PRIMARY KEY, 
+                driver_id TEXT, 
+                payload JSONB, 
+                scheduled_time BIGINT, 
+                status TEXT DEFAULT 'pending', 
+                attempts INT DEFAULT 0,
+                last_error TEXT,
+                created_at BIGINT
+            )`);
+            // Index for faster queue processing
+            await queryWithRetry(`CREATE INDEX IF NOT EXISTS idx_message_queue_status_time ON message_queue(status, scheduled_time)`);
+            // Index for fast retrieval by driver ID (UI Hint)
+            await queryWithRetry(`CREATE INDEX IF NOT EXISTS idx_message_queue_driver ON message_queue(driver_id, status)`);
+
             const addCol = async (table, col, type) => {
                 try { await queryWithRetry(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch(e) {}
             };
@@ -136,13 +151,13 @@ const ensureSchema = async () => {
             await addCol('media_folders', 'is_public_showcase', 'BOOLEAN DEFAULT FALSE');
         } catch (e) {
             console.error("Schema Init Error:", e.message);
-            schemaPromise = null; // Allow retry on failure
+            schemaPromise = null; 
         }
     })();
     return schemaPromise;
 };
 
-// Optimized Cache Fetching (No persistent in-memory cache for Serverless)
+// Optimized Cache Fetching
 const fetchRuntimeConfig = async () => {
     await ensureSchema();
     const [botRes, sysRes] = await Promise.all([
@@ -157,48 +172,7 @@ const fetchRuntimeConfig = async () => {
     return { botSettings, systemSettings };
 };
 
-// --- DATA MAPPERS ---
-const mapDriver = (row) => {
-    let messages = [];
-    let metadata = {};
-    try { messages = typeof row.messages === 'string' ? JSON.parse(row.messages) : (row.messages || []); } catch(e) {}
-    try { metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {}); } catch(e) {}
-
-    return {
-        id: row.id,
-        phoneNumber: row.phone_number,
-        name: row.name,
-        status: row.status,
-        source: row.source || 'Organic',
-        lastMessage: row.last_message,
-        lastMessageTime: parseInt(row.last_message_time || '0'),
-        messages: messages,
-        documents: [],
-        notes: row.notes || '',
-        onboardingStep: metadata.onboardingStep || 0,
-        vehicleRegistration: metadata.vehicleRegistration,
-        availability: metadata.availability,
-        qualificationChecks: metadata.qualificationChecks || { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
-        isBotActive: metadata.isBotActive !== false,
-        currentBotStepId: metadata.currentBotStepId,
-        isHumanMode: metadata.isHumanMode === true,
-        humanModeEndsAt: metadata.humanModeEndsAt
-    };
-};
-
-const mapDocument = (row) => ({
-    id: row.id,
-    driverId: row.driver_id,
-    docType: row.doc_type,
-    fileUrl: row.file_url,
-    mimeType: row.mime_type,
-    createdAt: parseInt(row.created_at || '0'),
-    verificationStatus: row.verification_status,
-    notes: row.notes
-});
-
-// --- PAYLOAD ENGINE (INDUSTRIAL LEVEL) ---
-// Handles formatting, truncation, and fallback logic automatically
+// --- PAYLOAD ENGINE ---
 const generateWhatsAppPayload = (content) => {
     if (content.templateName) {
         return { type: 'template', template: { name: content.templateName, language: { code: 'en_US' } } };
@@ -222,7 +196,7 @@ const generateWhatsAppPayload = (content) => {
         else header = { type: 'image', image: { link: content.headerImageUrl || content.mediaUrl } };
     }
 
-    const bodyText = (content.message || "Please select an option:").substring(0, 1024); // Safe limit
+    const bodyText = (content.message || "Please select an option:").substring(0, 1024);
     const footerText = (content.footerText || "Uber Fleet").substring(0, 60);
 
     if (useListMessage) {
@@ -239,7 +213,7 @@ const generateWhatsAppPayload = (content) => {
                         title: "Available Options",
                         rows: buttons.map(b => ({
                             id: (b.payload || b.title).substring(0, 200),
-                            title: b.title.substring(0, 24), // Strict List Title Limit
+                            title: b.title.substring(0, 24),
                             description: "" 
                         }))
                     }]
@@ -261,7 +235,7 @@ const generateWhatsAppPayload = (content) => {
                         type: "reply",
                         reply: {
                             id: (b.payload || b.title).substring(0, 256),
-                            title: b.title.substring(0, 20) // Strict Button Title Limit
+                            title: b.title.substring(0, 20)
                         }
                     }))
                 }
@@ -296,11 +270,118 @@ const sendToMeta = async (to, payload) => {
     }
 };
 
+// --- QUEUE PROCESSOR WORKER ---
+let isProcessingQueue = false;
+
+const processMessageQueue = async () => {
+    if (isProcessingQueue) return;
+    isProcessingQueue = true;
+
+    try {
+        await ensureSchema();
+        const now = Date.now();
+        
+        // 1. Fetch Pending Messages AND Lock them atomically (if serverless, we emulate lock with status update)
+        // This prevents race conditions with Cancellation requests
+        const candidatesRes = await queryWithRetry(
+            `SELECT id FROM message_queue WHERE status = 'pending' AND scheduled_time <= $1 ORDER BY scheduled_time ASC LIMIT $2`,
+            [now, SYSTEM_CONFIG.BATCH_SIZE]
+        );
+
+        const candidateIds = candidatesRes.rows.map(r => r.id);
+        if (candidateIds.length === 0) {
+            isProcessingQueue = false;
+            return;
+        }
+
+        // 2. Lock: Set status to 'processing' so user cannot cancel
+        await queryWithRetry(
+            `UPDATE message_queue SET status = 'processing' WHERE id = ANY($1)`,
+            [candidateIds]
+        );
+
+        // 3. Fetch full details for processing
+        const jobsRes = await queryWithRetry(`SELECT * FROM message_queue WHERE id = ANY($1)`, [candidateIds]);
+        
+        const config = await fetchRuntimeConfig();
+        if (!config.systemSettings.sending_enabled) {
+            console.log("[Worker] Sending Disabled. Reverting locked items.");
+            await queryWithRetry(`UPDATE message_queue SET status = 'pending' WHERE id = ANY($1)`, [candidateIds]);
+            isProcessingQueue = false;
+            return;
+        }
+
+        console.log(`[Worker] Processing ${jobsRes.rows.length} messages...`);
+
+        // 4. Process Batch
+        for (const job of jobsRes.rows) {
+            if (job.attempts >= SYSTEM_CONFIG.MAX_RETRIES) {
+                await queryWithRetry(`UPDATE message_queue SET status = 'failed', last_error = 'Max retries exceeded' WHERE id = $1`, [job.id]);
+                continue;
+            }
+
+            try {
+                const driverRes = await queryWithRetry('SELECT phone_number, messages FROM drivers WHERE id = $1', [job.driver_id]);
+                if (driverRes.rows.length === 0) {
+                    await queryWithRetry(`UPDATE message_queue SET status = 'failed', last_error = 'Driver not found' WHERE id = $1`, [job.id]);
+                    continue;
+                }
+                const driver = driverRes.rows[0];
+
+                const metaPayload = generateWhatsAppPayload(job.payload);
+                const sendRes = await sendToMeta(driver.phone_number, metaPayload);
+
+                if (sendRes.success) {
+                    await queryWithRetry(`UPDATE message_queue SET status = 'completed' WHERE id = $1`, [job.id]);
+                    
+                    let msgs = [];
+                    try { msgs = typeof driver.messages === 'string' ? JSON.parse(driver.messages) : (driver.messages || []); } catch(e) {}
+                    
+                    msgs.push({
+                        id: `bulk_${Date.now()}_${job.id}`,
+                        sender: 'agent',
+                        text: job.payload.message || `[${job.payload.templateName || 'Media'}]`,
+                        timestamp: Date.now(),
+                        type: 'text',
+                        status: 'sent',
+                        isBroadcast: true
+                    });
+
+                    await queryWithRetry(
+                        `UPDATE drivers SET messages = $1, last_message = $2, last_message_time = $3 WHERE id = $4`,
+                        [JSON.stringify(msgs), "Broadcast Message", Date.now(), job.driver_id]
+                    );
+
+                } else {
+                    const errorMsg = JSON.stringify(sendRes.error).substring(0, 200);
+                    await queryWithRetry(
+                        `UPDATE message_queue SET attempts = attempts + 1, last_error = $1, status = CASE WHEN attempts + 1 >= $2 THEN 'failed' ELSE 'pending' END WHERE id = $3`,
+                        [errorMsg, SYSTEM_CONFIG.MAX_RETRIES, job.id]
+                    );
+                }
+                // Rate Limit Pause (100ms)
+                await new Promise(r => setTimeout(r, 100));
+
+            } catch (e) {
+                console.error(`[Worker] Job ${job.id} failed:`, e.message);
+                await queryWithRetry(`UPDATE message_queue SET attempts = attempts + 1, last_error = $1 WHERE id = $2`, [e.message, job.id]);
+            }
+        }
+
+    } catch (e) {
+        console.error("[Worker] Critical Error:", e);
+    } finally {
+        isProcessingQueue = false;
+    }
+};
+
+// Start Worker Interval
+setInterval(processMessageQueue, SYSTEM_CONFIG.PROCESS_INTERVAL);
+
 // ============================================================================
 // ROUTES
 // ============================================================================
 
-// 1. PUBLIC ROUTES
 app.get('/webhook', (req, res) => {
     if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
         res.status(200).send(req.query['hub.challenge']);
@@ -309,19 +390,13 @@ app.get('/webhook', (req, res) => {
     }
 });
 
-// INDUSTRIAL STRENGTH WEBHOOK HANDLER
 app.post('/webhook', async (req, res) => {
-    // DO NOT send 200 OK immediately in Serverless environment.
-    // Wait until critical logic (DB updates) is done, otherwise the process freezes.
-    
     try {
         await ensureSchema();
         const body = req.body;
 
         if (body.object === 'whatsapp_business_account') {
             const entries = body.entry || [];
-            
-            // Process all entries in parallel for maximum speed
             await Promise.all(entries.map(async (entry) => {
                 const changes = entry.changes || [];
                 await Promise.all(changes.map(async (change) => {
@@ -330,18 +405,14 @@ app.post('/webhook', async (req, res) => {
                         const message = value.messages[0];
                         const from = message.from;
                         
-                        // --- PARALLEL FETCH: Config + Driver Data ---
                         const [config, driverRes] = await Promise.all([
                             fetchRuntimeConfig(),
                             queryWithRetry('SELECT * FROM drivers WHERE phone_number = $1', [from])
                         ]);
 
                         const { botSettings, systemSettings } = config;
-
-                        // Global Kill Switch Check
                         if (!systemSettings.webhook_ingest_enabled) return;
 
-                        // Parse Content
                         let msgBody = '';
                         let btnId = null;
 
@@ -357,87 +428,68 @@ app.post('/webhook', async (req, res) => {
                         } else if (message.type === 'image') msgBody = '[Image]';
                         else msgBody = '[Media]';
 
-                        // --- DRIVER UPSERT & DEDUPLICATION ---
                         let driverRow = driverRes.rows[0];
-                        let isNewDriver = false;
-
+                        
                         if (!driverRow) {
                              const newId = Date.now().toString();
-                             // Insert and return immediately
                              const insertRes = await queryWithRetry(
                                  `INSERT INTO drivers (id, phone_number, name, status, last_message, last_message_time, metadata, messages, source) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
                                  [newId, from, 'New Lead', 'New', msgBody, Date.now(), { isBotActive: true }, '[]', 'Organic']
                              );
                              driverRow = insertRes.rows[0];
-                             isNewDriver = true;
                         }
 
-                        const driver = mapDriver(driverRow);
-
-                        // DEDUPLICATION: Check if we already processed this message ID
-                        // This prevents double-replies if Meta retries the webhook during cold start
-                        const messageExists = driver.messages.some(m => m.id === message.id);
-                        if (messageExists) {
-                            console.log(`[Dedupe] Skipping duplicate message ${message.id}`);
-                            return;
-                        }
+                        let messages = [];
+                        try { messages = typeof driverRow.messages === 'string' ? JSON.parse(driverRow.messages) : (driverRow.messages || []); } catch(e) {}
                         
-                        // Save User Message
-                        driver.messages.push({ id: message.id, sender: 'driver', text: msgBody, timestamp: Date.now(), type: message.type });
+                        // Deduplication
+                        if (messages.some(m => m.id === message.id)) return;
                         
-                        // --- BOT LOGIC ENGINE ---
+                        messages.push({ id: message.id, sender: 'driver', text: msgBody, timestamp: Date.now(), type: message.type });
+                        
+                        // --- BOT LOGIC ---
                         let replyToSend = null;
-                        let newBotStepId = driver.currentBotStepId;
+                        let driverMetadata = typeof driverRow.metadata === 'string' ? JSON.parse(driverRow.metadata) : (driverRow.metadata || {});
+                        let currentBotStepId = driverMetadata.currentBotStepId;
+                        let isBotActive = driverMetadata.isBotActive !== false;
+                        let isHumanMode = driverMetadata.isHumanMode === true;
 
-                        if (systemSettings.automation_enabled && botSettings.isEnabled && !driver.isHumanMode && (driver.isBotActive || botSettings.shouldRepeat)) {
-                            
+                        if (systemSettings.automation_enabled && botSettings.isEnabled && !isHumanMode && (isBotActive || botSettings.shouldRepeat)) {
                             const entryPointId = botSettings.entryPointId || (botSettings.steps[0] ? botSettings.steps[0].id : null);
                             
-                            // 1. New Flow Start
-                            if (!driver.currentBotStepId) {
+                            if (!currentBotStepId) {
                                 if (entryPointId) {
-                                    newBotStepId = entryPointId;
-                                    const step = botSettings.steps.find(s => s.id === entryPointId);
-                                    if (step) replyToSend = step;
+                                    currentBotStepId = entryPointId;
+                                    replyToSend = botSettings.steps.find(s => s.id === entryPointId);
                                 }
-                            } 
-                            // 2. Existing Flow Continuation
-                            else {
-                                const currentStep = botSettings.steps.find(s => s.id === driver.currentBotStepId);
+                            } else {
+                                const currentStep = botSettings.steps.find(s => s.id === currentBotStepId);
                                 if (currentStep) {
                                     let nextId = currentStep.nextStepId;
-                                    
-                                    // Branching Logic
                                     if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
                                         if (btnId && currentStep.routes[btnId]) {
-                                            nextId = currentStep.routes[btnId]; // Exact ID match (Preferred)
+                                            nextId = currentStep.routes[btnId];
                                         } else {
                                             const inputLower = msgBody.toLowerCase().trim();
-                                            // Fuzzy Text match
                                             let matchedKey = Object.keys(currentStep.routes).find(key => key.toLowerCase() === inputLower);
                                             if (!matchedKey) matchedKey = Object.keys(currentStep.routes).find(key => inputLower.includes(key.toLowerCase()));
-                                            
                                             if (matchedKey) nextId = currentStep.routes[matchedKey];
                                         }
                                     }
 
                                     if (nextId && nextId !== 'END' && nextId !== 'AI_HANDOFF') {
-                                        newBotStepId = nextId;
-                                        const nextStep = botSettings.steps.find(s => s.id === nextId);
-                                        if (nextStep) replyToSend = nextStep;
+                                        currentBotStepId = nextId;
+                                        replyToSend = botSettings.steps.find(s => s.id === nextId);
                                     } else if (nextId === 'END') {
-                                        newBotStepId = null; // Reset flow
+                                        currentBotStepId = null;
                                     }
                                 } else {
-                                    // Step missing? Restart flow.
-                                    newBotStepId = entryPointId;
-                                    const step = botSettings.steps.find(s => s.id === entryPointId);
-                                    if (step) replyToSend = step;
+                                    currentBotStepId = entryPointId;
+                                    replyToSend = botSettings.steps.find(s => s.id === entryPointId);
                                 }
                             }
                         }
 
-                        // --- EXECUTE REPLY ---
                         if (replyToSend && systemSettings.sending_enabled) {
                             const rawText = replyToSend.message || "";
                             const isPlaceholder = /replace\s+this\s+sample|type\s+your\s+message/i.test(rawText);
@@ -445,10 +497,9 @@ app.post('/webhook', async (req, res) => {
 
                             if (!isPlaceholder && !isEmpty) {
                                 const metaPayload = generateWhatsAppPayload(replyToSend);
-                                const sendRes = await sendToMeta(driver.phoneNumber, metaPayload);
-                                
+                                const sendRes = await sendToMeta(driverRow.phone_number, metaPayload);
                                 if (sendRes.success) {
-                                    driver.messages.push({
+                                    messages.push({
                                         id: `bot_${Date.now()}`,
                                         sender: 'system',
                                         text: replyToSend.message || `[${replyToSend.mediaType || 'Template'}]`,
@@ -460,17 +511,10 @@ app.post('/webhook', async (req, res) => {
                             }
                         }
 
-                        // --- FINAL DB UPDATE ---
-                        // Update metadata and messages.
-                        const newMetadata = { 
-                            ...driverRow.metadata,
-                            currentBotStepId: newBotStepId,
-                            isBotActive: newBotStepId !== null 
-                        };
-
+                        const newMetadata = { ...driverMetadata, currentBotStepId, isBotActive: currentBotStepId !== null };
                         await queryWithRetry(
                             `UPDATE drivers SET last_message = $1, last_message_time = $2, messages = $3, metadata = $4 WHERE id = $5`,
-                            [msgBody, Date.now(), JSON.stringify(driver.messages), JSON.stringify(newMetadata), driver.id]
+                            [msgBody, Date.now(), JSON.stringify(messages), JSON.stringify(newMetadata), driverRow.id]
                         );
                     }
                 }));
@@ -478,49 +522,12 @@ app.post('/webhook', async (req, res) => {
         }
         res.sendStatus(200);
     } catch (e) {
-        console.error("Webhook Critical Failure:", e);
-        // Important: Still send 200 to Meta so they stop retrying a broken message
+        console.error("Webhook Error:", e);
         res.sendStatus(200); 
     }
 });
 
-// ... (Rest of Public/Protected Routes remain largely the same, ensuring they use queryWithRetry) ...
-
-// PUBLIC SHOWCASE API
-publicRouter.get('/status', async (req, res) => {
-    try {
-        await ensureSchema();
-        const resDb = await queryWithRetry('SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE ORDER BY created_at DESC LIMIT 1');
-        if (resDb.rows.length > 0) {
-            res.json({ active: true, folderId: resDb.rows[0].id, folderName: resDb.rows[0].name });
-        } else {
-            res.json({ active: false });
-        }
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-publicRouter.get('/showcase', async (req, res) => {
-    try {
-        await ensureSchema();
-        const folderName = req.query.folder;
-        let folderTitle = "Showcase";
-        let query = 'SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE ORDER BY created_at DESC LIMIT 1';
-        let params = [];
-        if (folderName && folderName !== 'undefined') {
-            query = 'SELECT id, name FROM media_folders WHERE name = $1';
-            params = [decodeURIComponent(folderName)];
-        }
-        const fRes = await queryWithRetry(query, params);
-        if (fRes.rows.length === 0) return res.json({ items: [], title: 'Showcase Offline' });
-        folderTitle = fRes.rows[0].name;
-        const filesRes = await queryWithRetry(
-            'SELECT * FROM media_files WHERE folder_path = $1 OR folder_path = $2 ORDER BY created_at DESC', 
-            [`/${folderTitle}`, folderTitle]
-        );
-        res.json({ items: filesRes.rows, title: folderTitle });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
+// AUTH
 apiRouter.post('/auth/login', async (req, res) => {
     const { token } = req.body;
     try {
@@ -542,8 +549,138 @@ const requireAuth = async (req, res, next) => {
     if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: "Unauthorized" });
     next();
 };
-
 apiRouter.use(requireAuth);
+
+// BULK & SCHEDULE API
+apiRouter.post('/messages/schedule', async (req, res) => {
+    const { driverIds, scheduledTime, ...content } = req.body;
+    const time = scheduledTime || Date.now();
+    
+    if (!Array.isArray(driverIds) || driverIds.length === 0) {
+        return res.status(400).json({ error: "No recipients provided" });
+    }
+
+    try {
+        const query = `
+            INSERT INTO message_queue (id, driver_id, payload, scheduled_time, created_at)
+            VALUES ($1, $2, $3, $4, $5)
+        `;
+        
+        for (const driverId of driverIds) {
+            await queryWithRetry(query, [
+                crypto.randomUUID(),
+                driverId,
+                JSON.stringify(content), 
+                time,
+                Date.now()
+            ]);
+        }
+
+        if (time <= Date.now()) {
+            processMessageQueue(); 
+        }
+
+        res.json({ success: true, message: `Queued ${driverIds.length} messages.` });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// NEW: GET Scheduled messages for a specific driver
+apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => {
+    try {
+        // Return messages that are pending or failed, but not completed.
+        const result = await queryWithRetry(
+            `SELECT id, driver_id as "driverId", payload, scheduled_time as "scheduledTime", status, created_at as "createdAt"
+             FROM message_queue 
+             WHERE driver_id = $1 AND status IN ('pending', 'failed') 
+             ORDER BY scheduled_time ASC`,
+            [req.params.id]
+        );
+        res.json(result.rows);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// NEW: Cancel (Delete) Scheduled Message
+apiRouter.delete('/messages/scheduled/:id', async (req, res) => {
+    try {
+        // Only allow deleting if still pending/failed. If processing/completed, it's too late.
+        const result = await queryWithRetry(
+            `DELETE FROM message_queue WHERE id = $1 AND status IN ('pending', 'failed') RETURNING id`,
+            [req.params.id]
+        );
+        
+        if (result.rowCount === 0) {
+            return res.status(409).json({ error: "Message already processed or not found." });
+        }
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// NEW: Update Scheduled Message
+apiRouter.patch('/messages/scheduled/:id', async (req, res) => {
+    const { text, scheduledTime } = req.body;
+    try {
+        // 1. Fetch current payload to merge
+        const currentRes = await queryWithRetry(
+            `SELECT payload FROM message_queue WHERE id = $1 AND status IN ('pending', 'failed')`, 
+            [req.params.id]
+        );
+        
+        if (currentRes.rowCount === 0) {
+            return res.status(409).json({ error: "Message already processed or not found." });
+        }
+
+        const currentPayload = currentRes.rows[0].payload;
+        const newPayload = { ...currentPayload };
+        if (text !== undefined) newPayload.message = text; // Update text logic
+
+        // 2. Update
+        await queryWithRetry(
+            `UPDATE message_queue SET payload = $1, scheduled_time = COALESCE($2, scheduled_time) WHERE id = $3`,
+            [JSON.stringify(newPayload), scheduledTime, req.params.id]
+        );
+        
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+apiRouter.get('/cron/process-queue', async (req, res) => {
+    processMessageQueue();
+    res.json({ success: true, message: "Worker triggered" });
+});
+
+apiRouter.get('/drivers', async (req, res) => {
+    try {
+        const result = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC LIMIT 100');
+        res.json(result.rows.map(mapDriver));
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/sync', async (req, res) => {
+    const since = parseInt(req.query.since || '0');
+    try {
+        const result = await queryWithRetry('SELECT * FROM drivers WHERE last_message_time > $1 ORDER BY last_message_time DESC LIMIT 50', [since]);
+        res.json({ drivers: result.rows.map(mapDriver), nextCursor: Date.now() });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/drivers/:id/messages', async (req, res) => {
+    try {
+        const result = await queryWithRetry('SELECT messages FROM drivers WHERE id = $1', [req.params.id]);
+        let msgs = [];
+        if (result.rows.length > 0 && result.rows[0].messages) {
+            msgs = typeof result.rows[0].messages === 'string' ? JSON.parse(result.rows[0].messages) : result.rows[0].messages;
+        }
+        res.json(msgs);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 apiRouter.get('/drivers/:id/documents', async (req, res) => {
     try {
@@ -552,12 +689,65 @@ apiRouter.get('/drivers/:id/documents', async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.patch('/documents/:id', async (req, res) => {
-    const { status, notes } = req.body;
+apiRouter.patch('/drivers/:id', async (req, res) => {
+    const { status, notes, isHumanMode } = req.body;
     try {
-        await queryWithRetry('UPDATE driver_documents SET verification_status = COALESCE($1, verification_status), notes = COALESCE($2, notes) WHERE id = $3', [status, notes, req.params.id]);
+        const driverRes = await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [req.params.id]);
+        if (driverRes.rows.length === 0) return res.status(404).json({ error: "Not Found" });
+        const driver = driverRes.rows[0];
+        let metadata = typeof driver.metadata === 'string' ? JSON.parse(driver.metadata) : (driver.metadata || {});
+        if (isHumanMode !== undefined) metadata.isHumanMode = isHumanMode;
+        await queryWithRetry('UPDATE drivers SET status = COALESCE($1, status), notes = COALESCE($2, notes), metadata = $3 WHERE id = $4', [status, notes, JSON.stringify(metadata), req.params.id]);
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/messages/send', async (req, res) => {
+    const { driverId, text, templateName, mediaUrl, mediaType } = req.body;
+    const sysSettings = await fetchRuntimeConfig();
+    if (!sysSettings.systemSettings.sending_enabled) return res.status(503).json({ error: "Sending Disabled" });
+    
+    try {
+        const driverRes = await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [driverId]);
+        if (driverRes.rows.length === 0) return res.status(404).json({ error: "Driver not found" });
+        const driver = driverRes.rows[0];
+        
+        const metaPayload = generateWhatsAppPayload({ message: text, templateName, mediaUrl, mediaType });
+        const metaRes = await sendToMeta(driver.phone_number, metaPayload);
+        if (!metaRes.success) throw new Error(JSON.stringify(metaRes.error));
+
+        let msgs = typeof driver.messages === 'string' ? JSON.parse(driver.messages) : (driver.messages || []);
+        msgs.push({ id: `agent_${Date.now()}`, sender: 'agent', text: text || `[${templateName || mediaType}]`, timestamp: Date.now(), type: 'text', status: 'sent' });
+        await queryWithRetry('UPDATE drivers SET messages = $1, last_message = $2, last_message_time = $3 WHERE id = $4', [JSON.stringify(msgs), "Agent Reply", Date.now(), driverId]);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/bot-settings', async (req, res) => { 
+    const config = await fetchRuntimeConfig();
+    res.json(config.botSettings); 
+});
+
+apiRouter.post('/bot-settings', async (req, res) => {
+    await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET settings = $1`, [req.body]);
+    res.json({ success: true });
+});
+
+apiRouter.get('/system/stats', async (req, res) => {
+    res.json({ serverLoad: 12, dbLatency: 5, aiCredits: 100, aiModel: "Gemini 1.5", s3Status: 'ok', whatsappStatus: META_API_TOKEN ? 'ok' : 'error' });
+});
+
+apiRouter.get('/system/settings', async (req, res) => { 
+    const config = await fetchRuntimeConfig();
+    res.json(config.systemSettings); 
+});
+
+apiRouter.post('/system/settings', async (req, res) => {
+    const { settings } = req.body;
+    for (const [k, v] of Object.entries(settings)) {
+        await queryWithRetry(`INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2`, [k, String(v)]);
+    }
+    res.json({ success: true });
 });
 
 apiRouter.get('/media', async (req, res) => {
@@ -593,78 +783,6 @@ apiRouter.delete('/files/:id', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.post('/messages/schedule', async (req, res) => {
-    // For Production: Integrate a real job queue (e.g. BullMQ) or cron job
-    // For now, logging to console as per spec
-    res.json({ success: true, message: "Scheduled successfully" });
-});
-
-apiRouter.post('/messages/send', async (req, res) => {
-    const { driverId, text, templateName, mediaUrl, mediaType } = req.body;
-    const sysSettings = await fetchRuntimeConfig();
-    if (!sysSettings.systemSettings.sending_enabled) return res.status(503).json({ error: "Sending Disabled" });
-    
-    try {
-        const driverRes = await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [driverId]);
-        if (driverRes.rows.length === 0) return res.status(404).json({ error: "Driver not found" });
-        const driver = driverRes.rows[0];
-        
-        const metaPayload = generateWhatsAppPayload({
-            message: text,
-            templateName,
-            mediaUrl,
-            mediaType
-        });
-
-        const metaRes = await sendToMeta(driver.phone_number, metaPayload);
-        if (!metaRes.success) throw new Error(JSON.stringify(metaRes.error));
-
-        let msgs = typeof driver.messages === 'string' ? JSON.parse(driver.messages) : (driver.messages || []);
-        msgs.push({ id: `agent_${Date.now()}`, sender: 'agent', text: text || `[${templateName || mediaType}]`, timestamp: Date.now(), type: 'text', status: 'sent' });
-        await queryWithRetry('UPDATE drivers SET messages = $1, last_message = $2, last_message_time = $3 WHERE id = $4', [JSON.stringify(msgs), "Agent Reply", Date.now(), driverId]);
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.get('/sync', async (req, res) => {
-    const since = parseInt(req.query.since || '0');
-    try {
-        const result = await queryWithRetry('SELECT * FROM drivers WHERE last_message_time > $1 ORDER BY last_message_time DESC LIMIT 50', [since]);
-        res.json({ drivers: result.rows.map(mapDriver), nextCursor: Date.now() });
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.get('/drivers', async (req, res) => {
-    try {
-        const result = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC LIMIT 100');
-        res.json(result.rows.map(mapDriver));
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.get('/drivers/:id/messages', async (req, res) => {
-    try {
-        const result = await queryWithRetry('SELECT messages FROM drivers WHERE id = $1', [req.params.id]);
-        let msgs = [];
-        if (result.rows.length > 0 && result.rows[0].messages) {
-            msgs = typeof result.rows[0].messages === 'string' ? JSON.parse(result.rows[0].messages) : result.rows[0].messages;
-        }
-        res.json(msgs);
-    } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.patch('/drivers/:id', async (req, res) => {
-    const { status, notes, isHumanMode } = req.body;
-    try {
-        const driverRes = await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [req.params.id]);
-        if (driverRes.rows.length === 0) return res.status(404).json({ error: "Not Found" });
-        const driver = driverRes.rows[0];
-        let metadata = typeof driver.metadata === 'string' ? JSON.parse(driver.metadata) : (driver.metadata || {});
-        if (isHumanMode !== undefined) metadata.isHumanMode = isHumanMode;
-        await queryWithRetry('UPDATE drivers SET status = COALESCE($1, status), notes = COALESCE($2, notes), metadata = $3 WHERE id = $4', [status, notes, JSON.stringify(metadata), req.params.id]);
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 apiRouter.post('/s3/presign', async (req, res) => {
     const { filename, fileType, folderPath } = req.body;
     const key = `${folderPath === '/' ? '' : folderPath + '/'}${Date.now()}-${filename}`.replace(/^\//, '');
@@ -692,33 +810,6 @@ apiRouter.post('/folders/:id/public', async (req, res) => {
 
 apiRouter.delete('/folders/:id/public', async (req, res) => {
     await queryWithRetry('UPDATE media_folders SET is_public_showcase = FALSE WHERE id = $1', [req.params.id]);
-    res.json({ success: true });
-});
-
-apiRouter.get('/bot-settings', async (req, res) => { 
-    const config = await fetchRuntimeConfig();
-    res.json(config.botSettings); 
-});
-
-apiRouter.post('/bot-settings', async (req, res) => {
-    await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET settings = $1`, [req.body]);
-    res.json({ success: true });
-});
-
-apiRouter.get('/system/stats', async (req, res) => {
-    res.json({ serverLoad: 12, dbLatency: 5, aiCredits: 100, aiModel: "Gemini 1.5", s3Status: 'ok', whatsappStatus: META_API_TOKEN ? 'ok' : 'error' });
-});
-
-apiRouter.get('/system/settings', async (req, res) => { 
-    const config = await fetchRuntimeConfig();
-    res.json(config.systemSettings); 
-});
-
-apiRouter.post('/system/settings', async (req, res) => {
-    const { settings } = req.body;
-    for (const [k, v] of Object.entries(settings)) {
-        await queryWithRetry(`INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2`, [k, String(v)]);
-    }
     res.json({ success: true });
 });
 

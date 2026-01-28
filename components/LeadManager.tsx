@@ -1,5 +1,4 @@
 
-
 import React, { useState, useMemo } from 'react';
 import { Driver, LeadStatus, MessageButton } from '../types';
 import { 
@@ -9,7 +8,7 @@ import {
   Globe, MapPin, CreditCard, LayoutTemplate, Clock
 } from 'lucide-react';
 import { MediaSelectorModal } from './MediaSelectorModal';
-import { liveApiService } from '../services/liveApiService'; // Imported Service
+import { liveApiService } from '../services/liveApiService'; 
 
 interface LeadManagerProps {
   drivers: Driver[];
@@ -36,7 +35,6 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
   const [bulkMessage, setBulkMessage] = useState('');
   const [selectedMedia, setSelectedMedia] = useState<{url: string, type: 'image' | 'video' | 'document'} | null>(null);
   const [showMediaPicker, setShowMediaPicker] = useState(false);
-  const [showOptions, setShowOptions] = useState(false);
   const [templateName, setTemplateName] = useState('');
   
   // Scheduling State
@@ -84,10 +82,10 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
   const executeBulkSend = async () => {
     if (!bulkMessage.trim() && !selectedMedia && !templateName) return;
     
-    // Default to NOW if not explicitly scheduled, using the robust scheduler backend
     const timestamp = isScheduled && scheduleTime ? new Date(scheduleTime).getTime() : Date.now();
 
     try {
+        // Send directly to the robust backend scheduler/queue
         await liveApiService.scheduleMessage(selectedIds, {
             text: bulkMessage,
             mediaUrl: selectedMedia?.url,
@@ -96,7 +94,7 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
             templateName: templateName || undefined
         }, timestamp);
         
-        // Notify parent to show success toast
+        // Notify parent UI
         onBulkSend(
             selectedIds, 
             bulkMessage, 
@@ -106,9 +104,9 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
             templateName || undefined,
             timestamp
         );
-    } catch (e) {
+    } catch (e: any) {
         console.error(e);
-        alert("Failed to schedule broadcast");
+        alert(`Failed to broadcast: ${e.message || 'Unknown error'}`);
         return;
     }
 
@@ -117,7 +115,6 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
     setTemplateName('');
     setSelectedMedia(null);
     setButtons([]);
-    setShowOptions(false);
     setIsScheduled(false);
     setScheduleTime('');
     setSelectedIds([]);
