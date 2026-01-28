@@ -76,7 +76,7 @@ if (!global.pgPool) {
         global.pgPool = new Pool({
             connectionString: CONNECTION_STRING,
             ssl: { rejectUnauthorized: false }, 
-            max: IS_SERVERLESS ? 2 : 20, // Increased pool for worker threads
+            max: IS_SERVERLESS ? 2 : 20, 
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT, 
             idleTimeoutMillis: 30000 
         });
@@ -135,9 +135,7 @@ const ensureSchema = async () => {
                 last_error TEXT,
                 created_at BIGINT
             )`);
-            // Index for faster queue processing
             await queryWithRetry(`CREATE INDEX IF NOT EXISTS idx_message_queue_status_time ON message_queue(status, scheduled_time)`);
-            // Index for fast retrieval by driver ID (UI Hint)
             await queryWithRetry(`CREATE INDEX IF NOT EXISTS idx_message_queue_driver ON message_queue(driver_id, status)`);
 
             const addCol = async (table, col, type) => {
@@ -270,7 +268,7 @@ const sendToMeta = async (to, payload) => {
     }
 };
 
-// --- QUEUE PROCESSOR WORKER ---
+// --- INDUSTRIAL QUEUE PROCESSOR WORKER ---
 let isProcessingQueue = false;
 
 const processMessageQueue = async () => {
@@ -281,40 +279,41 @@ const processMessageQueue = async () => {
         await ensureSchema();
         const now = Date.now();
         
-        // 1. Fetch Pending Messages AND Lock them atomically (if serverless, we emulate lock with status update)
-        // This prevents race conditions with Cancellation requests
-        const candidatesRes = await queryWithRetry(
-            `SELECT id FROM message_queue WHERE status = 'pending' AND scheduled_time <= $1 ORDER BY scheduled_time ASC LIMIT $2`,
+        // 1. ATOMIC LOCKING & FETCHING (SKIP LOCKED)
+        // This ensures multiple workers (or rapid polling) don't grab the same job.
+        const jobsRes = await queryWithRetry(
+            `UPDATE message_queue 
+             SET status = 'processing' 
+             WHERE id IN (
+                 SELECT id FROM message_queue 
+                 WHERE status = 'pending' AND scheduled_time <= $1 
+                 ORDER BY scheduled_time ASC 
+                 LIMIT $2 
+                 FOR UPDATE SKIP LOCKED
+             ) 
+             RETURNING *`,
             [now, SYSTEM_CONFIG.BATCH_SIZE]
         );
 
-        const candidateIds = candidatesRes.rows.map(r => r.id);
-        if (candidateIds.length === 0) {
+        if (jobsRes.rows.length === 0) {
             isProcessingQueue = false;
             return;
         }
 
-        // 2. Lock: Set status to 'processing' so user cannot cancel
-        await queryWithRetry(
-            `UPDATE message_queue SET status = 'processing' WHERE id = ANY($1)`,
-            [candidateIds]
-        );
-
-        // 3. Fetch full details for processing
-        const jobsRes = await queryWithRetry(`SELECT * FROM message_queue WHERE id = ANY($1)`, [candidateIds]);
-        
         const config = await fetchRuntimeConfig();
         if (!config.systemSettings.sending_enabled) {
             console.log("[Worker] Sending Disabled. Reverting locked items.");
-            await queryWithRetry(`UPDATE message_queue SET status = 'pending' WHERE id = ANY($1)`, [candidateIds]);
+            // Revert status safely
+            await queryWithRetry(`UPDATE message_queue SET status = 'pending' WHERE id = ANY($1)`, [jobsRes.rows.map(j => j.id)]);
             isProcessingQueue = false;
             return;
         }
 
         console.log(`[Worker] Processing ${jobsRes.rows.length} messages...`);
 
-        // 4. Process Batch
+        // 2. Process Batch
         for (const job of jobsRes.rows) {
+            // Safety check for retries
             if (job.attempts >= SYSTEM_CONFIG.MAX_RETRIES) {
                 await queryWithRetry(`UPDATE message_queue SET status = 'failed', last_error = 'Max retries exceeded' WHERE id = $1`, [job.id]);
                 continue;
@@ -328,12 +327,14 @@ const processMessageQueue = async () => {
                 }
                 const driver = driverRes.rows[0];
 
+                // Generate Payload & Send
                 const metaPayload = generateWhatsAppPayload(job.payload);
                 const sendRes = await sendToMeta(driver.phone_number, metaPayload);
 
                 if (sendRes.success) {
                     await queryWithRetry(`UPDATE message_queue SET status = 'completed' WHERE id = $1`, [job.id]);
                     
+                    // Update Chat History
                     let msgs = [];
                     try { msgs = typeof driver.messages === 'string' ? JSON.parse(driver.messages) : (driver.messages || []); } catch(e) {}
                     
@@ -359,7 +360,7 @@ const processMessageQueue = async () => {
                         [errorMsg, SYSTEM_CONFIG.MAX_RETRIES, job.id]
                     );
                 }
-                // Rate Limit Pause (100ms)
+                // Rate Limit Pause (100ms) to be nice to Meta API
                 await new Promise(r => setTimeout(r, 100));
 
             } catch (e) {
@@ -442,7 +443,6 @@ app.post('/webhook', async (req, res) => {
                         let messages = [];
                         try { messages = typeof driverRow.messages === 'string' ? JSON.parse(driverRow.messages) : (driverRow.messages || []); } catch(e) {}
                         
-                        // Deduplication
                         if (messages.some(m => m.id === message.id)) return;
                         
                         messages.push({ id: message.id, sender: 'driver', text: msgBody, timestamp: Date.now(), type: message.type });
@@ -576,6 +576,7 @@ apiRouter.post('/messages/schedule', async (req, res) => {
             ]);
         }
 
+        // Trigger processing immediately if scheduled for now/past
         if (time <= Date.now()) {
             processMessageQueue(); 
         }
@@ -586,10 +587,8 @@ apiRouter.post('/messages/schedule', async (req, res) => {
     }
 });
 
-// NEW: GET Scheduled messages for a specific driver
 apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => {
     try {
-        // Return messages that are pending or failed, but not completed.
         const result = await queryWithRetry(
             `SELECT id, driver_id as "driverId", payload, scheduled_time as "scheduledTime", status, created_at as "createdAt"
              FROM message_queue 
@@ -603,10 +602,8 @@ apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => {
     }
 });
 
-// NEW: Cancel (Delete) Scheduled Message
 apiRouter.delete('/messages/scheduled/:id', async (req, res) => {
     try {
-        // Only allow deleting if still pending/failed. If processing/completed, it's too late.
         const result = await queryWithRetry(
             `DELETE FROM message_queue WHERE id = $1 AND status IN ('pending', 'failed') RETURNING id`,
             [req.params.id]
@@ -621,11 +618,14 @@ apiRouter.delete('/messages/scheduled/:id', async (req, res) => {
     }
 });
 
-// NEW: Update Scheduled Message
+// Update Scheduled Message (Supports Send Now)
 apiRouter.patch('/messages/scheduled/:id', async (req, res) => {
-    const { text, scheduledTime } = req.body;
+    const { text, scheduledTime, sendNow } = req.body;
     try {
-        // 1. Fetch current payload to merge
+        // If Send Now is requested, we update the time to NOW
+        const newTime = sendNow ? Date.now() : scheduledTime;
+
+        // 1. Fetch current to check existence and status
         const currentRes = await queryWithRetry(
             `SELECT payload FROM message_queue WHERE id = $1 AND status IN ('pending', 'failed')`, 
             [req.params.id]
@@ -637,19 +637,26 @@ apiRouter.patch('/messages/scheduled/:id', async (req, res) => {
 
         const currentPayload = currentRes.rows[0].payload;
         const newPayload = { ...currentPayload };
-        if (text !== undefined) newPayload.message = text; // Update text logic
+        if (text !== undefined) newPayload.message = text;
 
         // 2. Update
         await queryWithRetry(
             `UPDATE message_queue SET payload = $1, scheduled_time = COALESCE($2, scheduled_time) WHERE id = $3`,
-            [JSON.stringify(newPayload), scheduledTime, req.params.id]
+            [JSON.stringify(newPayload), newTime, req.params.id]
         );
+        
+        // If Send Now, trigger worker
+        if (sendNow) {
+            processMessageQueue();
+        }
         
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
 });
+
+// ... (Rest of existing routes for drivers, sync, media, etc. unchanged) ...
 
 apiRouter.get('/cron/process-queue', async (req, res) => {
     processMessageQueue();
@@ -706,7 +713,6 @@ apiRouter.post('/messages/send', async (req, res) => {
     const { driverId, text, templateName, mediaUrl, mediaType } = req.body;
     const sysSettings = await fetchRuntimeConfig();
     if (!sysSettings.systemSettings.sending_enabled) return res.status(503).json({ error: "Sending Disabled" });
-    
     try {
         const driverRes = await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [driverId]);
         if (driverRes.rows.length === 0) return res.status(404).json({ error: "Driver not found" });

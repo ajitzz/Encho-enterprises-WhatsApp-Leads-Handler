@@ -6,7 +6,7 @@ import {
   ShieldCheck, ChevronRight, Facebook, Globe, Headset, MicOff, Phone, 
   FileText, Sparkles, MapPin, ExternalLink, LayoutTemplate, Calendar,
   Download, Eye, AlertCircle, File, List, Filter, AlertTriangle, ArrowUp,
-  Check, CheckCheck, Timer, Paperclip, Cloud, Edit2, Trash2
+  Check, CheckCheck, Timer, Paperclip, Cloud, Edit2, Trash2, Zap
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 import { MediaSelectorModal } from './MediaSelectorModal';
@@ -70,6 +70,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
         setLocalNotes(driver.notes || '');
         loadDocuments(driver.id);
         loadScheduledMessages(driver.id);
+        
+        // Poll for scheduled updates every 10s
+        const interval = setInterval(() => loadScheduledMessages(driver.id), 10000);
+        return () => clearInterval(interval);
     }
   }, [driver]);
 
@@ -112,14 +116,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   };
 
   const loadScheduledMessages = async (driverId: string) => {
-      setLoadingScheduled(true);
+      // Background load, don't show spinner every time
       try {
           const items = await liveApiService.getScheduledMessages(driverId);
           setScheduledMessages(items);
       } catch(e) {
           console.error("Failed scheduled fetch", e);
-      } finally {
-          setLoadingScheduled(false);
       }
   };
 
@@ -130,6 +132,27 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
           setScheduledMessages(prev => prev.filter(m => m.id !== msgId));
       } catch (e: any) {
           alert(`Error: ${e.message || "Could not cancel. It might be sending already."}`);
+      }
+  };
+  
+  const handleSendNowScheduled = async (msgId: string) => {
+      if (!window.confirm("Send this message immediately?")) return;
+      try {
+          // Send update with sendNow flag
+          await liveApiService.updateScheduledMessage(msgId, {
+              text: undefined, // No text change
+              scheduledTime: undefined,
+          } as any); 
+          // Note: The API call logic for sendNow is effectively handled by updateScheduledMessage 
+          // if we pass a special flag or just set time to now.
+          // Since the API signature in component might need adjustment, let's do it via update:
+          await liveApiService.updateScheduledMessage(msgId, { scheduledTime: Date.now() });
+          
+          // Optimistic remove
+          setScheduledMessages(prev => prev.filter(m => m.id !== msgId));
+          alert("Message queued for immediate delivery.");
+      } catch (e: any) {
+          alert(`Error: ${e.message}`);
       }
   };
 
@@ -147,7 +170,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       const timestamp = new Date(editTime).getTime();
       
       if (timestamp <= Date.now()) {
-          alert("Time must be in the future.");
+          alert("Time must be in the future for editing. Use 'Send Now' instead.");
           return;
       }
 
@@ -177,33 +200,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       } catch(e) { console.error("History load failed", e); } finally { setLoadingHistory(false); }
   };
 
-  const handleUpdateDocStatus = async (docId: string, status: 'approved' | 'rejected') => {
-      try {
-          await liveApiService.updateDocumentStatus(docId, status);
-          setDocuments(prev => prev.map(d => d.id === docId ? { ...d, verificationStatus: status } : d));
-      } catch(e) { alert("Failed to update status"); }
-  };
-
   const filteredDocuments = useMemo(() => {
       if (docFilter === 'all') return documents;
       return documents.filter(d => d.docType === docFilter);
   }, [documents, docFilter]);
-
-  const checklistStatus = useMemo(() => {
-      return REQUIRED_DOCS.map(req => {
-          const found = documents.find(d => d.docType === req.type && d.verificationStatus !== 'rejected');
-          return { ...req, isUploaded: !!found, isApproved: found?.verificationStatus === 'approved' };
-      });
-  }, [documents]);
-
-  const handleRequestMissingDocs = async () => {
-      if (!driver) return;
-      const missing = checklistStatus.filter(c => !c.isUploaded).map(c => c.label);
-      if (missing.length === 0) { alert("All required documents are uploaded!"); return; }
-      const msg = `Hello ${driver.name}, please upload the following documents:\n- ${missing.join('\n- ')}`;
-      await onSendMessage(msg);
-      alert("Request sent.");
-  };
 
   if (!driver) return null;
 
@@ -251,8 +251,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } };
-  const handleUpdateDetails = (updates: Partial<Driver>) => { onUpdateDriver(driver.id, updates); };
-  const handleSaveNotes = () => { onUpdateDriver(driver.id, { notes: localNotes }); };
   const toggleHumanMode = () => { onUpdateDriver(driver.id, { isHumanMode: !driver.isHumanMode }); };
   const handleMediaSelect = (url: string, type: 'image' | 'video' | 'document') => { setSelectedMedia({ url, type }); setShowMediaPicker(false); };
 
@@ -309,6 +307,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     <div className="flex justify-center py-2"><button onClick={handleLoadMore} disabled={loadingHistory} className="text-xs bg-white border border-gray-300 rounded-full px-4 py-2 shadow-sm text-gray-600 hover:bg-gray-100 flex items-center gap-2 disabled:opacity-50">{loadingHistory ? 'Loading...' : <><ArrowUp size={12} /> Load Previous Messages</>}</button></div>
                 )}
 
+                {/* Normal Messages */}
                 {messages.length > 0 ? (
                     messages.map((msg) => (
                     <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
@@ -324,25 +323,37 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     ))
                 ) : <div className="h-full flex items-center justify-center text-gray-400 text-sm">No messages yet</div>}
                 
-                {/* SCHEDULED MESSAGES SECTION */}
+                {/* SCHEDULED MESSAGES (GHOST BUBBLES) - NOW INTEGRATED INTO CHAT STREAM */}
                 {scheduledMessages.length > 0 && (
-                    <div className="space-y-3 pt-4 border-t-2 border-dashed border-gray-200 mt-4 relative">
-                        <div className="flex justify-center -mt-7 mb-2"><span className="bg-gray-50 px-3 text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-2"><Clock size={12} /> Upcoming Scheduled</span></div>
+                    <div className="space-y-4 pt-4 relative">
+                        <div className="flex items-center gap-4 justify-center">
+                            <div className="h-px bg-gray-300 w-12"></div>
+                            <span className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-1"><Clock size={12} /> Scheduled Queue</span>
+                            <div className="h-px bg-gray-300 w-12"></div>
+                        </div>
+                        
                         {scheduledMessages.map(msg => (
-                            <div key={msg.id} className="flex justify-end opacity-90">
-                                <div className="max-w-[80%] bg-amber-50 border border-amber-200 rounded-2xl rounded-tr-none p-3 shadow-sm relative group transition-all hover:bg-amber-100">
-                                    <div className="flex justify-between items-start gap-3 mb-1">
-                                        <div className="flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded border border-amber-200">
-                                            <Clock size={10} /> 
-                                            {new Date(msg.scheduledTime).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})}
-                                        </div>
-                                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                            <button onClick={() => openEditModal(msg)} className="p-1 bg-white rounded border border-amber-200 text-amber-600 hover:text-blue-600 hover:border-blue-200"><Edit2 size={12} /></button>
-                                            <button onClick={() => handleCancelScheduled(msg.id)} className="p-1 bg-white rounded border border-amber-200 text-amber-600 hover:text-red-600 hover:border-red-200"><Trash2 size={12} /></button>
-                                        </div>
+                            <div key={msg.id} className="flex justify-end animate-in fade-in slide-in-from-bottom-2">
+                                <div className="max-w-[80%] rounded-2xl rounded-tr-none border-2 border-dashed border-amber-300 bg-amber-50/50 p-4 shadow-sm relative group hover:bg-amber-50 transition-all">
+                                    {/* Action Overlay */}
+                                    <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white/80 backdrop-blur rounded-lg p-1 shadow-sm border border-amber-100">
+                                        <button onClick={() => handleSendNowScheduled(msg.id)} className="p-1.5 text-green-600 hover:bg-green-50 rounded" title="Send Now"><Zap size={14} /></button>
+                                        <button onClick={() => openEditModal(msg)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded" title="Edit"><Edit2 size={14} /></button>
+                                        <button onClick={() => handleCancelScheduled(msg.id)} className="p-1.5 text-red-600 hover:bg-red-50 rounded" title="Cancel"><Trash2 size={14} /></button>
                                     </div>
-                                    <p className="text-sm text-gray-800 whitespace-pre-wrap">{msg.payload.text || `[Media: ${msg.payload.mediaType}]`}</p>
-                                    {msg.status === 'failed' && <p className="text-[10px] text-red-600 font-bold mt-1">Failed to send. Check logs.</p>}
+
+                                    <div className="flex items-center gap-2 mb-2 text-amber-700">
+                                        <Clock size={14} />
+                                        <span className="text-xs font-bold font-mono">
+                                            {new Date(msg.scheduledTime).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})}
+                                        </span>
+                                        {msg.status === 'processing' && <span className="text-[10px] bg-amber-200 px-1.5 rounded animate-pulse">Sending...</span>}
+                                        {msg.status === 'failed' && <span className="text-[10px] bg-red-200 text-red-800 px-1.5 rounded">Retry Failed</span>}
+                                    </div>
+                                    
+                                    <p className="text-sm text-gray-600 italic">
+                                        {msg.payload.text || (msg.payload.mediaType ? `[Media: ${msg.payload.mediaType}]` : '[No Text]')}
+                                    </p>
                                 </div>
                             </div>
                         ))}
@@ -393,7 +404,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                         <button onClick={() => setDocFilter('rc_book')} className={`px-2 py-1 text-[10px] font-bold rounded ${docFilter === 'rc_book' ? 'bg-purple-50 text-purple-600' : 'text-gray-400'}`}>RC</button>
                     </div>
                 </div>
-                {/* ... Doc List (Simplified for brevity) ... */}
                 <div className="space-y-3">
                     {filteredDocuments.map((doc) => (
                         <div key={doc.id} className="bg-white p-3 rounded-xl border border-gray-200 shadow-sm flex items-center justify-between">
@@ -403,13 +413,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     ))}
                 </div>
               </div>
-              {/* ... Notes & Actions ... */}
             </div>
           </div>
         </div>
       </div>
       
-      {/* EDIT MODAL */}
+      {/* EDIT SCHEDULED MESSAGE MODAL */}
       {editingMessage && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
               <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm animate-in zoom-in-95 overflow-hidden">
