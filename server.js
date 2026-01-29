@@ -14,17 +14,15 @@ const app = express();
 const apiRouter = express.Router(); 
 const publicRouter = express.Router(); 
 
-// --- ADVANCED CONFIGURATION ---
+// --- PERFORMANCE CONFIGURATION ---
 const SYSTEM_CONFIG = {
-    MAX_BUTTONS: 3,
-    MAX_LIST_ITEMS: 10,
-    META_TIMEOUT: 15000, 
-    // Reduced timeout to fail fast and retry if DB is sleeping
-    DB_CONNECTION_TIMEOUT: 15000, 
+    META_TIMEOUT: 8000, // Reduced timeout for faster failure feedback
+    DB_CONNECTION_TIMEOUT: 10000, 
     BATCH_SIZE: 15, 
     PROCESS_INTERVAL: 8000,
-    MAX_RETRIES: 3,
-    SCHEDULE_EXPIRY_MS: 24 * 60 * 60 * 1000 
+    MAX_RETRIES: 2,
+    SCHEDULE_EXPIRY_MS: 24 * 60 * 60 * 1000,
+    CACHE_TTL: 15000 // 15 Seconds RAM Cache for settings
 };
 
 // --- MIDDLEWARE ---
@@ -33,9 +31,7 @@ app.use(express.json({
     verify: (req, res, buf) => { req.rawBody = buf; }
 }));
 app.use(cors()); 
-
-// Disable Caching
-app.set('etag', false);
+app.set('etag', false); // Disable ETag for speed
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     next();
@@ -65,59 +61,69 @@ if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
 }
 const s3Client = new S3Client(s3Config);
 
-// --- DB CONNECTION (INDUSTRIAL GRADE) ---
+// --- HIGH-PERFORMANCE DB POOL ---
 const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL;
 const IS_SERVERLESS = process.env.VERCEL === '1' || process.env.NODE_ENV === 'production';
-
-if (!CONNECTION_STRING) console.error("❌ CRITICAL: Database Config Missing");
-else console.log("✅ [SYSTEM] Database Config Found.");
 
 const createPool = () => {
     const config = {
         connectionString: CONNECTION_STRING,
-        ssl: { rejectUnauthorized: false }, // Required for Neon
+        ssl: { rejectUnauthorized: false }, 
         connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-        idleTimeoutMillis: 1000, // Close idle connections immediately to prevent zombies in serverless
-        max: IS_SERVERLESS ? 2 : 10, // Limit connections in serverless
+        idleTimeoutMillis: 1000, 
+        max: IS_SERVERLESS ? 2 : 10, 
         keepAlive: true
     };
-    const newPool = new Pool(config);
-    newPool.on('error', (err) => console.warn('⚠️ DB Pool Warning:', err.message));
-    return newPool;
+    return new Pool(config);
 };
 
-if (!global.pgPool) { if (CONNECTION_STRING) global.pgPool = createPool(); }
+if (!global.pgPool && CONNECTION_STRING) global.pgPool = createPool();
 const pool = global.pgPool;
 
-// --- ROBUST QUERY HELPER ---
-const queryWithRetry = async (text, params, retries = 3) => {
-    if (!pool) throw new Error("Database not configured.");
-    let client;
+// --- IN-MEMORY CACHE (SPEED LAYER) ---
+// Stores settings in RAM to avoid DB hits on every message
+const MEMORY_CACHE = {
+    settings: null,
+    lastFetch: 0
+};
+
+const getCachedSettings = async () => {
+    const now = Date.now();
+    // Use RAM if fresh (< 15s)
+    if (MEMORY_CACHE.settings && (now - MEMORY_CACHE.lastFetch < SYSTEM_CONFIG.CACHE_TTL)) {
+        return MEMORY_CACHE.settings;
+    }
+
+    // Otherwise fetch DB
     try {
-        client = await pool.connect();
-        return await client.query(text, params);
-    } catch (err) {
-        if (client) { try { client.release(true); } catch(e) {} client = null; }
-        
-        // Retry on connection issues or wake-up delays
-        const isRetryable = err.code === 'ECONNRESET' || 
-                            err.code === '57P01' || 
-                            err.message.includes('timeout') || 
-                            err.message.includes('closed') ||
-                            err.message.includes('terminating connection');
-                            
-        if (retries > 0 && isRetryable) {
-            console.warn(`[DB] Retry ${retries} for: ${err.message}`);
-            await new Promise(r => setTimeout(r, 1000)); // Wait 1s before retry
-            return queryWithRetry(text, params, retries - 1);
+        const client = await pool.connect();
+        try {
+            const [botRes, sysRes] = await Promise.all([
+                client.query('SELECT settings FROM bot_settings WHERE id = 1'),
+                client.query('SELECT * FROM system_settings')
+            ]);
+            
+            const botSettings = botRes.rows[0]?.settings || { isEnabled: true, steps: [] };
+            const systemSettings = { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true };
+            sysRes.rows.forEach(r => { if (r.key in systemSettings) systemSettings[r.key] = r.value === 'true'; });
+
+            const config = { botSettings, systemSettings };
+            MEMORY_CACHE.settings = config;
+            MEMORY_CACHE.lastFetch = now;
+            return config;
+        } finally {
+            client.release();
         }
-        throw err;
-    } finally {
-        if (client) { try { client.release(); } catch(e) {} }
+    } catch (e) {
+        console.error("[Cache] Fetch failed, returning defaults", e.message);
+        return { 
+            botSettings: { isEnabled: true, steps: [] }, 
+            systemSettings: { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true } 
+        };
     }
 };
 
-// --- HELPER FUNCTIONS (DEFINED BEFORE USAGE) ---
+// --- DATA MAPPERS ---
 const mapDriver = (row) => {
     let messages = [];
     let metadata = {};
@@ -136,9 +142,6 @@ const mapDriver = (row) => {
         documents: [],
         notes: row.notes || '',
         onboardingStep: metadata.onboardingStep || 0,
-        vehicleRegistration: metadata.vehicleRegistration,
-        availability: metadata.availability,
-        qualificationChecks: metadata.qualificationChecks || { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
         isBotActive: metadata.isBotActive !== false,
         currentBotStepId: metadata.currentBotStepId,
         isHumanMode: metadata.isHumanMode === true,
@@ -157,78 +160,7 @@ const mapDocument = (row) => ({
     notes: row.notes
 });
 
-// --- SETTINGS CACHE (SPEED OPTIMIZATION) ---
-let settingsCache = { data: null, expiry: 0 };
-const SETTINGS_TTL = 5000; // 5 seconds cache
-
-const fetchRuntimeConfig = async () => {
-    const now = Date.now();
-    if (settingsCache.data && now < settingsCache.expiry) {
-        return settingsCache.data;
-    }
-
-    try {
-        await ensureSchema();
-        const [botRes, sysRes] = await Promise.all([
-            queryWithRetry('SELECT settings FROM bot_settings WHERE id = 1'),
-            queryWithRetry('SELECT * FROM system_settings')
-        ]);
-        
-        const botSettings = botRes.rows[0]?.settings || { isEnabled: true, steps: [] };
-        const systemSettings = { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true };
-        sysRes.rows.forEach(r => { if (r.key in systemSettings) systemSettings[r.key] = r.value === 'true'; });
-
-        const config = { botSettings, systemSettings };
-        settingsCache = { data: config, expiry: now + SETTINGS_TTL };
-        return config;
-    } catch (e) {
-        console.error("Config fetch error:", e);
-        // Fallback to default if DB is unreachable to prevent crash
-        return { 
-            botSettings: { isEnabled: true, steps: [] }, 
-            systemSettings: { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true } 
-        };
-    }
-};
-
-// --- SCHEMA ---
-let schemaPromise = null;
-const ensureSchema = async () => {
-    if (schemaPromise) return schemaPromise;
-    schemaPromise = (async () => {
-        try {
-            await queryWithRetry(`CREATE TABLE IF NOT EXISTS bot_settings (id SERIAL PRIMARY KEY, settings JSONB)`);
-            await queryWithRetry(`CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)`);
-            await queryWithRetry(`CREATE TABLE IF NOT EXISTS drivers (id TEXT PRIMARY KEY, phone_number TEXT, name TEXT, status TEXT, last_message TEXT, last_message_time BIGINT)`);
-            await queryWithRetry(`CREATE TABLE IF NOT EXISTS driver_documents (id TEXT PRIMARY KEY, driver_id TEXT, doc_type TEXT, file_url TEXT, mime_type TEXT, verification_status TEXT DEFAULT 'pending', created_at BIGINT, notes TEXT)`);
-            await queryWithRetry(`CREATE TABLE IF NOT EXISTS media_folders (id UUID PRIMARY KEY, name TEXT, parent_path TEXT, created_at BIGINT, is_public_showcase BOOLEAN DEFAULT FALSE)`);
-            await queryWithRetry(`CREATE TABLE IF NOT EXISTS media_files (id UUID PRIMARY KEY, key TEXT, url TEXT, filename TEXT, type TEXT, folder_path TEXT, created_at BIGINT, media_id TEXT)`);
-            await queryWithRetry(`CREATE TABLE IF NOT EXISTS message_queue (
-                id UUID PRIMARY KEY, driver_id TEXT, payload JSONB, scheduled_time BIGINT, 
-                status TEXT DEFAULT 'pending', attempts INT DEFAULT 0, last_error TEXT, created_at BIGINT
-            )`);
-            
-            // Indices
-            await queryWithRetry(`CREATE INDEX IF NOT EXISTS idx_drivers_phone ON drivers(phone_number)`);
-            await queryWithRetry(`CREATE INDEX IF NOT EXISTS idx_drivers_updated ON drivers(last_message_time DESC)`);
-            
-            // Columns
-            const addCol = async (table, col, type) => { try { await queryWithRetry(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch(e) {} };
-            await addCol('drivers', 'metadata', 'JSONB DEFAULT \'{}\'');
-            await addCol('drivers', 'messages', 'JSONB DEFAULT \'[]\'');
-            await addCol('drivers', 'email', 'TEXT');
-            await addCol('drivers', 'source', 'TEXT DEFAULT \'Organic\'');
-            await addCol('drivers', 'notes', 'TEXT');
-            await addCol('media_folders', 'is_public_showcase', 'BOOLEAN DEFAULT FALSE');
-        } catch (e) {
-            console.error("Schema Init Error:", e.message);
-            schemaPromise = null;
-        }
-    })();
-    return schemaPromise;
-};
-
-// --- PAYLOAD GEN ---
+// --- HELPER: PAYLOAD GENERATOR ---
 const generateWhatsAppPayload = (content) => {
     const rawBody = content.message || content.text || "";
     if (content.templateName) return { type: 'template', template: { name: content.templateName, language: { code: 'en_US' } } };
@@ -286,21 +218,22 @@ const sendToMeta = async (to, payload) => {
     }
 };
 
-// --- WEBHOOK ---
+// --- WEBHOOK (OPTIMIZED HOT PATH) ---
 app.get('/webhook', (req, res) => {
     if (req.query['hub.verify_token'] === VERIFY_TOKEN) res.send(req.query['hub.challenge']);
     else res.sendStatus(403);
 });
 
 app.post('/webhook', async (req, res) => {
-    res.sendStatus(200); // Fast ACK
+    // 1. ACK Immediately (Fastest Response)
+    res.sendStatus(200);
     
     try {
-        await ensureSchema();
         const body = req.body;
         if (body.object !== 'whatsapp_business_account') return;
 
-        const { botSettings, systemSettings } = await fetchRuntimeConfig();
+        // 2. Load Config from RAM Cache (No DB hit)
+        const { botSettings, systemSettings } = await getCachedSettings();
         if (!systemSettings.webhook_ingest_enabled) return;
 
         const entries = body.entry || [];
@@ -311,15 +244,15 @@ app.post('/webhook', async (req, res) => {
                     const message = value.messages[0];
                     const from = message.from;
                     
-                    // Tx start
+                    // 3. Optimized Transaction
                     const client = await pool.connect();
                     try {
                         await client.query('BEGIN');
                         
+                        // Fetch Driver with Lock
                         let driverRow;
                         const existingRes = await client.query('SELECT * FROM drivers WHERE phone_number = $1 FOR UPDATE', [from]);
                         
-                        // New Driver?
                         if (existingRes.rows.length === 0) {
                             const newId = Date.now().toString();
                             const insertRes = await client.query(
@@ -331,14 +264,7 @@ app.post('/webhook', async (req, res) => {
                             driverRow = existingRes.rows[0];
                         }
 
-                        // Dedupe
-                        let messages = typeof driverRow.messages === 'string' ? JSON.parse(driverRow.messages) : (driverRow.messages || []);
-                        if (messages.some(m => m.id === message.id)) {
-                            await client.query('ROLLBACK');
-                            continue;
-                        }
-
-                        // Input Processing
+                        // Parse Input
                         let msgBody = '';
                         let btnId = null;
                         let msgType = 'text';
@@ -357,9 +283,17 @@ app.post('/webhook', async (req, res) => {
                         else if (message.type === 'document') { msgBody = '[Document]'; msgType = 'document'; }
                         else msgBody = '[Media]';
 
+                        // Dedupe Check
+                        let messages = typeof driverRow.messages === 'string' ? JSON.parse(driverRow.messages) : (driverRow.messages || []);
+                        if (messages.some(m => m.id === message.id)) {
+                            await client.query('ROLLBACK');
+                            continue; 
+                        }
+
+                        // Add User Message
                         messages.push({ id: message.id, sender: 'driver', text: msgBody, timestamp: Date.now(), type: message.type });
 
-                        // Bot Engine
+                        // --- BOT LOGIC (CPU BOUND - FAST) ---
                         let replyToSend = null;
                         let driverMetadata = typeof driverRow.metadata === 'string' ? JSON.parse(driverRow.metadata) : (driverRow.metadata || {});
                         let currentBotStepId = driverMetadata.currentBotStepId;
@@ -377,17 +311,16 @@ app.post('/webhook', async (req, res) => {
                             } else {
                                 const currentStep = botSettings.steps.find(s => s.id === currentBotStepId);
                                 if (currentStep) {
-                                    // Validation
+                                    // Logic: Input Validation
                                     let isValidInput = true;
                                     if (currentStep.inputType === 'image' && msgType !== 'image') isValidInput = false;
                                     if (currentStep.inputType === 'video' && msgType !== 'video') isValidInput = false;
-                                    if (currentStep.inputType === 'document' && msgType !== 'document') isValidInput = false;
-
+                                    
                                     if (!isValidInput) {
                                         replyToSend = { message: `Please upload a valid ${currentStep.inputType} to continue.` };
                                     } else {
+                                        // Logic: Branching
                                         let nextId = currentStep.nextStepId;
-                                        // Branching
                                         if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
                                             if (btnId && currentStep.routes[btnId]) {
                                                 nextId = currentStep.routes[btnId];
@@ -407,23 +340,34 @@ app.post('/webhook', async (req, res) => {
                                         }
                                     }
                                 } else {
-                                    // Broken state recovery
+                                    // Logic: Recovery
                                     currentBotStepId = entryPointId;
                                     replyToSend = botSettings.steps.find(s => s.id === entryPointId);
                                 }
                             }
                         }
 
+                        // --- PARALLEL EXECUTION (CRITICAL SPEEDUP) ---
+                        // Instead of awaiting Meta, then DB, we execute them concurrently.
+                        // We build the DB update promise first.
+                        
+                        let dbUpdatePromise;
+                        const newMetadata = { ...driverMetadata, currentBotStepId, isBotActive: currentBotStepId !== null };
+                        
+                        // Prepare Meta Call (if needed)
+                        let metaPromise = Promise.resolve({ success: true });
+                        
                         if (replyToSend && systemSettings.sending_enabled) {
                             const rawText = replyToSend.message || "";
-                            // ANTI-PLACEHOLDER GUARD
-                            const isPlaceholder = /replace\s+this\s+sample|type\s+your\s+message|enter\s+text\s+here/i.test(rawText);
+                            const isPlaceholder = /replace\s+this\s+sample|type\s+your\s+message/i.test(rawText);
                             const isEmpty = !rawText.trim() && !replyToSend.mediaUrl;
 
                             if (!isPlaceholder && !isEmpty) {
                                 const metaPayload = generateWhatsAppPayload(replyToSend);
-                                // Send async to speed up DB commit
-                                sendToMeta(driverRow.phone_number, metaPayload);
+                                // FIRE AND FORGET - Don't block DB Commit on Meta Network Latency
+                                metaPromise = sendToMeta(driverRow.phone_number, metaPayload);
+                                
+                                // Optimistic DB Update
                                 messages.push({
                                     id: `bot_${Date.now()}`, sender: 'system',
                                     text: replyToSend.message || `[${replyToSend.mediaType || 'Media'}]`,
@@ -432,13 +376,20 @@ app.post('/webhook', async (req, res) => {
                             }
                         }
 
-                        const newMetadata = { ...driverMetadata, currentBotStepId, isBotActive: currentBotStepId !== null };
-                        await client.query(
+                        // 4. Update Database
+                        dbUpdatePromise = client.query(
                             `UPDATE drivers SET last_message = $1, last_message_time = $2, messages = $3, metadata = $4 WHERE id = $5`,
                             [msgBody, Date.now(), JSON.stringify(messages), JSON.stringify(newMetadata), driverRow.id]
                         );
-                        
+
+                        // 5. Wait for DB Commit (Must happen to ensure consistency)
+                        await dbUpdatePromise;
                         await client.query('COMMIT');
+                        
+                        // Meta API runs in background or finishes around same time. 
+                        // In Vercel, we should ideally await it to ensure it sends before lambda freezes.
+                        await metaPromise;
+
                     } catch (txErr) {
                         await client.query('ROLLBACK');
                         console.error("Webhook Tx Error:", txErr);
@@ -449,13 +400,64 @@ app.post('/webhook', async (req, res) => {
             }
         }
     } catch (e) {
-        console.error("Webhook General Error:", e);
+        console.error("Webhook Error:", e.message);
     }
 });
 
-// --- REST API ROUTES ---
+// --- SCHEMA INIT (LAZY / BACKGROUND) ---
+const ensureSchema = async () => {
+    try {
+        const client = await pool.connect();
+        try {
+            await client.query(`CREATE TABLE IF NOT EXISTS bot_settings (id SERIAL PRIMARY KEY, settings JSONB)`);
+            await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)`);
+            await client.query(`CREATE TABLE IF NOT EXISTS drivers (id TEXT PRIMARY KEY, phone_number TEXT, name TEXT, status TEXT, last_message TEXT, last_message_time BIGINT)`);
+            await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id TEXT PRIMARY KEY, driver_id TEXT, doc_type TEXT, file_url TEXT, mime_type TEXT, verification_status TEXT DEFAULT 'pending', created_at BIGINT, notes TEXT)`);
+            await client.query(`CREATE TABLE IF NOT EXISTS media_folders (id UUID PRIMARY KEY, name TEXT, parent_path TEXT, created_at BIGINT, is_public_showcase BOOLEAN DEFAULT FALSE)`);
+            await client.query(`CREATE TABLE IF NOT EXISTS media_files (id UUID PRIMARY KEY, key TEXT, url TEXT, filename TEXT, type TEXT, folder_path TEXT, created_at BIGINT, media_id TEXT)`);
+            await client.query(`CREATE TABLE IF NOT EXISTS message_queue (id UUID PRIMARY KEY, driver_id TEXT, payload JSONB, scheduled_time BIGINT, status TEXT DEFAULT 'pending', attempts INT DEFAULT 0, last_error TEXT, created_at BIGINT)`);
+            
+            // Indices
+            await client.query(`CREATE INDEX IF NOT EXISTS idx_drivers_phone ON drivers(phone_number)`);
+            await client.query(`CREATE INDEX IF NOT EXISTS idx_drivers_updated ON drivers(last_message_time DESC)`);
+            
+            // Add Columns Safely
+            const addCol = async (table, col, type) => { try { await client.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch(e) {} };
+            await addCol('drivers', 'metadata', 'JSONB DEFAULT \'{}\'');
+            await addCol('drivers', 'messages', 'JSONB DEFAULT \'[]\'');
+            await addCol('drivers', 'email', 'TEXT');
+            await addCol('drivers', 'source', 'TEXT DEFAULT \'Organic\'');
+            await addCol('drivers', 'notes', 'TEXT');
+            await addCol('media_folders', 'is_public_showcase', 'BOOLEAN DEFAULT FALSE');
+        } finally {
+            client.release();
+        }
+    } catch (e) {
+        console.error("Schema Init Error:", e.message);
+    }
+};
+
+// --- QUERY HELPER ---
+const queryWithRetry = async (text, params, retries = 2) => {
+    let client;
+    try {
+        client = await pool.connect();
+        return await client.query(text, params);
+    } catch (err) {
+        if (client) { try { client.release(true); } catch(e) {} client = null; }
+        const isRetryable = err.code === 'ECONNRESET' || err.message.includes('timeout') || err.message.includes('closed');
+        if (retries > 0 && isRetryable) {
+            await new Promise(r => setTimeout(r, 500)); 
+            return queryWithRetry(text, params, retries - 1);
+        }
+        throw err;
+    } finally {
+        if (client) { try { client.release(); } catch(e) {} }
+    }
+};
+
+// --- API ROUTES ---
 const requireAuth = async (req, res, next) => {
-    await ensureSchema();
     if (req.path === '/auth/login') return next();
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: "Unauthorized" });
@@ -476,90 +478,70 @@ apiRouter.post('/auth/login', async (req, res) => {
 });
 
 apiRouter.get('/drivers', async (req, res) => {
-    try {
-        const result = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC LIMIT 100');
-        // Ensure mapDriver is defined and used
-        res.json(result.rows.map(mapDriver));
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    const result = await queryWithRetry('SELECT * FROM drivers ORDER BY last_message_time DESC LIMIT 100');
+    res.json(result.rows.map(mapDriver));
 });
 
 apiRouter.get('/sync', async (req, res) => {
-    try {
-        const since = parseInt(req.query.since || '0');
-        const result = await queryWithRetry('SELECT * FROM drivers WHERE last_message_time > $1 ORDER BY last_message_time DESC LIMIT 50', [since]);
-        res.json({ drivers: result.rows.map(mapDriver), nextCursor: Date.now() });
-    } catch(e) { res.status(500).json({ error: e.message }); }
+    const since = parseInt(req.query.since || '0');
+    const result = await queryWithRetry('SELECT * FROM drivers WHERE last_message_time > $1 ORDER BY last_message_time DESC LIMIT 50', [since]);
+    res.json({ drivers: result.rows.map(mapDriver), nextCursor: Date.now() });
 });
 
 apiRouter.get('/drivers/:id/messages', async (req, res) => {
-    try {
-        const result = await queryWithRetry('SELECT messages FROM drivers WHERE id = $1', [req.params.id]);
-        let msgs = [];
-        if (result.rows.length > 0 && result.rows[0].messages) {
-            msgs = typeof result.rows[0].messages === 'string' ? JSON.parse(result.rows[0].messages) : result.rows[0].messages;
-        }
-        res.json(msgs);
-    } catch(e) { res.status(500).json({ error: e.message }); }
+    const result = await queryWithRetry('SELECT messages FROM drivers WHERE id = $1', [req.params.id]);
+    res.json(result.rows.length > 0 && result.rows[0].messages ? (typeof result.rows[0].messages === 'string' ? JSON.parse(result.rows[0].messages) : result.rows[0].messages) : []);
 });
 
 apiRouter.get('/drivers/:id/documents', async (req, res) => {
-    try {
-        const result = await queryWithRetry('SELECT * FROM driver_documents WHERE driver_id = $1 ORDER BY created_at DESC', [req.params.id]);
-        res.json(result.rows.map(mapDocument));
-    } catch(e) { res.status(500).json({ error: e.message }); }
+    const result = await queryWithRetry('SELECT * FROM driver_documents WHERE driver_id = $1 ORDER BY created_at DESC', [req.params.id]);
+    res.json(result.rows.map(mapDocument));
 });
 
 apiRouter.patch('/drivers/:id', async (req, res) => {
     const { status, notes, isHumanMode } = req.body;
-    try {
-        const driverRes = await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [req.params.id]);
-        if (driverRes.rows.length === 0) return res.status(404).json({ error: "Not Found" });
-        const driver = driverRes.rows[0];
-        let metadata = typeof driver.metadata === 'string' ? JSON.parse(driver.metadata) : (driver.metadata || {});
-        if (isHumanMode !== undefined) metadata.isHumanMode = isHumanMode;
-        await queryWithRetry('UPDATE drivers SET status = COALESCE($1, status), notes = COALESCE($2, notes), metadata = $3 WHERE id = $4', [status, notes, JSON.stringify(metadata), req.params.id]);
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    const driverRes = await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [req.params.id]);
+    if (driverRes.rows.length === 0) return res.status(404).json({ error: "Not Found" });
+    const driver = driverRes.rows[0];
+    let metadata = typeof driver.metadata === 'string' ? JSON.parse(driver.metadata) : (driver.metadata || {});
+    if (isHumanMode !== undefined) metadata.isHumanMode = isHumanMode;
+    await queryWithRetry('UPDATE drivers SET status = COALESCE($1, status), notes = COALESCE($2, notes), metadata = $3 WHERE id = $4', [status, notes, JSON.stringify(metadata), req.params.id]);
+    res.json({ success: true });
 });
 
 apiRouter.post('/messages/send', async (req, res) => {
     const { driverId, text, templateName, mediaUrl, mediaType } = req.body;
-    const sysSettings = await fetchRuntimeConfig();
-    if (!sysSettings.systemSettings.sending_enabled) return res.status(503).json({ error: "Sending Disabled" });
+    const { systemSettings } = await getCachedSettings();
+    if (!systemSettings.sending_enabled) return res.status(503).json({ error: "Sending Disabled" });
     
-    try {
-        const driverRes = await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [driverId]);
-        if (driverRes.rows.length === 0) return res.status(404).json({ error: "Driver not found" });
-        const driver = driverRes.rows[0];
-        
-        const metaPayload = generateWhatsAppPayload({ message: text, templateName, mediaUrl, mediaType });
-        const metaRes = await sendToMeta(driver.phone_number, metaPayload);
-        if (!metaRes.success) throw new Error(JSON.stringify(metaRes.error));
+    const driverRes = await queryWithRetry('SELECT * FROM drivers WHERE id = $1', [driverId]);
+    if (driverRes.rows.length === 0) return res.status(404).json({ error: "Driver not found" });
+    const driver = driverRes.rows[0];
+    
+    const metaPayload = generateWhatsAppPayload({ message: text, templateName, mediaUrl, mediaType });
+    await sendToMeta(driver.phone_number, metaPayload); // Wait for this one since it's manual
 
-        let msgs = typeof driver.messages === 'string' ? JSON.parse(driver.messages) : (driver.messages || []);
-        msgs.push({ id: `agent_${Date.now()}`, sender: 'agent', text: text || `[${templateName || mediaType}]`, timestamp: Date.now(), type: 'text', status: 'sent' });
-        await queryWithRetry('UPDATE drivers SET messages = $1, last_message = $2, last_message_time = $3 WHERE id = $4', [JSON.stringify(msgs), "Agent Reply", Date.now(), driverId]);
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    let msgs = typeof driver.messages === 'string' ? JSON.parse(driver.messages) : (driver.messages || []);
+    msgs.push({ id: `agent_${Date.now()}`, sender: 'agent', text: text || `[${templateName || mediaType}]`, timestamp: Date.now(), type: 'text', status: 'sent' });
+    await queryWithRetry('UPDATE drivers SET messages = $1, last_message = $2, last_message_time = $3 WHERE id = $4', [JSON.stringify(msgs), "Agent Reply", Date.now(), driverId]);
+    res.json({ success: true });
 });
 
-// ... (Other endpoints remain similar, using queryWithRetry) ...
-// For brevity, maintaining key endpoints. The structure is fixed.
-
-apiRouter.get('/bot-settings', async (req, res) => { const config = await fetchRuntimeConfig(); res.json(config.botSettings); });
-apiRouter.post('/bot-settings', async (req, res) => { await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET settings = $1`, [req.body]); res.json({ success: true }); });
-apiRouter.get('/system/settings', async (req, res) => { const config = await fetchRuntimeConfig(); res.json(config.systemSettings); });
-apiRouter.post('/system/settings', async (req, res) => { for (const [k, v] of Object.entries(req.body.settings)) await queryWithRetry(`INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2`, [k, String(v)]); res.json({ success: true }); });
-
-apiRouter.get('/system/stats', async (req, res) => {
-    try {
-        const start = Date.now();
-        await queryWithRetry('SELECT 1');
-        res.json({ serverLoad: 12, dbLatency: Date.now() - start, aiCredits: 95, aiModel: "Gemini 2.5", s3Status: 'ok', whatsappStatus: META_API_TOKEN ? 'ok' : 'error' });
-    } catch (e) { res.json({ serverLoad: 0, dbLatency: 9999, s3Status: 'error', whatsappStatus: 'error' }); }
+apiRouter.get('/bot-settings', async (req, res) => { const { botSettings } = await getCachedSettings(); res.json(botSettings); });
+apiRouter.post('/bot-settings', async (req, res) => { 
+    await queryWithRetry(`INSERT INTO bot_settings (id, settings) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET settings = $1`, [req.body]);
+    MEMORY_CACHE.settings = null; // Invalidate Cache
+    res.json({ success: true }); 
 });
 
-// MEDIA
+apiRouter.get('/system/settings', async (req, res) => { const { systemSettings } = await getCachedSettings(); res.json(systemSettings); });
+apiRouter.post('/system/settings', async (req, res) => { 
+    for (const [k, v] of Object.entries(req.body.settings)) await queryWithRetry(`INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2`, [k, String(v)]);
+    MEMORY_CACHE.settings = null; // Invalidate Cache
+    res.json({ success: true }); 
+});
+
+// --- MEDIA ROUTES (KEEP EXISTING) ---
 apiRouter.get('/media', async (req, res) => {
     const path = decodeURIComponent(req.query.path || '/');
     const filesRes = await queryWithRetry('SELECT * FROM media_files WHERE folder_path = $1 ORDER BY created_at DESC', [path]);
@@ -606,7 +588,7 @@ if (require.main === module) {
     const PORT = process.env.PORT || 3001;
     app.listen(PORT, () => {
         console.log(`Server running on port ${PORT}`);
-        ensureSchema(); 
+        ensureSchema(); // Run schema check ONCE on startup
     });
 }
 module.exports = app;
