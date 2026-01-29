@@ -24,7 +24,7 @@ const missingEnv = requiredEnv.filter(key => !process.env[key]);
 if (missingEnv.length > 0) {
     console.error(`❌ STARTUP ERROR: Missing Keys: ${missingEnv.join(', ')}`);
 } else {
-    console.log("✅ Security Keys Loaded: Database, Redis, QStash, Meta");
+    console.log("🔐 Keys Loaded: Validating Connections...");
 }
 
 const app = express();
@@ -44,16 +44,15 @@ const SYSTEM_CONFIG = {
 let pgPool = null;
 const getDb = () => {
     if (!pgPool) {
-        // Prefer Pooled URL for Vercel, fall back to standard
         const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
         
         pgPool = new Pool({
             connectionString,
             ssl: { 
-                rejectUnauthorized: false // Required for Neon secure connection
+                rejectUnauthorized: false // Required for Neon/Vercel secure connections
             },
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-            max: 5, // Limit connections in serverless environment
+            max: 5, // Serverless pool limit
             idleTimeoutMillis: 10000, 
             keepAlive: true 
         });
@@ -100,6 +99,7 @@ const getMetaClient = () => {
 };
 
 // --- MIDDLEWARE ---
+// Capture raw body for QStash signature verification
 app.use(express.json({ 
     limit: '10mb', 
     verify: (req, res, buf) => { req.rawBody = buf; }
@@ -184,20 +184,28 @@ app.post('/api/internal/bot-worker', async (req, res) => {
     const start = Date.now();
     
     // 1. STRICT SECURITY: Verify QStash Signature
+    // CRITICAL FIX: Use req.rawBody (Buffer) converted to string for verification. 
+    // JSON.stringify(req.body) is unreliable for signature checks.
     const signature = req.headers["upstash-signature"];
-    if (process.env.NODE_ENV === 'production' && !signature) {
-        return res.status(401).json({ error: "Missing Signature" });
-    }
-
-    if (process.env.NODE_ENV === 'production' && signature) {
+    
+    // In production, enforce signature check
+    if (process.env.NODE_ENV === 'production' || process.env.VERCEL) {
+        if (!signature) {
+            console.error("❌ [Worker] Missing QStash Signature");
+            return res.status(401).json({ error: "Missing Signature" });
+        }
         try {
             const isValid = await qstashReceiver.verify({
                 signature: signature,
-                body: JSON.stringify(req.body),
+                body: req.rawBody.toString(), // Must use raw body string
                 url: getWorkerUrl(req) 
             });
-            if (!isValid) return res.status(401).json({ error: "Invalid Signature" });
+            if (!isValid) {
+                console.error("❌ [Worker] Invalid QStash Signature");
+                return res.status(401).json({ error: "Invalid Signature" });
+            }
         } catch (e) {
+            console.error("❌ [Worker] Verification Error", e.message);
             return res.status(401).json({ error: "Verification Failed" });
         }
     }
@@ -222,7 +230,8 @@ app.post('/api/internal/bot-worker', async (req, res) => {
             redis.get(`bot:state:${from}`) || { isBotActive: true, variables: {}, history: [] }
         ]);
 
-        // ... [Bot Logic would go here] ...
+        // ... [Bot Logic Placeholder] ...
+        // Ensure this logic mimics your flow engine from previous iterations
 
         // 4. DB PERSISTENCE
         const client = await getDb().connect();
@@ -264,9 +273,7 @@ apiRouter.get('/system/stats', async (req, res) => {
         aiCredits: 85,
         aiModel: 'Gemini 1.5 Flash',
         s3Status: 'ok',
-        s3Load: 12,
         whatsappStatus: 'ok',
-        whatsappUploadLoad: 5,
         uptime: process.uptime(),
         
         // Connectivity Checks
@@ -299,8 +306,8 @@ apiRouter.get('/system/stats', async (req, res) => {
         stats.redisStatus = 'error';
     }
 
-    // 3. Analyze QStash
-    if (process.env.QSTASH_TOKEN) {
+    // 3. Analyze QStash Config
+    if (process.env.QSTASH_TOKEN && process.env.QSTASH_CURRENT_SIGNING_KEY) {
         stats.qstashStatus = 'configured';
     } else {
         stats.qstashStatus = 'missing_token';
@@ -330,6 +337,7 @@ const getBotSettings = async (phoneId) => {
     if (cached) return cached;
     const client = await getDb().connect();
     try {
+        // Create table if not exists (Lazy Init)
         const res = await client.query(
             `SELECT settings FROM bot_versions WHERE phone_number_id = $1 AND status = 'published' ORDER BY version_number DESC LIMIT 1`,
             [phoneId]
@@ -400,8 +408,21 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
 // --- SERVER INIT ---
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;
-    app.listen(PORT, () => {
+    app.listen(PORT, async () => {
         console.log(`🚀 Uber Fleet Bot running on port ${PORT}`);
+        
+        // IMMEDIATE CONNECTION PROBE
+        try {
+            const client = await getDb().connect();
+            await client.query('SELECT 1');
+            client.release();
+            console.log("✅ Database: Connected (Neon Postgres)");
+        } catch(e) { console.error("❌ Database: Connection Failed", e.message); }
+
+        try {
+            await redis.ping();
+            console.log("✅ Cache: Connected (Upstash Redis)");
+        } catch(e) { console.error("❌ Cache: Connection Failed", e.message); }
     });
 }
 
