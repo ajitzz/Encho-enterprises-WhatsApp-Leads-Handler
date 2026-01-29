@@ -67,7 +67,7 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
   const isCardType = data.label === 'Rich Card';
   const isLinkType = data.label === 'Link';
   
-  // Validation Checks
+  // Validation Checks - STRICT PLACEHOLDER DETECTION
   const hasPlaceholder = data.message && /replace\s+this|enter\s+your|type\s+your|sample\s+message/i.test(data.message);
   const isEmptyOptions = isOptionType && (!data.options || data.options.length === 0);
   const isEmptyMedia = (isMediaType || isDocType) && !data.mediaUrl;
@@ -269,11 +269,7 @@ const NodePreviewCard = ({ data, id, selected }: any) => {
   );
 };
 
-// ... (Rest of PropertyInspector, DraggableSidebarItem, BotBuilder, and FlowEditor remain unchanged) ...
-// Since the user only provided snippets in previous turns, I will ensure the full file context is maintained where needed
-// But for XML output, I only need to provide the parts that change or the full file if significant.
-// Given the prompt asks to update based on existing files, I will output the FULL file to be safe and ensure no imports are lost.
-
+// ... (Rest of component remains unchanged, ensuring imports are correct) ...
 const PropertyInspector = ({ selectedNode, onChange }: { selectedNode: Node, onChange: (id: string, data: any) => void }) => {
     const [localData, setLocalData] = useState<any>(selectedNode.data);
     const [showMediaPicker, setShowMediaPicker] = useState(false);
