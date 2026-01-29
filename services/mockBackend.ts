@@ -77,6 +77,7 @@ class MockBackendService {
   addMessage(driverId: string, message: Message) {
     const driver = this.drivers.find((d) => d.id === driverId);
     if (driver) {
+      if (!driver.messages) driver.messages = [];
       driver.messages.push(message);
       driver.lastMessage = message.text || '[Media]';
       driver.lastMessageTime = message.timestamp;
@@ -102,7 +103,7 @@ class MockBackendService {
         lastMessage: text,
         lastMessageTime: Date.now(),
         messages: [],
-        documents: [],
+        documents: {}, // Fixed: initialized as empty object instead of array
         onboardingStep: OnboardingStep.WELCOME_SENT,
         qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
         isBotActive: shouldActivateBot,

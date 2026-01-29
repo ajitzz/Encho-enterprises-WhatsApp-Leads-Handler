@@ -1,409 +1,237 @@
 
-import { Driver, BotSettings, MessageButton, Message, DriverDocument, ScheduledMessage } from '../types';
+import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage } from '../types';
 
-// Determine Base URL
 const getBaseUrl = () => {
     if (typeof window === 'undefined') return '';
     const host = window.location.hostname;
-    if (host === 'localhost' || host === '127.0.0.1') return 'http://localhost:3001';
+    // Assuming backend is on port 3001 or proxied via Vite
+    if (host === 'localhost' || host === '127.0.0.1') return ''; 
     return ''; 
 };
-
 const API_BASE_URL = getBaseUrl();
 
-// --- AUTHENTICATION TOKEN MANAGEMENT ---
 let authToken: string | null = localStorage.getItem('uber_fleet_auth_token');
 
-export const setAuthToken = (token: string | null) => {
+export const setAuthToken = (token: string) => {
     authToken = token;
-    if (token) localStorage.setItem('uber_fleet_auth_token', token);
-    else localStorage.removeItem('uber_fleet_auth_token');
+    localStorage.setItem('uber_fleet_auth_token', token);
 };
 
-const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, delay = 500): Promise<Response> => {
-    const headers = {
-        ...(options?.headers || {}),
-        // Inject Auth Token if available
-        ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {})
+const getHeaders = () => {
+    const headers: Record<string, string> = {
+        'Content-Type': 'application/json'
     };
-
-    const config = {
-        ...options,
-        headers
-    };
-
-    try {
-        const response = await fetch(url, config);
-        
-        // Handle Auth Failures Globally
-        if (response.status === 401 || response.status === 403) {
-            console.warn("Unauthorized Access. Redirecting to login...");
-            setAuthToken(null);
-            // Optional: window.location.reload() to force login screen, but React state handling is smoother
-            throw new Error("Unauthorized");
-        }
-
-        if (!response.ok) {
-             const method = options?.method?.toUpperCase() || 'GET';
-             // Don't throw immediately on HEAD/GET 404s if handled by caller, but 500s usually need retry
-             if (response.status >= 500) {
-                 if (retries > 0) {
-                     await new Promise(res => setTimeout(res, delay));
-                     return fetchWithRetry(url, options, retries - 1, delay * 2);
-                 }
-             }
-             
-             let errMessage = `Request Failed: ${response.status}`;
-             try {
-                 const errData = await response.json();
-                 if (errData.error) errMessage = errData.error;
-             } catch(e) {}
-             throw new Error(errMessage);
-        }
-        return response;
-    } catch (err: any) {
-        // Retry logic for network errors
-        if (retries > 0 && !err.message.includes('40') && !err.message.includes('Unauthorized')) { 
-            await new Promise(res => setTimeout(res, delay));
-            return fetchWithRetry(url, options, retries - 1, delay * 2); 
-        }
-        throw err;
+    if (authToken) {
+        headers['Authorization'] = `Bearer ${authToken}`;
     }
+    return headers;
 };
 
-let lastSyncTimestamp = 0;
+// Generic fetch wrapper
+const apiRequest = async <T>(endpoint: string, options: RequestInit = {}): Promise<T> => {
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+        ...options,
+        headers: {
+            ...getHeaders(),
+            ...options.headers
+        }
+    });
+    
+    if (!response.ok) {
+        // Handle 401 unauthorized
+        if (response.status === 401) {
+            // potentially redirect to login or throw specific error
+        }
+        const errorBody = await response.text();
+        throw new Error(`API Error ${response.status}: ${errorBody}`);
+    }
+    return response.json();
+};
 
 export const liveApiService = {
-  // --- AUTH ENDPOINTS ---
-  verifyLogin: async (credential: string) => {
-      const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: credential })
-      });
-      if (!response.ok) {
-          const err = await response.json();
-          throw new Error(err.error || "Authentication failed");
-      }
-      return await response.json();
+  getBotSettings: async (): Promise<BotSettings> => {
+    return apiRequest<BotSettings>('/api/bot/settings');
+  },
+
+  saveBotSettings: async (settings: any) => {
+    return apiRequest('/api/bot/save', {
+      method: 'POST',
+      body: JSON.stringify(settings)
+    });
+  },
+
+  publishBot: async () => {
+      return apiRequest('/api/bot/publish', { method: 'POST' });
   },
 
   getDrivers: async (): Promise<Driver[]> => {
-    try {
-      lastSyncTimestamp = Date.now();
-      const url = `${API_BASE_URL}/api/drivers`;
-      const response = await fetchWithRetry(url);
-      return await response.json();
-    } catch (error: any) {
-      console.warn("Fetch Error (handled):", error);
-      throw error;
-    }
+      return apiRequest<Driver[]>('/api/drivers');
   },
 
-  syncDrivers: async (): Promise<Driver[]> => {
-      try {
-          const url = `${API_BASE_URL}/api/sync?since=${lastSyncTimestamp}`;
-          const response = await fetchWithRetry(url);
-          const data = await response.json();
-          if (data.nextCursor) {
-              lastSyncTimestamp = data.nextCursor;
-          }
-          return data.drivers || [];
-      } catch (e) {
-          return [];
-      }
-  },
-
-  getDriverMessages: async (driverId: string, limit = 50, before?: number): Promise<Message[]> => {
-      try {
-          let url = `${API_BASE_URL}/api/drivers/${driverId}/messages?limit=${limit}`;
-          if (before) url += `&before=${before}`;
-          const response = await fetchWithRetry(url);
-          return await response.json();
-      } catch (e) {
-          return [];
-      }
-  },
-
-  // NEW: Get Pending Scheduled Messages
-  getScheduledMessages: async (driverId: string): Promise<ScheduledMessage[]> => {
-      try {
-          const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}/scheduled-messages`);
-          return await response.json();
-      } catch (e) {
-          console.warn("Failed to fetch scheduled messages", e);
-          return [];
-      }
-  },
-
-  // NEW: Cancel Scheduled Message
-  cancelScheduledMessage: async (messageId: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/scheduled/${messageId}`, {
-          method: 'DELETE'
+  verifyLogin: async (credential: string): Promise<{success: boolean, user?: any}> => {
+      return apiRequest('/api/auth/google', {
+          method: 'POST',
+          body: JSON.stringify({ credential })
       });
-      return await response.json();
   },
 
-  // NEW: Update Scheduled Message
-  updateScheduledMessage: async (messageId: string, updates: { text?: string, scheduledTime?: number }) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/scheduled/${messageId}`, {
+  subscribeToUpdates: (callback: (drivers: Driver[]) => void) => {
+      // Mock implementation of polling or SSE
+      const interval = setInterval(async () => {
+          try {
+              const drivers = await liveApiService.getDrivers();
+              callback(drivers);
+          } catch(e) {}
+      }, 5000);
+      return () => clearInterval(interval);
+  },
+
+  updateDriver: async (id: string, updates: Partial<Driver>) => {
+      return apiRequest(`/api/drivers/${id}`, {
           method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(updates)
       });
-      return await response.json();
+  },
+
+  getDriverMessages: async (id: string, limit: number = 50, beforeTimestamp?: number): Promise<Message[]> => {
+      let url = `/api/drivers/${id}/messages?limit=${limit}`;
+      if (beforeTimestamp) url += `&before=${beforeTimestamp}`;
+      return apiRequest<Message[]>(url);
+  },
+
+  sendMessage: async (driverId: string, text: string, options?: any) => {
+      return apiRequest(`/api/drivers/${driverId}/messages`, {
+          method: 'POST',
+          body: JSON.stringify({ text, ...options })
+      });
   },
 
   getDriverDocuments: async (driverId: string): Promise<DriverDocument[]> => {
-      try {
-          const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}/documents`);
-          return await response.json();
-      } catch(e) {
-          return [];
-      }
+      return apiRequest<DriverDocument[]>(`/api/drivers/${driverId}/documents`);
   },
 
-  updateDocumentStatus: async (docId: string, status?: string, notes?: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/documents/${docId}`, {
+  getScheduledMessages: async (driverId: string): Promise<ScheduledMessage[]> => {
+      return apiRequest<ScheduledMessage[]>(`/api/drivers/${driverId}/scheduled-messages`);
+  },
+
+  cancelScheduledMessage: async (msgId: string) => {
+      return apiRequest(`/api/scheduled-messages/${msgId}`, { method: 'DELETE' });
+  },
+
+  updateScheduledMessage: async (msgId: string, updates: any) => {
+      return apiRequest(`/api/scheduled-messages/${msgId}`, {
           method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status, notes })
-      });
-      return await response.json();
-  },
-
-  subscribeToUpdates: (callback: (updatedDrivers: Driver[]) => void) => {
-    const interval = setInterval(async () => {
-        try { 
-            const updates = await liveApiService.syncDrivers();
-            if (updates.length > 0) {
-                callback(updates);
-            }
-        } catch(e) {}
-    }, 6000); 
-    return () => clearInterval(interval);
-  },
-
-  getBotSettings: async (): Promise<BotSettings> => {
-    const response = await fetchWithRetry(`${API_BASE_URL}/api/bot-settings`);
-    return await response.json();
-  },
-
-  saveBotSettings: async (settings: BotSettings) => {
-    const response = await fetchWithRetry(`${API_BASE_URL}/api/bot-settings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings)
-    });
-    return await response.json();
-  },
-
-  sendMessage: async (driverId: string, text: string, attachments?: { mediaUrl?: string, mediaType?: string, options?: string[], headerImageUrl?: string, footerText?: string, buttons?: MessageButton[], templateName?: string }) => {
-    const clientMessageId = `web_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/send`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-          driverId, 
-          text,
-          clientMessageId,
-          mediaUrl: attachments?.mediaUrl,
-          mediaType: attachments?.mediaType,
-          options: attachments?.options,
-          headerImageUrl: attachments?.headerImageUrl,
-          footerText: attachments?.footerText,
-          buttons: attachments?.buttons,
-          templateName: attachments?.templateName 
-      })
-    });
-    return await response.json();
-  },
-
-  scheduleMessage: async (driverIds: string[], content: any, scheduledTime: number) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/messages/schedule`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-              driverIds,
-              scheduledTime,
-              ...content
-          })
-      });
-      return await response.json();
-  },
-
-  updateDriver: async (driverId: string, updates: Partial<Driver>) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(updates)
       });
-      return await response.json();
   },
 
-  uploadMedia: async (file: File, folderPath: string = '/') => {
-      const PROXY_LIMIT = 4.5 * 1024 * 1024; 
-      
-      const headers: Record<string, string> = {};
-      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-
-      if (file.size < PROXY_LIMIT) {
-          try {
-              const formData = new FormData();
-              formData.append('file', file);
-              formData.append('folderPath', folderPath);
-
-              const response = await fetch(`${API_BASE_URL}/api/s3/proxy-upload`, {
-                  method: 'POST',
-                  body: formData,
-                  headers: headers // Attach Auth
-              });
-
-              if (!response.ok) {
-                  const err = await response.json();
-                  throw new Error(err.error || "Proxy upload failed");
-              }
-              const result = await response.json();
-              return { url: result.url, type: result.type };
-          } catch (e: any) {
-              console.warn("Proxy upload failed, falling back to direct...", e);
-          }
-      }
-
-      try {
-          const presignResponse = await fetchWithRetry(`${API_BASE_URL}/api/s3/presign`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ filename: file.name, fileType: file.type, folderPath })
-          });
-          
-          const { uploadUrl, key, publicUrl } = await presignResponse.json();
-
-          const uploadResponse = await fetch(uploadUrl, {
-              method: 'PUT',
-              body: file,
-              headers: { 'Content-Type': file.type }
-          });
-
-          if (!uploadResponse.ok) throw new Error(`Direct upload failed: ${uploadResponse.statusText}`);
-
-          const fileType = file.type.split('/')[0];
-          await fetchWithRetry(`${API_BASE_URL}/api/files/register`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ key, url: publicUrl, filename: file.name, type: fileType, folderPath })
-          });
-
-          return { url: publicUrl, type: fileType };
-
-      } catch (error: any) {
-          throw error;
-      }
-  },
-
-  syncFromS3: async () => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/media/sync`, { method: 'POST' });
-      return await response.json();
-  },
-
-  setPublicFolder: async (folderId: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${folderId}/public`, { method: 'POST' });
-      return await response.json();
-  },
-
-  unsetPublicFolder: async (folderId: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${folderId}/public`, { method: 'DELETE' });
-      return await response.json();
-  },
-
-  getPublicShowcase: async (token?: string) => {
-      let url = `${API_BASE_URL}/api/public/showcase`;
-      if (token) url += `?folder=${encodeURIComponent(token)}`;
-      const response = await fetch(url);
-      return await response.json();
-  },
-
-  getShowcaseStatus: async () => {
-      const response = await fetch(`${API_BASE_URL}/api/public/status`);
-      return await response.json();
-  },
-
-  syncFileToWhatsApp: async (fileId: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/files/${fileId}/sync`, { method: 'POST' });
-      return await response.json();
-  },
-
-  getMediaLibrary: async (path: string = '/') => {
-      const encodedPath = encodeURIComponent(path);
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/media?path=${encodedPath}`);
-      return await response.json();
-  },
-
-  createFolder: async (name: string, parentPath: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders`, {
+  scheduleMessage: async (driverIds: string[], message: any, timestamp: number) => {
+      return apiRequest('/api/scheduled-messages', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, parentPath })
+          body: JSON.stringify({ driverIds, message, timestamp })
       });
-      return await response.json();
   },
 
-  renameFolder: async (id: string, newName: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: newName })
+  sendAssistantMessage: async (input: string, history: any[]) => {
+      return apiRequest<any>('/api/ai/assistant', {
+          method: 'POST',
+          body: JSON.stringify({ input, history })
       });
-      return await response.json();
   },
 
-  deleteMediaFile: async (id: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/files/${id}`, { method: 'DELETE' });
-      return await response.json();
-  },
-
-  deleteFolder: async (id: string) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/folders/${id}`, { method: 'DELETE' });
-      return await response.json();
+  updateCredentials: async (creds: any) => {
+      return apiRequest('/api/system/credentials', {
+          method: 'POST',
+          body: JSON.stringify(creds)
+      });
   },
 
   configureWebhook: async (config: any) => {
-    const response = await fetchWithRetry(`${API_BASE_URL}/api/configure-webhook`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(config)
-    });
-    return await response.json();
+      return apiRequest('/api/system/webhook', {
+          method: 'POST',
+          body: JSON.stringify(config)
+      });
   },
 
-  updateCredentials: async (credentials: any) => {
-    const response = await fetchWithRetry(`${API_BASE_URL}/api/update-credentials`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(credentials)
-    });
-    return await response.json();
+  getShowcaseStatus: async () => {
+      return apiRequest<any>('/api/showcase/status');
   },
-  
-  getSystemSettings: async (): Promise<any> => {
-      try {
-          const response = await fetchWithRetry(`${API_BASE_URL}/api/system/settings`);
-          return await response.json();
-      } catch (e) {
-          return { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true };
+
+  getMediaLibrary: async (path: string) => {
+      return apiRequest<any>(`/api/media?path=${encodeURIComponent(path)}`);
+  },
+
+  uploadMedia: async (file: File, path: string) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('path', path);
+      
+      const response = await fetch(`${API_BASE_URL}/api/media/upload`, {
+          method: 'POST',
+          headers: {
+              'Authorization': `Bearer ${authToken}`
+          },
+          body: formData
+      });
+      
+      if (!response.ok) {
+           const errorBody = await response.text();
+           throw new Error(errorBody || 'Upload failed');
       }
+      return response.json();
+  },
+
+  syncFileToWhatsApp: async (id: string) => {
+      return apiRequest(`/api/media/${id}/sync`, { method: 'POST' });
+  },
+
+  syncFromS3: async () => {
+      return apiRequest<any>('/api/media/sync-s3', { method: 'POST' });
+  },
+
+  unsetPublicFolder: async (id: string) => {
+      return apiRequest(`/api/media/folders/${id}/public`, { method: 'DELETE' });
+  },
+
+  setPublicFolder: async (id: string) => {
+      return apiRequest(`/api/media/folders/${id}/public`, { method: 'POST' });
+  },
+
+  renameFolder: async (id: string, name: string) => {
+      return apiRequest(`/api/media/folders/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ name })
+      });
+  },
+
+  createFolder: async (name: string, parentPath: string) => {
+      return apiRequest('/api/media/folders', {
+          method: 'POST',
+          body: JSON.stringify({ name, parentPath })
+      });
+  },
+
+  deleteMediaFile: async (id: string) => {
+      return apiRequest(`/api/media/files/${id}`, { method: 'DELETE' });
+  },
+
+  deleteFolder: async (id: string) => {
+      return apiRequest(`/api/media/folders/${id}`, { method: 'DELETE' });
+  },
+
+  getPublicShowcase: async (folderName?: string) => {
+      const url = folderName ? `/api/showcase/${encodeURIComponent(folderName)}` : '/api/showcase';
+      return apiRequest<any>(url);
+  },
+
+  getSystemSettings: async () => {
+      return apiRequest<any>('/api/system/settings');
   },
 
   updateSystemSettings: async (settings: any) => {
-      const response = await fetchWithRetry(`${API_BASE_URL}/api/system/settings`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ settings })
+      return apiRequest('/api/system/settings', {
+          method: 'PATCH',
+          body: JSON.stringify(settings)
       });
-      return await response.json();
-  },
-  
-  sendAssistantMessage: async (message: string, history: any[]) => {
-      return { text: "AI Assistant is disabled in this mode." };
   }
 };

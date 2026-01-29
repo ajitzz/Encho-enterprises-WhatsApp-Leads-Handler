@@ -15,10 +15,10 @@ import type {
   OnEdgesChange,
   OnConnect,
 } from '@xyflow/react';
-import { BotSettings, BotStep } from '../types';
+import { FlowNodeData } from '../types';
 
 interface FlowState {
-  nodes: Node[];
+  nodes: Node<FlowNodeData>[];
   edges: Edge[];
   onNodesChange: OnNodesChange;
   onEdgesChange: OnEdgesChange;
@@ -26,17 +26,17 @@ interface FlowState {
   setNodes: (nodes: Node[]) => void;
   setEdges: (edges: Edge[]) => void;
   addNode: (node: Node) => void;
-  updateNodeData: (id: string, data: any) => void;
+  updateNodeData: (id: string, data: Partial<FlowNodeData>) => void;
   deleteNode: (id: string) => void;
   resetFlow: () => void;
 }
 
-const initialNodes: Node[] = [
+const initialNodes: Node<FlowNodeData>[] = [
     { 
         id: 'start', 
         type: 'custom', 
         position: { x: 50, y: 300 }, 
-        data: { type: 'start', label: 'Start', message: 'START' } 
+        data: { id: 'start', type: 'start', label: 'Start Flow' } 
     }
 ];
 
@@ -46,7 +46,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   
   onNodesChange: (changes: NodeChange[]) => {
     set({
-      nodes: applyNodeChanges(changes, get().nodes),
+      nodes: applyNodeChanges(changes, get().nodes) as Node<FlowNodeData>[],
     });
   },
   
@@ -63,7 +63,6 @@ export const useFlowStore = create<FlowState>((set, get) => ({
           type: 'smoothstep', 
           animated: true,
           style: { stroke: '#64748b', strokeWidth: 2 },
-          markerEnd: { type: 'arrowclosed', color: '#64748b' }
       }, get().edges),
     });
   },
@@ -79,6 +78,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     set({
       nodes: get().nodes.map((node) => {
         if (node.id === id) {
+          // Deep merge logic if needed, or simple spread
           return { ...node, data: { ...node.data, ...data } };
         }
         return node;

@@ -4,170 +4,167 @@ export enum LeadStatus {
   QUALIFIED = 'Qualified',
   FLAGGED_FOR_REVIEW = 'Flagged',
   REJECTED = 'Rejected',
-  ONBOARDED = 'Onboarded'
-}
-
-export enum OnboardingStep {
-  WELCOME_SENT = 0,
-  DOCUMENTS_RECEIVED = 1,
-  VEHICLE_DETAILS = 2,
-  AVAILABILITY_SET = 3,
-  READY_FOR_REVIEW = 4
+  ONBOARDED = 'Onboarded',
+  INTERVIEW_SCHEDULED = 'Interview Scheduled'
 }
 
 export type LeadSource = 'Organic' | 'Meta Ad' | 'Referral' | 'Manual';
 
 export interface MessageButton {
-  type: 'reply' | 'url' | 'phone' | 'location' | 'copy_code';
+  type: 'reply' | 'url' | 'phone' | 'copy_code' | 'location';
   title: string;
-  payload?: string; // URL, Phone Number, or ID
+  payload?: string;
+  id?: string; // Unique ID for routing
 }
 
-export interface Message {
+// --- NEW FLOW TYPES ---
+
+export type NodeType = 
+  | 'message' 
+  | 'question' 
+  | 'buttons' 
+  | 'list' 
+  | 'condition' 
+  | 'document' 
+  | 'status' 
+  | 'handoff' 
+  | 'start' 
+  | 'end';
+
+export interface ValidationRule {
+  type: 'text' | 'number' | 'email' | 'phone' | 'regex';
+  regex?: string;
+  min?: number;
+  max?: number;
+  errorMessage?: string;
+}
+
+export interface ConditionRule {
+  variable: string;
+  operator: 'equals' | 'contains' | 'greater_than' | 'less_than' | 'exists';
+  value?: string | number;
+  nextStepId: string;
+}
+
+export interface FlowNodeData {
   id: string;
-  sender: 'driver' | 'system' | 'agent';
-  text?: string;
-  imageUrl?: string; // Legacy field for basic images
-  
-  // Rich Card Fields
-  headerImageUrl?: string;
-  footerText?: string;
-  buttons?: MessageButton[];
-  templateName?: string; // New: Track template used
-  
-  timestamp: number;
-  type: 'text' | 'image' | 'video_link' | 'template' | 'options' | 'rich_card' | 'audio' | 'document' | 'video';
-  options?: string[]; // Legacy for quick replies
-  
-  // Outbox Status
-  status?: 'pending' | 'sent' | 'delivered' | 'read' | 'failed';
-}
-
-// NEW: Queue Item Definition
-export interface ScheduledMessage {
-  id: string;
-  driverId: string;
-  payload: {
-    text?: string;
-    templateName?: string;
-    mediaUrl?: string;
-    mediaType?: 'image' | 'video' | 'document';
-    buttons?: MessageButton[];
-  };
-  scheduledTime: number;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
-  createdAt: number;
-  error?: string;
-}
-
-export interface DriverDocument {
-  id: string;
-  driverId: string;
-  docType: 'license' | 'id_proof' | 'rc_book' | 'photo' | 'other';
-  fileUrl: string;
-  mimeType: string;
-  createdAt: number;
-  verificationStatus: 'pending' | 'approved' | 'rejected' | 'failed';
-  notes?: string;
-}
-
-export interface Driver {
-  id: string;
-  phoneNumber: string;
-  name: string;
-  source: LeadSource; // Track where the lead came from
-  status: LeadStatus;
-  lastMessage: string;
-  lastMessageTime: number;
-  messages: Message[];
-  documents: DriverDocument[]; // Updated to use structured documents
-  notes?: string;
-  
-  // New Onboarding Fields
-  onboardingStep: OnboardingStep;
-  vehicleRegistration?: string;
-  availability?: 'Full-time' | 'Part-time' | 'Weekends';
-  qualificationChecks: {
-    hasValidLicense: boolean;
-    hasVehicle: boolean;
-    isLocallyAvailable: boolean;
-  };
-  
-  // Bot State Tracking
-  currentBotStepId?: string; 
-  isBotActive: boolean;
-  
-  // Human Handover
-  isHumanMode?: boolean;
-  humanModeEndsAt?: number; // Timestamp when human mode expires
-  
-  // Internal tracking
-  updatedAt?: number;
-}
-
-export interface MetaTemplate {
-  name: string;
-  language: string;
-  components: any[];
-}
-
-export interface AppNotification {
-  id: string;
-  type: 'info' | 'warning' | 'success';
-  title: string;
-  message: string;
-}
-
-// --- BOT BUILDER TYPES ---
-
-export type InputType = 'text' | 'image' | 'option' | 'location' | 'card';
-
-export interface BotStep {
-  id: string;
-  title: string;
-  message: string; // Body text
-  inputType: InputType; 
-  options?: string[]; // Legacy simple options
-  saveToField?: 'name' | 'vehicleRegistration' | 'availability' | 'document' | 'email'; 
-  nextStepId?: string | 'END' | 'AI_HANDOFF';
-  
-  // Branching Logic
-  routes?: Record<string, string>; 
-  
-  // Template / Rich Card
-  templateName?: string; 
-  templateLanguage?: string;
-  
-  // Rich Media
+  label: string; // Display name
+  type: NodeType;
+  content?: string; // Text message
   mediaUrl?: string;
   mediaType?: 'image' | 'video' | 'document';
   
-  // Rich Card Specifics
-  headerImageUrl?: string;
-  footerText?: string;
+  // Question / Input
+  variable?: string; // Name of variable to store result in
+  validation?: ValidationRule;
+  
+  // Interactive
   buttons?: MessageButton[];
+  listSections?: { title: string; rows: { id: string; title: string; description?: string }[] }[];
   
-  // Link Node Specific
+  // Logic
+  conditions?: ConditionRule[];
+  defaultNextStepId?: string;
+  
+  // Actions
+  targetStatus?: LeadStatus; // For Status Node
+  
+  // Metadata
+  isTerminal?: boolean; // Ends flow
+  warning?: string; // UI Validation warning
+}
+
+export interface BotVersion {
+  id: string;
+  phoneNumberId: string;
+  versionNumber: number;
+  status: 'draft' | 'published';
+  nodes: any[]; // React Flow Nodes
+  edges: any[]; // React Flow Edges
+  createdAt: string;
+}
+
+// --- CANDIDATE TYPES ---
+
+export interface Message {
+  id: string;
+  sender: 'system' | 'agent' | 'driver' | 'bot';
+  text?: string;
+  imageUrl?: string;
+  videoUrl?: string;
+  documentUrl?: string;
+  timestamp: number;
+  type: 'text' | 'image' | 'video' | 'document' | 'audio' | 'location' | 'template' | 'interactive' | 'options' | 'video_link';
+  status?: 'sent' | 'delivered' | 'read' | 'failed' | 'processing';
+  options?: string[];
+  templateName?: string;
+  payload?: any;
+  headerImageUrl?: string;
+}
+
+export interface Candidate {
+  id: string;
+  phoneNumber: string;
+  name: string;
+  stage: LeadStatus;
+  variables: Record<string, any>;
+  documents: Record<string, { url: string; type: string; timestamp: number }>;
+  tags: string[];
+  lastMessageAt: number;
+  assignedAgent?: string;
+  messages?: Message[]; // For UI view
+}
+
+export enum OnboardingStep {
+  WELCOME_SENT = 'WELCOME_SENT',
+  // Add others if needed
+}
+
+export interface BotStep {
+  id: string;
+  title?: string;
+  message: string;
+  inputType?: 'text' | 'option' | 'image' | 'video' | 'document';
+  options?: string[];
+  saveToField?: string;
+  nextStepId?: string;
+  mediaUrl?: string;
+  mediaType?: 'image' | 'video' | 'document';
   linkLabel?: string;
-  
-  // New: Scheduling
-  delay?: number; // Delay in seconds before sending this step
+  routes?: Record<string, string>;
 }
 
 export interface BotSettings {
   isEnabled: boolean;
-  shouldRepeat?: boolean; 
-  routingStrategy: 'BOT_ONLY' | 'AI_ONLY' | 'HYBRID_BOT_FIRST';
-  systemInstruction: string; 
+  shouldRepeat: boolean;
+  routingStrategy: 'BOT_ONLY' | 'HYBRID' | 'HUMAN_FIRST' | string;
+  systemInstruction?: string;
   steps: BotStep[];
-  entryPointId?: string; 
-  flowData?: {
-    nodes: any[];
-    edges: any[];
+  entryPointId?: string;
+  nodes?: any[];
+  edges?: any[];
+}
+
+// Legacy types support
+export interface Driver extends Candidate {
+  lastMessage: string;
+  lastMessageTime: number;
+  source: LeadSource;
+  status: LeadStatus;
+  isBotActive: boolean;
+  isHumanMode?: boolean;
+  humanModeEndsAt?: number;
+  // Added missing properties
+  notes?: string;
+  currentBotStepId?: string;
+  onboardingStep?: OnboardingStep;
+  qualificationChecks?: {
+    hasValidLicense: boolean;
+    hasVehicle: boolean;
+    isLocallyAvailable: boolean;
   };
 }
 
-// --- SYSTEM MONITOR ---
 export interface SystemStats {
     serverLoad: number; 
     dbLatency: number; 
@@ -181,17 +178,41 @@ export interface SystemStats {
     uptime: number;
 }
 
-// --- AI AUDIT TYPES ---
+export interface AppNotification {
+  id: string;
+  type: 'info' | 'warning' | 'success';
+  title: string;
+  message: string;
+}
+
 export interface AuditIssue {
   nodeId: string;
   severity: 'CRITICAL' | 'WARNING';
-  issue: string; 
-  suggestion: string; 
-  autoFixValue?: any; 
+  issue: string;
+  suggestion: string;
+  autoFixValue?: string;
 }
 
 export interface AuditReport {
   isValid: boolean;
   issues: AuditIssue[];
-  fixedNodes?: any[]; 
+}
+
+export interface DriverDocument {
+  id: string;
+  docType: string;
+  url: string;
+  verificationStatus: 'pending' | 'approved' | 'rejected';
+  timestamp: number;
+}
+
+export interface ScheduledMessage {
+  id: string;
+  scheduledTime: number;
+  payload: {
+    text?: string;
+    mediaUrl?: string;
+    mediaType?: string;
+  };
+  status: 'pending' | 'processing' | 'failed' | 'sent';
 }
