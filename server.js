@@ -114,13 +114,12 @@ const getBotSettings = async (timings) => {
     try {
         const cached = await redis.get(cacheKey);
         if (cached) {
-            if (timings) timings.settings_get_ms = performance.now() - start;
+            if (timings) timings.settings = performance.now() - start;
             return cached;
         }
     } catch(e) {}
 
     // DB Fallback (Only happens once per 10 mins)
-    const dbStart = performance.now();
     try {
         const client = await getDb().connect();
         const res = await client.query('SELECT settings FROM bot_settings WHERE id = 1');
@@ -130,10 +129,11 @@ const getBotSettings = async (timings) => {
         // Async Cache Write
         redis.set(cacheKey, settings, { ex: SYSTEM_CONFIG.CACHE_TTL_SETTINGS }).catch(console.error);
         
-        if (timings) timings.settings_get_ms = performance.now() - start; 
+        if (timings) timings.settings = performance.now() - start; 
         return settings;
     } catch(e) {
         console.error("[DB] Settings Fetch Fail", e);
+        if (timings) timings.settings = performance.now() - start;
         return { isEnabled: true, steps: [] };
     }
 };
@@ -145,12 +145,13 @@ const getUserState = async (phoneNumber, timings) => {
     
     try {
         const cached = await redis.get(key);
-        if (timings) timings.state_get_ms = performance.now() - start;
+        if (timings) timings.state = performance.now() - start;
         
         if (cached) return { state: cached, isNew: false };
         
         return { state: { isBotActive: true }, isNew: true };
     } catch(e) {
+        if (timings) timings.state = performance.now() - start;
         return { state: { isBotActive: true }, isNew: true };
     }
 };
@@ -323,6 +324,7 @@ app.post('/api/internal/bot-worker', async (req, res) => {
     }
 
     const { originalBody, traceId, ingestTime } = req.body;
+    // Initial Timings Object
     const timings = { workerStart: workerStart, ingestLag: workerStart - (ingestTime || workerStart), lock: 0, settings: 0, state: 0, logic: 0, meta: 0, db: 0 };
     
     try {
@@ -348,12 +350,11 @@ app.post('/api/internal/bot-worker', async (req, res) => {
 
         try {
             // 3. FETCH DATA
-            const fetchStart = performance.now();
+            // Independent timing tracked inside getBotSettings and getUserState
             const [settings, userCtx] = await Promise.all([
                 getBotSettings(timings),
                 getUserState(from, timings)
             ]);
-            timings.settings = performance.now() - fetchStart;
 
             // 4. BOT LOGIC
             const logicStart = performance.now();
