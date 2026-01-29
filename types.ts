@@ -72,6 +72,7 @@ export interface FlowNodeData {
   // Metadata
   isTerminal?: boolean; // Ends flow
   warning?: string; // UI Validation warning
+  [key: string]: any;
 }
 
 export interface BotVersion {

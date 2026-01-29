@@ -23,9 +23,9 @@ interface FlowState {
   onNodesChange: OnNodesChange;
   onEdgesChange: OnEdgesChange;
   onConnect: OnConnect;
-  setNodes: (nodes: Node[]) => void;
+  setNodes: (nodes: Node<FlowNodeData>[]) => void;
   setEdges: (edges: Edge[]) => void;
-  addNode: (node: Node) => void;
+  addNode: (node: Node<FlowNodeData>) => void;
   updateNodeData: (id: string, data: Partial<FlowNodeData>) => void;
   deleteNode: (id: string) => void;
   resetFlow: () => void;
@@ -46,7 +46,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
   
   onNodesChange: (changes: NodeChange[]) => {
     set({
-      nodes: applyNodeChanges(changes, get().nodes) as Node<FlowNodeData>[],
+      nodes: applyNodeChanges(changes, get().nodes) as unknown as Node<FlowNodeData>[],
     });
   },
   

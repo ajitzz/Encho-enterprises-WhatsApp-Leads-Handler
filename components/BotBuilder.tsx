@@ -1,5 +1,4 @@
 
-
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { 
   ReactFlow, 
@@ -9,9 +8,7 @@ import {
   BackgroundVariant,
   Handle, 
   Position,
-  ReactFlowProvider,
   useReactFlow,
-  Panel,
   Node,
   Edge
 } from '@xyflow/react';
@@ -20,9 +17,8 @@ import { liveApiService } from '../services/liveApiService';
 import { mockBackend } from '../services/mockBackend';
 import { 
   MessageSquare, FileText, List, GitBranch, 
-  Settings, Save, Play, AlertTriangle, Trash2, 
-  Plus, Check, X, Phone, Mail, Hash, User, Briefcase,
-  HelpCircle, Eye, RefreshCw, LayoutTemplate
+  Save, Play, AlertTriangle, Trash2, 
+  Check, User, HelpCircle, Phone, X, LayoutTemplate, RefreshCw
 } from 'lucide-react';
 import { FlowNodeData, NodeType } from '../types';
 
@@ -49,8 +45,10 @@ const CustomNode = ({ data, selected }: { data: FlowNodeData, selected: boolean 
         case 'handoff': color = 'bg-red-500'; icon = <User size={12} />; break;
     }
 
+    const isPlaceholder = !data.content || /replace this|sample message|enter your message/i.test(data.content);
+
     return (
-        <div className={`w-[280px] bg-white rounded-lg shadow-lg border-2 transition-all ${selected ? 'border-blue-500 ring-2 ring-blue-200' : 'border-gray-200'}`}>
+        <div className={`w-[280px] bg-white rounded-lg shadow-lg border-2 transition-all ${selected ? 'border-blue-500 ring-2 ring-blue-200' : (isPlaceholder && ['message', 'question', 'buttons'].includes(data.type) ? 'border-red-400 bg-red-50' : 'border-gray-200')}`}>
             <Handle type="target" position={Position.Left} className="!w-3 !h-3 !bg-gray-400" />
             
             <NodeHeader label={data.label || data.type} icon={icon} color={color} />
@@ -59,11 +57,11 @@ const CustomNode = ({ data, selected }: { data: FlowNodeData, selected: boolean 
                 {data.content ? (
                     <div className="line-clamp-3 whitespace-pre-wrap">{data.content}</div>
                 ) : (
-                    <span className="italic text-gray-400">No content set...</span>
+                    <span className="italic text-red-400 font-bold flex items-center gap-1"><AlertTriangle size={10} /> Message Required</span>
                 )}
                 
                 {/* Visual Indicators */}
-                {data.variable && <div className="mt-2 text-[10px] bg-blue-50 text-blue-700 px-2 py-1 rounded border border-blue-100 flex items-center gap-1"><Hash size={10} /> Save to: {data.variable}</div>}
+                {data.variable && <div className="mt-2 text-[10px] bg-blue-50 text-blue-700 px-2 py-1 rounded border border-blue-100 flex items-center gap-1">Save to: {data.variable}</div>}
                 
                 {data.warning && (
                     <div className="mt-2 text-[10px] bg-red-50 text-red-600 px-2 py-1 rounded border border-red-100 flex items-center gap-1 font-bold">
@@ -95,7 +93,7 @@ const CustomNode = ({ data, selected }: { data: FlowNodeData, selected: boolean 
     );
 };
 
-const Inspector = ({ node, onChange }: { node: Node, onChange: (id: string, d: any) => void }) => {
+const Inspector = ({ node, onChange }: { node: Node<FlowNodeData>, onChange: (id: string, d: any) => void }) => {
     const [local, setLocal] = useState(node.data as any);
     useEffect(() => setLocal(node.data), [node]);
 
@@ -118,14 +116,16 @@ const Inspector = ({ node, onChange }: { node: Node, onChange: (id: string, d: a
 
                 {['message', 'question', 'buttons', 'handoff'].includes(local.type) && (
                     <div>
-                        <label className="block text-xs font-bold text-gray-500 mb-1">Message Text</label>
+                        <label className="block text-xs font-bold text-gray-500 mb-1">Message Text <span className="text-red-500">*</span></label>
                         <textarea 
-                            className="w-full border p-2 rounded text-sm h-32 resize-none" 
+                            className={`w-full border p-2 rounded text-sm h-32 resize-none ${(!local.content || /replace this/i.test(local.content)) ? 'border-red-300 ring-1 ring-red-100' : 'border-gray-300'}`}
                             value={local.content || ''} 
                             onChange={e => update('content', e.target.value)} 
-                            placeholder="Hello! How can I help?"
+                            placeholder="Type your message here..."
                         />
-                        <div className="text-[10px] text-gray-400 text-right mt-1">{local.content?.length || 0} / 1024 chars</div>
+                        {(!local.content || /replace this/i.test(local.content)) && (
+                            <div className="text-[10px] text-red-500 mt-1 font-bold flex items-center gap-1"><AlertTriangle size={10} /> Valid message required</div>
+                        )}
                     </div>
                 )}
 
@@ -178,7 +178,6 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
     const [isSimulating, setIsSimulating] = useState(false);
     
-    // Load Draft
     useEffect(() => {
         const load = async () => {
              try {
@@ -187,9 +186,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     setNodes(data.nodes);
                     setEdges(data.edges);
                 }
-             } catch(e) {
-                 console.error("Failed to load bot settings", e);
-             }
+             } catch(e) { console.error("Failed to load bot settings", e); }
         };
         load();
     }, [isLiveMode, setNodes, setEdges]);
@@ -205,8 +202,8 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
         const type = event.dataTransfer.getData('application/reactflow/type') as NodeType;
         const label = event.dataTransfer.getData('application/reactflow/label');
         
-        const position = { x: event.clientX - 300, y: event.clientY - 100 }; // rough offset
-        const newNode: Node = {
+        const position = { x: event.clientX - 300, y: event.clientY - 100 };
+        const newNode: Node<FlowNodeData> = {
             id: `node_${Date.now()}`,
             type: 'custom',
             position,
@@ -215,15 +212,41 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
         addNode(newNode);
     };
 
+    // STRICT VALIDATION
+    const validateNodes = (nodesToSave: Node<FlowNodeData>[]) => {
+        const errors: string[] = [];
+        const BAD_PATTERNS = [/replace this/i, /sample text/i, /enter your message/i, /type your message/i];
+        
+        nodesToSave.forEach(node => {
+            if (node.type === 'custom') {
+                const { label, content, type } = node.data;
+                // Only validate output nodes
+                if (['message', 'question', 'buttons', 'handoff'].includes(type)) {
+                     if (!content || !content.toString().trim()) {
+                         errors.push(`Node "${label}" is empty. Please enter text.`);
+                     } else if (BAD_PATTERNS.some(p => p.test(content))) {
+                         errors.push(`Node "${label}" has placeholder text. Please update it.`);
+                     }
+                }
+            }
+        });
+        return errors;
+    };
+
     const handleSave = async (publish = false) => {
+        const errors = validateNodes(nodes);
+        if (errors.length > 0) {
+            alert(`Cannot Save: Found Invalid Content\n\n${errors.map(e => `• ${e}`).join('\n')}`);
+            return;
+        }
+
         const payload = { nodes, edges };
         try {
-            // Get current settings to merge
             let currentSettings = isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
             const newSettings = { ...currentSettings, ...payload };
 
             if (isLiveMode) {
-                await liveApiService.saveBotSettings(newSettings); // Save draft
+                await liveApiService.saveBotSettings(newSettings);
                 if (publish) await liveApiService.publishBot();
             } else {
                 mockBackend.updateBotSettings(newSettings);
@@ -282,21 +305,18 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 </div>
             </div>
 
-            {/* Inspector Panel */}
             {selectedNode && !isSimulating && <Inspector node={selectedNode} onChange={updateNodeData} />}
 
-            {/* Simulator Panel (Overlay) */}
+            {/* Simulator (Overlay) */}
             {isSimulating && (
-                <div className="w-96 bg-white border-l shadow-2xl z-30 flex flex-col animate-in slide-in-from-right">
+                <div className="w-96 bg-white border-l shadow-2xl z-30 flex flex-col animate-in slide-in-from-right absolute right-0 top-0 bottom-0">
                     <div className="p-4 bg-gray-900 text-white flex justify-between items-center">
                         <div className="font-bold flex items-center gap-2"><Phone size={16} /> Simulator</div>
                         <button onClick={() => setIsSimulating(false)}><X size={18} /></button>
                     </div>
                     <div className="flex-1 bg-slate-100 p-4 overflow-y-auto">
                         <div className="text-center text-xs text-gray-400 my-4">-- Session Started --</div>
-                        {/* Mock Chat UI */}
-                        <div className="flex justify-start mb-2"><div className="bg-white p-3 rounded-lg rounded-tl-none shadow-sm text-sm max-w-[80%]">👋 Welcome! Are you looking for a job?</div></div>
-                        <div className="flex justify-end mb-2"><div className="bg-green-600 text-white p-3 rounded-lg rounded-tr-none shadow-sm text-sm max-w-[80%]">Yes</div></div>
+                        <div className="flex justify-start mb-2"><div className="bg-white p-3 rounded-lg rounded-tl-none shadow-sm text-sm max-w-[80%]">👋 Simulator Active</div></div>
                     </div>
                     <div className="p-3 bg-white border-t">
                         <input className="w-full border rounded-full px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500" placeholder="Type a message..." />
