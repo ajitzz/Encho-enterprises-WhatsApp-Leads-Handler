@@ -14,10 +14,11 @@ const { Client: QStashClient, Receiver } = require('@upstash/qstash');
 require('dotenv').config();
 
 // --- 0. CRITICAL: FAIL FAST VALIDATION ---
-const requiredEnv = ['POSTGRES_URL', 'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN', 'QSTASH_TOKEN', 'META_API_TOKEN', 'PHONE_NUMBER_ID'];
+const requiredEnv = ['POSTGRES_URL', 'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN', 'QSTASH_TOKEN', 'META_API_TOKEN', 'PHONE_NUMBER_ID', 'PUBLIC_BASE_URL'];
 const missingEnv = requiredEnv.filter(key => !process.env[key]);
 if (missingEnv.length > 0) {
-    console.error(`❌ FATAL: Missing Environment Variables: ${missingEnv.join(', ')}`);
+    console.warn(`⚠️ WARNING: Missing Environment Variables: ${missingEnv.join(', ')}`);
+    console.warn(`⚠️ PUBLIC_BASE_URL is critical for QStash signature verification in production.`);
 }
 
 const app = express();
@@ -87,11 +88,13 @@ const upload = multer({ storage: multer.memoryStorage() });
 // --- HELPERS ---
 
 const getWorkerUrl = (req) => {
-    // 1. Prefer Explicit Config
+    // 1. Prefer Explicit Config (Production/Stable)
     if (process.env.PUBLIC_BASE_URL) {
         return `${process.env.PUBLIC_BASE_URL.replace(/\/$/, '')}/api/internal/bot-worker`;
     }
-    // 2. Fallback to Vercel URL or Host Header
+    
+    // 2. Dynamic Fallback (Development/Preview Only)
+    // Warning: Signature verification might fail if proxies interfere with Host header
     const protocol = (req.headers['x-forwarded-proto'] || req.protocol) === 'https' ? 'https' : 'http';
     const host = process.env.VERCEL_URL || req.get('host');
     return `${protocol}://${host}/api/internal/bot-worker`;

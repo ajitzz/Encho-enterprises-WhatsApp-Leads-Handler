@@ -16,6 +16,9 @@ Add these to your `.env` file (and Vercel Environment Variables):
 # Database
 POSTGRES_URL="postgresql://..."
 
+# App URL (Critical for QStash Signature Verification)
+PUBLIC_BASE_URL="https://your-app-name.vercel.app"
+
 # WhatsApp
 META_API_TOKEN="EAAG..."
 PHONE_NUMBER_ID="123..."
