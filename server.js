@@ -1,14 +1,7 @@
 
 const express = require('express');
-const axios = require('axios');
 const cors = require('cors');
 const crypto = require('crypto');
-const multer = require('multer'); 
-const { Pool } = require('pg'); 
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-const { OAuth2Client } = require('google-auth-library');
-const https = require('https');
 const { Redis } = require('@upstash/redis');
 const { Client: QStashClient, Receiver } = require('@upstash/qstash');
 require('dotenv').config();
@@ -35,21 +28,21 @@ const SYSTEM_CONFIG = {
     DEDUPE_TTL: 3600 // 1 Hour dedupe
 };
 
-// --- CLIENTS ---
+// --- CLIENTS (LAZY LOADED) ---
 
 // 1. Postgres (Cold Path - Persistence Only)
-const createPool = () => {
-    return new Pool({
-        connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
-        ssl: { rejectUnauthorized: false }, 
-        connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-        max: 5, 
-        idleTimeoutMillis: 1000
-    });
-};
 let pgPool = null;
 const getDb = () => {
-    if (!pgPool) pgPool = createPool();
+    if (!pgPool) {
+        const { Pool } = require('pg');
+        pgPool = new Pool({
+            connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
+            ssl: { rejectUnauthorized: false }, 
+            connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
+            max: 5, 
+            idleTimeoutMillis: 1000
+        });
+    }
     return pgPool;
 };
 
@@ -68,12 +61,27 @@ const qstashReceiver = new Receiver({
     nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY || "mock_key",
 });
 
-// 4. Axios (Meta API - KeepAlive for Low Latency)
-const metaClient = axios.create({
-    httpsAgent: new https.Agent({ keepAlive: true }),
-    timeout: SYSTEM_CONFIG.META_TIMEOUT,
-    headers: { 'Content-Type': 'application/json' }
-});
+// 4. Meta Client (Lazy Axios)
+let metaClient = null;
+const getMetaClient = () => {
+    if (!metaClient) {
+        const axios = require('axios');
+        const https = require('https');
+        metaClient = axios.create({
+            httpsAgent: new https.Agent({ keepAlive: true }),
+            timeout: SYSTEM_CONFIG.META_TIMEOUT,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    return metaClient;
+};
+
+// 5. Multer Wrapper (Lazy)
+const uploadSingle = (fieldName) => (req, res, next) => {
+    const multer = require('multer');
+    const upload = multer({ storage: multer.memoryStorage() });
+    upload.single(fieldName)(req, res, next);
+};
 
 // --- MIDDLEWARE ---
 // Critical: Verify requires raw body. We store it in req.rawBody.
@@ -82,8 +90,6 @@ app.use(express.json({
     verify: (req, res, buf) => { req.rawBody = buf; }
 }));
 app.use(cors()); 
-
-const upload = multer({ storage: multer.memoryStorage() });
 
 // --- HELPERS ---
 
@@ -212,7 +218,7 @@ const generateWhatsAppPayload = (content) => {
 const sendToMeta = async (to, payload) => {
     if (!process.env.META_API_TOKEN) return { success: false, error: "No Token" };
     try {
-        await metaClient.post(
+        await getMetaClient().post(
             `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
             { messaging_product: 'whatsapp', recipient_type: 'individual', to, ...payload },
             { headers: { 'Authorization': `Bearer ${process.env.META_API_TOKEN}` } }
@@ -506,6 +512,83 @@ app.post('/api/internal/bot-worker', async (req, res) => {
     } catch (e) {
         console.error("Worker Fatal", e);
         res.status(500).send(e.message);
+    }
+});
+
+// --- API ROUTES & AUTH ---
+
+// Login Route (Lazy Auth)
+apiRouter.post('/auth/login', async (req, res) => {
+    try {
+        const { OAuth2Client } = require('google-auth-library');
+        const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+        const { token } = req.body;
+        const ticket = await client.verifyIdToken({
+            idToken: token,
+            audience: process.env.GOOGLE_CLIENT_ID,
+        });
+        const payload = ticket.getPayload();
+        res.json({ success: true, user: payload });
+    } catch (e) {
+        res.status(401).json({ error: "Auth failed" });
+    }
+});
+
+apiRouter.post('/s3/proxy-upload', uploadSingle('file'), async (req, res) => {
+    try {
+        const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+        const s3 = new S3Client({
+            region: process.env.AWS_REGION,
+            credentials: {
+                accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+                secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+            }
+        });
+        const file = req.file;
+        const folderPath = req.body.folderPath || '/';
+        const key = `${folderPath.replace(/^\//, '')}/${Date.now()}_${file.originalname}`;
+        
+        await s3.send(new PutObjectCommand({
+            Bucket: process.env.AWS_BUCKET_NAME,
+            Key: key,
+            Body: file.buffer,
+            ContentType: file.mimetype
+        }));
+        
+        const url = `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+        res.json({ url, type: file.mimetype.split('/')[0] });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+apiRouter.post('/s3/presign', async (req, res) => {
+    try {
+        const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+        const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+        const s3 = new S3Client({
+            region: process.env.AWS_REGION,
+            credentials: {
+                accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+                secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+            }
+        });
+        
+        const { filename, fileType, folderPath } = req.body;
+        const key = `${folderPath.replace(/^\//, '')}/${Date.now()}_${filename}`;
+        
+        const command = new PutObjectCommand({
+            Bucket: process.env.AWS_BUCKET_NAME,
+            Key: key,
+            ContentType: fileType
+        });
+        
+        const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
+        const publicUrl = `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+        
+        res.json({ uploadUrl, key, publicUrl });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
 });
 
