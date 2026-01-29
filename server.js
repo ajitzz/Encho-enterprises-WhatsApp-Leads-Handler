@@ -123,9 +123,8 @@ const getBotSettings = async (timings, phoneNumberId = process.env.PHONE_NUMBER_
     // DB Fallback (Only happens once per 10 mins)
     try {
         const client = await getDb().connect();
-        // NOTE: If multi-tenancy is fully implemented in DB, add WHERE phone_number_id = ...
-        // For now, we assume ID 1 is the primary config, but cache it under the specific phone ID.
-        const res = await client.query('SELECT settings FROM bot_settings WHERE id = 1');
+        // Query by phone_number_id instead of ID 1
+        const res = await client.query('SELECT settings FROM bot_settings WHERE phone_number_id = $1', [phoneNumberId]);
         client.release();
         const settings = res.rows[0]?.settings || { isEnabled: true, steps: [] };
         
@@ -644,14 +643,15 @@ apiRouter.post('/s3/presign', async (req, res) => {
 // --- SETTINGS UPDATE ---
 apiRouter.post('/bot-settings', async (req, res) => {
     const client = await getDb().connect();
+    const phoneId = process.env.PHONE_NUMBER_ID; // Use env ID for admin updates
     try {
         await client.query(
-            `INSERT INTO bot_settings (id, settings) VALUES (1, $1) 
-             ON CONFLICT (id) DO UPDATE SET settings = $1`, 
-            [req.body]
+            `INSERT INTO bot_settings (phone_number_id, settings) VALUES ($1, $2) 
+             ON CONFLICT (phone_number_id) DO UPDATE SET settings = $2`, 
+            [phoneId, req.body]
         );
         // Clear namespaced key using env var (Admin Context)
-        await redis.del(`bot:settings:${process.env.PHONE_NUMBER_ID}`);
+        await redis.del(`bot:settings:${phoneId}`);
         res.json({ success: true });
     } catch(e) {
         res.status(500).json({ error: e.message });
@@ -664,7 +664,8 @@ apiRouter.post('/bot-settings', async (req, res) => {
 apiRouter.get('/internal/migrate', async (req, res) => {
     const client = await getDb().connect();
     try {
-        await client.query(`CREATE TABLE IF NOT EXISTS bot_settings (id SERIAL PRIMARY KEY, settings JSONB)`);
+        // Schema definition now uses phone_number_id as primary key
+        await client.query(`CREATE TABLE IF NOT EXISTS bot_settings (phone_number_id TEXT PRIMARY KEY, settings JSONB)`);
         await client.query(`CREATE TABLE IF NOT EXISTS drivers (id TEXT PRIMARY KEY, phone_number TEXT UNIQUE, name TEXT, status TEXT, last_message TEXT, last_message_time BIGINT, metadata JSONB DEFAULT '{}'::jsonb, messages JSONB DEFAULT '[]'::jsonb, source TEXT DEFAULT 'Organic')`);
         res.json({ success: true, message: "Schema updated" });
     } catch(e) { 
