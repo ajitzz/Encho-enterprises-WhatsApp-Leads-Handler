@@ -37,17 +37,18 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
         
         // Handle Auth Failures Globally
         if (response.status === 401 || response.status === 403) {
-            console.warn("Unauthorized Access. Redirecting to login...");
+            console.warn(`[AUTH ERROR] 401/403 at ${url}. Redirecting to login...`);
             setAuthToken(null);
-            // Optional: window.location.reload() to force login screen, but React state handling is smoother
             throw new Error("Unauthorized");
         }
 
         if (!response.ok) {
              const method = options?.method?.toUpperCase() || 'GET';
-             // Don't throw immediately on HEAD/GET 404s if handled by caller, but 500s usually need retry
+             
+             // Retry 500s
              if (response.status >= 500) {
                  if (retries > 0) {
+                     console.log(`[API RETRY] ${method} ${url} failed (${response.status}). Retrying...`);
                      await new Promise(res => setTimeout(res, delay));
                      return fetchWithRetry(url, options, retries - 1, delay * 2);
                  }
@@ -58,6 +59,8 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
                  const errData = await response.json();
                  if (errData.error) errMessage = errData.error;
              } catch(e) {}
+             
+             console.error(`[API ERROR] ${method} ${url} -> ${response.status}: ${errMessage}`);
              throw new Error(errMessage);
         }
         return response;
@@ -67,6 +70,7 @@ const fetchWithRetry = async (url: string, options?: RequestInit, retries = 3, d
             await new Promise(res => setTimeout(res, delay));
             return fetchWithRetry(url, options, retries - 1, delay * 2); 
         }
+        console.error(`[NETWORK ERROR] Failed to fetch ${url}:`, err.message);
         throw err;
     }
 };
@@ -95,7 +99,7 @@ export const liveApiService = {
       const response = await fetchWithRetry(url);
       return await response.json();
     } catch (error: any) {
-      console.warn("Fetch Error (handled):", error);
+      console.warn("[API] getDrivers fetch error:", error.message);
       throw error;
     }
   },
@@ -131,7 +135,6 @@ export const liveApiService = {
           const response = await fetchWithRetry(`${API_BASE_URL}/api/drivers/${driverId}/scheduled-messages`);
           return await response.json();
       } catch (e) {
-          console.warn("Failed to fetch scheduled messages", e);
           return [];
       }
   },

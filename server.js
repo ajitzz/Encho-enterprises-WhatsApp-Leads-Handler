@@ -23,7 +23,6 @@ const SYSTEM_CONFIG = {
     BATCH_SIZE: 15, 
     PROCESS_INTERVAL: 8000,
     MAX_RETRIES: 5,
-    // Industrial: Expire messages if server was down for > 24 hours to prevent awkward late sends
     SCHEDULE_EXPIRY_MS: 24 * 60 * 60 * 1000 
 };
 
@@ -34,9 +33,24 @@ app.use(express.json({
 }));
 app.use(cors()); 
 
-app.set('etag', false);
+// CRITICAL FIX: Security Headers for Google OAuth
 app.use((req, res, next) => {
+    // Allows popups (like Google Login) to postMessage back to this window
+    res.setHeader("Cross-Origin-Opener-Policy", "same-origin-allow-popups");
+    // Standard security to prevent clickjacking, but allow necessary embeds
+    res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+    
+    // Cache Control
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    next();
+});
+
+// Developer Logging Middleware
+app.use((req, res, next) => {
+    // Only log API requests to reduce noise
+    if (req.path.startsWith('/api') || req.path.startsWith('/webhook')) {
+        console.log(`[REQ] ${req.method} ${req.path}`);
+    }
     next();
 });
 
@@ -68,21 +82,24 @@ const s3Client = new S3Client(s3Config);
 const CONNECTION_STRING = process.env.POSTGRES_URL || process.env.DATABASE_URL;
 const IS_SERVERLESS = process.env.VERCEL === '1' || process.env.NODE_ENV === 'production';
 
-if (!CONNECTION_STRING) console.error("❌ Database Config Missing");
-else console.log("✅ Database Config Found.");
+if (!CONNECTION_STRING) {
+    console.error("❌ [CRITICAL] Database Config Missing in .env");
+} else {
+    console.log("✅ [SYSTEM] Database Config Found.");
+}
 
 const createPool = () => {
     const config = {
         connectionString: CONNECTION_STRING,
         ssl: { rejectUnauthorized: false },
         connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-        idleTimeoutMillis: 1000, // Aggressive cleanup for cold starts
+        idleTimeoutMillis: 1000, 
         max: IS_SERVERLESS ? 4 : 20,
         keepAlive: true,
         application_name: 'uber_fleet_bot'
     };
     const newPool = new Pool(config);
-    newPool.on('error', (err) => console.error('⚠️ DB Pool Error:', err.message));
+    newPool.on('error', (err) => console.error('⚠️ [DB POOL ERROR]:', err.message));
     return newPool;
 };
 
@@ -91,19 +108,33 @@ const pool = global.pgPool;
 
 // --- QUERY HELPER ---
 const queryWithRetry = async (text, params, retries = 2) => {
-    if (!pool) throw new Error("Database not configured.");
+    if (!pool) {
+        console.error("❌ [DB ERROR] Attempted query without connection pool.");
+        throw new Error("Database not configured.");
+    }
     let client;
     try {
         client = await pool.connect();
         return await client.query(text, params);
     } catch (err) {
+        // Detailed Error Labeling for Developer
+        const isConnectionError = err.code === 'ECONNRESET' || err.code === '57P01' || err.message.includes('timeout') || err.message.includes('closed');
+        const isAuthError = err.code === '28P01'; // Invalid password
+        
         if (client) { try { client.release(true); } catch(e) {} client = null; }
-        const isRetryable = err.code === 'ECONNRESET' || err.code === '57P01' || err.message.includes('timeout') || err.message.includes('closed');
-        if (retries > 0 && isRetryable) {
-            console.warn(`[DB] Retry ${retries}: ${err.message}`);
+        
+        if (isAuthError) {
+            console.error("❌ [DB AUTH FAIL] Check POSTGRES_URL credentials.");
+            throw err; // Don't retry auth errors
+        }
+
+        if (retries > 0 && isConnectionError) {
+            console.warn(`⚠️ [DB RETRY] Connection Unstable (${err.message}). Retrying... (${retries} left)`);
             await new Promise(r => setTimeout(r, 1500)); 
             return queryWithRetry(text, params, retries - 1);
         }
+        
+        console.error(`❌ [DB QUERY FAILED] Query: "${text.substring(0, 50)}..." Error: ${err.message}`);
         throw err;
     } finally {
         if (client) { try { client.release(); } catch(e) {} }
@@ -145,7 +176,7 @@ const ensureSchema = async () => {
             await addCol('drivers', 'notes', 'TEXT');
             await addCol('media_folders', 'is_public_showcase', 'BOOLEAN DEFAULT FALSE');
         } catch (e) {
-            console.error("Schema Init Error:", e.message);
+            console.error("❌ [SCHEMA ERROR]:", e.message);
             schemaPromise = null; 
         }
     })();
@@ -287,7 +318,7 @@ const processMessageQueue = async () => {
                 await queryWithRetry(`UPDATE message_queue SET attempts = attempts + 1, last_error = $1 WHERE id = $2`, [jobErr.message, job.id]);
             }
         }
-    } catch (e) { console.error("[Worker] Error:", e.message); } 
+    } catch (e) { console.error("❌ [WORKER ERROR]:", e.message); } 
     finally { isProcessingQueue = false; }
 };
 setInterval(processMessageQueue, SYSTEM_CONFIG.PROCESS_INTERVAL);
@@ -451,7 +482,7 @@ app.post('/webhook', async (req, res) => {
                         await client.query('COMMIT');
                     } catch (err) {
                         await client.query('ROLLBACK');
-                        console.error("Tx Error:", err);
+                        console.error("❌ [TX ERROR]:", err);
                     } finally {
                         client.release();
                     }
@@ -459,11 +490,11 @@ app.post('/webhook', async (req, res) => {
             }
         }
     } catch (e) {
-        console.error("Webhook Global Error:", e);
+        console.error("❌ [WEBHOOK FATAL]:", e);
     }
 });
 
-// AUTH & API ROUTES (Keep existing implementations but ensure queryWithRetry is used)
+// AUTH & API ROUTES
 apiRouter.post('/auth/login', async (req, res) => {
     const { token } = req.body;
     try {
@@ -471,19 +502,21 @@ apiRouter.post('/auth/login', async (req, res) => {
         const ticket = await authClient.verifyIdToken({ idToken: token, audience: GOOGLE_CLIENT_ID });
         const payload = ticket.getPayload();
         const email = payload.email.toLowerCase();
-        if (SUPER_ADMIN_EMAILS.length > 0 && !SUPER_ADMIN_EMAILS.includes(email)) return res.status(403).json({ success: false, error: "Access Denied" });
+        if (SUPER_ADMIN_EMAILS.length > 0 && !SUPER_ADMIN_EMAILS.includes(email)) return res.status(403).json({ success: false, error: "Access Denied: Email not in Super Admin list" });
         res.json({ success: true, user: { email, name: payload.name, picture: payload.picture } });
-    } catch (e) { res.status(401).json({ success: false, error: "Invalid Token" }); }
+    } catch (e) { res.status(401).json({ success: false, error: "Invalid Token: " + e.message }); }
 });
 
 const requireAuth = async (req, res, next) => {
     await ensureSchema();
     if (req.path === '/auth/login') return next();
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: "Unauthorized" });
+    if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: "Unauthorized: Missing or Invalid Token" });
     next();
 };
 apiRouter.use(requireAuth);
+
+// ... (Rest of routes kept same, assuming they rely on queryWithRetry which handles error logging)
 
 apiRouter.post('/messages/schedule', async (req, res) => {
     const { driverIds, scheduledTime, ...content } = req.body;
