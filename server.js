@@ -107,9 +107,10 @@ const getWorkerUrl = (req) => {
 };
 
 // Hot Path: Get Settings (Redis -> DB Fallback)
-const getBotSettings = async (timings) => {
+// Namespaced by phoneNumberId to support multi-tenancy
+const getBotSettings = async (timings, phoneNumberId = process.env.PHONE_NUMBER_ID) => {
     const start = performance.now();
-    const cacheKey = 'bot:settings';
+    const cacheKey = `bot:settings:${phoneNumberId}`;
     
     try {
         const cached = await redis.get(cacheKey);
@@ -122,6 +123,8 @@ const getBotSettings = async (timings) => {
     // DB Fallback (Only happens once per 10 mins)
     try {
         const client = await getDb().connect();
+        // NOTE: If multi-tenancy is fully implemented in DB, add WHERE phone_number_id = ...
+        // For now, we assume ID 1 is the primary config, but cache it under the specific phone ID.
         const res = await client.query('SELECT settings FROM bot_settings WHERE id = 1');
         client.release();
         const settings = res.rows[0]?.settings || { isEnabled: true, steps: [] };
@@ -139,9 +142,10 @@ const getBotSettings = async (timings) => {
 };
 
 // Hot Path: Get User State (Redis Only preferred)
-const getUserState = async (phoneNumber, timings) => {
+const getUserState = async (phoneNumberId, phoneNumber, timings) => {
     const start = performance.now();
-    const key = `bot:state:${phoneNumber}`;
+    // Namespaced state key
+    const key = `bot:state:${phoneNumberId}:${phoneNumber}`;
     
     try {
         const cached = await redis.get(key);
@@ -239,61 +243,90 @@ app.get('/webhook', (req, res) => {
 
 app.post('/webhook', async (req, res) => {
     const start = performance.now();
-    const traceId = crypto.randomUUID();
+    const batchTraceId = crypto.randomUUID();
 
     try {
         const body = req.body;
         if (body.object !== 'whatsapp_business_account') return res.sendStatus(404);
 
-        // Extract ID for Deduplication
-        const entry = body.entry?.[0];
-        const change = entry?.changes?.[0];
-        const message = change?.value?.messages?.[0];
+        const processingTasks = [];
+        const entries = body.entry || [];
 
-        if (!message) {
-            res.sendStatus(200); // Heartbeat
-            return;
+        // Loop through all entries, changes, and messages to handle batching
+        for (const entry of entries) {
+            const changes = entry.changes || [];
+            for (const change of changes) {
+                const value = change.value;
+                // Extract Phone Number ID for Namespacing
+                const phoneNumberId = value.metadata?.phone_number_id;
+
+                if (value && value.messages && phoneNumberId) {
+                    for (const message of value.messages) {
+                        
+                        // Enqueue processing for each message individually
+                        processingTasks.push((async () => {
+                            const msgId = message.id;
+                            // Namespaced Dedupe Key
+                            const dedupeKey = `dedupe:${phoneNumberId}:${msgId}`;
+                            
+                            // 1. FAST DEDUPE (Redis)
+                            const isNew = await redis.set(dedupeKey, '1', { nx: true, ex: SYSTEM_CONFIG.DEDUPE_TTL });
+                            if (!isNew) {
+                                console.log(JSON.stringify({ batchTraceId, status: 'duplicate_ingress', msgId }));
+                                return;
+                            }
+
+                            // 2. SYNTHESIZE BODY (For Worker Compatibility)
+                            // We construct a valid single-message payload so the worker doesn't need to loop.
+                            const syntheticBody = {
+                                object: body.object,
+                                entry: [{
+                                    id: entry.id,
+                                    changes: [{
+                                        value: {
+                                            messaging_product: value.messaging_product,
+                                            metadata: value.metadata,
+                                            contacts: value.contacts,
+                                            messages: [message] // Single message array
+                                        },
+                                        field: change.field
+                                    }]
+                                }]
+                            };
+
+                            // 3. ASYNC HANDOFF (QStash)
+                            const workerUrl = getWorkerUrl(req);
+                            await qstash.publishJSON({
+                                url: workerUrl,
+                                body: { 
+                                    originalBody: syntheticBody, 
+                                    traceId: `${batchTraceId}_${msgId}`,
+                                    ingestTime: Date.now() 
+                                },
+                                deduplicationId: msgId
+                            });
+                        })());
+                    }
+                }
+            }
         }
 
-        const msgId = message.id;
-        const from = message.from;
+        // Wait for all QStash handoffs to complete (Parallel)
+        await Promise.all(processingTasks);
 
-        // 1. FAST DEDUPE (Redis)
-        // We do this at ingress to save QStash credits
-        const dedupeKey = `dedupe:${msgId}`;
-        const isNew = await redis.set(dedupeKey, '1', { nx: true, ex: SYSTEM_CONFIG.DEDUPE_TTL });
-
-        if (!isNew) {
-            console.log(JSON.stringify({ traceId, status: 'duplicate_ingress', msgId }));
-            return res.sendStatus(200);
-        }
-
-        // 2. ASYNC HANDOFF (QStash)
-        // Send the raw body to the worker. QStash handles retries and async execution.
-        const workerUrl = getWorkerUrl(req);
-        
-        await qstash.publishJSON({
-            url: workerUrl,
-            body: { 
-                originalBody: body, 
-                traceId,
-                ingestTime: Date.now() 
-            },
-            // Optional: Deduplication ID for QStash itself
-            deduplicationId: msgId
-        });
-
-        // 3. INSTANT ACK
+        // 4. INSTANT ACK
         res.sendStatus(200);
         
         const duration = performance.now() - start;
-        console.log(JSON.stringify({ 
-            level: 'info', 
-            type: 'ingress', 
-            traceId, 
-            ms: duration, 
-            status: 'queued' 
-        }));
+        if (processingTasks.length > 0) {
+            console.log(JSON.stringify({ 
+                level: 'info', 
+                type: 'ingress_batch', 
+                batchTraceId, 
+                count: processingTasks.length,
+                ms: duration 
+            }));
+        }
 
     } catch (e) {
         console.error("Ingress Error", e);
@@ -304,7 +337,8 @@ app.post('/webhook', async (req, res) => {
 // --- WORKER (LOGIC LAYER) ---
 // Secure endpoint called by QStash. Handles Logic, Meta, and DB.
 app.post('/api/internal/bot-worker', async (req, res) => {
-    const workerStart = performance.now();
+    // FIX: Use Date.now() to allow correct latency comparison with ingestTime
+    const workerStart = Date.now();
     
     // 1. Verify QStash Signature
     const signature = req.headers["upstash-signature"];
@@ -334,10 +368,15 @@ app.post('/api/internal/bot-worker', async (req, res) => {
         const from = message.from;
         const msgId = message.id;
         const contactName = change.value.contacts?.[0]?.profile?.name || "Unknown";
+        
+        // Extract Phone Number ID for Namespacing
+        const phoneNumberId = change.value.metadata?.phone_number_id;
+        if (!phoneNumberId) throw new Error("Missing phone_number_id in worker payload");
 
         // 2. USER LOCK (Redis) - Prevent race conditions in logic
         const lockStart = performance.now();
-        const lockKey = `lock:${from}`;
+        // Namespaced Lock Key
+        const lockKey = `lock:${phoneNumberId}:${from}`;
         // Spin-wait or fail? For simplicity in worker, we try once. 
         // If locked, QStash will retry automatically if we throw 429/500.
         const acquiredLock = await redis.set(lockKey, '1', { nx: true, ex: SYSTEM_CONFIG.LOCK_TTL });
@@ -352,8 +391,8 @@ app.post('/api/internal/bot-worker', async (req, res) => {
             // 3. FETCH DATA
             // Independent timing tracked inside getBotSettings and getUserState
             const [settings, userCtx] = await Promise.all([
-                getBotSettings(timings),
-                getUserState(from, timings)
+                getBotSettings(timings, phoneNumberId),
+                getUserState(phoneNumberId, from, timings)
             ]);
 
             // 4. BOT LOGIC
@@ -423,19 +462,28 @@ app.post('/api/internal/bot-worker', async (req, res) => {
             const metaStart = performance.now();
             let outboundMeta = null;
             if (replyToSend) {
-                const payload = generateWhatsAppPayload(replyToSend);
-                // CRITICAL: Only send if we have a valid payload (no empty texts)
-                if (payload) {
-                    const metaRes = await sendToMeta(from, payload);
-                    outboundMeta = {
-                        id: `bot_${Date.now()}`,
-                        text: replyToSend.message || `[${payload.type}]`,
-                        type: payload.type === 'text' || payload.type === 'interactive' ? 'text' : payload.type,
-                        timestamp: Date.now(),
-                        status: metaRes.success ? 'sent' : 'failed'
-                    };
+                // IDEMPOTENCY CHECK: Prevent Duplicate Sends on Retry
+                const processedKey = `processed:${phoneNumberId}:${msgId}`;
+                const first = await redis.set(processedKey, '1', { nx: true, ex: 86400 }); // 24h key life
+
+                if (!first) {
+                    console.log(`[Worker] Idempotency: Duplicate send prevented for ${msgId}`);
+                    // Skip sending, essentially treating this as "Already Done"
                 } else {
-                    console.log(`[Worker] Skipped empty payload for ${from} (Step ID: ${replyToSend.id})`);
+                    const payload = generateWhatsAppPayload(replyToSend);
+                    // CRITICAL: Only send if we have a valid payload (no empty texts)
+                    if (payload) {
+                        const metaRes = await sendToMeta(from, payload);
+                        outboundMeta = {
+                            id: `bot_${Date.now()}`,
+                            text: replyToSend.message || `[${payload.type}]`,
+                            type: payload.type === 'text' || payload.type === 'interactive' ? 'text' : payload.type,
+                            timestamp: Date.now(),
+                            status: metaRes.success ? 'sent' : 'failed'
+                        };
+                    } else {
+                        console.log(`[Worker] Skipped empty payload for ${from} (Step ID: ${replyToSend.id})`);
+                    }
                 }
             }
             timings.meta = performance.now() - metaStart;
@@ -443,8 +491,8 @@ app.post('/api/internal/bot-worker', async (req, res) => {
             // 6. DB PERSISTENCE & STATE UPDATE
             const dbStart = performance.now();
             
-            // Update Redis State
-            await redis.set(`bot:state:${from}`, nextState, { ex: SYSTEM_CONFIG.CACHE_TTL_STATE });
+            // Update Redis State (Namespaced)
+            await redis.set(`bot:state:${phoneNumberId}:${from}`, nextState, { ex: SYSTEM_CONFIG.CACHE_TTL_STATE });
             
             // Write to Postgres
             const client = await getDb().connect();
@@ -602,7 +650,8 @@ apiRouter.post('/bot-settings', async (req, res) => {
              ON CONFLICT (id) DO UPDATE SET settings = $1`, 
             [req.body]
         );
-        await redis.del('bot:settings');
+        // Clear namespaced key using env var (Admin Context)
+        await redis.del(`bot:settings:${process.env.PHONE_NUMBER_ID}`);
         res.json({ success: true });
     } catch(e) {
         res.status(500).json({ error: e.message });
@@ -634,7 +683,8 @@ apiRouter.get('/drivers', async (req, res) => {
 });
 
 apiRouter.get('/bot-settings', async (req, res) => {
-    const settings = await getBotSettings();
+    // Admin context uses env ID
+    const settings = await getBotSettings(null, process.env.PHONE_NUMBER_ID);
     res.json(settings);
 });
 
