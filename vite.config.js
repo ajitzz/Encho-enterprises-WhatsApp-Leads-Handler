@@ -14,13 +14,6 @@ export default defineConfig(({ mode }) => {
       'process.env.VITE_GOOGLE_CLIENT_ID': JSON.stringify(env.VITE_GOOGLE_CLIENT_ID),
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development')
     },
-    server: {
-      headers: {
-        // CRITICAL FIX: Allow Google OAuth popups to communicate back to the app
-        "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
-        "Cross-Origin-Embedder-Policy": "require-corp"
-      }
-    },
     build: {
       outDir: 'dist' 
     }
