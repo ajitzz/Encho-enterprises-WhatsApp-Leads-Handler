@@ -444,22 +444,21 @@ app.post('/api/internal/bot-worker', async (req, res) => {
             try {
                 await client.query('BEGIN');
                 
-                // Upsert Driver
-                let driverId;
-                const isNew = userCtx.isNew;
+                // Optimized UPSERT with UUID generation
+                const newDriverId = crypto.randomUUID();
+                
                 const driverQuery = `
                     INSERT INTO drivers (id, phone_number, name, status, last_message, last_message_time, metadata, messages, source)
-                    VALUES ($1, $2, $3, 'New', $4, $5, $6, '[]', 'Organic')
+                    VALUES ($1, $2, $3, 'New', $4, $5, $6::jsonb, '[]'::jsonb, 'Organic')
                     ON CONFLICT (phone_number) 
-                    DO UPDATE SET last_message = $4, last_message_time = $5, metadata = $6
+                    DO UPDATE SET last_message = $4, last_message_time = $5, metadata = $6::jsonb
                     RETURNING id, messages
                 `;
-                const driverIdVal = isNew ? Date.now().toString() : (await client.query('SELECT id FROM drivers WHERE phone_number = $1', [from])).rows[0]?.id || Date.now().toString();
                 
                 const resDriver = await client.query(driverQuery, [
-                    driverIdVal, from, contactName, msgBody, Date.now(), JSON.stringify(nextState)
+                    newDriverId, from, contactName, msgBody, Date.now(), JSON.stringify(nextState)
                 ]);
-                driverId = resDriver.rows[0].id;
+                const driverId = resDriver.rows[0].id;
 
                 // Append Messages
                 let newMsgs = [
@@ -533,7 +532,7 @@ apiRouter.get('/internal/migrate', async (req, res) => {
     const client = await getDb().connect();
     try {
         await client.query(`CREATE TABLE IF NOT EXISTS bot_settings (id SERIAL PRIMARY KEY, settings JSONB)`);
-        await client.query(`CREATE TABLE IF NOT EXISTS drivers (id TEXT PRIMARY KEY, phone_number TEXT UNIQUE, name TEXT, status TEXT, last_message TEXT, last_message_time BIGINT, metadata JSONB DEFAULT '{}', messages JSONB DEFAULT '[]', source TEXT DEFAULT 'Organic')`);
+        await client.query(`CREATE TABLE IF NOT EXISTS drivers (id TEXT PRIMARY KEY, phone_number TEXT UNIQUE, name TEXT, status TEXT, last_message TEXT, last_message_time BIGINT, metadata JSONB DEFAULT '{}'::jsonb, messages JSONB DEFAULT '[]'::jsonb, source TEXT DEFAULT 'Organic')`);
         res.json({ success: true, message: "Schema updated" });
     } catch(e) { 
         res.status(500).json({ error: e.message }); 
