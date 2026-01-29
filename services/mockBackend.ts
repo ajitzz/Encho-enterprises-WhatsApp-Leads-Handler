@@ -1,4 +1,5 @@
 
+
 import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, BotStep } from '../types';
 
 const DEFAULT_BOT_SETTINGS: BotSettings = {
@@ -100,6 +101,12 @@ class MockBackendService {
         name: 'Unknown Driver',
         source: 'Organic',
         status: LeadStatus.NEW,
+        // Missing properties added below
+        stage: LeadStatus.NEW,
+        variables: {},
+        tags: [],
+        lastMessageAt: Date.now(),
+        // End missing properties
         lastMessage: text,
         lastMessageTime: Date.now(),
         messages: [],

@@ -59,7 +59,18 @@ export default function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
   const [isRepeatToggling, setIsRepeatToggling] = useState(false);
-  const [dataSource, setDataSource] = useState<'mock' | 'live'>('mock');
+  
+  // Data Source Logic (Persist & Default)
+  const [dataSource, setDataSource] = useState<'mock' | 'live'>(() => {
+      const saved = localStorage.getItem('uber_fleet_data_source');
+      if (saved === 'live' || saved === 'mock') return saved;
+      return process.env.NODE_ENV === 'production' ? 'live' : 'mock';
+  });
+
+  const changeDataSource = (mode: 'mock' | 'live') => {
+      setDataSource(mode);
+      localStorage.setItem('uber_fleet_data_source', mode);
+  };
 
   useEffect(() => {
       if (!isAuthenticated) return;
@@ -105,7 +116,7 @@ export default function App() {
            addNotification({ type: 'info', title: 'Connected to Live Server', message: 'Delta-Sync Active' });
          } catch (e: any) {
              if (e.message !== "Unauthorized") {
-                 addNotification({ type: 'warning', title: 'Connection Failed', message: 'Ensure node server.js is running.' });
+                 addNotification({ type: 'warning', title: 'Connection Failed', message: 'Ensure server is running.' });
              }
          }
       }
@@ -271,8 +282,8 @@ export default function App() {
                      <button onClick={() => setShowWebhookModal(true)} className="bg-white border border-gray-200 text-gray-700 p-2 rounded-lg hover:bg-gray-50 transition-colors shadow-sm"><SettingsIcon size={20} /></button>
                    )}
                    <div className="flex items-center bg-white border border-gray-200 rounded-lg p-1 shadow-sm">
-                      <button onClick={() => setDataSource('mock')} className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${dataSource === 'mock' ? 'bg-gray-100 text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}><Database size={16} /> Simulator</button>
-                      <button onClick={() => setDataSource('live')} className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${dataSource === 'live' ? 'bg-green-100 text-green-800 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}><Radio size={16} className={dataSource === 'live' ? 'animate-pulse' : ''} /> Live API</button>
+                      <button onClick={() => changeDataSource('mock')} className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${dataSource === 'mock' ? 'bg-gray-100 text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}><Database size={16} /> Simulator</button>
+                      <button onClick={() => changeDataSource('live')} className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${dataSource === 'live' ? 'bg-green-100 text-green-800 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}><Radio size={16} className={dataSource === 'live' ? 'animate-pulse' : ''} /> Live API</button>
                    </div>
                  </div>
               </div>
@@ -299,7 +310,7 @@ export default function App() {
 
           <div className="h-[600px] flex flex-col">
             <div className="flex justify-between items-center mb-4"><h3 className="text-lg font-bold text-gray-900">Recent Activity</h3></div>
-            {dataSource === 'live' && drivers.length === 0 && <div className="bg-amber-50 text-amber-800 p-4 rounded-lg mb-4 border border-amber-200 text-sm"><strong>Note:</strong> Ensure <code>node server.js</code> is running on port 3000.</div>}
+            {dataSource === 'live' && drivers.length === 0 && <div className="bg-amber-50 text-amber-800 p-4 rounded-lg mb-4 border border-amber-200 text-sm"><strong>Note:</strong> Waiting for new leads via Live API.</div>}
             <LeadTable drivers={drivers} onSelectDriver={handleSelectDriver} onSendWelcome={handleSendWelcome} selectedIds={selectedBulkIds} onBulkSelect={setSelectedBulkIds} />
           </div>
         </div>

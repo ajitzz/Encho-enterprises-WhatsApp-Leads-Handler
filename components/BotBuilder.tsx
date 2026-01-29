@@ -1,4 +1,5 @@
 
+
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { 
   ReactFlow, 
@@ -16,6 +17,7 @@ import {
 } from '@xyflow/react';
 import { useFlowStore } from '../services/flowStore';
 import { liveApiService } from '../services/liveApiService';
+import { mockBackend } from '../services/mockBackend';
 import { 
   MessageSquare, FileText, List, GitBranch, 
   Settings, Save, Play, AlertTriangle, Trash2, 
@@ -171,20 +173,26 @@ const Inspector = ({ node, onChange }: { node: Node, onChange: (id: string, d: a
     );
 };
 
-export const BotBuilder = () => {
+export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
     const { nodes, edges, onNodesChange, onEdgesChange, onConnect, addNode, updateNodeData, setNodes, setEdges } = useFlowStore();
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
     const [isSimulating, setIsSimulating] = useState(false);
     
     // Load Draft
     useEffect(() => {
-        liveApiService.getBotSettings().then(data => {
-            if (data?.nodes) {
-                setNodes(data.nodes);
-                setEdges(data.edges);
-            }
-        });
-    }, []);
+        const load = async () => {
+             try {
+                const data = isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
+                if (data?.nodes) {
+                    setNodes(data.nodes);
+                    setEdges(data.edges);
+                }
+             } catch(e) {
+                 console.error("Failed to load bot settings", e);
+             }
+        };
+        load();
+    }, [isLiveMode, setNodes, setEdges]);
 
     const onDragStart = (event: React.DragEvent, nodeType: NodeType, label: string) => {
         event.dataTransfer.setData('application/reactflow/type', nodeType);
@@ -210,8 +218,16 @@ export const BotBuilder = () => {
     const handleSave = async (publish = false) => {
         const payload = { nodes, edges };
         try {
-            await liveApiService.saveBotSettings(payload); // Save draft
-            if (publish) await liveApiService.publishBot();
+            // Get current settings to merge
+            let currentSettings = isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
+            const newSettings = { ...currentSettings, ...payload };
+
+            if (isLiveMode) {
+                await liveApiService.saveBotSettings(newSettings); // Save draft
+                if (publish) await liveApiService.publishBot();
+            } else {
+                mockBackend.updateBotSettings(newSettings);
+            }
             alert(publish ? "Published Live!" : "Draft Saved.");
         } catch(e) { alert("Error saving"); }
     };
