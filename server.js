@@ -86,15 +86,12 @@ app.use(cors());
 
 // ROBUST URL RESOLVER (Fixes QStash localhost issues)
 function getBaseUrl(req) {
-  // 1. Explicit Env Var (Best for Prod)
   const envBase = process.env.PUBLIC_BASE_URL ? process.env.PUBLIC_BASE_URL.trim() : '';
   if (envBase) return envBase.replace(/\/$/, "");
 
-  // 2. Vercel System Env (Automatic)
   const vercelUrl = process.env.VERCEL_URL ? process.env.VERCEL_URL.trim() : '';
   if (vercelUrl) return `https://${vercelUrl.replace(/\/$/, "")}`;
 
-  // 3. Request Header Fallback (Localhost/Ngrok)
   const proto = (req.headers["x-forwarded-proto"] || req.protocol || "http").toString();
   const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString();
   return `${proto}://${host}`.replace(/\/$/, "");
@@ -124,6 +121,62 @@ const sendToMeta = async (to, payload) => {
         await getMetaClient().post(`https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`, { messaging_product: 'whatsapp', recipient_type: 'individual', to, ...payload }); 
     } catch (e) { 
         console.error("Meta Send Error", e.response?.data || e.message); 
+    }
+};
+
+// CORE PROCESSING LOGIC (Shared by Worker and Fallback)
+const processMessageInternal = async (message, contact, phoneId) => {
+    if (!message || !phoneId) throw new Error("Invalid Payload");
+
+    console.log(`[Core] Processing message from: ${message.from}`);
+    const client = await getDb().connect();
+    
+    try {
+        const from = message.from;
+        const name = contact?.profile?.name || "Unknown";
+        
+        // Upsert Candidate
+        const upsertQuery = `INSERT INTO candidates (id, phone_number, name, stage, last_message_at, created_at) VALUES ($1, $2, $3, 'New', $4, NOW()) ON CONFLICT (phone_number) DO UPDATE SET name = EXCLUDED.name, last_message_at = $4 RETURNING id`;
+        const resDb = await client.query(upsertQuery, [crypto.randomUUID(), from, name, Date.now()]);
+        
+        // Insert Message
+        await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'in', $3, $4, 'received', NOW())`, [crypto.randomUUID(), resDb.rows[0].id, message.text?.body || '[Media]', message.type]);
+        
+        // Bot Logic Check
+        const settings = await getBotSettings(phoneId);
+        if (settings && settings.nodes) {
+             console.log(`[Core] Bot logic active. Flow size: ${settings.nodes.length}`);
+             // Future: Inject Bot Execution Engine here
+        }
+        return { success: true };
+    } finally { 
+        client.release(); 
+    }
+};
+
+// FAULT-TOLERANT QUEUE DISPATCHER
+const enqueueIncomingMessageJob = async (req, message, contact, phoneId) => {
+    const baseUrl = getBaseUrl(req);
+    const workerUrl = `${baseUrl}/api/internal/bot-worker`;
+
+    // 1. Check Configuration
+    if (!process.env.QSTASH_TOKEN || process.env.QSTASH_TOKEN === 'mock') {
+        console.warn("[Queue] QStash token missing. Falling back to synchronous processing.");
+        return processMessageInternal(message, contact, phoneId);
+    }
+
+    // 2. Try Async Publish
+    try {
+        console.log(`[Queue] Dispatching to: ${workerUrl} | ID: ${message.id}`);
+        await qstash.publishJSON({
+            url: workerUrl,
+            body: { message, contact, phoneId },
+            retries: 3 
+        });
+    } catch (e) {
+        console.error(`[Queue Error] Publish failed: ${e.message}. Falling back to sync.`);
+        // 3. Fallback on Failure (Critical for Data Integrity)
+        return processMessageInternal(message, contact, phoneId);
     }
 };
 
@@ -267,7 +320,6 @@ apiRouter.get('/drivers', async (req, res) => {
             source: 'Organic' 
         })));
     } catch (e) {
-        // Table doesn't exist yet - return empty to UI
         if (e.code === '42P01') { 
             res.json([]); 
         } else {
@@ -487,7 +539,7 @@ apiRouter.post('/ai/assistant', async (req, res) => {
 });
 
 // ==========================================
-// 7. WEBHOOK (With Robust QStash Resolution)
+// 7. WEBHOOK (With Robust QStash Resolution & Fallback)
 // ==========================================
 app.get('/webhook', (req, res) => {
     if (req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) res.send(req.query['hub.challenge']);
@@ -499,10 +551,6 @@ app.post('/webhook', async (req, res) => {
         const body = req.body;
         if (body.object !== 'whatsapp_business_account') return res.sendStatus(404);
         
-        // 1. Determine Worker URL (Fixes localhost issue)
-        const baseUrl = getBaseUrl(req);
-        const workerUrl = `${baseUrl}/api/internal/bot-worker`;
-        
         const entries = body.entry || [];
         for (const entry of entries) {
             for (const change of (entry.changes || [])) {
@@ -510,11 +558,8 @@ app.post('/webhook', async (req, res) => {
                 if (!value.messages) continue;
                 const phoneId = value.metadata?.phone_number_id;
                 for (const message of value.messages) {
-                    console.log(`[Webhook] Dispatching to: ${workerUrl} | ID: ${message.id}`);
-                    await qstash.publishJSON({
-                        url: workerUrl,
-                        body: { message, contact: value.contacts?.[0], phoneId },
-                    });
+                    // Use Fault-Tolerant Queue Wrapper
+                    await enqueueIncomingMessageJob(req, message, value.contacts?.[0], phoneId);
                 }
             }
         }
@@ -529,37 +574,13 @@ app.post('/webhook', async (req, res) => {
 // 8. WORKER (Queue Handler)
 // ==========================================
 apiRouter.post('/internal/bot-worker', async (req, res) => {
-    // 1. Basic Validation
-    const { message, contact, phoneId } = req.body;
-    if (!message || !phoneId) return res.status(400).send("Invalid Payload");
-
-    console.log(`[Worker] Processing message from: ${message.from}`);
-
-    // 2. Persist to DB (Critical for Dashboard visibility)
-    const client = await getDb().connect();
     try {
-        const from = message.from;
-        const name = contact?.profile?.name || "Unknown";
-        
-        // Upsert Candidate
-        const upsertQuery = `INSERT INTO candidates (id, phone_number, name, stage, last_message_at, created_at) VALUES ($1, $2, $3, 'New', $4, NOW()) ON CONFLICT (phone_number) DO UPDATE SET name = EXCLUDED.name, last_message_at = $4 RETURNING id`;
-        const resDb = await client.query(upsertQuery, [crypto.randomUUID(), from, name, Date.now()]);
-        
-        // Insert Message
-        await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'in', $3, $4, 'received', NOW())`, [crypto.randomUUID(), resDb.rows[0].id, message.text?.body || '[Media]', message.type]);
-        
-        // 3. Bot Logic (Restored)
-        const settings = await getBotSettings(phoneId);
-        if (settings && settings.nodes) {
-             console.log(`[Worker] Bot logic active. Flow size: ${settings.nodes.length}`);
-        }
-
+        const { message, contact, phoneId } = req.body;
+        await processMessageInternal(message, contact, phoneId);
         res.json({ success: true });
     } catch(e) { 
         console.error("[Worker Error]", e);
         res.status(500).send(e.message); 
-    } finally { 
-        client.release(); 
     }
 });
 
