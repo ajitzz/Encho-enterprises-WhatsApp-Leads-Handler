@@ -23,7 +23,9 @@ const SYSTEM_CONFIG = {
     DB_CONNECTION_TIMEOUT: 15000,
     CACHE_TTL_SETTINGS: 600,
     LOCK_TTL: 15,
-    DEDUPE_TTL: 3600
+    DEDUPE_TTL: 3600,
+    SCHEDULE_BATCH_SIZE: parseInt(process.env.SCHEDULE_BATCH_SIZE || '25', 10),
+    SCHEDULE_POLL_INTERVAL_MS: parseInt(process.env.SCHEDULE_POLL_INTERVAL_MS || '15000', 10)
 };
 
 // --- SERVICES INITIALIZATION ---
@@ -198,10 +200,19 @@ const ensureDbSchema = async () => {
                 payload JSONB,
                 scheduled_time BIGINT,
                 status VARCHAR(50) DEFAULT 'pending',
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                attempts INT DEFAULT 0,
+                last_error TEXT,
+                sent_at TIMESTAMP WITH TIME ZONE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );
         `);
+        await client.query(`ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS attempts INT DEFAULT 0;`);
+        await client.query(`ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS last_error TEXT;`);
+        await client.query(`ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP WITH TIME ZONE;`);
+        await client.query(`ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();`);
         await client.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_time ON scheduled_messages(scheduled_time) WHERE status = 'pending';`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_status_time ON scheduled_messages(status, scheduled_time);`);
 
         await client.query('COMMIT');
         _schemaEnsured = true;
@@ -297,20 +308,79 @@ const sendToMeta = async (to, payload) => {
         const body = payload.text.body.trim().toLowerCase();
         if (!body || body.includes('replace this') || body.includes('sample message') || body.includes('type your message')) {
             logger.warn("Blocked Placeholder/Empty Message", { to, body: payload.text.body });
-            return;
+            return { ok: false, error: 'blocked_placeholder' };
         }
     }
 
     if (!process.env.META_API_TOKEN || !process.env.PHONE_NUMBER_ID) {
         logger.error('Meta Send Misconfigured (missing META_API_TOKEN or PHONE_NUMBER_ID)', { to });
-        return;
+        return { ok: false, error: 'missing_meta_configuration' };
     }
 
     try {
         await getMetaClient().post(`https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`, { messaging_product: 'whatsapp', recipient_type: 'individual', to, ...payload });
+        return { ok: true };
     } catch (e) {
         logger.error("Meta Send Error", { error: e.response?.data || e.message, to });
+        return { ok: false, error: e.response?.data || e.message };
     }
+};
+
+const normalizeScheduledPayload = (payload) => {
+    if (!payload) return {};
+    if (typeof payload === 'string') {
+        try {
+            return JSON.parse(payload);
+        } catch (e) {
+            return {};
+        }
+    }
+    return payload;
+};
+
+const buildTemplatePayload = ({ templateName, templateLanguage, text }) => {
+    const language = templateLanguage || process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US';
+    const payload = {
+        type: 'template',
+        template: {
+            name: templateName,
+            language: { code: language }
+        }
+    };
+
+    if (text && text.trim()) {
+        payload.template.components = [{
+            type: 'body',
+            parameters: [{ type: 'text', text: text.trim() }]
+        }];
+    }
+
+    return payload;
+};
+
+const buildWhatsAppPayload = ({ text, mediaUrl, mediaType, templateName, templateLanguage }) => {
+    if (templateName) {
+        return buildTemplatePayload({ templateName, templateLanguage, text });
+    }
+
+    if (mediaUrl) {
+        const type = mediaType || 'image';
+        return {
+            type,
+            [type]: {
+                link: mediaUrl,
+                ...(text ? { caption: text } : {})
+            }
+        };
+    }
+
+    return { type: 'text', text: { body: text || '' } };
+};
+
+const summarizePayload = (payload) => {
+    if (payload.templateName) return `Template: ${payload.templateName}`;
+    if (payload.text) return payload.text;
+    return payload.mediaUrl ? '[Media]' : '';
 };
 
 // CORE PROCESSING LOGIC (Shared by Worker and Fallback)
@@ -456,6 +526,134 @@ const persistInboundMessage = async (message, contact, requestId = 'system') => 
     }
 };
 
+const authorizeInternalRequest = async (req) => {
+    const signature = req.headers["upstash-signature"];
+    const secretHeader = req.headers["x-internal-secret"];
+    const expectedSecret = process.env.INTERNAL_WORKER_SECRET;
+
+    if (expectedSecret && secretHeader === expectedSecret) {
+        return true;
+    }
+
+    if (signature && process.env.QSTASH_CURRENT_SIGNING_KEY) {
+        try {
+            const body = req.rawBody ? req.rawBody.toString() : JSON.stringify(req.body);
+            return await qstashReceiver.verify({ signature, body });
+        } catch (e) {
+            logger.warn("Worker Signature Verification Failed", { error: e.message });
+        }
+    }
+
+    return !process.env.QSTASH_CURRENT_SIGNING_KEY || process.env.QSTASH_CURRENT_SIGNING_KEY === 'mock';
+};
+
+const processScheduledMessages = async ({ source = 'manual' } = {}) => {
+    await ensureDbSchema();
+    const now = Date.now();
+    const client = await getDb().connect();
+    let scheduledRows = [];
+
+    try {
+        await client.query('BEGIN');
+        const dueRes = await client.query(
+            `
+            WITH due AS (
+                SELECT id
+                FROM scheduled_messages
+                WHERE status = 'pending' AND scheduled_time <= $1
+                ORDER BY scheduled_time ASC
+                LIMIT $2
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE scheduled_messages
+            SET status = 'processing', updated_at = NOW()
+            WHERE id IN (SELECT id FROM due)
+            RETURNING *;
+            `,
+            [now, SYSTEM_CONFIG.SCHEDULE_BATCH_SIZE]
+        );
+        await client.query('COMMIT');
+        scheduledRows = dueRes.rows;
+    } catch (e) {
+        await client.query('ROLLBACK');
+        logger.error("Scheduled Message Claim Failed", { error: e.message, source });
+    } finally {
+        client.release();
+    }
+
+    if (scheduledRows.length === 0) {
+        return { processed: 0, sent: 0, failed: 0 };
+    }
+
+    let sent = 0;
+    let failed = 0;
+
+    for (const row of scheduledRows) {
+        const workerClient = await getDb().connect();
+        try {
+            const payload = normalizeScheduledPayload(row.payload);
+            if (!payload || (!payload.text && !payload.mediaUrl && !payload.templateName)) {
+                await workerClient.query(
+                    `UPDATE scheduled_messages SET status = 'failed', last_error = $2, attempts = attempts + 1, updated_at = NOW() WHERE id = $1`,
+                    [row.id, 'empty_payload']
+                );
+                failed += 1;
+                continue;
+            }
+
+            const candidateRes = await workerClient.query('SELECT phone_number FROM candidates WHERE id = $1', [row.candidate_id]);
+            if (candidateRes.rows.length === 0) {
+                await workerClient.query(
+                    `UPDATE scheduled_messages SET status = 'failed', last_error = $2, attempts = attempts + 1, updated_at = NOW() WHERE id = $1`,
+                    [row.id, 'candidate_not_found']
+                );
+                failed += 1;
+                continue;
+            }
+
+            const metaPayload = buildWhatsAppPayload(payload);
+            const sendResult = await sendToMeta(candidateRes.rows[0].phone_number, metaPayload);
+            if (!sendResult.ok) {
+                await workerClient.query(
+                    `UPDATE scheduled_messages SET status = 'failed', last_error = $2, attempts = attempts + 1, updated_at = NOW() WHERE id = $1`,
+                    [row.id, sendResult.error || 'meta_send_failed']
+                );
+                failed += 1;
+                continue;
+            }
+
+            const messageType = payload.templateName ? 'template' : (payload.mediaUrl ? (payload.mediaType || 'media') : 'text');
+            const summary = summarizePayload(payload) || '[Media]';
+
+            await workerClient.query(
+                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
+                 VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
+                [crypto.randomUUID(), row.candidate_id, payload.text || summary, messageType]
+            );
+            await workerClient.query(
+                `UPDATE candidates SET last_message_at = $1, last_message = $2, updated_at = NOW() WHERE id = $3`,
+                [Date.now(), summary, row.candidate_id]
+            );
+            await workerClient.query(
+                `UPDATE scheduled_messages SET status = 'sent', sent_at = NOW(), last_error = NULL, updated_at = NOW() WHERE id = $1`,
+                [row.id]
+            );
+            sent += 1;
+        } catch (e) {
+            await workerClient.query(
+                `UPDATE scheduled_messages SET status = 'failed', last_error = $2, attempts = attempts + 1, updated_at = NOW() WHERE id = $1`,
+                [row.id, e.message || 'processing_error']
+            );
+            failed += 1;
+        } finally {
+            workerClient.release();
+        }
+    }
+
+    logger.info("Scheduled Message Batch Processed", { source, processed: scheduledRows.length, sent, failed });
+    return { processed: scheduledRows.length, sent, failed };
+};
+
 // --- ROUTE GROUPS ---
 
 // ==========================================
@@ -559,23 +757,25 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
 });
 
 apiRouter.post('/drivers/:id/messages', async (req, res, next) => {
-    const { text, mediaUrl, mediaType } = req.body;
+    const { text, mediaUrl, mediaType, templateName, templateLanguage } = req.body;
     const client = await getDb().connect();
     try {
         const dRes = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
         if (dRes.rows.length === 0) return res.status(404).json({ ok: false, error: "Driver not found" });
 
-        const payload = mediaUrl
-            ? { type: mediaType || 'image', [mediaType || 'image']: { link: mediaUrl, caption: text } }
-            : { type: 'text', text: { body: text } };
+        const payload = buildWhatsAppPayload({ text, mediaUrl, mediaType, templateName, templateLanguage });
 
-        await sendToMeta(dRes.rows[0].phone_number, payload);
+        const sendResult = await sendToMeta(dRes.rows[0].phone_number, payload);
+        if (!sendResult.ok) {
+            return res.status(502).json({ ok: false, error: sendResult.error || 'Failed to send message' });
+        }
 
+        const messageType = templateName ? 'template' : (mediaUrl ? (mediaType || 'media') : 'text');
         await client.query(
-            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`,
-            [crypto.randomUUID(), req.params.id, text]
+            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
+            [crypto.randomUUID(), req.params.id, text, messageType]
         );
-        await client.query('UPDATE candidates SET last_message_at = $1, last_message = $2 WHERE id = $3', [Date.now(), text || '[Media]', req.params.id]);
+        await client.query('UPDATE candidates SET last_message_at = $1, last_message = $2 WHERE id = $3', [Date.now(), summarizePayload({ text, mediaUrl, templateName }) || '[Media]', req.params.id]);
         res.json({ success: true });
     } catch (e) { next(e); } finally { client.release(); }
 });
@@ -595,11 +795,12 @@ apiRouter.get('/drivers/:id/documents', async (req, res) => { res.json([]); });
 apiRouter.get('/drivers/:id/scheduled-messages', async (req, res, next) => {
     const client = await getDb().connect();
     try {
+        await ensureDbSchema();
         const result = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 ORDER BY scheduled_time ASC`, [req.params.id]);
         res.json(result.rows.map(r => ({
             id: r.id,
             scheduledTime: parseInt(r.scheduled_time),
-            payload: r.payload,
+            payload: normalizeScheduledPayload(r.payload),
             status: r.status
         })));
     } catch (e) { next(e); } finally { client.release(); }
@@ -609,10 +810,12 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
     const { driverIds, message, timestamp } = req.body;
     const client = await getDb().connect();
     try {
+        await ensureDbSchema();
+        const scheduledTime = typeof timestamp === 'number' ? timestamp : Date.now();
         for (const driverId of driverIds) {
             await client.query(
                 `INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`,
-                [crypto.randomUUID(), driverId, JSON.stringify(message), timestamp || Date.now()]
+                [crypto.randomUUID(), driverId, JSON.stringify(message), scheduledTime]
             );
         }
         res.json({ success: true, count: driverIds.length });
@@ -622,6 +825,7 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
 apiRouter.delete('/scheduled-messages/:id', async (req, res, next) => {
     const client = await getDb().connect();
     try {
+        await ensureDbSchema();
         await client.query('DELETE FROM scheduled_messages WHERE id = $1', [req.params.id]);
         res.json({ success: true });
     } catch (e) { next(e); } finally { client.release(); }
@@ -631,15 +835,17 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
     const { text, scheduledTime } = req.body;
     const client = await getDb().connect();
     try {
+        await ensureDbSchema();
         const old = await client.query('SELECT payload FROM scheduled_messages WHERE id = $1', [req.params.id]);
         if (old.rows.length === 0) return res.status(404).json({ ok: false, error: "Not found" });
 
-        const newPayload = { ...old.rows[0].payload, text: text || old.rows[0].payload.text };
+        const existingPayload = normalizeScheduledPayload(old.rows[0].payload);
+        const newPayload = { ...existingPayload, text: text || existingPayload.text };
         const updates = [`payload = $1`];
         const values = [JSON.stringify(newPayload)];
         let idx = 2;
 
-        if (scheduledTime) {
+        if (typeof scheduledTime === 'number') {
             updates.push(`scheduled_time = $${idx++}`);
             values.push(scheduledTime);
         }
@@ -1011,26 +1217,7 @@ apiRouter.post('/webhook', handleWebhook);
 // 8. WORKER (Queue Handler)
 // ==========================================
 apiRouter.post('/internal/bot-worker', async (req, res, next) => {
-    const signature = req.headers["upstash-signature"];
-    const secretHeader = req.headers["x-internal-secret"];
-    const expectedSecret = process.env.INTERNAL_WORKER_SECRET;
-
-    let isAuthorized = false;
-
-    if (expectedSecret && secretHeader === expectedSecret) {
-        isAuthorized = true;
-    }
-    else if (signature && process.env.QSTASH_CURRENT_SIGNING_KEY) {
-        try {
-            const body = req.rawBody ? req.rawBody.toString() : JSON.stringify(req.body);
-            isAuthorized = await qstashReceiver.verify({ signature, body });
-        } catch (e) {
-            logger.warn("Worker Signature Verification Failed", { error: e.message });
-        }
-    }
-    else if (!process.env.QSTASH_CURRENT_SIGNING_KEY || process.env.QSTASH_CURRENT_SIGNING_KEY === 'mock') {
-        isAuthorized = true;
-    }
+    const isAuthorized = await authorizeInternalRequest(req);
 
     if (!isAuthorized) {
         logger.warn("Unauthorized Worker Access");
@@ -1041,6 +1228,20 @@ apiRouter.post('/internal/bot-worker', async (req, res, next) => {
         const { message, contact, phoneId } = req.body;
         await processMessageInternal(message, contact, phoneId, req.headers['x-request-id']);
         res.json({ success: true });
+    } catch (e) { next(e); }
+});
+
+apiRouter.post('/internal/scheduled-messages/run', async (req, res, next) => {
+    const isAuthorized = await authorizeInternalRequest(req);
+
+    if (!isAuthorized) {
+        logger.warn("Unauthorized Scheduler Access");
+        return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
+    try {
+        const result = await processScheduledMessages({ source: 'manual' });
+        res.json({ success: true, ...result });
     } catch (e) { next(e); }
 });
 
@@ -1164,6 +1365,18 @@ ensureDbSchema().then(() => {
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;
     app.listen(PORT, () => logger.info(`🚀 WhatsApp Leads Handler running on port ${PORT}`));
+
+    if (process.env.SCHEDULED_MESSAGES_ENABLED !== 'false') {
+        const runScheduler = async (source) => {
+            try {
+                await processScheduledMessages({ source });
+            } catch (e) {
+                logger.error("Scheduled Message Loop Failed", { error: e.message, source });
+            }
+        };
+        setTimeout(() => runScheduler('startup'), 1000);
+        setInterval(() => runScheduler('interval'), SYSTEM_CONFIG.SCHEDULE_POLL_INTERVAL_MS);
+    }
 }
 
 module.exports = app;
