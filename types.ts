@@ -214,6 +214,7 @@ export interface ScheduledMessage {
     text?: string;
     mediaUrl?: string;
     mediaType?: string;
+    templateName?: string;
   };
   status: 'pending' | 'processing' | 'failed' | 'sent';
 }
