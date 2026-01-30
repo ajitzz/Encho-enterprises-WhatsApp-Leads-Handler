@@ -1,5 +1,4 @@
 
-
 import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, BotStep } from '../types';
 
 const DEFAULT_BOT_SETTINGS: BotSettings = {
@@ -11,7 +10,7 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
     {
       id: 'step_1',
       title: 'Welcome',
-      message: 'Welcome to Encho Cabs! What is your name?',
+      message: 'Welcome to Encho Cabs! Could you please share your full name?',
       inputType: 'text',
       saveToField: 'name',
       nextStepId: 'step_2'
@@ -19,7 +18,7 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
     {
       id: 'step_2',
       title: 'Role',
-      message: 'Are you looking to Rent or Drive?',
+      message: 'Are you looking to Rent a vehicle or Drive your own?',
       inputType: 'option',
       options: ['Rent', 'Drive Own Car'],
       nextStepId: 'AI_HANDOFF'

@@ -45,7 +45,7 @@ const CustomNode = ({ data, selected }: { data: FlowNodeData, selected: boolean 
         case 'handoff': color = 'bg-red-500'; icon = <User size={12} />; break;
     }
 
-    const isPlaceholder = !data.content || /replace this|sample message|enter your message/i.test(data.content);
+    const isPlaceholder = !data.content || /replace this|sample message|enter your message|type your message|enter text/i.test(data.content);
 
     return (
         <div className={`w-[280px] bg-white rounded-lg shadow-lg border-2 transition-all ${selected ? 'border-blue-500 ring-2 ring-blue-200' : (isPlaceholder && ['message', 'question', 'buttons'].includes(data.type) ? 'border-red-400 bg-red-50' : 'border-gray-200')}`}>
@@ -57,7 +57,7 @@ const CustomNode = ({ data, selected }: { data: FlowNodeData, selected: boolean 
                 {data.content ? (
                     <div className="line-clamp-3 whitespace-pre-wrap">{data.content}</div>
                 ) : (
-                    <span className="italic text-red-400 font-bold flex items-center gap-1"><AlertTriangle size={10} /> Message Required</span>
+                    <span className="italic text-red-500 font-bold flex items-center gap-1"><AlertTriangle size={10} /> Message Required</span>
                 )}
                 
                 {/* Visual Indicators */}
@@ -103,6 +103,8 @@ const Inspector = ({ node, onChange }: { node: Node<FlowNodeData>, onChange: (id
         onChange(node.id, n);
     };
 
+    const hasPlaceholder = (!local.content || /replace this|sample message|enter your message|type your message/i.test(local.content));
+
     return (
         <div className="w-80 bg-white border-l border-gray-200 h-full flex flex-col shadow-xl z-20">
             <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
@@ -118,13 +120,13 @@ const Inspector = ({ node, onChange }: { node: Node<FlowNodeData>, onChange: (id
                     <div>
                         <label className="block text-xs font-bold text-gray-500 mb-1">Message Text <span className="text-red-500">*</span></label>
                         <textarea 
-                            className={`w-full border p-2 rounded text-sm h-32 resize-none ${(!local.content || /replace this/i.test(local.content)) ? 'border-red-300 ring-1 ring-red-100' : 'border-gray-300'}`}
+                            className={`w-full border p-2 rounded text-sm h-32 resize-none ${hasPlaceholder ? 'border-red-300 ring-1 ring-red-100' : 'border-gray-300'}`}
                             value={local.content || ''} 
                             onChange={e => update('content', e.target.value)} 
-                            placeholder="Type your message here..."
+                            placeholder="Enter the message the user will see..."
                         />
-                        {(!local.content || /replace this/i.test(local.content)) && (
-                            <div className="text-[10px] text-red-500 mt-1 font-bold flex items-center gap-1"><AlertTriangle size={10} /> Valid message required</div>
+                        {hasPlaceholder && (
+                            <div className="text-[10px] text-red-500 mt-1 font-bold flex items-center gap-1"><AlertTriangle size={10} /> Valid message required (No placeholders)</div>
                         )}
                     </div>
                 )}
@@ -203,6 +205,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
         const label = event.dataTransfer.getData('application/reactflow/label');
         
         const position = { x: event.clientX - 300, y: event.clientY - 100 };
+        // INITIALIZATION FIX: Start with EMPTY string to force user input, never use a placeholder.
         const newNode: Node<FlowNodeData> = {
             id: `node_${Date.now()}`,
             type: 'custom',
@@ -210,12 +213,14 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
             data: { id: `node_${Date.now()}`, type, label, content: '' }
         };
         addNode(newNode);
+        // Auto-select to prompt editing
+        setSelectedNodeId(newNode.id);
     };
 
     // STRICT VALIDATION
     const validateNodes = (nodesToSave: Node<FlowNodeData>[]) => {
         const errors: string[] = [];
-        const BAD_PATTERNS = [/replace this/i, /sample text/i, /enter your message/i, /type your message/i];
+        const BAD_PATTERNS = [/replace this/i, /sample message/i, /enter your message/i, /type your message/i, /insert text/i];
         
         nodesToSave.forEach(node => {
             if (node.type === 'custom') {
@@ -225,7 +230,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
                      if (!content || !content.toString().trim()) {
                          errors.push(`Node "${label}" is empty. Please enter text.`);
                      } else if (BAD_PATTERNS.some(p => p.test(content))) {
-                         errors.push(`Node "${label}" has placeholder text. Please update it.`);
+                         errors.push(`Node "${label}" has placeholder text. Please replace it with a real message.`);
                      }
                 }
             }
@@ -236,7 +241,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
     const handleSave = async (publish = false) => {
         const errors = validateNodes(nodes);
         if (errors.length > 0) {
-            alert(`Cannot Save: Found Invalid Content\n\n${errors.map(e => `• ${e}`).join('\n')}`);
+            alert(`⚠️ Cannot ${publish ? 'Publish' : 'Save'}: Invalid Bot Content\n\nTo prevent sending bad messages to customers, please fix:\n\n${errors.map(e => `• ${e}`).join('\n')}`);
             return;
         }
 

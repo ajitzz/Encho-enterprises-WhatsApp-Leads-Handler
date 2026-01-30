@@ -20,8 +20,8 @@ const logger = {
 
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
-    META_TIMEOUT: 5000, 
-    DB_CONNECTION_TIMEOUT: 5000, 
+    META_TIMEOUT: 15000, // Increased to 15s
+    DB_CONNECTION_TIMEOUT: 20000, // Increased to 20s to fix Startup DB Check Failed
     CACHE_TTL_SETTINGS: 600, 
     LOCK_TTL: 15,
     DEDUPE_TTL: 3600 
@@ -228,11 +228,30 @@ const getBotSettings = async (phoneId) => {
 };
 
 const sendToMeta = async (to, payload) => {
-    // 🛡️ GUARD: Block Placeholders & Empty Messages
+    // 🛡️ STRICT GATEKEEPER: Block Placeholders, Empty Messages, & Invalid Flows
+    // This prevents accidental sending of "Replace this message" to customers.
+    const BLOCKED_PHRASES = [
+        'replace this', 
+        'sample message', 
+        'type your message', 
+        'enter your message', 
+        'enter text',
+        'insert text here'
+    ];
+
     if (payload.text && payload.text.body) {
-        const body = payload.text.body.trim().toLowerCase();
-        if (!body || body.includes('replace this') || body.includes('sample message') || body.includes('type your message')) {
-            logger.warn("Blocked Placeholder/Empty Message", { to, body: payload.text.body });
+        const body = payload.text.body.trim();
+        
+        // 1. Check for empty messages
+        if (!body) {
+            logger.warn("BLOCKED: Empty message detected", { to });
+            return;
+        }
+
+        // 2. Check for blocked phrases (Case Insensitive)
+        const lowerBody = body.toLowerCase();
+        if (BLOCKED_PHRASES.some(phrase => lowerBody.includes(phrase))) {
+            logger.warn("BLOCKED: Placeholder message detected", { to, body });
             return;
         }
     }
@@ -309,13 +328,22 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
                      const edge = settings.edges?.find(e => e.source === startNode.id);
                      if (edge) {
                          const nextNode = settings.nodes.find(n => n.id === edge.target);
+                         
+                         // Check nextNode content validity before sending
                          if (nextNode && nextNode.data && nextNode.data.content) {
-                             await sendToMeta(from, { type: 'text', text: { body: nextNode.data.content } });
+                             const content = nextNode.data.content.trim();
+                             const BLOCKED = ['replace this', 'sample message', 'type your message'];
                              
-                             await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
-                                [crypto.randomUUID(), candidateId, nextNode.data.content]);
-                             
-                             await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [nextNode.id, candidateId]);
+                             if (content && !BLOCKED.some(b => content.toLowerCase().includes(b))) {
+                                 await sendToMeta(from, { type: 'text', text: { body: content } });
+                                 
+                                 await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
+                                    [crypto.randomUUID(), candidateId, content]);
+                                 
+                                 await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [nextNode.id, candidateId]);
+                             } else {
+                                 logger.warn("Bot Logic: Skipped Invalid Node Message", { nodeId: nextNode.id, content });
+                             }
                          }
                      }
                  }
@@ -825,6 +853,8 @@ app.post('/webhook', async (req, res, next) => {
         const body = req.body;
         if (body.object !== 'whatsapp_business_account') return res.sendStatus(404);
         
+        logger.info("Webhook Received", { type: 'incoming_webhook' });
+
         const entries = body.entry || [];
         for (const entry of entries) {
             for (const change of (entry.changes || [])) {
