@@ -128,6 +128,7 @@ const ensureDbSchema = async () => {
         await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_message TEXT;`);
         await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;`);
         await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS human_mode_ends_at BIGINT;`);
+        await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS current_node_id VARCHAR(255);`);
 
         await client.query(`CREATE INDEX IF NOT EXISTS idx_candidates_phone ON candidates(phone_number);`);
         await client.query(`CREATE INDEX IF NOT EXISTS idx_candidates_last_msg ON candidates(last_message_at DESC);`);
@@ -227,6 +228,15 @@ const getBotSettings = async (phoneId) => {
 };
 
 const sendToMeta = async (to, payload) => {
+    // 🛡️ GUARD: Block Placeholders & Empty Messages
+    if (payload.text && payload.text.body) {
+        const body = payload.text.body.trim().toLowerCase();
+        if (!body || body.includes('replace this') || body.includes('sample message') || body.includes('type your message')) {
+            logger.warn("Blocked Placeholder/Empty Message", { to, body: payload.text.body });
+            return;
+        }
+    }
+
     try { 
         await getMetaClient().post(`https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`, { messaging_product: 'whatsapp', recipient_type: 'individual', to, ...payload }); 
     } catch (e) { 
@@ -263,15 +273,17 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         const textBody = message.text?.body || `[${message.type}]`;
         
         // Upsert Candidate (Include last_message update)
+        // We also retrieve current_node_id to know where they are in the bot flow
         const upsertQuery = `
             INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at) 
             VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
             ON CONFLICT (phone_number) 
             DO UPDATE SET name = EXCLUDED.name, last_message_at = $4, last_message = $5 
-            RETURNING id
+            RETURNING id, current_node_id
         `;
         const resDb = await client.query(upsertQuery, [crypto.randomUUID(), from, name, Date.now(), textBody]);
-        const candidateId = resDb.rows[0].id;
+        const candidate = resDb.rows[0];
+        const candidateId = candidate.id;
         
         logger.info("Candidate Upserted", { requestId, candidateId });
 
@@ -283,11 +295,31 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         `;
         await client.query(insertMsgQuery, [crypto.randomUUID(), candidateId, textBody, message.type, message.id]);
         
-        // Bot Logic Check
+        // --- BOT AUTO-REPLY LOGIC ---
         const settings = await getBotSettings(phoneId);
-        if (settings && settings.nodes) {
-             logger.info("Bot Logic Active", { requestId, nodeCount: settings.nodes.length });
-             // Future: Inject Bot Execution Engine here
+        if (settings && settings.nodes && settings.nodes.length > 0) {
+             logger.info("Bot Logic Active", { requestId });
+             
+             // Simple Logic: If no current node, find start node and reply
+             if (!candidate.current_node_id) {
+                 const startNode = settings.nodes.find(n => n.type === 'start') || settings.nodes[0];
+                 // Find edges coming OUT of start node
+                 const edge = settings.edges?.find(e => e.source === startNode.id);
+                 if (edge) {
+                     const nextNode = settings.nodes.find(n => n.id === edge.target);
+                     if (nextNode && nextNode.data && nextNode.data.content) {
+                         // Send Reply
+                         await sendToMeta(from, { type: 'text', text: { body: nextNode.data.content } });
+                         
+                         // Log Reply
+                         await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
+                            [crypto.randomUUID(), candidateId, nextNode.data.content]);
+                         
+                         // Update State
+                         await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [nextNode.id, candidateId]);
+                     }
+                 }
+             }
         }
         return { success: true };
     } finally { 
@@ -856,7 +888,6 @@ app.use((err, req, res, next) => {
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
 
-// --- START OF FILE database_schema.sql ---
 // --- STARTUP SCHEMA CHECK ---
 ensureDbSchema().then(() => {
     logger.info("Startup DB Check Complete");
