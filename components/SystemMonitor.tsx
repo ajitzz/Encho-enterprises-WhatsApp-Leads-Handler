@@ -1,7 +1,6 @@
 
 import React, { useEffect, useState, useRef } from 'react';
-import { liveApiService } from '../services/liveApiService';
-import { Database, Server, Shield, X, Power, AlertTriangle, Play, Lock, Zap, RefreshCw, AlertCircle, DatabaseZap } from 'lucide-react';
+import { Database, Server, Shield, X, AlertTriangle, Zap, RefreshCw, AlertCircle, DatabaseZap, Workflow } from 'lucide-react';
 import { SystemStats } from '../types';
 
 interface DiagnosticStats extends SystemStats {
@@ -10,7 +9,8 @@ interface DiagnosticStats extends SystemStats {
     tables?: { candidates: boolean; bot_versions: boolean };
     counts?: { candidates: number };
     lastError?: string;
-    env?: { hasPostgres: boolean; hasRedis: boolean };
+    workerUrl?: string;
+    env?: { hasPostgres: boolean; hasRedis: boolean; hasQStash: boolean; publicUrl: string };
 }
 
 export const SystemMonitor = () => {
@@ -40,6 +40,7 @@ export const SystemMonitor = () => {
                         tables: debugStats.tables,
                         counts: debugStats.counts,
                         lastError: debugStats.lastError,
+                        workerUrl: debugStats.workerUrl,
                         env: debugStats.env
                     });
                 }
@@ -54,7 +55,6 @@ export const SystemMonitor = () => {
         try {
             await fetch('/api/system/init-db', { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` } });
             setDbActionStatus('Tables Ready!');
-            // Force immediate refresh
             const res = await fetch('/api/debug/status', { headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }});
             if(res.ok) { const d = await res.json(); setStats(prev => ({...prev!, tables: d.tables, counts: d.counts})); }
         } catch(e) { setDbActionStatus('Failed'); }
@@ -71,150 +71,106 @@ export const SystemMonitor = () => {
 
     if (!stats) return null;
 
-    // DIAGNOSTIC LOGIC
     const isDbError = stats.dbStatus === 'error';
     const isTablesMissing = stats.dbStatus === 'connected' && (!stats.tables?.candidates || !stats.tables?.bot_versions);
     const isDbEmpty = stats.dbStatus === 'connected' && !isTablesMissing && (stats.counts?.candidates === 0);
     const hasCriticalIssue = isDbError || isTablesMissing || isDbEmpty;
+    const isWorkerLocalhost = stats.workerUrl && stats.workerUrl.includes('localhost') && !window.location.hostname.includes('localhost');
 
     return (
         <>
         <div className={`fixed bottom-0 left-0 right-0 z-40 transition-transform duration-300 ${isOpen ? 'translate-y-0' : 'translate-y-[calc(100%-4px)]'}`}>
             <div 
-                className={`h-1 cursor-pointer hover:h-2 transition-all ${hasCriticalIssue ? 'bg-red-500 animate-pulse' : 'bg-gradient-to-r from-green-500 via-blue-500 to-purple-500'}`}
+                className={`h-1 cursor-pointer hover:h-2 transition-all ${hasCriticalIssue || isWorkerLocalhost ? 'bg-red-500 animate-pulse' : 'bg-gradient-to-r from-green-500 via-blue-500 to-purple-500'}`}
                 onClick={() => setIsOpen(!isOpen)}
                 title="System Monitor"
             />
             
             <div className="bg-black/90 backdrop-blur-md text-white border-t border-gray-800 p-2 flex items-center justify-between text-[10px] font-mono shadow-2xl">
                 <div className="flex items-center gap-4 px-2">
-                    {/* Database Health */}
                     <div className="flex items-center gap-1.5">
                         <Database size={12} className={stats.dbStatus === 'connected' ? 'text-blue-400' : 'text-red-500 animate-pulse'} />
                         <span className="text-gray-400">DB:</span>
-                        <span className={`font-bold ${stats.dbStatus === 'connected' ? 'text-white' : 'text-red-400'}`}>
-                            {stats.dbStatus === 'connected' ? 'OK' : 'ERR'}
-                        </span>
+                        <span className={`font-bold ${stats.dbStatus === 'connected' ? 'text-white' : 'text-red-400'}`}>{stats.dbStatus === 'connected' ? 'OK' : 'ERR'}</span>
                     </div>
-
-                    {/* Table Check */}
                     {stats.dbStatus === 'connected' && (
                         <div className="flex items-center gap-1.5">
                             <span className="text-gray-400">SCHEMA:</span>
-                            <span className={`font-bold ${!isTablesMissing ? 'text-green-400' : 'text-red-400'}`}>
-                                {!isTablesMissing ? 'VALID' : 'MISSING'}
-                            </span>
+                            <span className={`font-bold ${!isTablesMissing ? 'text-green-400' : 'text-red-400'}`}>{!isTablesMissing ? 'VALID' : 'MISSING'}</span>
                         </div>
                     )}
-
-                    {/* Count Check */}
-                    {stats.dbStatus === 'connected' && !isTablesMissing && (
-                        <div className="flex items-center gap-1.5">
-                            <span className="text-gray-400">ROWS:</span>
-                            <span className={`font-bold ${stats.counts?.candidates > 0 ? 'text-white' : 'text-yellow-400'}`}>
-                                {stats.counts?.candidates || 0}
-                            </span>
+                    {stats.workerUrl && (
+                        <div className="flex items-center gap-1.5 hidden md:flex">
+                             <span className="text-gray-400">WORKER:</span>
+                             <span className={`truncate max-w-[150px] ${isWorkerLocalhost ? 'text-red-400' : 'text-gray-300'}`}>{stats.workerUrl}</span>
                         </div>
                     )}
                 </div>
 
-                {/* ALERT BANNER */}
-                {hasCriticalIssue && (
+                {(hasCriticalIssue || isWorkerLocalhost) && (
                     <div className="absolute left-1/2 transform -translate-x-1/2 top-1 flex items-center gap-2 bg-red-600/90 px-3 py-1 rounded text-white font-bold animate-pulse cursor-pointer" onClick={() => setShowControls(true)}>
                         <AlertTriangle size={12} />
-                        {isDbError ? 'CONNECTION ERROR' : isTablesMissing ? 'MISSING TABLES' : 'DATABASE EMPTY'}
-                        <span className="underline">FIX NOW</span>
+                        {isDbError ? 'DB ERROR' : isTablesMissing ? 'MISSING TABLES' : isWorkerLocalhost ? 'INVALID WORKER URL' : 'DATABASE EMPTY'}
+                        <span className="underline">FIX</span>
                     </div>
                 )}
 
                 <div className="flex items-center gap-2">
-                     <button onClick={() => setShowControls(true)} className="hover:text-white text-gray-400 flex items-center gap-1">
-                        <Shield size={12} /> Diagnose
-                     </button>
+                     <button onClick={() => setShowControls(true)} className="hover:text-white text-gray-400 flex items-center gap-1"><Shield size={12} /> Diagnose</button>
                 </div>
             </div>
         </div>
 
-        {/* DIAGNOSTIC MODAL */}
         {showControls && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
                 <div className="bg-gray-900 rounded-xl shadow-2xl w-full max-w-lg border border-gray-700 animate-in zoom-in-95">
                     <div className="p-5 border-b border-gray-800 flex items-center justify-between">
-                        <h3 className="font-bold text-white flex items-center gap-2">
-                            <DatabaseZap size={20} className="text-blue-500" />
-                            System Diagnostics
-                        </h3>
+                        <h3 className="font-bold text-white flex items-center gap-2"><DatabaseZap size={20} className="text-blue-500" /> System Diagnostics</h3>
                         <button onClick={() => setShowControls(false)} className="text-gray-400 hover:text-white"><X size={20} /></button>
                     </div>
                     
                     <div className="p-6 space-y-6">
-                        {/* 1. Connection Error */}
-                        {isDbError && (
-                            <div className="bg-red-900/30 border border-red-800 p-4 rounded-lg">
-                                <div className="flex items-center gap-2 text-red-400 font-bold mb-2">
-                                    <AlertCircle size={18} /> Connection Failed
-                                </div>
-                                <p className="text-xs text-gray-300 mb-2">
-                                    Unable to connect to Postgres. 
-                                    Error: <span className="font-mono text-red-300">{stats.lastError || 'Unknown'}</span>
-                                </p>
-                                <div className="text-xs bg-black/50 p-2 rounded text-gray-400 font-mono">
-                                    Check POSTGRES_URL in .env
-                                </div>
+                        {isWorkerLocalhost && (
+                             <div className="bg-red-900/30 border border-red-800 p-4 rounded-lg">
+                                <div className="flex items-center gap-2 text-red-400 font-bold mb-2"><AlertCircle size={18} /> Critical Config Error</div>
+                                <p className="text-xs text-gray-300 mb-2">QStash is trying to hit <strong>localhost</strong>. This will fail in production.</p>
+                                <div className="text-xs bg-black/50 p-2 rounded text-gray-400 font-mono break-all">{stats.workerUrl}</div>
+                                <p className="text-xs text-gray-400 mt-2">Add <strong>PUBLIC_BASE_URL</strong> to Vercel Env Variables.</p>
                             </div>
                         )}
 
-                        {/* 2. Missing Tables */}
+                        {isDbError && (
+                            <div className="bg-red-900/30 border border-red-800 p-4 rounded-lg">
+                                <div className="flex items-center gap-2 text-red-400 font-bold mb-2"><AlertCircle size={18} /> Connection Failed</div>
+                                <p className="text-xs text-gray-300 mb-2">Postgres Error: <span className="font-mono text-red-300">{stats.lastError || 'Unknown'}</span></p>
+                            </div>
+                        )}
+
                         {isTablesMissing && (
                             <div className="bg-amber-900/30 border border-amber-800 p-4 rounded-lg">
                                 <div className="flex items-center justify-between mb-2">
-                                    <div className="flex items-center gap-2 text-amber-400 font-bold">
-                                        <AlertTriangle size={18} /> Tables Missing
-                                    </div>
+                                    <div className="flex items-center gap-2 text-amber-400 font-bold"><AlertTriangle size={18} /> Tables Missing</div>
                                     {dbActionStatus && <span className="text-xs text-green-400">{dbActionStatus}</span>}
                                 </div>
-                                <p className="text-xs text-gray-300 mb-3">
-                                    The database is connected but tables (candidates, bot_versions) were not found.
-                                </p>
-                                <button onClick={handleInitDB} className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2">
-                                    <DatabaseZap size={14} /> Initialize Database Schema
-                                </button>
+                                <button onClick={handleInitDB} className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2"><DatabaseZap size={14} /> Initialize Database Schema</button>
                             </div>
                         )}
 
-                        {/* 3. Empty Data */}
                         {isDbEmpty && (
                             <div className="bg-blue-900/30 border border-blue-800 p-4 rounded-lg">
                                 <div className="flex items-center justify-between mb-2">
-                                    <div className="flex items-center gap-2 text-blue-400 font-bold">
-                                        <Database size={18} /> Database Empty
-                                    </div>
+                                    <div className="flex items-center gap-2 text-blue-400 font-bold"><Database size={18} /> Database Empty</div>
                                     {dbActionStatus && <span className="text-xs text-green-400">{dbActionStatus}</span>}
                                 </div>
-                                <p className="text-xs text-gray-300 mb-3">
-                                    Tables exist but no drivers found. The dashboard will show "0".
-                                </p>
-                                <button onClick={handleSeedDB} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2">
-                                    <RefreshCw size={14} /> Seed Dummy Data
-                                </button>
-                            </div>
-                        )}
-
-                        {!hasCriticalIssue && (
-                            <div className="bg-green-900/20 border border-green-800 p-4 rounded-lg flex items-center gap-3">
-                                <div className="bg-green-500/20 p-2 rounded-full">
-                                    <Shield size={20} className="text-green-500" />
-                                </div>
-                                <div>
-                                    <h4 className="text-green-400 font-bold text-sm">System Healthy</h4>
-                                    <p className="text-xs text-gray-400">Database connected, tables verified, {stats.counts?.candidates} rows found.</p>
-                                </div>
+                                <button onClick={handleSeedDB} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2"><RefreshCw size={14} /> Seed Dummy Data</button>
                             </div>
                         )}
 
                         <div className="grid grid-cols-2 gap-4 text-xs font-mono text-gray-500">
-                             <div className="bg-gray-800 p-2 rounded border border-gray-700">PG URL: {stats.env?.hasPostgres ? 'SET' : 'MISSING'}</div>
-                             <div className="bg-gray-800 p-2 rounded border border-gray-700">Redis URL: {stats.env?.hasRedis ? 'SET' : 'MISSING'}</div>
+                             <div className="bg-gray-800 p-2 rounded border border-gray-700">PG: {stats.env?.hasPostgres ? 'OK' : 'MISSING'}</div>
+                             <div className="bg-gray-800 p-2 rounded border border-gray-700">Redis: {stats.env?.hasRedis ? 'OK' : 'MISSING'}</div>
+                             <div className="bg-gray-800 p-2 rounded border border-gray-700">QStash: {stats.env?.hasQStash ? 'OK' : 'MISSING'}</div>
+                             <div className="bg-gray-800 p-2 rounded border border-gray-700 truncate" title={stats.env?.publicUrl}>Public URL: {stats.env?.publicUrl}</div>
                         </div>
                     </div>
                 </div>
