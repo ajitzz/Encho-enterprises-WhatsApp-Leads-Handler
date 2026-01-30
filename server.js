@@ -123,7 +123,7 @@ const ensureDbSchema = async () => {
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );
         `);
-        // Add robust columns
+        // Add robust columns needed for Logic and UI
         await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS notes TEXT;`);
         await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_message TEXT;`);
         await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;`);
@@ -279,7 +279,7 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
             VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
             ON CONFLICT (phone_number) 
             DO UPDATE SET name = EXCLUDED.name, last_message_at = $4, last_message = $5 
-            RETURNING id, current_node_id
+            RETURNING id, current_node_id, is_human_mode
         `;
         const resDb = await client.query(upsertQuery, [crypto.randomUUID(), from, name, Date.now(), textBody]);
         const candidate = resDb.rows[0];
@@ -296,30 +296,30 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         await client.query(insertMsgQuery, [crypto.randomUUID(), candidateId, textBody, message.type, message.id]);
         
         // --- BOT AUTO-REPLY LOGIC ---
-        const settings = await getBotSettings(phoneId);
-        if (settings && settings.nodes && settings.nodes.length > 0) {
-             logger.info("Bot Logic Active", { requestId });
-             
-             // Simple Logic: If no current node, find start node and reply
-             if (!candidate.current_node_id) {
-                 const startNode = settings.nodes.find(n => n.type === 'start') || settings.nodes[0];
-                 // Find edges coming OUT of start node
-                 const edge = settings.edges?.find(e => e.source === startNode.id);
-                 if (edge) {
-                     const nextNode = settings.nodes.find(n => n.id === edge.target);
-                     if (nextNode && nextNode.data && nextNode.data.content) {
-                         // Send Reply
-                         await sendToMeta(from, { type: 'text', text: { body: nextNode.data.content } });
-                         
-                         // Log Reply
-                         await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
-                            [crypto.randomUUID(), candidateId, nextNode.data.content]);
-                         
-                         // Update State
-                         await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [nextNode.id, candidateId]);
+        // Only reply if not in Human Mode
+        if (!candidate.is_human_mode) {
+            const settings = await getBotSettings(phoneId);
+            if (settings && settings.nodes && settings.nodes.length > 0) {
+                 logger.info("Bot Logic Active", { requestId });
+                 
+                 // Simple Logic: If no current node, find start node and reply
+                 // Real implementation would traverse edges based on input
+                 if (!candidate.current_node_id) {
+                     const startNode = settings.nodes.find(n => n.type === 'start') || settings.nodes[0];
+                     const edge = settings.edges?.find(e => e.source === startNode.id);
+                     if (edge) {
+                         const nextNode = settings.nodes.find(n => n.id === edge.target);
+                         if (nextNode && nextNode.data && nextNode.data.content) {
+                             await sendToMeta(from, { type: 'text', text: { body: nextNode.data.content } });
+                             
+                             await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
+                                [crypto.randomUUID(), candidateId, nextNode.data.content]);
+                             
+                             await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [nextNode.id, candidateId]);
+                         }
                      }
                  }
-             }
+            }
         }
         return { success: true };
     } finally { 
@@ -370,7 +370,7 @@ apiRouter.post('/auth/google', async (req, res, next) => {
         const payload = ticket.getPayload();
         res.json({ success: true, user: { name: payload.name, email: payload.email, picture: payload.picture } });
     } catch (error) {
-        next(error); // Pass to global handler
+        next(error); 
     }
 });
 
@@ -453,6 +453,7 @@ apiRouter.post('/system/webhook', async (req, res) => { res.json({ success: true
 apiRouter.get('/drivers', async (req, res, next) => {
     const client = await getDb().connect();
     try {
+        // Ensuring we fetch last_message so UI is not empty
         const resDb = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC LIMIT 50');
         res.json(resDb.rows.map(row => ({ 
             id: row.id, 

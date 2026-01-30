@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS candidates (
     variables JSONB DEFAULT '{}',
     tags TEXT[],
     current_node_id VARCHAR(255),
+    is_human_mode BOOLEAN DEFAULT FALSE,
+    human_mode_ends_at BIGINT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -25,6 +27,7 @@ CREATE TABLE IF NOT EXISTS candidate_messages (
     text TEXT,
     type VARCHAR(50),
     status VARCHAR(50),
+    whatsapp_message_id VARCHAR(255) UNIQUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -38,7 +41,18 @@ CREATE TABLE IF NOT EXISTS bot_versions (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- 4. Scheduled Messages Table
+CREATE TABLE IF NOT EXISTS scheduled_messages (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+    payload JSONB,
+    scheduled_time BIGINT,
+    status VARCHAR(50) DEFAULT 'pending',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_candidates_phone ON candidates(phone_number);
 CREATE INDEX IF NOT EXISTS idx_messages_candidate ON candidate_messages(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON candidate_messages(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_scheduled_time ON scheduled_messages(scheduled_time) WHERE status = 'pending';
