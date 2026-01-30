@@ -16,9 +16,6 @@ interface LeadManagerProps {
 }
 
 const ITEMS_PER_PAGE = 15;
-const MIN_SCHEDULE_LEAD_MINUTES = 5;
-const MAX_BROADCAST_RECIPIENTS = 5000;
-const MAX_BUTTONS = 3;
 
 export const LeadManager: React.FC<LeadManagerProps> = ({ 
   drivers, onSelectDriver, onBulkSend, onUpdateDriverStatus
@@ -37,14 +34,6 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
   const [isScheduled, setIsScheduled] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
   const [buttons, setButtons] = useState<MessageButton[]>([]);
-  const [campaignName, setCampaignName] = useState('');
-  const [priority, setPriority] = useState<'standard' | 'high'>('standard');
-  const [rateLimit, setRateLimit] = useState(60);
-  const [batchSize, setBatchSize] = useState(100);
-  const [windowStart, setWindowStart] = useState('08:00');
-  const [windowEnd, setWindowEnd] = useState('20:00');
-  const [complianceConfirmed, setComplianceConfirmed] = useState(false);
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
   const sections = [
     { id: 'All', label: 'All Leads', icon: Users, color: 'text-gray-600' },
@@ -75,30 +64,6 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
     else setSelectedIds(prev => [...prev, id]);
   };
 
-  const scheduleTimestamp = useMemo(() => {
-    if (!isScheduled || !scheduleTime) return null;
-    const value = new Date(scheduleTime).getTime();
-    return Number.isNaN(value) ? null : value;
-  }, [isScheduled, scheduleTime]);
-
-  const scheduleError = useMemo(() => {
-    if (!isScheduled) return '';
-    if (!scheduleTimestamp) return 'Schedule time is required.';
-    const minLeadMs = MIN_SCHEDULE_LEAD_MINUTES * 60 * 1000;
-    if (scheduleTimestamp <= Date.now() + minLeadMs) {
-      return `Choose a time at least ${MIN_SCHEDULE_LEAD_MINUTES} minutes in the future.`;
-    }
-    return '';
-  }, [isScheduled, scheduleTimestamp]);
-
-  const broadcastEstimate = useMemo(() => {
-    const recipients = selectedIds.length;
-    if (recipients === 0) return '—';
-    const effectiveRate = Math.max(1, rateLimit);
-    const minutes = Math.ceil(recipients / effectiveRate);
-    return `${minutes} min @ ${effectiveRate}/min`;
-  }, [selectedIds.length, rateLimit]);
-
   const executeBulkSend = async () => {
     // BLOCKED PHRASES
     if (/replace this|sample message|type your message/i.test(bulkMessage)) {
@@ -107,44 +72,21 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
     }
 
     if (!bulkMessage.trim() && !selectedMedia && !templateName) return;
-    if (selectedIds.length > MAX_BROADCAST_RECIPIENTS) {
-        alert(`Broadcast cap exceeded. Max ${MAX_BROADCAST_RECIPIENTS} recipients per campaign.`);
-        return;
-    }
-    if (isScheduled && scheduleError) {
-        alert(scheduleError);
-        return;
-    }
-    if (!complianceConfirmed) {
-        alert("Please confirm opt-in compliance before broadcasting.");
-        return;
-    }
     
-    const timestamp = isScheduled && scheduleTimestamp ? scheduleTimestamp : Date.now();
+    const timestamp = isScheduled && scheduleTime ? new Date(scheduleTime).getTime() : Date.now();
     try {
         await liveApiService.scheduleMessage(selectedIds, {
             text: bulkMessage,
             mediaUrl: selectedMedia?.url,
             mediaType: selectedMedia?.type,
             buttons: buttons.length > 0 ? (buttons as any) : undefined,
-            templateName: templateName || undefined,
-            metadata: {
-              campaignName: campaignName || `Broadcast ${new Date().toLocaleDateString()}`,
-              priority,
-              rateLimitPerMinute: rateLimit,
-              batchSize,
-              windowStart,
-              windowEnd,
-              timezone,
-              complianceConfirmed
-            }
+            templateName: templateName || undefined
         }, timestamp);
         onBulkSend(selectedIds, bulkMessage, selectedMedia?.url, selectedMedia?.type, buttons as any, templateName, timestamp);
     } catch (e: any) { alert(`Failed: ${e.message}`); return; }
 
     setShowBulkCompose(false);
     setBulkMessage(''); setTemplateName(''); setSelectedMedia(null); setButtons([]); setIsScheduled(false); setScheduleTime(''); setSelectedIds([]);
-    setCampaignName(''); setPriority('standard'); setRateLimit(60); setBatchSize(100); setWindowStart('08:00'); setWindowEnd('20:00'); setComplianceConfirmed(false);
   };
 
   return (
@@ -201,130 +143,16 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
                       <button onClick={() => setShowBulkCompose(false)}><X size={20} className="text-gray-400" /></button>
                   </div>
                   <div className="p-6 flex-1 flex flex-col overflow-y-auto space-y-4">
-                      <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 text-xs text-blue-800 space-y-2">
-                        <div className="flex items-center justify-between">
-                          <span>Recipients</span>
-                          <strong>{selectedIds.length}</strong>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span>Estimated delivery</span>
-                          <strong>{broadcastEstimate}</strong>
-                        </div>
-                        <div className="text-[10px] text-blue-700">Timezone: {timezone}</div>
+                      <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 text-xs text-blue-800">Sending to <strong>{selectedIds.length}</strong> recipients.</div>
+                      <div className="p-3 rounded-lg border bg-gray-50">
+                          <label className="text-xs font-bold text-gray-600 flex items-center gap-2"><Clock size={14} /> Schedule</label>
+                          <input type="checkbox" checked={isScheduled} onChange={(e) => setIsScheduled(e.target.checked)} className="ml-2" />
+                          {isScheduled && <input type="datetime-local" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} className="w-full mt-2 p-2 border rounded text-sm" />}
                       </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-gray-600">Campaign Name</label>
-                        <input value={campaignName} onChange={(e) => setCampaignName(e.target.value)} className="w-full p-2 border rounded text-sm" placeholder="e.g. April Fleet Push" />
-                      </div>
-                      <div className="p-3 rounded-lg border bg-gray-50 space-y-2">
-                          <div className="flex items-center justify-between">
-                            <label className="text-xs font-bold text-gray-600 flex items-center gap-2"><Clock size={14} /> Schedule</label>
-                            <input type="checkbox" checked={isScheduled} onChange={(e) => setIsScheduled(e.target.checked)} />
-                          </div>
-                          {isScheduled && (
-                            <>
-                              <input type="datetime-local" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} className="w-full p-2 border rounded text-sm" />
-                              {scheduleError && <div className="text-[10px] text-red-600 font-semibold">{scheduleError}</div>}
-                            </>
-                          )}
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="text-[10px] text-gray-500 font-semibold">Window Start</label>
-                              <input type="time" value={windowStart} onChange={(e) => setWindowStart(e.target.value)} className="w-full p-2 border rounded text-sm" />
-                            </div>
-                            <div>
-                              <label className="text-[10px] text-gray-500 font-semibold">Window End</label>
-                              <input type="time" value={windowEnd} onChange={(e) => setWindowEnd(e.target.value)} className="w-full p-2 border rounded text-sm" />
-                            </div>
-                          </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="space-y-2">
-                          <label className="text-xs font-bold text-gray-600">Priority</label>
-                          <select value={priority} onChange={(e) => setPriority(e.target.value as 'standard' | 'high')} className="w-full p-2 border rounded text-sm">
-                            <option value="standard">Standard</option>
-                            <option value="high">High</option>
-                          </select>
-                        </div>
-                        <div className="space-y-2">
-                          <label className="text-xs font-bold text-gray-600">Rate Limit / min</label>
-                          <input type="number" min={1} value={rateLimit} onChange={(e) => setRateLimit(Math.max(1, Number(e.target.value)))} className="w-full p-2 border rounded text-sm" />
-                        </div>
-                        <div className="space-y-2">
-                          <label className="text-xs font-bold text-gray-600">Batch Size</label>
-                          <input type="number" min={1} value={batchSize} onChange={(e) => setBatchSize(Math.max(1, Number(e.target.value)))} className="w-full p-2 border rounded text-sm" />
-                        </div>
-                      </div>
-                      <div className="space-y-3">
-                        <label className="text-xs font-bold text-gray-600">Message</label>
-                        <textarea value={bulkMessage} onChange={(e) => setBulkMessage(e.target.value)} className="w-full p-4 bg-gray-50 border border-gray-200 rounded-xl resize-none min-h-[120px] text-sm" placeholder="Type message..." />
-                        <div className="flex flex-wrap gap-2 text-[10px] text-gray-500 items-center">
-                          <span>{bulkMessage.trim().length} characters</span>
-                          <span className="h-1 w-1 rounded-full bg-gray-300" />
-                          <span>{buttons.length}/{MAX_BUTTONS} buttons</span>
-                          {selectedMedia && (
-                            <>
-                              <span className="h-1 w-1 rounded-full bg-gray-300" />
-                              <span className="text-blue-600 font-semibold">Media: {selectedMedia.type}</span>
-                            </>
-                          )}
-                        </div>
-                        <div className="flex gap-2">
-                          <button onClick={() => setShowMediaPicker(true)} className="flex items-center gap-2 text-xs font-semibold px-3 py-2 border rounded-lg hover:bg-gray-50">
-                            <Paperclip size={12} /> Attach Media
-                          </button>
-                          <button onClick={() => setSelectedMedia(null)} className="text-xs font-semibold px-3 py-2 border rounded-lg hover:bg-gray-50">
-                            Clear Media
-                          </button>
-                        </div>
-                        <div className="space-y-2">
-                          <label className="text-xs font-bold text-gray-600">Template Name (Optional)</label>
-                          <input value={templateName} onChange={(e) => setTemplateName(e.target.value)} className="w-full p-2 border rounded text-sm" placeholder="e.g. lead_followup_v1" />
-                        </div>
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-gray-600">Quick Reply Buttons</label>
-                        <div className="space-y-2">
-                          {buttons.map((btn, index) => (
-                            <div key={btn.id || index} className="flex items-center gap-2">
-                              <input
-                                value={btn.title}
-                                onChange={(e) => {
-                                  const next = [...buttons];
-                                  next[index] = { ...next[index], title: e.target.value };
-                                  setButtons(next);
-                                }}
-                                className="flex-1 p-2 border rounded text-sm"
-                                placeholder={`Button ${index + 1}`}
-                              />
-                              <button onClick={() => setButtons(buttons.filter((_, idx) => idx !== index))} className="p-1 text-red-500">
-                                <Trash2 size={14} />
-                              </button>
-                            </div>
-                          ))}
-                          {buttons.length < MAX_BUTTONS && (
-                            <button
-                              onClick={() => setButtons([...buttons, { type: 'reply', title: `Option ${buttons.length + 1}`, id: Date.now().toString() }])}
-                              className="text-xs text-blue-600 font-semibold"
-                            >
-                              + Add button
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                      <label className="flex items-center gap-2 text-xs text-gray-600 font-semibold">
-                        <input type="checkbox" checked={complianceConfirmed} onChange={(e) => setComplianceConfirmed(e.target.checked)} />
-                        I confirm recipients have opted in and content meets compliance requirements.
-                      </label>
+                      <textarea value={bulkMessage} onChange={(e) => setBulkMessage(e.target.value)} className="w-full p-4 bg-gray-50 border border-gray-200 rounded-xl resize-none min-h-[120px] text-sm" placeholder="Type message..." />
                   </div>
                   <div className="p-6 border-t border-gray-100 bg-gray-50">
-                      <button
-                        onClick={executeBulkSend}
-                        disabled={(!bulkMessage.trim() && !selectedMedia && !templateName) || !!scheduleError || !complianceConfirmed}
-                        className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold hover:bg-blue-700 disabled:opacity-50"
-                      >
-                        {isScheduled ? 'Schedule Broadcast' : 'Send Broadcast'}
-                      </button>
+                      <button onClick={executeBulkSend} disabled={(!bulkMessage.trim() && !selectedMedia && !templateName)} className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold hover:bg-blue-700 disabled:opacity-50">Send Broadcast</button>
                   </div>
               </div>
           </div>
