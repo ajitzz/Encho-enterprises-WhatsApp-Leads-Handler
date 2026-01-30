@@ -338,6 +338,15 @@ const normalizeScheduledPayload = (payload) => {
     return payload;
 };
 
+const resolveTimestamp = (timestamp) => {
+    if (typeof timestamp === 'number' && Number.isFinite(timestamp)) return timestamp;
+    if (typeof timestamp === 'string' && timestamp.trim()) {
+        const parsed = Date.parse(timestamp);
+        if (!Number.isNaN(parsed)) return parsed;
+    }
+    return null;
+};
+
 const buildTemplatePayload = ({ templateName, templateLanguage, text }) => {
     const language = templateLanguage || process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US';
     const payload = {
@@ -826,7 +835,14 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
     const { driverIds, message, timestamp } = req.body;
     const client = await getDb().connect();
     try {
-        const scheduledTime = typeof timestamp === 'number' ? timestamp : Date.now();
+        await ensureDbSchema();
+        if (!Array.isArray(driverIds) || driverIds.length === 0) {
+            return res.status(400).json({ ok: false, error: 'driverIds must be a non-empty array' });
+        }
+        const scheduledTime = resolveTimestamp(timestamp) ?? Date.now();
+        if (!Number.isFinite(scheduledTime)) {
+            return res.status(400).json({ ok: false, error: 'Invalid scheduled timestamp' });
+        }
         for (const driverId of driverIds) {
             await client.query(
                 `INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`,
@@ -838,7 +854,10 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
         if (e.code === '42P01') {
             try {
                 await ensureDbSchema();
-                const scheduledTime = typeof timestamp === 'number' ? timestamp : Date.now();
+                const scheduledTime = resolveTimestamp(timestamp) ?? Date.now();
+                if (!Number.isFinite(scheduledTime)) {
+                    return res.status(400).json({ ok: false, error: 'Invalid scheduled timestamp' });
+                }
                 const payload = message || {};
                 for (const driverId of driverIds || []) {
                     await client.query(
@@ -889,9 +908,13 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
         const values = [JSON.stringify(newPayload)];
         let idx = 2;
 
-        if (typeof scheduledTime === 'number') {
+        const resolvedScheduledTime = scheduledTime !== undefined ? resolveTimestamp(scheduledTime) : null;
+        if (scheduledTime !== undefined && resolvedScheduledTime === null) {
+            return res.status(400).json({ ok: false, error: 'Invalid scheduled timestamp' });
+        }
+        if (resolvedScheduledTime !== null) {
             updates.push(`scheduled_time = $${idx++}`);
-            values.push(scheduledTime);
+            values.push(resolvedScheduledTime);
         }
 
         values.push(req.params.id);
@@ -910,9 +933,13 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
                 const values = [JSON.stringify(newPayload)];
                 let idx = 2;
 
-                if (typeof scheduledTime === 'number') {
+                const resolvedScheduledTime = scheduledTime !== undefined ? resolveTimestamp(scheduledTime) : null;
+                if (scheduledTime !== undefined && resolvedScheduledTime === null) {
+                    return res.status(400).json({ ok: false, error: 'Invalid scheduled timestamp' });
+                }
+                if (resolvedScheduledTime !== null) {
                     updates.push(`scheduled_time = $${idx++}`);
-                    values.push(scheduledTime);
+                    values.push(resolvedScheduledTime);
                 }
 
                 values.push(req.params.id);
