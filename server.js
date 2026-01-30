@@ -803,7 +803,23 @@ apiRouter.get('/drivers/:id/scheduled-messages', async (req, res, next) => {
             payload: normalizeScheduledPayload(r.payload),
             status: r.status
         })));
-    } catch (e) { next(e); } finally { client.release(); }
+    } catch (e) {
+        if (e.code === '42P01') {
+            try {
+                await ensureDbSchema();
+                const retry = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 ORDER BY scheduled_time ASC`, [req.params.id]);
+                return res.json(retry.rows.map(r => ({
+                    id: r.id,
+                    scheduledTime: parseInt(r.scheduled_time),
+                    payload: normalizeScheduledPayload(r.payload),
+                    status: r.status
+                })));
+            } catch (retryError) {
+                return next(retryError);
+            }
+        }
+        next(e);
+    } finally { client.release(); }
 });
 
 apiRouter.post('/scheduled-messages', async (req, res, next) => {
@@ -818,7 +834,25 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
             );
         }
         res.json({ success: true, count: driverIds.length });
-    } catch (e) { next(e); } finally { client.release(); }
+    } catch (e) {
+        if (e.code === '42P01') {
+            try {
+                await ensureDbSchema();
+                const scheduledTime = typeof timestamp === 'number' ? timestamp : Date.now();
+                const payload = message || {};
+                for (const driverId of driverIds || []) {
+                    await client.query(
+                        `INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`,
+                        [crypto.randomUUID(), driverId, JSON.stringify(payload), scheduledTime]
+                    );
+                }
+                return res.json({ success: true, count: (driverIds || []).length });
+            } catch (retryError) {
+                return next(retryError);
+            }
+        }
+        next(e);
+    } finally { client.release(); }
 });
 
 apiRouter.delete('/scheduled-messages/:id', async (req, res, next) => {
@@ -827,7 +861,18 @@ apiRouter.delete('/scheduled-messages/:id', async (req, res, next) => {
         await ensureDbSchema();
         await client.query('DELETE FROM scheduled_messages WHERE id = $1', [req.params.id]);
         res.json({ success: true });
-    } catch (e) { next(e); } finally { client.release(); }
+    } catch (e) {
+        if (e.code === '42P01') {
+            try {
+                await ensureDbSchema();
+                await client.query('DELETE FROM scheduled_messages WHERE id = $1', [req.params.id]);
+                return res.json({ success: true });
+            } catch (retryError) {
+                return next(retryError);
+            }
+        }
+        next(e);
+    } finally { client.release(); }
 });
 
 apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
@@ -852,7 +897,33 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
         values.push(req.params.id);
         await client.query(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = $${idx}`, values);
         res.json({ success: true });
-    } catch (e) { next(e); } finally { client.release(); }
+    } catch (e) {
+        if (e.code === '42P01') {
+            try {
+                await ensureDbSchema();
+                const old = await client.query('SELECT payload FROM scheduled_messages WHERE id = $1', [req.params.id]);
+                if (old.rows.length === 0) return res.status(404).json({ ok: false, error: "Not found" });
+
+                const existingPayload = normalizeScheduledPayload(old.rows[0].payload);
+                const newPayload = { ...existingPayload, text: text || existingPayload.text };
+                const updates = [`payload = $1`];
+                const values = [JSON.stringify(newPayload)];
+                let idx = 2;
+
+                if (typeof scheduledTime === 'number') {
+                    updates.push(`scheduled_time = $${idx++}`);
+                    values.push(scheduledTime);
+                }
+
+                values.push(req.params.id);
+                await client.query(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = $${idx}`, values);
+                return res.json({ success: true });
+            } catch (retryError) {
+                return next(retryError);
+            }
+        }
+        next(e);
+    } finally { client.release(); }
 });
 
 // ==========================================
