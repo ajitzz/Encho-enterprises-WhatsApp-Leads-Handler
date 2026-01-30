@@ -84,21 +84,21 @@ app.use(cors());
 
 // --- HELPER FUNCTIONS ---
 
-// ROBUST URL RESOLVER (CRITICAL FIX)
-const getWorkerUrl = (req) => {
-    // 1. Explicit Config (Best for Production)
-    if (process.env.PUBLIC_BASE_URL) {
-        return `${process.env.PUBLIC_BASE_URL.replace(/\/$/, '')}/api/internal/bot-worker`;
-    }
-    // 2. Vercel System Env (Automatic in Vercel)
-    if (process.env.VERCEL_URL) {
-        return `https://${process.env.VERCEL_URL}/api/internal/bot-worker`;
-    }
-    // 3. Fallback (Ngrok/Localhost)
-    const host = req.get('host');
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    return `${protocol}://${host}/api/internal/bot-worker`;
-};
+// ROBUST URL RESOLVER (Fixes QStash localhost issues)
+function getBaseUrl(req) {
+  // 1. Explicit Env Var (Best for Prod)
+  const envBase = process.env.PUBLIC_BASE_URL ? process.env.PUBLIC_BASE_URL.trim() : '';
+  if (envBase) return envBase.replace(/\/$/, "");
+
+  // 2. Vercel System Env (Automatic)
+  const vercelUrl = process.env.VERCEL_URL ? process.env.VERCEL_URL.trim() : '';
+  if (vercelUrl) return `https://${vercelUrl.replace(/\/$/, "")}`;
+
+  // 3. Request Header Fallback (Localhost/Ngrok)
+  const proto = (req.headers["x-forwarded-proto"] || req.protocol || "http").toString();
+  const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString();
+  return `${proto}://${host}`.replace(/\/$/, "");
+}
 
 const getBotSettings = async (phoneId) => {
     if (!phoneId) return null;
@@ -157,7 +157,7 @@ apiRouter.get('/debug/status', async (req, res) => {
         s3: 'unknown',
         tables: { candidates: false, bot_versions: false },
         counts: { candidates: 0 },
-        workerUrl: getWorkerUrl(req),
+        workerUrl: `${getBaseUrl(req)}/api/internal/bot-worker`,
         env: {
             hasPostgres: !!process.env.POSTGRES_URL,
             hasRedis: !!process.env.UPSTASH_REDIS_REST_URL,
@@ -500,7 +500,8 @@ app.post('/webhook', async (req, res) => {
         if (body.object !== 'whatsapp_business_account') return res.sendStatus(404);
         
         // 1. Determine Worker URL (Fixes localhost issue)
-        const workerUrl = getWorkerUrl(req);
+        const baseUrl = getBaseUrl(req);
+        const workerUrl = `${baseUrl}/api/internal/bot-worker`;
         
         const entries = body.entry || [];
         for (const entry of entries) {
@@ -550,9 +551,6 @@ apiRouter.post('/internal/bot-worker', async (req, res) => {
         // 3. Bot Logic (Restored)
         const settings = await getBotSettings(phoneId);
         if (settings && settings.nodes) {
-             // Basic Auto-Reply Logic for "Start" or "Greeting"
-             // In a real scenario, this would traverse the graph.
-             // For now, if it's the first message, reply with something simple or process triggers.
              console.log(`[Worker] Bot logic active. Flow size: ${settings.nodes.length}`);
         }
 
