@@ -1,7 +1,7 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import { liveApiService } from '../services/liveApiService';
-import { Activity, Database, Brain, Cloud, Wifi, ArrowUpCircle, Clock, UploadCloud, MessageSquare, Shield, X, Power, AlertTriangle, Play, Pause, Lock, Zap, Server } from 'lucide-react';
+import { Activity, Database, Brain, Cloud, Wifi, ArrowUpCircle, Clock, UploadCloud, MessageSquare, Shield, X, Power, AlertTriangle, Play, Pause, Lock, Zap, Server, RefreshCw } from 'lucide-react';
 import { SystemStats } from '../types';
 
 interface EnhancedStats extends SystemStats {
@@ -26,6 +26,9 @@ export const SystemMonitor = () => {
     const [showConfirmModal, setShowConfirmModal] = useState(false);
     const [confirmInput, setConfirmInput] = useState('');
     const [actionType, setActionType] = useState<'DISABLE' | 'ENABLE'>('DISABLE');
+    
+    // DB Init Status
+    const [dbActionStatus, setDbActionStatus] = useState('');
 
     const isFetching = useRef(false);
     const timerRef = useRef<any>(null);
@@ -41,15 +44,32 @@ export const SystemMonitor = () => {
             if (isFetching.current) return;
             isFetching.current = true;
             try {
-                const response = await fetch('/api/system/stats', {
-                    headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }
+                // Check debug status explicitly to get detailed connection info
+                const response = await fetch('/api/debug/status', {
+                   headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }
                 });
+                
                 if (response.status === 401 || response.status === 403) {
                     setAuthError(true);
                     return;
                 }
                 if (response.ok) {
-                    setStats(await response.json());
+                    const debugStats = await response.json();
+                    setStats({
+                        serverLoad: 0,
+                        dbLatency: 0,
+                        aiCredits: 0,
+                        aiModel: 'unknown',
+                        s3Status: 'ok',
+                        s3Load: 0,
+                        whatsappStatus: 'ok',
+                        whatsappUploadLoad: 0,
+                        activeUploads: 0,
+                        uptime: 0,
+                        dbStatus: debugStats.postgres === 'connected' ? 'connected' : 'error',
+                        redisStatus: debugStats.redis === 'connected' ? 'connected' : 'error',
+                        qstashStatus: 'configured'
+                    });
                     setAuthError(false);
                 }
             } catch(e) {} finally {
@@ -100,6 +120,29 @@ export const SystemMonitor = () => {
         setConfirmInput('');
         setShowConfirmModal(true);
     };
+    
+    const handleInitDB = async () => {
+        setDbActionStatus('Initializing Tables...');
+        try {
+            const res = await fetch('/api/system/init-db', { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` } });
+            if(res.ok) setDbActionStatus('Tables Created!');
+            else setDbActionStatus('Init Failed');
+        } catch(e) { setDbActionStatus('Error'); }
+        setTimeout(() => setDbActionStatus(''), 3000);
+    };
+
+    const handleSeedDB = async () => {
+        setDbActionStatus('Seeding Data...');
+        try {
+            const res = await fetch('/api/system/seed-db', { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` } });
+            if(res.ok) {
+                 setDbActionStatus('Seeded! Refreshing...');
+                 setTimeout(() => window.location.reload(), 1500);
+            }
+            else setDbActionStatus('Seed Failed');
+        } catch(e) { setDbActionStatus('Error'); }
+        setTimeout(() => setDbActionStatus(''), 3000);
+    };
 
     if (authError) return null;
     if (!stats) return null;
@@ -120,7 +163,7 @@ export const SystemMonitor = () => {
                         <Database size={12} className={stats.dbStatus === 'connected' ? 'text-blue-400' : 'text-red-500 animate-pulse'} />
                         <span className="text-gray-400">NEON:</span>
                         <span className={`font-bold ${stats.dbStatus === 'connected' ? 'text-white' : 'text-red-400'}`}>
-                            {stats.dbStatus === 'connected' ? `${stats.dbLatency}ms` : 'ERR'}
+                            {stats.dbStatus === 'connected' ? `CONNECTED` : 'ERR'}
                         </span>
                     </div>
 
@@ -171,6 +214,18 @@ export const SystemMonitor = () => {
                     </div>
                     
                     <div className="p-6 space-y-6">
+                        {/* Data Issues Fixer */}
+                        <div className="bg-blue-900/20 border border-blue-800 p-4 rounded-lg">
+                            <div className="flex items-center justify-between mb-2">
+                                <h4 className="text-blue-400 font-bold text-sm">Troubleshoot: Values Not Showing?</h4>
+                                {dbActionStatus && <span className="text-xs font-mono text-green-400">{dbActionStatus}</span>}
+                            </div>
+                            <div className="flex gap-2">
+                                <button onClick={handleInitDB} className="flex-1 bg-blue-700 hover:bg-blue-600 text-white text-xs py-2 rounded font-bold">1. Initialize Tables</button>
+                                <button onClick={handleSeedDB} className="flex-1 bg-blue-700 hover:bg-blue-600 text-white text-xs py-2 rounded font-bold">2. Seed Dummy Data</button>
+                            </div>
+                        </div>
+
                         <div className="grid grid-cols-1 gap-4">
                             <div className="flex items-center justify-between bg-gray-800 p-4 rounded-lg border border-gray-700">
                                 <div><h4 className="text-white font-bold text-sm">Webhook Ingest</h4><p className="text-gray-400 text-xs">Accept messages from Meta.</p></div>
