@@ -795,6 +795,7 @@ apiRouter.get('/drivers/:id/documents', async (req, res) => { res.json([]); });
 apiRouter.get('/drivers/:id/scheduled-messages', async (req, res, next) => {
     const client = await getDb().connect();
     try {
+        await ensureDbSchema();
         const result = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 ORDER BY scheduled_time ASC`, [req.params.id]);
         res.json(result.rows.map(r => ({
             id: r.id,
@@ -823,6 +824,7 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
 apiRouter.delete('/scheduled-messages/:id', async (req, res, next) => {
     const client = await getDb().connect();
     try {
+        await ensureDbSchema();
         await client.query('DELETE FROM scheduled_messages WHERE id = $1', [req.params.id]);
         res.json({ success: true });
     } catch (e) { next(e); } finally { client.release(); }
@@ -832,6 +834,7 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
     const { text, scheduledTime } = req.body;
     const client = await getDb().connect();
     try {
+        await ensureDbSchema();
         const old = await client.query('SELECT payload FROM scheduled_messages WHERE id = $1', [req.params.id]);
         if (old.rows.length === 0) return res.status(404).json({ ok: false, error: "Not found" });
 
