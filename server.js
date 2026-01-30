@@ -826,16 +826,11 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
     const { driverIds, message, timestamp } = req.body;
     const client = await getDb().connect();
     try {
-        await ensureDbSchema();
-        if (!Array.isArray(driverIds) || driverIds.length === 0) {
-            return res.status(400).json({ ok: false, error: 'driverIds required' });
-        }
         const scheduledTime = typeof timestamp === 'number' ? timestamp : Date.now();
-        const payload = message || {};
         for (const driverId of driverIds) {
             await client.query(
                 `INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`,
-                [crypto.randomUUID(), driverId, JSON.stringify(payload), scheduledTime]
+                [crypto.randomUUID(), driverId, JSON.stringify(message), scheduledTime]
             );
         }
         res.json({ success: true, count: driverIds.length });
