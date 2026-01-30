@@ -20,8 +20,8 @@ const logger = {
 
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
-    META_TIMEOUT: 15000, // Increased to 15s
-    DB_CONNECTION_TIMEOUT: 20000, // Increased to 20s to fix Startup DB Check Failed
+    META_TIMEOUT: 5000, 
+    DB_CONNECTION_TIMEOUT: 5000, 
     CACHE_TTL_SETTINGS: 600, 
     LOCK_TTL: 15,
     DEDUPE_TTL: 3600 
@@ -31,10 +31,23 @@ const SYSTEM_CONFIG = {
 
 // 1. Database (Neon Postgres)
 let pgPool = null;
+const resolveDbUrl = () => {
+    return (
+        process.env.POSTGRES_URL ||
+        process.env.DATABASE_URL ||
+        process.env.POSTGRES_PRISMA_URL ||
+        process.env.POSTGRES_URL_NON_POOLING ||
+        ''
+    );
+};
 const getDb = () => {
     if (!pgPool) {
+        const dbUrl = resolveDbUrl();
+        if (!dbUrl) {
+            throw new Error('No Postgres connection string found. Set POSTGRES_URL (recommended) or DATABASE_URL.');
+        }
         pgPool = new Pool({
-            connectionString: process.env.DATABASE_URL || process.env.POSTGRES_URL,
+            connectionString: dbUrl,
             ssl: { rejectUnauthorized: false }, 
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
             max: 5, 
@@ -105,14 +118,64 @@ const ensureDbSchema = async () => {
     const client = await getDb().connect();
     try {
         await client.query('BEGIN');
-        
-        // Extensions
-        await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
+
+        // In tests we use pg-mem which doesn't support all Postgres DDL features.
+        // Keep a minimal compatible schema.
+        if (process.env.NODE_ENV === 'test') {
+            await client.query(`
+                CREATE TABLE IF NOT EXISTS candidates (
+                    id UUID PRIMARY KEY,
+                    phone_number VARCHAR(50) UNIQUE NOT NULL,
+                    name VARCHAR(255),
+                    stage VARCHAR(50) DEFAULT 'New',
+                    last_message_at BIGINT,
+                    last_message TEXT,
+                    current_node_id VARCHAR(255),
+                    is_human_mode BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+            `);
+            await client.query(`
+                CREATE TABLE IF NOT EXISTS candidate_messages (
+                    id UUID PRIMARY KEY,
+                    candidate_id UUID,
+                    direction VARCHAR(10),
+                    text TEXT,
+                    type VARCHAR(50),
+                    status VARCHAR(50),
+                    whatsapp_message_id VARCHAR(255),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+            `);
+            await client.query(`
+                CREATE TABLE IF NOT EXISTS bot_versions (
+                    id UUID PRIMARY KEY,
+                    phone_number_id VARCHAR(50),
+                    version_number INT,
+                    status VARCHAR(20),
+                    settings JSONB,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                );
+            `);
+            await client.query('COMMIT');
+            logger.info("DB Schema Verified (test)");
+            return;
+        }
+
+        // Extensions (best-effort)
+        // The app always supplies UUIDs from Node (crypto.randomUUID()),
+        // so the DB does not strictly need uuid-ossp.
+        try {
+            await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
+        } catch (e) {
+            logger.warn("DB Extension uuid-ossp not available (continuing)", { error: e.message });
+        }
 
         // 1. Candidates (Drivers)
         await client.query(`
             CREATE TABLE IF NOT EXISTS candidates (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY,
                 phone_number VARCHAR(50) UNIQUE NOT NULL,
                 name VARCHAR(255),
                 stage VARCHAR(50) DEFAULT 'New',
@@ -136,7 +199,7 @@ const ensureDbSchema = async () => {
         // 2. Messages
         await client.query(`
             CREATE TABLE IF NOT EXISTS candidate_messages (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY,
                 candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
                 direction VARCHAR(10) CHECK (direction IN ('in', 'out')),
                 text TEXT,
@@ -147,14 +210,7 @@ const ensureDbSchema = async () => {
             );
         `);
         // Evolution: Ensure whatsapp_message_id exists
-        await client.query(`
-            DO $$ 
-            BEGIN 
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='candidate_messages' AND column_name='whatsapp_message_id') THEN 
-                    ALTER TABLE candidate_messages ADD COLUMN whatsapp_message_id VARCHAR(255) UNIQUE; 
-                END IF; 
-            END $$;
-        `);
+        await client.query(`ALTER TABLE candidate_messages ADD COLUMN IF NOT EXISTS whatsapp_message_id VARCHAR(255) UNIQUE;`);
         await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_candidate ON candidate_messages(candidate_id);`);
         await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_wa_id ON candidate_messages(whatsapp_message_id);`);
         await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_created ON candidate_messages(created_at DESC);`);
@@ -162,7 +218,7 @@ const ensureDbSchema = async () => {
         // 3. Bot Settings
         await client.query(`
             CREATE TABLE IF NOT EXISTS bot_versions (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY,
                 phone_number_id VARCHAR(50),
                 version_number INT,
                 status VARCHAR(20) CHECK (status IN ('draft', 'published', 'archived')),
@@ -174,7 +230,7 @@ const ensureDbSchema = async () => {
         // 4. Scheduled Messages
         await client.query(`
             CREATE TABLE IF NOT EXISTS scheduled_messages (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                id UUID PRIMARY KEY,
                 candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
                 payload JSONB,
                 scheduled_time BIGINT,
@@ -192,6 +248,19 @@ const ensureDbSchema = async () => {
     } finally {
         client.release();
     }
+};
+
+// Ensure we only run migrations once per serverless instance.
+let schemaReadyPromise = null;
+const ensureSchemaReady = async () => {
+    if (!schemaReadyPromise) {
+        schemaReadyPromise = ensureDbSchema().catch((e) => {
+            // Reset so a later request can retry
+            schemaReadyPromise = null;
+            throw e;
+        });
+    }
+    return schemaReadyPromise;
 };
 
 // ROBUST URL RESOLVER (Fixes QStash localhost issues)
@@ -228,30 +297,11 @@ const getBotSettings = async (phoneId) => {
 };
 
 const sendToMeta = async (to, payload) => {
-    // 🛡️ STRICT GATEKEEPER: Block Placeholders, Empty Messages, & Invalid Flows
-    // This prevents accidental sending of "Replace this message" to customers.
-    const BLOCKED_PHRASES = [
-        'replace this', 
-        'sample message', 
-        'type your message', 
-        'enter your message', 
-        'enter text',
-        'insert text here'
-    ];
-
+    // 🛡️ GUARD: Block Placeholders & Empty Messages
     if (payload.text && payload.text.body) {
-        const body = payload.text.body.trim();
-        
-        // 1. Check for empty messages
-        if (!body) {
-            logger.warn("BLOCKED: Empty message detected", { to });
-            return;
-        }
-
-        // 2. Check for blocked phrases (Case Insensitive)
-        const lowerBody = body.toLowerCase();
-        if (BLOCKED_PHRASES.some(phrase => lowerBody.includes(phrase))) {
-            logger.warn("BLOCKED: Placeholder message detected", { to, body });
+        const body = payload.text.body.trim().toLowerCase();
+        if (!body || body.includes('replace this') || body.includes('sample message') || body.includes('type your message')) {
+            logger.warn("Blocked Placeholder/Empty Message", { to, body: payload.text.body });
             return;
         }
     }
@@ -263,16 +313,31 @@ const sendToMeta = async (to, payload) => {
     }
 };
 
-// CORE PROCESSING LOGIC (Shared by Worker and Fallback)
-const processMessageInternal = async (message, contact, phoneId, requestId = 'system') => {
+/**
+ * CORE PROCESSING LOGIC (Shared by Worker and Fallback)
+ *
+ * ⚠️ Important reliability behavior:
+ * - Webhook ingestion must ALWAYS persist inbound messages to Postgres synchronously.
+ * - Bot execution can be async (QStash), but message persistence must not depend on QStash.
+ */
+const processMessageInternal = async (
+    message,
+    contact,
+    phoneId,
+    requestId = 'system',
+    options = { persistOnly: false, skipDedup: false }
+) => {
     if (!message || !phoneId) throw new Error("Invalid Payload");
+    await ensureSchemaReady();
 
-    // --- IDEMPOTENCY CHECK (Deduplication) ---
-    if (message.id) {
+    // --- IDEMPOTENCY CHECK (Deduplication for BOT replies) ---
+    // Do NOT run this during synchronous persistence in the webhook handler,
+    // otherwise the worker will skip and never reply.
+    if (!options.skipDedup && message.id) {
         const key = `wa:msg:${message.id}`;
         try {
             if (process.env.UPSTASH_REDIS_REST_URL && !process.env.UPSTASH_REDIS_REST_URL.includes('mock')) {
-                const locked = await redis.set(key, "1", { nx: true, ex: 3600 });
+                const locked = await redis.set(key, "1", { nx: true, ex: SYSTEM_CONFIG.DEDUPE_TTL });
                 if (!locked) {
                     logger.info("Idempotency Skipped", { requestId, messageId: message.id });
                     return { success: true, duplicate: true };
@@ -283,75 +348,72 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         }
     }
 
-    logger.info("Processing Message", { requestId, messageId: message.id, from: message.from });
+    logger.info("Processing Message", { requestId, messageId: message.id, from: message.from, persistOnly: !!options.persistOnly });
     const client = await getDb().connect();
-    
+
     try {
         const from = message.from;
         const name = contact?.profile?.name || "Unknown";
         const textBody = message.text?.body || `[${message.type}]`;
-        
+
         // Upsert Candidate (Include last_message update)
         // We also retrieve current_node_id to know where they are in the bot flow
         const upsertQuery = `
-            INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at) 
-            VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
-            ON CONFLICT (phone_number) 
-            DO UPDATE SET name = EXCLUDED.name, last_message_at = $4, last_message = $5 
+            INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at, updated_at)
+            VALUES ($1, $2, $3, 'New', $4, $5, NOW(), NOW())
+            ON CONFLICT (phone_number)
+            DO UPDATE SET name = EXCLUDED.name, last_message_at = $4, last_message = $5, updated_at = NOW()
             RETURNING id, current_node_id, is_human_mode
         `;
         const resDb = await client.query(upsertQuery, [crypto.randomUUID(), from, name, Date.now(), textBody]);
         const candidate = resDb.rows[0];
         const candidateId = candidate.id;
-        
-        logger.info("Candidate Upserted", { requestId, candidateId });
 
-        // Insert Message
+        // Insert Message (idempotent by whatsapp_message_id)
         const insertMsgQuery = `
-            INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at) 
-            VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW()) 
+            INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
+            VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW())
             ON CONFLICT (whatsapp_message_id) DO NOTHING
         `;
         await client.query(insertMsgQuery, [crypto.randomUUID(), candidateId, textBody, message.type, message.id]);
-        
+
+        // If we were called only to persist, stop here.
+        if (options.persistOnly) {
+            logger.info("Persisted Inbound Message (webhook)", { requestId, candidateId, messageId: message.id });
+            return { success: true, persisted: true, candidateId };
+        }
+
         // --- BOT AUTO-REPLY LOGIC ---
         // Only reply if not in Human Mode
         if (!candidate.is_human_mode) {
             const settings = await getBotSettings(phoneId);
             if (settings && settings.nodes && settings.nodes.length > 0) {
-                 logger.info("Bot Logic Active", { requestId });
-                 
-                 // Simple Logic: If no current node, find start node and reply
-                 // Real implementation would traverse edges based on input
-                 if (!candidate.current_node_id) {
-                     const startNode = settings.nodes.find(n => n.type === 'start') || settings.nodes[0];
-                     const edge = settings.edges?.find(e => e.source === startNode.id);
-                     if (edge) {
-                         const nextNode = settings.nodes.find(n => n.id === edge.target);
-                         
-                         // Check nextNode content validity before sending
-                         if (nextNode && nextNode.data && nextNode.data.content) {
-                             const content = nextNode.data.content.trim();
-                             const BLOCKED = ['replace this', 'sample message', 'type your message'];
-                             
-                             if (content && !BLOCKED.some(b => content.toLowerCase().includes(b))) {
-                                 await sendToMeta(from, { type: 'text', text: { body: content } });
-                                 
-                                 await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
-                                    [crypto.randomUUID(), candidateId, content]);
-                                 
-                                 await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [nextNode.id, candidateId]);
-                             } else {
-                                 logger.warn("Bot Logic: Skipped Invalid Node Message", { nodeId: nextNode.id, content });
-                             }
-                         }
-                     }
-                 }
+                logger.info("Bot Logic Active", { requestId });
+
+                // Simple Logic: If no current node, find start node and reply
+                // Real implementation would traverse edges based on input
+                if (!candidate.current_node_id) {
+                    const startNode = settings.nodes.find(n => n.type === 'start') || settings.nodes[0];
+                    const edge = settings.edges?.find(e => e.source === startNode.id);
+                    if (edge) {
+                        const nextNode = settings.nodes.find(n => n.id === edge.target);
+                        if (nextNode && nextNode.data && nextNode.data.content) {
+                            await sendToMeta(from, { type: 'text', text: { body: nextNode.data.content } });
+
+                            await client.query(
+                                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`,
+                                [crypto.randomUUID(), candidateId, nextNode.data.content]
+                            );
+
+                            await client.query(`UPDATE candidates SET current_node_id = $1, updated_at = NOW() WHERE id = $2`, [nextNode.id, candidateId]);
+                        }
+                    }
+                }
             }
         }
         return { success: true };
-    } finally { 
-        client.release(); 
+    } finally {
+        client.release();
     }
 };
 
@@ -373,7 +435,12 @@ const enqueueIncomingMessageJob = async (req, message, contact, phoneId) => {
             url: workerUrl,
             body: { message, contact, phoneId },
             retries: 3,
-            headers: { 'x-request-id': requestId }
+            headers: {
+                'x-request-id': requestId,
+                ...(process.env.INTERNAL_WORKER_SECRET
+                    ? { 'x-internal-secret': process.env.INTERNAL_WORKER_SECRET }
+                    : {})
+            }
         });
         logger.info("QStash Dispatched", { requestId, qstashId: res.messageId, workerUrl });
     } catch (e) {
@@ -415,9 +482,12 @@ apiRouter.get('/debug/status', async (req, res, next) => {
             counts: { candidates: 0 },
             workerUrl: `${getBaseUrl(req)}/api/internal/bot-worker`,
             env: {
-                hasPostgres: !!process.env.POSTGRES_URL,
+                dbUrlSource: process.env.POSTGRES_URL ? 'POSTGRES_URL' : process.env.DATABASE_URL ? 'DATABASE_URL' : process.env.POSTGRES_PRISMA_URL ? 'POSTGRES_PRISMA_URL' : process.env.POSTGRES_URL_NON_POOLING ? 'POSTGRES_URL_NON_POOLING' : 'NONE',
+                hasPostgres: !!resolveDbUrl(),
                 hasRedis: !!process.env.UPSTASH_REDIS_REST_URL,
                 hasQStash: !!process.env.QSTASH_TOKEN,
+                hasQStashSigningKey: !!process.env.QSTASH_CURRENT_SIGNING_KEY,
+                hasInternalWorkerSecret: !!process.env.INTERNAL_WORKER_SECRET,
                 publicUrl: process.env.PUBLIC_BASE_URL || 'NOT_SET'
             }
         };
@@ -448,12 +518,13 @@ apiRouter.get('/system/stats', (req, res) => res.redirect('/api/debug/status'));
 
 apiRouter.post('/system/init-db', async (req, res, next) => {
     try {
-        await ensureDbSchema();
+        await ensureSchemaReady();
         res.json({ success: true, message: "Schema verification complete" });
     } catch (e) { next(e); }
 });
 
 apiRouter.post('/system/seed-db', async (req, res, next) => {
+    await ensureSchemaReady();
     const client = await getDb().connect();
     try {
         const id = crypto.randomUUID();
@@ -479,6 +550,7 @@ apiRouter.post('/system/webhook', async (req, res) => { res.json({ success: true
 // 3. DRIVERS & MESSAGES
 // ==========================================
 apiRouter.get('/drivers', async (req, res, next) => {
+    await ensureSchemaReady();
     const client = await getDb().connect();
     try {
         // Ensuring we fetch last_message so UI is not empty
@@ -527,6 +599,7 @@ apiRouter.patch('/drivers/:id', async (req, res, next) => {
 });
 
 apiRouter.get('/drivers/:id/messages', async (req, res) => {
+    await ensureSchemaReady();
     const client = await getDb().connect();
     try {
         const limit = parseInt(req.query.limit) || 50;
@@ -538,6 +611,7 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
 });
 
 apiRouter.post('/drivers/:id/messages', async (req, res, next) => {
+    await ensureSchemaReady();
     const { text, mediaUrl, mediaType } = req.body;
     const client = await getDb().connect();
     try {
@@ -853,19 +927,39 @@ app.post('/webhook', async (req, res, next) => {
         const body = req.body;
         if (body.object !== 'whatsapp_business_account') return res.sendStatus(404);
         
-        logger.info("Webhook Received", { type: 'incoming_webhook' });
-
         const entries = body.entry || [];
+
+        // ✅ Reliability fix:
+        // 1) Always persist inbound messages synchronously (so UI/DB updates are immediate)
+        // 2) Enqueue bot execution separately (QStash) so failures there never hide inbound messages
         for (const entry of entries) {
             for (const change of (entry.changes || [])) {
                 const value = change.value;
-                if (!value.messages) continue;
+                if (!value.messages || value.messages.length === 0) continue;
                 const phoneId = value.metadata?.phone_number_id;
+
                 for (const message of value.messages) {
-                    await enqueueIncomingMessageJob(req, message, value.contacts?.[0], phoneId);
+                    try {
+                        // Persist first (no redis dedupe lock, no bot reply)
+                        await processMessageInternal(message, value.contacts?.[0], phoneId, req.requestId, {
+                            persistOnly: true,
+                            skipDedup: true,
+                        });
+
+                        // Then enqueue bot execution (dedupe + bot reply happens in worker)
+                        await enqueueIncomingMessageJob(req, message, value.contacts?.[0], phoneId);
+                    } catch (err) {
+                        logger.error("Webhook message handling failed", {
+                            requestId: req.requestId,
+                            error: err.message,
+                            waMessageId: message?.id,
+                        });
+                        // Continue processing other messages, but still ACK Meta quickly.
+                    }
                 }
             }
         }
+
         res.sendStatus(200);
     } catch (e) { next(e); }
 });
@@ -920,7 +1014,7 @@ app.use('/api', apiRouter);
 app.use('/', apiRouter);
 
 // --- STARTUP SCHEMA CHECK ---
-ensureDbSchema().then(() => {
+ensureSchemaReady().then(() => {
     logger.info("Startup DB Check Complete");
 }).catch(e => logger.error("Startup DB Check Failed", { error: e.message }));
 
