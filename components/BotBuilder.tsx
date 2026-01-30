@@ -15,13 +15,12 @@ import {
 import { useFlowStore } from '../services/flowStore';
 import { liveApiService } from '../services/liveApiService';
 import { mockBackend } from '../services/mockBackend';
-import { auditBotFlow } from '../services/geminiService';
 import { 
   MessageSquare, FileText, List, GitBranch, 
   Save, Play, AlertTriangle, Trash2, 
-  Check, User, HelpCircle, Phone, X, LayoutTemplate, RefreshCw, ShieldCheck, AlertOctagon, Sparkles
+  Check, User, HelpCircle, Phone, X, LayoutTemplate, RefreshCw
 } from 'lucide-react';
-import { AuditReport, FlowNodeData, NodeType } from '../types';
+import { FlowNodeData, NodeType } from '../types';
 
 // --- CUSTOM NODES ---
 
@@ -94,7 +93,7 @@ const CustomNode = ({ data, selected }: { data: FlowNodeData, selected: boolean 
     );
 };
 
-const Inspector = ({ node, onChange, className }: { node: Node<FlowNodeData>, onChange: (id: string, d: any) => void, className?: string }) => {
+const Inspector = ({ node, onChange }: { node: Node<FlowNodeData>, onChange: (id: string, d: any) => void }) => {
     const [local, setLocal] = useState(node.data as any);
     useEffect(() => setLocal(node.data), [node]);
 
@@ -107,7 +106,7 @@ const Inspector = ({ node, onChange, className }: { node: Node<FlowNodeData>, on
     const hasPlaceholder = (!local.content || /replace this|sample message|enter your message|type your message/i.test(local.content));
 
     return (
-        <div className={`bg-white h-full flex flex-col ${className || ''}`}>
+        <div className="w-80 bg-white border-l border-gray-200 h-full flex flex-col shadow-xl z-20">
             <div className="p-4 border-b bg-gray-50 flex justify-between items-center">
                 <h3 className="font-bold text-gray-800 uppercase text-xs tracking-wider">{local.type} Settings</h3>
             </div>
@@ -180,10 +179,6 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
     const { nodes, edges, onNodesChange, onEdgesChange, onConnect, addNode, updateNodeData, setNodes, setEdges } = useFlowStore();
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
     const [isSimulating, setIsSimulating] = useState(false);
-    const [auditReport, setAuditReport] = useState<AuditReport | null>(null);
-    const [isAuditing, setIsAuditing] = useState(false);
-    const [lastAuditAt, setLastAuditAt] = useState<Date | null>(null);
-    const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
     
     useEffect(() => {
         const load = async () => {
@@ -243,42 +238,11 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
         return errors;
     };
 
-    const runAudit = useCallback(async () => {
-        setIsAuditing(true);
-        try {
-            const report = await auditBotFlow(nodes);
-            setAuditReport(report);
-            setLastAuditAt(new Date());
-            return report;
-        } finally {
-            setIsAuditing(false);
-        }
-    }, [nodes]);
-
-    const applyAutoFixes = () => {
-        if (!auditReport) return;
-        auditReport.issues.forEach(issue => {
-            if (!issue.autoFixValue) return;
-            const node = nodes.find(n => n.id === issue.nodeId);
-            if (!node) return;
-            updateNodeData(issue.nodeId, { ...node.data, content: issue.autoFixValue });
-        });
-    };
-
     const handleSave = async (publish = false) => {
         const errors = validateNodes(nodes);
         if (errors.length > 0) {
             alert(`⚠️ Cannot ${publish ? 'Publish' : 'Save'}: Invalid Bot Content\n\nTo prevent sending bad messages to customers, please fix:\n\n${errors.map(e => `• ${e}`).join('\n')}`);
             return;
-        }
-
-        if (publish) {
-            const report = await runAudit();
-            const criticalIssues = report.issues.filter(issue => issue.severity === 'CRITICAL');
-            if (criticalIssues.length > 0) {
-                alert(`⚠️ Publish blocked. Resolve ${criticalIssues.length} critical audit issue(s) before publishing.`);
-                return;
-            }
         }
 
         const payload = { nodes, edges };
@@ -292,32 +256,11 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
             } else {
                 mockBackend.updateBotSettings(newSettings);
             }
-            setLastSavedAt(new Date());
             alert(publish ? "Published Live!" : "Draft Saved.");
         } catch(e) { alert("Error saving"); }
     };
 
     const selectedNode = useMemo(() => nodes.find(n => n.id === selectedNodeId), [selectedNodeId, nodes]);
-    const flowStats = useMemo(() => {
-        const linkedNodeIds = new Set<string>();
-        edges.forEach(edge => {
-            if (edge.source) linkedNodeIds.add(edge.source);
-            if (edge.target) linkedNodeIds.add(edge.target);
-        });
-        const missingContent = nodes.filter(node => {
-            const { type, content } = node.data || {};
-            return ['message', 'question', 'buttons', 'handoff'].includes(type) && (!content || !content.toString().trim());
-        });
-        const placeholderNodes = nodes.filter(node => {
-            const { content } = node.data || {};
-            return typeof content === 'string' && /replace this|sample message|enter your message|type your message|insert text/i.test(content);
-        });
-        const orphanNodes = nodes.filter(node => !linkedNodeIds.has(node.id));
-        const issues = auditReport?.issues || [];
-        const critical = issues.filter(issue => issue.severity === 'CRITICAL').length;
-        const warnings = issues.filter(issue => issue.severity === 'WARNING').length;
-        return { missingContent, placeholderNodes, orphanNodes, critical, warnings };
-    }, [nodes, edges, auditReport]);
 
     return (
         <div className="flex h-screen w-full bg-gray-50 overflow-hidden">
@@ -344,9 +287,6 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
                     <button onClick={() => setIsSimulating(!isSimulating)} className={`px-4 py-2 rounded-full font-bold shadow-lg transition-all flex items-center gap-2 ${isSimulating ? 'bg-amber-500 text-white' : 'bg-white text-gray-700'}`}>
                         {isSimulating ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} />} Simulator
                     </button>
-                    <button onClick={runAudit} disabled={isAuditing} className="px-4 py-2 bg-white text-gray-700 rounded-full font-bold shadow-lg hover:bg-gray-50 flex items-center gap-2 disabled:opacity-50">
-                        {isAuditing ? <RefreshCw size={16} className="animate-spin" /> : <ShieldCheck size={16} />} Audit
-                    </button>
                     <button onClick={() => handleSave(false)} className="px-4 py-2 bg-white text-gray-700 rounded-full font-bold shadow-lg hover:bg-gray-50 flex items-center gap-2"><Save size={16} /> Draft</button>
                     <button onClick={() => handleSave(true)} className="px-4 py-2 bg-black text-white rounded-full font-bold shadow-lg hover:bg-gray-800 flex items-center gap-2"><LayoutTemplate size={16} /> Publish</button>
                 </div>
@@ -370,93 +310,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
                 </div>
             </div>
 
-            {!isSimulating && (
-                <div className="w-96 bg-white border-l border-gray-200 h-full flex flex-col shadow-xl z-20">
-                    {selectedNode ? (
-                        <Inspector node={selectedNode} onChange={updateNodeData} className="flex-1" />
-                    ) : (
-                        <div className="p-6 text-sm text-gray-400 border-b">Select a node to edit settings.</div>
-                    )}
-                    <div className="border-t bg-gray-50 p-4">
-                        <div className="flex items-center justify-between">
-                            <h3 className="font-bold text-gray-800 uppercase text-xs tracking-wider">Flow Quality</h3>
-                            <button onClick={runAudit} disabled={isAuditing} className="text-xs font-bold text-blue-600 disabled:opacity-50">
-                                {isAuditing ? 'Auditing…' : 'Run Audit'}
-                            </button>
-                        </div>
-                    </div>
-                    <div className="p-4 space-y-4 overflow-y-auto flex-1">
-                        <div className="grid grid-cols-2 gap-3 text-xs">
-                            <div className="p-3 rounded-lg border bg-white">
-                                <div className="text-[10px] text-gray-400 font-bold uppercase">Nodes</div>
-                                <div className="text-lg font-bold">{nodes.length}</div>
-                            </div>
-                            <div className="p-3 rounded-lg border bg-white">
-                                <div className="text-[10px] text-gray-400 font-bold uppercase">Edges</div>
-                                <div className="text-lg font-bold">{edges.length}</div>
-                            </div>
-                            <div className="p-3 rounded-lg border bg-white">
-                                <div className="text-[10px] text-gray-400 font-bold uppercase">Orphans</div>
-                                <div className="text-lg font-bold">{flowStats.orphanNodes.length}</div>
-                            </div>
-                            <div className="p-3 rounded-lg border bg-white">
-                                <div className="text-[10px] text-gray-400 font-bold uppercase">Missing Copy</div>
-                                <div className="text-lg font-bold">{flowStats.missingContent.length}</div>
-                            </div>
-                        </div>
-
-                        <div className="space-y-2">
-                            <div className="flex items-center gap-2 text-xs font-bold text-gray-600">
-                                <Sparkles size={14} /> Release Readiness
-                            </div>
-                            <div className={`p-3 rounded-lg border ${flowStats.critical > 0 ? 'bg-red-50 border-red-200' : 'bg-green-50 border-green-200'}`}>
-                                <div className="flex items-center gap-2 text-xs font-bold">
-                                    {flowStats.critical > 0 ? <AlertOctagon size={14} className="text-red-600" /> : <ShieldCheck size={14} className="text-green-600" />}
-                                    {flowStats.critical > 0 ? `${flowStats.critical} Critical issue(s)` : 'No critical issues detected'}
-                                </div>
-                                <div className="text-[10px] text-gray-500 mt-1">
-                                    {lastAuditAt ? `Last audit: ${lastAuditAt.toLocaleTimeString()}` : 'Run audit to verify logic.'}
-                                </div>
-                            </div>
-                            {flowStats.warnings > 0 && (
-                                <div className="text-[10px] text-amber-600 font-semibold">{flowStats.warnings} warning(s) to review.</div>
-                            )}
-                        </div>
-
-                        {auditReport && auditReport.issues.length > 0 && (
-                            <div className="space-y-2">
-                                <div className="text-xs font-bold text-gray-600">Audit Findings</div>
-                                <div className="space-y-2">
-                                    {auditReport.issues.map(issue => (
-                                        <div key={`${issue.nodeId}-${issue.issue}`} className="p-2 rounded-lg border bg-white text-[11px]">
-                                            <div className="flex items-center justify-between">
-                                                <span className="font-bold">{issue.issue}</span>
-                                                <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold ${issue.severity === 'CRITICAL' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>
-                                                    {issue.severity}
-                                                </span>
-                                            </div>
-                                            <div className="text-gray-500 mt-1">{issue.suggestion}</div>
-                                        </div>
-                                    ))}
-                                </div>
-                                {auditReport.issues.some(issue => issue.autoFixValue) && (
-                                    <button onClick={applyAutoFixes} className="text-xs font-bold text-blue-600">Apply Auto-Fixes</button>
-                                )}
-                            </div>
-                        )}
-
-                        {flowStats.placeholderNodes.length > 0 && (
-                            <div className="p-3 rounded-lg border border-amber-200 bg-amber-50 text-[11px] text-amber-700">
-                                {flowStats.placeholderNodes.length} node(s) still contain placeholder copy.
-                            </div>
-                        )}
-
-                        <div className="text-[10px] text-gray-400">
-                            {lastSavedAt ? `Last saved at ${lastSavedAt.toLocaleTimeString()}` : 'No saves yet.'}
-                        </div>
-                    </div>
-                </div>
-            )}
+            {selectedNode && !isSimulating && <Inspector node={selectedNode} onChange={updateNodeData} />}
 
             {/* Simulator (Overlay) */}
             {isSimulating && (

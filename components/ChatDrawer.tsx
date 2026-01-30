@@ -8,8 +8,6 @@ import {
 import { liveApiService } from '../services/liveApiService';
 import { MediaSelectorModal } from './MediaSelectorModal';
 
-const MIN_SCHEDULE_LEAD_MINUTES = 5;
-
 interface ChatDrawerProps {
   driver: Driver | null;
   onClose: () => void;
@@ -25,9 +23,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
   const [timeLeft, setTimeLeft] = useState<string>('');
-  const [scheduleWindowStart, setScheduleWindowStart] = useState('08:00');
-  const [scheduleWindowEnd, setScheduleWindowEnd] = useState('20:00');
-  const [schedulePriority, setSchedulePriority] = useState<'standard' | 'high'>('standard');
   
   const [showMediaPicker, setShowMediaPicker] = useState(false);
   const [selectedMedia, setSelectedMedia] = useState<{url: string, type: 'image' | 'video' | 'document'} | null>(null);
@@ -46,7 +41,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   const messages = driver && Array.isArray(driver.messages) ? driver.messages : [];
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
   useEffect(() => {
     if (messagesEndRef.current && !loadingHistory) {
@@ -122,28 +116,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       return documents.filter(d => d.docType === docFilter);
   }, [documents, docFilter]);
 
-  const scheduleTimestamp = useMemo(() => {
-    if (!showSchedule || !scheduleTime) return null;
-    const value = new Date(scheduleTime).getTime();
-    return Number.isNaN(value) ? null : value;
-  }, [showSchedule, scheduleTime]);
-
-  const scheduleError = useMemo(() => {
-    if (!showSchedule) return '';
-    if (!scheduleTimestamp) return 'Schedule time is required.';
-    const minLeadMs = MIN_SCHEDULE_LEAD_MINUTES * 60 * 1000;
-    if (scheduleTimestamp <= Date.now() + minLeadMs) {
-      return `Choose a time at least ${MIN_SCHEDULE_LEAD_MINUTES} minutes in the future.`;
-    }
-    return '';
-  }, [showSchedule, scheduleTimestamp]);
-
-  const setScheduleQuick = (date: Date) => {
-    const tzOffset = date.getTimezoneOffset() * 60000;
-    const localISO = new Date(date.getTime() - tzOffset).toISOString().slice(0, 16);
-    setScheduleTime(localISO);
-  };
-
   if (!driver) return null;
 
   const handleSend = async () => {
@@ -155,32 +127,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     }
 
     if (!replyText.trim() && !templateName && !selectedMedia) return;
-    if (isTemplateMode && !templateName.trim()) {
-        alert("Template name is required in template mode.");
-        return;
-    }
     
-    if (showSchedule) {
-        if (scheduleError) { alert(scheduleError); return; }
-        if (!scheduleTimestamp) { alert("Select future time."); return; }
-        try {
-          await liveApiService.scheduleMessage([driver.id], {
-            text: replyText,
-            templateName: isTemplateMode ? templateName : undefined,
-            mediaUrl: selectedMedia?.url,
-            mediaType: selectedMedia?.type,
-            metadata: {
-              priority: schedulePriority,
-              windowStart: scheduleWindowStart,
-              windowEnd: scheduleWindowEnd,
-              timezone
-            }
-          }, scheduleTimestamp);
-          loadScheduledMessages(driver.id);
-          setReplyText('');
-          setShowSchedule(false);
-          setSelectedMedia(null);
-        } catch(e: any) { alert(`Failed: ${e.message}`); }
+    if (showSchedule && scheduleTime) {
+        if (new Date(scheduleTime).getTime() <= Date.now()) { alert("Select future time."); return; }
+        try { await liveApiService.scheduleMessage([driver.id], { text: replyText, templateName: isTemplateMode ? templateName : undefined, mediaUrl: selectedMedia?.url, mediaType: selectedMedia?.type }, new Date(scheduleTime).getTime()); loadScheduledMessages(driver.id); setReplyText(''); setShowSchedule(false); } catch(e: any) { alert(`Failed: ${e.message}`); }
     } else if (isTemplateMode && templateName) {
         try { await liveApiService.sendMessage(driver.id, replyText, { templateName }); setReplyText(''); setTemplateName(''); setIsTemplateMode(false); } catch(e: any) { alert(`Failed: ${e.message}`); }
     } else if (selectedMedia) {
@@ -211,11 +161,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                         {driver.isHumanMode ? <Headset size={14} /> : <MicOff size={14} />} {driver.isHumanMode ? 'Human Agent Mode' : 'Automation Active'}
                     </button>
                </div>
-               {driver.isHumanMode && timeLeft && (
-                 <div className="text-[10px] text-amber-300 font-semibold bg-gray-900 px-3 py-1 rounded-full border border-gray-800">
-                   Session ends in {timeLeft}
-                 </div>
-               )}
               <button onClick={onClose} className="p-2 hover:bg-gray-800 rounded-full transition-colors"><X size={20} /></button>
             </div>
           </div>
@@ -248,12 +193,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                                         <button onClick={() => openEditModal(msg)} className="p-1 text-blue-600"><Edit2 size={14}/></button>
                                         <button onClick={() => handleCancelScheduled(msg.id)} className="p-1 text-red-600"><Trash2 size={14}/></button>
                                     </div>
-                                    <div className="flex items-center justify-between gap-2 mb-2 text-amber-700 text-xs font-bold">
-                                      <span className="flex items-center gap-2"><Clock size={12} /> {new Date(msg.scheduledTime).toLocaleString()}</span>
-                                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${msg.status === 'failed' ? 'bg-red-100 text-red-700' : msg.status === 'processing' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
-                                        {msg.status.toUpperCase()}
-                                      </span>
-                                    </div>
+                                    <div className="flex items-center gap-2 mb-2 text-amber-700 text-xs font-bold"><Clock size={12} /> {new Date(msg.scheduledTime).toLocaleString()}</div>
                                     <p className="text-sm text-gray-600 italic">{msg.payload.text || '[Media Only]'}</p>
                                 </div>
                             </div>
@@ -267,36 +207,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                 {showSchedule && (
                     <div className="absolute bottom-[calc(100%+10px)] left-4 right-4 bg-white rounded-xl shadow-2xl border border-gray-200 p-4 z-20">
                         <div className="flex justify-between mb-2"><h4 className="font-bold text-gray-800">Schedule</h4><button onClick={() => setShowSchedule(false)}><X size={16} /></button></div>
-                        <div className="text-[10px] text-gray-500 mb-2">Timezone: {timezone}</div>
                         <input type="datetime-local" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} className="w-full p-2 border rounded-lg text-sm" />
-                        {scheduleError && <div className="text-[10px] text-red-600 font-semibold mt-1">{scheduleError}</div>}
-                        <div className="flex gap-2 mt-3">
-                          <button onClick={() => setScheduleQuick(new Date(Date.now() + 15 * 60000))} className="text-[10px] px-2 py-1 border rounded-full">+15m</button>
-                          <button onClick={() => setScheduleQuick(new Date(Date.now() + 60 * 60000))} className="text-[10px] px-2 py-1 border rounded-full">+1h</button>
-                          <button onClick={() => {
-                            const nextMorning = new Date();
-                            nextMorning.setDate(nextMorning.getDate() + 1);
-                            nextMorning.setHours(9, 0, 0, 0);
-                            setScheduleQuick(nextMorning);
-                          }} className="text-[10px] px-2 py-1 border rounded-full">Tomorrow 9AM</button>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2 mt-3">
-                          <div>
-                            <label className="text-[10px] font-semibold text-gray-500">Window Start</label>
-                            <input type="time" value={scheduleWindowStart} onChange={(e) => setScheduleWindowStart(e.target.value)} className="w-full p-2 border rounded text-sm" />
-                          </div>
-                          <div>
-                            <label className="text-[10px] font-semibold text-gray-500">Window End</label>
-                            <input type="time" value={scheduleWindowEnd} onChange={(e) => setScheduleWindowEnd(e.target.value)} className="w-full p-2 border rounded text-sm" />
-                          </div>
-                        </div>
-                        <div className="mt-3">
-                          <label className="text-[10px] font-semibold text-gray-500">Priority</label>
-                          <select value={schedulePriority} onChange={(e) => setSchedulePriority(e.target.value as 'standard' | 'high')} className="w-full p-2 border rounded text-sm">
-                            <option value="standard">Standard</option>
-                            <option value="high">High</option>
-                          </select>
-                        </div>
                     </div>
                 )}
                 <div className="flex gap-2 mb-3">
@@ -304,31 +215,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     <button onClick={() => setIsTemplateMode(!isTemplateMode)} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${isTemplateMode ? 'bg-purple-100 text-purple-700 border-purple-200' : 'border-gray-200 hover:bg-gray-50'}`}><LayoutTemplate size={12} /> Template</button>
                     <button onClick={() => setShowSchedule(!showSchedule)} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${showSchedule ? 'bg-amber-100 text-amber-700 border-amber-200' : 'border-gray-200 hover:bg-gray-50'}`}><Clock size={12} /> Schedule</button>
                 </div>
-                {isTemplateMode && (
-                  <div className="mb-3">
-                    <label className="text-[10px] font-semibold text-gray-500">Template Name</label>
-                    <input value={templateName} onChange={(e) => setTemplateName(e.target.value)} className="w-full p-2 border rounded-lg text-sm" placeholder="e.g. followup_reminder_v2" />
-                  </div>
-                )}
-                {selectedMedia && (
-                  <div className="mb-3 text-[10px] text-blue-600 font-semibold flex items-center gap-2">
-                    <Paperclip size={10} /> Media attached: {selectedMedia.type}
-                    <button onClick={() => setSelectedMedia(null)} className="text-gray-400 hover:text-gray-600">Remove</button>
-                  </div>
-                )}
                 <div className="flex gap-3">
                   <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} onKeyDown={handleKeyPress} placeholder={isTemplateMode ? "Body Parameter..." : "Type a message..."} className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20 shadow-inner" />
-                  <button
-                    onClick={handleSend}
-                    disabled={
-                      (!replyText.trim() && !templateName && !selectedMedia) ||
-                      (showSchedule && !!scheduleError) ||
-                      (isTemplateMode && !templateName.trim())
-                    }
-                    className="self-end p-3 rounded-xl bg-black text-white hover:bg-gray-800 w-12 h-12 flex items-center justify-center disabled:opacity-50"
-                  >
-                    <Send size={20} />
-                  </button>
+                  <button onClick={handleSend} disabled={(!replyText.trim() && !templateName && !selectedMedia)} className="self-end p-3 rounded-xl bg-black text-white hover:bg-gray-800 w-12 h-12 flex items-center justify-center disabled:opacity-50"><Send size={20} /></button>
                 </div>
               </div>
             </div>
