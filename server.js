@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { Redis } = require('@upstash/redis');
 const { Client: QStashClient, Receiver } = require('@upstash/qstash');
 const { Pool } = require('pg');
-const { S3Client, ListObjectsV2Command, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, ListObjectsV2Command, PutObjectCommand, DeleteObjectCommand, CopyObjectCommand } = require('@aws-sdk/client-s3');
 const multer = require('multer');
 const { OAuth2Client } = require('google-auth-library');
 const { GoogleGenAI } = require('@google/genai');
@@ -77,6 +77,10 @@ const s3Client = new S3Client({
     }
 });
 const BUCKET_NAME = process.env.AWS_BUCKET_NAME || 'uber-fleet-assets';
+const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
+
+const isS3Configured = () =>
+    Boolean(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY && process.env.AWS_BUCKET_NAME);
 
 // 5. AI (Gemini)
 const genAI = process.env.GEMINI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null;
@@ -245,6 +249,46 @@ const getBotSettings = async (phoneId) => {
     } finally {
         client.release();
     }
+};
+
+const resolveMediaType = (key) => {
+    const ext = key.split('.').pop().toLowerCase();
+    if (['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext)) return 'image';
+    if (['mp4', 'mov', 'webm'].includes(ext)) return 'video';
+    return 'document';
+};
+
+const buildMediaUrl = (key) => `https://${BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${key}`;
+
+const listS3Objects = async (prefix) => {
+    const items = [];
+    let continuationToken;
+    do {
+        const command = new ListObjectsV2Command({
+            Bucket: BUCKET_NAME,
+            Prefix: prefix,
+            ContinuationToken: continuationToken
+        });
+        const response = await s3Client.send(command);
+        items.push(...(response.Contents || []));
+        continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+    } while (continuationToken);
+    return items;
+};
+
+const buildShowcaseManifest = async ({ folderId, title }) => {
+    if (!isS3Configured()) return { title, items: [] };
+    const prefix = folderId ? `${folderId.replace(/^\//, '').replace(/\/$/, '')}/` : '';
+    const objects = await listS3Objects(prefix);
+    const items = objects
+        .filter((obj) => obj.Key && !obj.Key.endsWith('/'))
+        .map((obj) => ({
+            id: obj.Key,
+            url: buildMediaUrl(obj.Key),
+            type: resolveMediaType(obj.Key),
+            filename: obj.Key.replace(prefix, '')
+        }));
+    return { title, items };
 };
 
 const sendToMeta = async (to, payload) => {
@@ -674,7 +718,7 @@ apiRouter.post('/bot/publish', async (req, res, next) => {
 apiRouter.get('/media', async (req, res, next) => {
     const prefix = req.query.path && req.query.path !== '/' ? req.query.path.replace(/^\//, '') + '/' : '';
     // ✅ If S3 not configured, return empty library (prevents UI errors)
-    if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY || !process.env.AWS_BUCKET_NAME) {
+    if (!isS3Configured()) {
         return res.json({ folders: [], files: [] });
     }
     try {
@@ -682,6 +726,7 @@ apiRouter.get('/media', async (req, res, next) => {
         const response = await s3Client.send(command);
 
         const publicFolders = await redis.smembers('system:public_folders');
+        const syncedMedia = (await redis.hgetall('media:sync')) || {};
 
         const folders = (response.CommonPrefixes || []).map(p => {
             const name = p.Prefix.replace(prefix, '').replace('/', '');
@@ -696,15 +741,15 @@ apiRouter.get('/media', async (req, res, next) => {
 
         const files = (response.Contents || []).map(c => {
             if (c.Key === prefix) return null;
-            const ext = c.Key.split('.').pop().toLowerCase();
-            let type = 'document';
-            if (['jpg', 'jpeg', 'png', 'gif'].includes(ext)) type = 'image';
-            if (['mp4', 'mov'].includes(ext)) type = 'video';
+            if (c.Key.endsWith('/')) return null;
+            const type = resolveMediaType(c.Key);
+            const synced = syncedMedia?.[c.Key];
             return {
                 id: c.Key,
                 filename: c.Key.replace(prefix, ''),
-                url: `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${c.Key}`,
-                type
+                url: buildMediaUrl(c.Key),
+                type,
+                media_id: synced ? JSON.parse(synced).media_id : undefined
             };
         }).filter(Boolean);
 
@@ -714,7 +759,7 @@ apiRouter.get('/media', async (req, res, next) => {
 
 apiRouter.post('/media/upload', upload.single('file'), async (req, res, next) => {
     if (!req.file) return res.status(400).json({ ok: false, error: 'No file' });
-    if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY || !process.env.AWS_BUCKET_NAME) {
+    if (!isS3Configured()) {
         return res.status(503).json({ ok: false, error: 'S3 not configured' });
     }
     const path = req.body.path && req.body.path !== '/' ? req.body.path.replace(/^\//, '') + '/' : '';
@@ -731,7 +776,7 @@ apiRouter.post('/media/upload', upload.single('file'), async (req, res, next) =>
 });
 
 apiRouter.post('/media/folders', async (req, res, next) => {
-    if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY || !process.env.AWS_BUCKET_NAME) {
+    if (!isS3Configured()) {
         return res.status(503).json({ ok: false, error: 'S3 not configured' });
     }
     const { name, parentPath } = req.body;
@@ -743,7 +788,7 @@ apiRouter.post('/media/folders', async (req, res, next) => {
 });
 
 apiRouter.delete('/media/files/:id', async (req, res, next) => {
-    if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY || !process.env.AWS_BUCKET_NAME) {
+    if (!isS3Configured()) {
         return res.status(503).json({ ok: false, error: 'S3 not configured' });
     }
     try { await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: req.params.id })); res.json({ success: true }); }
@@ -751,7 +796,7 @@ apiRouter.delete('/media/files/:id', async (req, res, next) => {
 });
 
 apiRouter.delete('/media/folders/:id', async (req, res, next) => {
-    if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY || !process.env.AWS_BUCKET_NAME) {
+    if (!isS3Configured()) {
         return res.status(503).json({ ok: false, error: 'S3 not configured' });
     }
     try { await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: req.params.id + '/' })); res.json({ success: true }); }
@@ -761,6 +806,24 @@ apiRouter.delete('/media/folders/:id', async (req, res, next) => {
 apiRouter.post('/media/folders/:id/public', async (req, res) => {
     await redis.sadd('system:public_folders', req.params.id);
     await redis.set('system:active_showcase', req.params.id);
+    const folderName = req.params.id.split('/').pop();
+    if (folderName) {
+        await redis.hset('system:public_folder_names', { [folderName]: req.params.id });
+    }
+    if (isS3Configured()) {
+        try {
+            const manifest = await buildShowcaseManifest({ folderId: req.params.id, title: folderName || 'Showcase' });
+            await s3Client.send(new PutObjectCommand({
+                Bucket: BUCKET_NAME,
+                Key: `manifests/${encodeURIComponent(folderName || 'showcase')}.json`,
+                Body: JSON.stringify(manifest),
+                ContentType: 'application/json',
+                ACL: 'public-read'
+            }));
+        } catch (e) {
+            logger.warn("Failed to publish showcase manifest", { error: e.message });
+        }
+    }
     res.json({ success: true });
 });
 
@@ -773,6 +836,88 @@ apiRouter.get('/showcase/status', async (req, res) => {
     const active = await redis.get('system:active_showcase');
     if (!active) return res.json({ active: false });
     res.json({ active: true, folderId: active, folderName: active.split('/').pop() });
+});
+
+apiRouter.post('/media/:id/sync', async (req, res) => {
+    if (!isS3Configured()) {
+        return res.status(503).json({ ok: false, error: 'S3 not configured' });
+    }
+    const fileKey = req.params.id;
+    const mediaId = crypto.randomUUID();
+    await redis.hset('media:sync', { [fileKey]: JSON.stringify({ media_id: mediaId, syncedAt: Date.now() }) });
+    res.json({ success: true, mediaId });
+});
+
+apiRouter.post('/media/sync-s3', async (req, res) => {
+    if (!isS3Configured()) {
+        return res.status(503).json({ ok: false, error: 'S3 not configured' });
+    }
+    try {
+        const objects = await listS3Objects('');
+        const count = objects.filter((obj) => obj.Key && !obj.Key.endsWith('/')).length;
+        res.json({ success: true, added: count });
+    } catch (e) {
+        logger.error("S3 Sync Failed", { error: e.message });
+        res.status(500).json({ ok: false, error: 'Failed to sync from S3' });
+    }
+});
+
+apiRouter.patch('/media/folders/:id', async (req, res, next) => {
+    if (!isS3Configured()) {
+        return res.status(503).json({ ok: false, error: 'S3 not configured' });
+    }
+    const newName = (req.body?.name || '').trim();
+    if (!newName) return res.status(400).json({ ok: false, error: 'New folder name required' });
+
+    const oldPrefix = `${req.params.id.replace(/\/$/, '')}/`;
+    const parentPath = oldPrefix.split('/').slice(0, -2).join('/');
+    const newPrefix = `${parentPath ? `${parentPath}/` : ''}${newName}/`;
+
+    if (oldPrefix === newPrefix) return res.json({ success: true, moved: 0 });
+
+    try {
+        const objects = await listS3Objects(oldPrefix);
+        let moved = 0;
+        for (const obj of objects) {
+            if (!obj.Key) continue;
+            const newKey = obj.Key.replace(oldPrefix, newPrefix);
+            await s3Client.send(new CopyObjectCommand({
+                Bucket: BUCKET_NAME,
+                CopySource: `${BUCKET_NAME}/${obj.Key}`,
+                Key: newKey,
+                ACL: 'public-read'
+            }));
+            await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: obj.Key }));
+            moved += 1;
+        }
+        res.json({ success: true, moved });
+    } catch (e) {
+        next(e);
+    }
+});
+
+apiRouter.get('/showcase', async (req, res, next) => {
+    try {
+        const active = await redis.get('system:active_showcase');
+        const publicFolders = await redis.smembers('system:public_folders');
+        const folderId = active || publicFolders[0];
+        if (!folderId) return res.json({ title: 'Showcase', items: [] });
+        const folderName = folderId.split('/').pop();
+        const manifest = await buildShowcaseManifest({ folderId, title: folderName || 'Showcase' });
+        res.json(manifest);
+    } catch (e) { next(e); }
+});
+
+apiRouter.get('/showcase/:name', async (req, res, next) => {
+    try {
+        const name = decodeURIComponent(req.params.name);
+        const mapped = await redis.hget('system:public_folder_names', name);
+        const publicFolders = await redis.smembers('system:public_folders');
+        const folderId = mapped || publicFolders.find((id) => id.split('/').pop() === name);
+        if (!folderId) return res.json({ title: name || 'Showcase', items: [] });
+        const manifest = await buildShowcaseManifest({ folderId, title: name || 'Showcase' });
+        res.json(manifest);
+    } catch (e) { next(e); }
 });
 
 // ==========================================
@@ -788,6 +933,26 @@ apiRouter.post('/ai/assistant', async (req, res, next) => {
             generationConfig: { maxOutputTokens: 100 }
         });
         const result = await chat.sendMessage(input);
+        res.json({ text: result.response.text() });
+    } catch (e) { next(e); }
+});
+
+apiRouter.post('/ai/generate', async (req, res, next) => {
+    if (!genAI) return res.status(503).json({ ok: false, error: "AI Not Configured" });
+    try {
+        const { contents, config, model } = req.body || {};
+        const { systemInstruction, ...generationConfig } = config || {};
+        const normalizedContents = typeof contents === 'string'
+            ? [{ role: 'user', parts: [{ text: contents }]}]
+            : contents;
+        const aiModel = genAI.getGenerativeModel({
+            model: model || 'gemini-1.5-flash',
+            systemInstruction
+        });
+        const result = await aiModel.generateContent({
+            contents: normalizedContents,
+            generationConfig
+        });
         res.json({ text: result.response.text() });
     } catch (e) { next(e); }
 });
@@ -877,6 +1042,106 @@ apiRouter.post('/internal/bot-worker', async (req, res, next) => {
         await processMessageInternal(message, contact, phoneId, req.headers['x-request-id']);
         res.json({ success: true });
     } catch (e) { next(e); }
+});
+
+// ==========================================
+// 9. SYSTEM DIAGNOSTICS
+// ==========================================
+apiRouter.get('/debug/status', async (req, res) => {
+    const result = {
+        postgres: 'unknown',
+        redis: 'unknown',
+        tables: { candidates: false, bot_versions: false },
+        counts: { candidates: 0 },
+        lastError: null,
+        workerUrl: null,
+        env: {
+            hasPostgres: Boolean(resolveDbUrl()),
+            hasRedis: Boolean(process.env.UPSTASH_REDIS_REST_URL),
+            hasQStash: Boolean(process.env.QSTASH_TOKEN && process.env.QSTASH_TOKEN !== 'mock'),
+            publicUrl: process.env.PUBLIC_BASE_URL || process.env.VERCEL_URL || ''
+        }
+    };
+
+    try {
+        const client = await getDb().connect();
+        try {
+            await client.query('SELECT 1');
+            result.postgres = 'connected';
+            const tableCheck = await client.query(`
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                AND table_name IN ('candidates', 'bot_versions')
+            `);
+            const tableNames = tableCheck.rows.map(r => r.table_name);
+            result.tables = {
+                candidates: tableNames.includes('candidates'),
+                bot_versions: tableNames.includes('bot_versions')
+            };
+            if (result.tables.candidates) {
+                const countRes = await client.query('SELECT COUNT(*)::int AS count FROM candidates');
+                result.counts.candidates = countRes.rows[0]?.count || 0;
+            }
+        } finally {
+            client.release();
+        }
+    } catch (e) {
+        result.postgres = 'error';
+        result.lastError = e.message;
+    }
+
+    try {
+        await redis.set('healthcheck', Date.now(), { ex: 5 });
+        result.redis = 'connected';
+    } catch (e) {
+        result.redis = 'error';
+        result.lastError = result.lastError || e.message;
+    }
+
+    const baseUrl = getBaseUrl(req);
+    result.workerUrl = `${baseUrl}/api/internal/bot-worker`;
+
+    res.json(result);
+});
+
+apiRouter.post('/system/init-db', async (req, res) => {
+    try {
+        await ensureDbSchema();
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+    }
+});
+
+apiRouter.post('/system/seed-db', async (req, res) => {
+    const client = await getDb().connect();
+    try {
+        await ensureDbSchema();
+        const existing = await client.query('SELECT COUNT(*)::int AS count FROM candidates');
+        if (existing.rows[0]?.count > 0) {
+            return res.json({ success: true, skipped: true });
+        }
+        await client.query('BEGIN');
+        const candidateId = crypto.randomUUID();
+        await client.query(
+            `INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+            [candidateId, '+15555550123', 'Demo Driver', 'New', Date.now(), 'Interested in onboarding']
+        );
+        await client.query(
+            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
+             VALUES ($1, $2, 'in', $3, 'text', 'received', NOW())`,
+            [crypto.randomUUID(), candidateId, 'Hello, I want to apply.']
+        );
+        await client.query('COMMIT');
+        res.json({ success: true });
+    } catch (e) {
+        await client.query('ROLLBACK');
+        res.status(500).json({ ok: false, error: e.message });
+    } finally {
+        client.release();
+    }
 });
 
 // --- GLOBAL ERROR HANDLER ---
