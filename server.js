@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Redis } = require('@upstash/redis');
-const { Client: QStashClient } = require('@upstash/qstash');
+const { Client: QStashClient, Receiver } = require('@upstash/qstash');
 const { Pool } = require('pg');
 const { S3Client, ListObjectsV2Command, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const multer = require('multer');
@@ -46,6 +46,10 @@ const redis = new Redis({
 
 // 3. Queue (QStash)
 const qstash = new QStashClient({ token: process.env.QSTASH_TOKEN || 'mock' });
+const qstashReceiver = new Receiver({
+    currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY || 'mock',
+    nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY || 'mock',
+});
 
 // 4. Storage (AWS S3)
 const s3Client = new S3Client({
@@ -594,6 +598,42 @@ app.post('/webhook', async (req, res) => {
 // 8. WORKER (Queue Handler)
 // ==========================================
 apiRouter.post('/internal/bot-worker', async (req, res) => {
+    // --- SECURITY GUARD ---
+    const signature = req.headers["upstash-signature"];
+    const secretHeader = req.headers["x-internal-secret"];
+    const expectedSecret = process.env.INTERNAL_WORKER_SECRET;
+
+    let isAuthorized = false;
+
+    // 1. Check Shared Secret (Manual/Internal calls)
+    if (expectedSecret && secretHeader === expectedSecret) {
+        isAuthorized = true;
+    } 
+    // 2. Check QStash Signature (Production Queue calls)
+    else if (signature && process.env.QSTASH_CURRENT_SIGNING_KEY) {
+        try {
+            const body = req.rawBody ? req.rawBody.toString() : JSON.stringify(req.body);
+            // We skip URL check here to avoid "Protocol mismatch" errors behind proxies (http vs https)
+            // unless we are confident in getBaseUrl. 
+            isAuthorized = await qstashReceiver.verify({
+                signature,
+                body
+            });
+        } catch (e) {
+            console.error("[Worker Security] Signature verification failed:", e.message);
+        }
+    } 
+    // 3. Dev/Mock Mode
+    else if (!process.env.QSTASH_CURRENT_SIGNING_KEY || process.env.QSTASH_CURRENT_SIGNING_KEY === 'mock') {
+        console.warn("[Worker Security] Running in insecure/mock mode.");
+        isAuthorized = true;
+    }
+
+    if (!isAuthorized) {
+        console.error("[Worker Security] Unauthorized access attempt.");
+        return res.status(401).json({ error: "Unauthorized" });
+    }
+
     try {
         const { message, contact, phoneId } = req.body;
         await processMessageInternal(message, contact, phoneId);
