@@ -128,6 +128,26 @@ const sendToMeta = async (to, payload) => {
 const processMessageInternal = async (message, contact, phoneId) => {
     if (!message || !phoneId) throw new Error("Invalid Payload");
 
+    // --- IDEMPOTENCY CHECK (Deduplication) ---
+    // Prevent processing the same WhatsApp message ID multiple times.
+    if (message.id) {
+        const key = `wa:msg:${message.id}`;
+        try {
+            // Only attempt if Redis is configured to avoid mock errors blocking flow
+            if (process.env.UPSTASH_REDIS_REST_URL && !process.env.UPSTASH_REDIS_REST_URL.includes('mock')) {
+                // Set key only if it doesn't exist (NX), expire in 1 hour (EX 3600)
+                const locked = await redis.set(key, "1", { nx: true, ex: 3600 });
+                if (!locked) {
+                    console.log(`[Idempotency] Skipped duplicate message ID: ${message.id}`);
+                    return { success: true, duplicate: true };
+                }
+            }
+        } catch (e) {
+            // Fail-Open: If Redis is down, we process the message anyway to ensure data integrity
+            console.warn(`[Idempotency] Lock check failed: ${e.message}`);
+        }
+    }
+
     console.log(`[Core] Processing message from: ${message.from}`);
     const client = await getDb().connect();
     
