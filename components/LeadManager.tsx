@@ -72,8 +72,15 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
     }
 
     if (!bulkMessage.trim() && !selectedMedia && !templateName) return;
-    
-    const timestamp = isScheduled && scheduleTime ? new Date(scheduleTime).getTime() : Date.now();
+
+    if (isScheduled) {
+        if (!scheduleTime) { alert("Please select a schedule time."); return; }
+        const scheduledTimestamp = Date.parse(scheduleTime);
+        if (Number.isNaN(scheduledTimestamp)) { alert("Please select a valid date and time."); return; }
+        if (scheduledTimestamp <= Date.now()) { alert("Please select a future time."); return; }
+    }
+
+    const timestamp = isScheduled && scheduleTime ? Date.parse(scheduleTime) : Date.now();
     try {
         await liveApiService.scheduleMessage(selectedIds, {
             text: bulkMessage,

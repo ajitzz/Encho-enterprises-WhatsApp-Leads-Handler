@@ -103,8 +103,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   };
   const saveEditedMessage = async () => {
       if (!editingMessage || !editTime) return;
-      if (new Date(editTime).getTime() <= Date.now()) { alert("Time must be in the future."); return; }
-      try { await liveApiService.updateScheduledMessage(editingMessage.id, { text: editText, scheduledTime: new Date(editTime).getTime() }); setEditingMessage(null); if (driver) loadScheduledMessages(driver.id); } catch(e: any) { alert(`Update failed: ${e.message}`); }
+      const editTimestamp = Date.parse(editTime);
+      if (Number.isNaN(editTimestamp)) { alert("Please select a valid date and time."); return; }
+      if (editTimestamp <= Date.now()) { alert("Time must be in the future."); return; }
+      try { await liveApiService.updateScheduledMessage(editingMessage.id, { text: editText, scheduledTime: editTimestamp }); setEditingMessage(null); if (driver) loadScheduledMessages(driver.id); } catch(e: any) { alert(`Update failed: ${e.message}`); }
   };
   const handleLoadMore = async () => {
       if (!driver || messages.length === 0) return;
@@ -129,8 +131,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     if (!replyText.trim() && !templateName && !selectedMedia) return;
     
     if (showSchedule && scheduleTime) {
-        if (new Date(scheduleTime).getTime() <= Date.now()) { alert("Select future time."); return; }
-        try { await liveApiService.scheduleMessage([driver.id], { text: replyText, templateName: isTemplateMode ? templateName : undefined, mediaUrl: selectedMedia?.url, mediaType: selectedMedia?.type }, new Date(scheduleTime).getTime()); loadScheduledMessages(driver.id); setReplyText(''); setShowSchedule(false); } catch(e: any) { alert(`Failed: ${e.message}`); }
+        const scheduleTimestamp = Date.parse(scheduleTime);
+        if (Number.isNaN(scheduleTimestamp)) { alert("Please select a valid date and time."); return; }
+        if (scheduleTimestamp <= Date.now()) { alert("Select future time."); return; }
+        try { await liveApiService.scheduleMessage([driver.id], { text: replyText, templateName: isTemplateMode ? templateName : undefined, mediaUrl: selectedMedia?.url, mediaType: selectedMedia?.type }, scheduleTimestamp); loadScheduledMessages(driver.id); setReplyText(''); setShowSchedule(false); } catch(e: any) { alert(`Failed: ${e.message}`); }
     } else if (isTemplateMode && templateName) {
         try { await liveApiService.sendMessage(driver.id, replyText, { templateName }); setReplyText(''); setTemplateName(''); setIsTemplateMode(false); } catch(e: any) { alert(`Failed: ${e.message}`); }
     } else if (selectedMedia) {
