@@ -8,9 +8,17 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    server: {
+      proxy: {
+        '/api': {
+          target: 'http://localhost:3001',
+          changeOrigin: true,
+          secure: false,
+        }
+      }
+    },
     define: {
       // SECURITY UPDATE: Only expose non-sensitive public configs to the frontend.
-      // API Keys (Gemini, AWS, Meta) are now strictly backend-only.
       'process.env.VITE_GOOGLE_CLIENT_ID': JSON.stringify(env.VITE_GOOGLE_CLIENT_ID),
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development')
     },

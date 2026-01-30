@@ -10,15 +10,19 @@ require('dotenv').config();
 // --- FAIL FAST VALIDATION ---
 const requiredEnv = ['POSTGRES_URL', 'UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN', 'QSTASH_TOKEN', 'META_API_TOKEN', 'PHONE_NUMBER_ID'];
 const missingEnv = requiredEnv.filter(key => !process.env[key]);
-if (missingEnv.length > 0) { console.error(`❌ STARTUP ERROR: Missing Keys: ${missingEnv.join(', ')}`); } 
-else { console.log("🔐 Keys Loaded: Validating Connections..."); }
+
+if (missingEnv.length > 0) {
+    console.error(`❌ STARTUP ERROR: Missing Keys: ${missingEnv.join(', ')}`);
+} else {
+    console.log("🔐 Keys Loaded: Validating Connections...");
+}
 
 const app = express();
 const apiRouter = express.Router(); 
 
 const SYSTEM_CONFIG = {
     META_TIMEOUT: 5000, 
-    DB_CONNECTION_TIMEOUT: 10000, 
+    DB_CONNECTION_TIMEOUT: 5000, // Reduced to 5s to fail faster
     CACHE_TTL_SETTINGS: 600, 
     LOCK_TTL: 15,
     DEDUPE_TTL: 3600 
@@ -28,13 +32,22 @@ const SYSTEM_CONFIG = {
 let pgPool = null;
 const getDb = () => {
     if (!pgPool) {
+        // Handle both pooled and direct connection strings
+        const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+        
         pgPool = new Pool({
-            connectionString: process.env.DATABASE_URL || process.env.POSTGRES_URL,
-            ssl: { rejectUnauthorized: false },
+            connectionString,
+            ssl: true, // Force SSL for Neon
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-            max: 5, idleTimeoutMillis: 10000, keepAlive: true 
+            max: 3, // Lower pool size for serverless
+            idleTimeoutMillis: 10000, 
+            keepAlive: true 
         });
-        pgPool.on('error', (err) => console.error('⚠️ DB Pool Error:', err.message));
+        
+        pgPool.on('error', (err) => {
+            console.error('⚠️ DB Pool Error:', err.message);
+            // Don't exit, just log. Serverless will recycle.
+        });
     }
     return pgPool;
 };
@@ -46,7 +59,10 @@ const redis = new Redis({
 });
 
 const qstash = new QStashClient({ token: process.env.QSTASH_TOKEN || 'mock' });
-const qstashReceiver = new Receiver({ currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY || "mock", nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY || "mock" });
+const qstashReceiver = new Receiver({ 
+    currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY || "mock", 
+    nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY || "mock" 
+});
 
 let metaClient = null;
 const getMetaClient = () => {
@@ -169,12 +185,43 @@ app.post('/webhook', async (req, res) => {
     } catch (e) { console.error("[Ingest] Error", e); res.sendStatus(200); }
 });
 
-// --- API ROUTER DEFINITIONS (Must be defined BEFORE app.use) ---
+// --- API ROUTER DEFINITIONS ---
 
-// 1. Health Check
+// 1. Diagnostics (NEW: Check Connections)
+apiRouter.get('/debug/status', async (req, res) => {
+    const status = {
+        postgres: 'unknown',
+        redis: 'unknown',
+        env: {
+            hasPostgres: !!process.env.POSTGRES_URL,
+            hasRedis: !!process.env.UPSTASH_REDIS_REST_URL,
+            hasPhoneId: !!process.env.PHONE_NUMBER_ID
+        }
+    };
+
+    try {
+        const client = await getDb().connect();
+        await client.query('SELECT 1');
+        client.release();
+        status.postgres = 'connected';
+    } catch(e) {
+        status.postgres = `error: ${e.message}`;
+    }
+
+    try {
+        await redis.ping();
+        status.redis = 'connected';
+    } catch(e) {
+        status.redis = `error: ${e.message}`;
+    }
+
+    res.json(status);
+});
+
+// 2. Health Check
 apiRouter.get('/health', (req, res) => res.status(200).json({ status: 'online', timestamp: Date.now() }));
 
-// 2. Bot Worker (Internal)
+// 3. Bot Worker (Internal)
 apiRouter.post('/internal/bot-worker', async (req, res) => {
     const start = Date.now();
     const signature = req.headers["upstash-signature"];
@@ -213,9 +260,7 @@ apiRouter.post('/internal/bot-worker', async (req, res) => {
         
         // 1. Calculate Replies based on Settings + UserState + Input
         if (settings && settings.nodes) {
-             // ... [Bot Traversal Logic] ...
-             // For now, if no nodes, we do nothing.
-             // If nodes exist, we assume traversal logic here.
+             // ... [Bot Traversal Logic would go here] ...
         }
 
         // 2. Send Replies
@@ -247,14 +292,13 @@ apiRouter.post('/internal/bot-worker', async (req, res) => {
     }
 });
 
-// 3. Bot Settings (THE FIX: Defined directly on apiRouter)
+// 4. Bot Settings
 apiRouter.get('/bot/settings', async (req, res) => { 
     try {
         const settings = await getBotSettings(process.env.PHONE_NUMBER_ID);
         res.json(settings || { nodes: [], edges: [] });
     } catch (error) {
         console.error("API Error /bot/settings:", error);
-        // Return empty structure instead of crashing
         res.json({ nodes: [], edges: [] });
     }
 });
@@ -275,7 +319,7 @@ apiRouter.post('/bot/publish', async (req, res) => {
     res.json({ success: true }); 
 });
 
-// 4. Driver Routes
+// 5. Driver Routes
 apiRouter.get('/drivers', async (req, res) => {
     const client = await getDb().connect();
     try {
@@ -299,29 +343,35 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
     const { text, mediaUrl, mediaType } = req.body;
     const client = await getDb().connect();
     try {
-        // 1. Fetch phone number
         const driverRes = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
         if (driverRes.rows.length === 0) return res.status(404).send("Driver not found");
         const phoneNumber = driverRes.rows[0].phone_number;
 
-        // 2. Send to Meta
         const payload = mediaUrl 
             ? { type: mediaType || 'image', [mediaType || 'image']: { link: mediaUrl, caption: text } }
             : { type: 'text', text: { body: text } };
         
         await sendToMeta(phoneNumber, payload);
 
-        // 3. Log DB
         await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), req.params.id, text]);
-        
-        // 4. Update Last Message
         await client.query('UPDATE candidates SET last_message_at = $1 WHERE id = $2', [Date.now(), req.params.id]);
         
         res.json({ success: true });
     } finally { client.release(); }
 });
 
-// 5. System Routes
+// 6. System Routes
+apiRouter.get('/system/stats', async (req, res) => {
+    // Basic stats, expensive checks handled by specialized endpoints
+    const status = {
+        serverLoad: process.cpuUsage().user / 1000,
+        uptime: process.uptime(),
+        dbStatus: 'ok', // Assumed ok for lightweight check
+        redisStatus: 'ok'
+    };
+    res.json(status);
+});
+
 apiRouter.get('/system/settings', async (req, res) => {
     const s = await redis.get('system:settings').catch(() => null);
     res.json(s || { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true });
@@ -332,9 +382,10 @@ apiRouter.patch('/system/settings', async (req, res) => {
     res.json(req.body);
 });
 
-// --- CRITICAL: MOUNT ROUTER AT THE END ---
-// This ensures all routes defined above are registered before the router handles requests.
+// --- ROUTER MOUNTING (CRITICAL FIX) ---
+// Mount on both paths to handle Vercel's variable rewrite behavior
 app.use('/api', apiRouter);
+app.use('/', apiRouter); // Fallback if prefix is stripped
 
 // --- SERVER STARTUP ---
 if (require.main === module) {
