@@ -810,7 +810,6 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
     const { driverIds, message, timestamp } = req.body;
     const client = await getDb().connect();
     try {
-        await ensureDbSchema();
         const scheduledTime = typeof timestamp === 'number' ? timestamp : Date.now();
         for (const driverId of driverIds) {
             await client.query(
