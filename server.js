@@ -125,6 +125,7 @@ const ensureDbSchema = async () => {
         `);
         // Add robust columns
         await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS notes TEXT;`);
+        await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_message TEXT;`);
         await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;`);
         await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS human_mode_ends_at BIGINT;`);
 
@@ -259,10 +260,17 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
     try {
         const from = message.from;
         const name = contact?.profile?.name || "Unknown";
+        const textBody = message.text?.body || `[${message.type}]`;
         
-        // Upsert Candidate
-        const upsertQuery = `INSERT INTO candidates (id, phone_number, name, stage, last_message_at, created_at) VALUES ($1, $2, $3, 'New', $4, NOW()) ON CONFLICT (phone_number) DO UPDATE SET name = EXCLUDED.name, last_message_at = $4 RETURNING id`;
-        const resDb = await client.query(upsertQuery, [crypto.randomUUID(), from, name, Date.now()]);
+        // Upsert Candidate (Include last_message update)
+        const upsertQuery = `
+            INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at) 
+            VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
+            ON CONFLICT (phone_number) 
+            DO UPDATE SET name = EXCLUDED.name, last_message_at = $4, last_message = $5 
+            RETURNING id
+        `;
+        const resDb = await client.query(upsertQuery, [crypto.randomUUID(), from, name, Date.now(), textBody]);
         const candidateId = resDb.rows[0].id;
         
         logger.info("Candidate Upserted", { requestId, candidateId });
@@ -273,7 +281,7 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
             VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW()) 
             ON CONFLICT (whatsapp_message_id) DO NOTHING
         `;
-        await client.query(insertMsgQuery, [crypto.randomUUID(), candidateId, message.text?.body || '[Media]', message.type, message.id]);
+        await client.query(insertMsgQuery, [crypto.randomUUID(), candidateId, textBody, message.type, message.id]);
         
         // Bot Logic Check
         const settings = await getBotSettings(phoneId);
@@ -389,7 +397,7 @@ apiRouter.post('/system/seed-db', async (req, res, next) => {
     const client = await getDb().connect();
     try {
         const id = crypto.randomUUID();
-        await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message_at) VALUES ($1, '+919876543210', 'Test Driver', 'New', $2) ON CONFLICT DO NOTHING`, [id, Date.now()]);
+        await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message) VALUES ($1, '+919876543210', 'Test Driver', 'New', $2, 'Hello world') ON CONFLICT DO NOTHING`, [id, Date.now()]);
         res.json({ success: true });
     } catch(e) { next(e); } finally { client.release(); }
 });
@@ -419,7 +427,7 @@ apiRouter.get('/drivers', async (req, res, next) => {
             phoneNumber: row.phone_number, 
             name: row.name, 
             status: row.stage, 
-            lastMessage: '...', 
+            lastMessage: row.last_message || '...', 
             lastMessageTime: parseInt(row.last_message_at), 
             source: 'Organic',
             notes: row.notes,
@@ -482,9 +490,19 @@ apiRouter.post('/drivers/:id/messages', async (req, res, next) => {
         await sendToMeta(dRes.rows[0].phone_number, payload);
         
         await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), req.params.id, text]);
-        await client.query('UPDATE candidates SET last_message_at = $1 WHERE id = $2', [Date.now(), req.params.id]);
+        await client.query('UPDATE candidates SET last_message_at = $1, last_message = $2 WHERE id = $3', [Date.now(), text || '[Media]', req.params.id]);
         res.json({ success: true });
     } catch(e) { next(e); } finally { client.release(); }
+});
+
+// Alias for generic send (requested by user spec)
+apiRouter.post('/messages/send', async (req, res, next) => {
+    // Expects { driverId: '...', text: '...' }
+    const { driverId, text, mediaUrl, mediaType } = req.body;
+    if (!driverId) return res.status(400).json({ ok: false, error: 'driverId required' });
+    req.params.id = driverId;
+    // Route to the existing handler logic
+    return apiRouter.handle({ ...req, url: `/drivers/${driverId}/messages`, method: 'POST' }, res, next);
 });
 
 apiRouter.get('/drivers/:id/documents', async (req, res) => { res.json([]); });
@@ -838,6 +856,7 @@ app.use((err, req, res, next) => {
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
 
+// --- START OF FILE database_schema.sql ---
 // --- STARTUP SCHEMA CHECK ---
 ensureDbSchema().then(() => {
     logger.info("Startup DB Check Complete");

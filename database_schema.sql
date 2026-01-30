@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS candidates (
     name VARCHAR(255),
     stage VARCHAR(50) DEFAULT 'New',
     last_message_at BIGINT,
+    last_message TEXT,
     variables JSONB DEFAULT '{}',
     tags TEXT[],
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
