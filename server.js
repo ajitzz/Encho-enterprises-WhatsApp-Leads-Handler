@@ -88,6 +88,98 @@ app.use(cors());
 
 // --- HELPER FUNCTIONS ---
 
+// DB AUTO-MIGRATION (Schema Enforcement)
+const ensureDbSchema = async () => {
+    const client = await getDb().connect();
+    try {
+        await client.query('BEGIN');
+        
+        // Extensions
+        await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
+
+        // 1. Candidates (Drivers)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS candidates (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                phone_number VARCHAR(50) UNIQUE NOT NULL,
+                name VARCHAR(255),
+                stage VARCHAR(50) DEFAULT 'New',
+                last_message_at BIGINT,
+                variables JSONB DEFAULT '{}',
+                tags TEXT[],
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+        `);
+        // Add robust columns
+        await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS notes TEXT;`);
+        await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;`);
+        await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS human_mode_ends_at BIGINT;`);
+
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_candidates_phone ON candidates(phone_number);`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_candidates_last_msg ON candidates(last_message_at DESC);`);
+
+        // 2. Messages
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS candidate_messages (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                direction VARCHAR(10) CHECK (direction IN ('in', 'out')),
+                text TEXT,
+                type VARCHAR(50),
+                status VARCHAR(50),
+                whatsapp_message_id VARCHAR(255) UNIQUE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+        `);
+        // Evolution: Ensure whatsapp_message_id exists
+        await client.query(`
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='candidate_messages' AND column_name='whatsapp_message_id') THEN 
+                    ALTER TABLE candidate_messages ADD COLUMN whatsapp_message_id VARCHAR(255) UNIQUE; 
+                END IF; 
+            END $$;
+        `);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_candidate ON candidate_messages(candidate_id);`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_wa_id ON candidate_messages(whatsapp_message_id);`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_created ON candidate_messages(created_at DESC);`);
+
+        // 3. Bot Settings
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS bot_versions (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                phone_number_id VARCHAR(50),
+                version_number INT,
+                status VARCHAR(20) CHECK (status IN ('draft', 'published', 'archived')),
+                settings JSONB,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+        `);
+
+        // 4. Scheduled Messages
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS scheduled_messages (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                payload JSONB,
+                scheduled_time BIGINT,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+        `);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_time ON scheduled_messages(scheduled_time) WHERE status = 'pending';`);
+
+        await client.query('COMMIT');
+        console.log("✅ DB Schema Verified");
+    } catch (e) {
+        await client.query('ROLLBACK');
+        console.error("❌ DB Schema Migration Failed:", e.message);
+    } finally {
+        client.release();
+    }
+};
+
 // ROBUST URL RESOLVER (Fixes QStash localhost issues)
 function getBaseUrl(req) {
   const envBase = process.env.PUBLIC_BASE_URL ? process.env.PUBLIC_BASE_URL.trim() : '';
@@ -163,8 +255,14 @@ const processMessageInternal = async (message, contact, phoneId) => {
         const upsertQuery = `INSERT INTO candidates (id, phone_number, name, stage, last_message_at, created_at) VALUES ($1, $2, $3, 'New', $4, NOW()) ON CONFLICT (phone_number) DO UPDATE SET name = EXCLUDED.name, last_message_at = $4 RETURNING id`;
         const resDb = await client.query(upsertQuery, [crypto.randomUUID(), from, name, Date.now()]);
         
-        // Insert Message
-        await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'in', $3, $4, 'received', NOW())`, [crypto.randomUUID(), resDb.rows[0].id, message.text?.body || '[Media]', message.type]);
+        // Insert Message with DB-Level Idempotency (ON CONFLICT DO NOTHING)
+        // If Redis lock fails or expires, this unique constraint on whatsapp_message_id saves us.
+        const insertMsgQuery = `
+            INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at) 
+            VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW()) 
+            ON CONFLICT (whatsapp_message_id) DO NOTHING
+        `;
+        await client.query(insertMsgQuery, [crypto.randomUUID(), resDb.rows[0].id, message.text?.body || '[Media]', message.type, message.id]);
         
         // Bot Logic Check
         const settings = await getBotSettings(phoneId);
@@ -264,40 +362,12 @@ apiRouter.get('/debug/status', async (req, res) => {
     res.json(status);
 });
 
+apiRouter.get('/system/stats', (req, res) => res.redirect('/api/debug/status'));
+
 apiRouter.post('/system/init-db', async (req, res) => {
-    const client = await getDb().connect();
-    try {
-        await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
-        await client.query(`CREATE TABLE IF NOT EXISTS candidates (
-            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-            phone_number VARCHAR(50) UNIQUE NOT NULL,
-            name VARCHAR(255),
-            stage VARCHAR(50) DEFAULT 'New',
-            last_message_at BIGINT,
-            variables JSONB DEFAULT '{}',
-            tags TEXT[],
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        );`);
-        await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (
-            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-            candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
-            direction VARCHAR(10) CHECK (direction IN ('in', 'out')),
-            text TEXT,
-            type VARCHAR(50),
-            status VARCHAR(50),
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        );`);
-        await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (
-            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-            phone_number_id VARCHAR(50),
-            version_number INT,
-            status VARCHAR(20) CHECK (status IN ('draft', 'published', 'archived')),
-            settings JSONB,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        );`);
-        res.json({ success: true, message: "Tables initialized" });
-    } catch(e) { res.status(500).json({ error: e.message }); } finally { client.release(); }
+    // Manually trigger migration via API if needed
+    await ensureDbSchema();
+    res.json({ success: true, message: "Schema verification complete" });
 });
 
 apiRouter.post('/system/seed-db', async (req, res) => {
@@ -341,7 +411,10 @@ apiRouter.get('/drivers', async (req, res) => {
             status: row.stage, 
             lastMessage: '...', 
             lastMessageTime: parseInt(row.last_message_at), 
-            source: 'Organic' 
+            source: 'Organic',
+            notes: row.notes,
+            isHumanMode: row.is_human_mode,
+            humanModeEndsAt: row.human_mode_ends_at ? parseInt(row.human_mode_ends_at) : undefined
         })));
     } catch (e) {
         if (e.code === '42P01') { 
@@ -351,6 +424,35 @@ apiRouter.get('/drivers', async (req, res) => {
             res.status(500).json({ error: e.message });
         }
     } finally { client.release(); }
+});
+
+apiRouter.patch('/drivers/:id', async (req, res) => {
+    const { status, tags, variables, name, notes, isHumanMode, humanModeEndsAt } = req.body;
+    const client = await getDb().connect();
+    try {
+        const updates = [];
+        const values = [];
+        let idx = 1;
+
+        if (status) { updates.push(`stage = $${idx++}`); values.push(status); }
+        if (name) { updates.push(`name = $${idx++}`); values.push(name); }
+        if (tags) { updates.push(`tags = $${idx++}`); values.push(tags); }
+        if (variables) { updates.push(`variables = COALESCE(variables, '{}'::jsonb) || $${idx++}::jsonb`); values.push(JSON.stringify(variables)); }
+        if (notes !== undefined) { updates.push(`notes = $${idx++}`); values.push(notes); }
+        if (isHumanMode !== undefined) { updates.push(`is_human_mode = $${idx++}`); values.push(isHumanMode); }
+        if (humanModeEndsAt !== undefined) { updates.push(`human_mode_ends_at = $${idx++}`); values.push(humanModeEndsAt); }
+
+        if (updates.length > 0) {
+            updates.push(`updated_at = NOW()`);
+            values.push(req.params.id);
+            await client.query(`UPDATE candidates SET ${updates.join(', ')} WHERE id = $${idx}`, values);
+        }
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    } finally {
+        client.release();
+    }
 });
 
 apiRouter.get('/drivers/:id/messages', async (req, res) => {
@@ -384,8 +486,63 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
 });
 
 apiRouter.get('/drivers/:id/documents', async (req, res) => { res.json([]); });
-apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => { res.json([]); });
-apiRouter.post('/scheduled-messages', async (req, res) => { res.json({ success: true }); });
+
+// Scheduled Messages
+apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => {
+    const client = await getDb().connect();
+    try {
+        const result = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 ORDER BY scheduled_time ASC`, [req.params.id]);
+        res.json(result.rows.map(r => ({
+            id: r.id,
+            scheduledTime: parseInt(r.scheduled_time),
+            payload: r.payload,
+            status: r.status
+        })));
+    } catch (e) { res.status(500).json({ error: e.message }); } finally { client.release(); }
+});
+
+apiRouter.post('/scheduled-messages', async (req, res) => {
+    const { driverIds, message, timestamp } = req.body;
+    const client = await getDb().connect();
+    try {
+        for (const driverId of driverIds) {
+             await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, 
+                [crypto.randomUUID(), driverId, JSON.stringify(message), timestamp || Date.now()]);
+        }
+        res.json({ success: true, count: driverIds.length });
+    } catch (e) { res.status(500).json({ error: e.message }); } finally { client.release(); }
+});
+
+apiRouter.delete('/scheduled-messages/:id', async (req, res) => {
+    const client = await getDb().connect();
+    try {
+        await client.query('DELETE FROM scheduled_messages WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); } finally { client.release(); }
+});
+
+apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
+    const { text, scheduledTime } = req.body;
+    const client = await getDb().connect();
+    try {
+        const old = await client.query('SELECT payload FROM scheduled_messages WHERE id = $1', [req.params.id]);
+        if (old.rows.length === 0) return res.status(404).json({error: "Not found"});
+        
+        const newPayload = { ...old.rows[0].payload, text: text || old.rows[0].payload.text };
+        const updates = [`payload = $1`];
+        const values = [JSON.stringify(newPayload)];
+        let idx = 2;
+        
+        if (scheduledTime) {
+            updates.push(`scheduled_time = $${idx++}`);
+            values.push(scheduledTime);
+        }
+        
+        values.push(req.params.id);
+        await client.query(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = $${idx}`, values);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); } finally { client.release(); }
+});
 
 // ==========================================
 // 4. BOT SETTINGS
@@ -394,6 +551,8 @@ apiRouter.get('/bot/settings', async (req, res) => {
     const s = await getBotSettings(process.env.PHONE_NUMBER_ID);
     res.json(s || { nodes: [], edges: [], steps: [] });
 });
+
+apiRouter.get('/bot-settings', (req, res) => res.redirect('/api/bot/settings'));
 
 apiRouter.post('/bot/save', async (req, res) => { 
     const client = await getDb().connect();
@@ -648,7 +807,14 @@ apiRouter.post('/internal/bot-worker', async (req, res) => {
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`🚀 Uber Fleet Bot running on port ${PORT}`));
+// --- STARTUP SCHEMA CHECK ---
+ensureDbSchema().then(() => {
+    console.log("Startup DB Check Complete");
+}).catch(console.error);
+
+if (require.main === module) {
+    const PORT = process.env.PORT || 3001;
+    app.listen(PORT, () => console.log(`🚀 Uber Fleet Bot running on port ${PORT}`));
+}
 
 module.exports = app;
