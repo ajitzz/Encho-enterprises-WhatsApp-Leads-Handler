@@ -21,7 +21,7 @@ const logger = {
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
     META_TIMEOUT: 10000, 
-    DB_CONNECTION_TIMEOUT: 5000,
+    DB_CONNECTION_TIMEOUT: 10000, 
     CACHE_TTL_SETTINGS: 600
 };
 
@@ -41,13 +41,11 @@ const getDb = () => {
         const dbUrl = resolveDbUrl();
         if (!dbUrl) throw new Error("No Postgres connection string found. Set POSTGRES_URL or DATABASE_URL.");
 
-        const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_VERSION;
-
         pgPool = new Pool({
             connectionString: dbUrl,
             ssl: { rejectUnauthorized: false },
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-            max: 1, 
+            max: 10, // Increased to 10 to handle dashboard + scheduler + webhook concurrency
             idleTimeoutMillis: 1000, 
             allowExitOnIdle: true 
         });
@@ -76,12 +74,6 @@ const withDb = async (operation) => {
 const redis = new Redis({ 
     url: process.env.UPSTASH_REDIS_REST_URL || 'https://mock.upstash.io', 
     token: process.env.UPSTASH_REDIS_REST_TOKEN || 'mock' 
-});
-
-const qstash = new QStashClient({ token: process.env.QSTASH_TOKEN || 'mock' });
-const qstashReceiver = new Receiver({
-    currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY || 'mock',
-    nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY || 'mock',
 });
 
 const authClient = new OAuth2Client(process.env.VITE_GOOGLE_CLIENT_ID);
@@ -136,7 +128,6 @@ const getBotSettings = async (phoneId) => {
 };
 
 const sendToMeta = async (to, payload) => {
-    // Safety: Check for placeholder text unless it's a pure media message
     if (payload.type === 'text' && payload.text && payload.text.body) {
         const body = payload.text.body.trim().toLowerCase();
         const forbiddenPhrases = [
@@ -172,6 +163,7 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         const name = contact?.profile?.name || "Unknown";
         const textBody = message.text?.body || `[${message.type}]`;
         
+        // Ensure table exists via init, but handle duplicate inserts gracefully
         const upsertQuery = `
             INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at) 
             VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
@@ -221,7 +213,7 @@ const processQueueInternal = async () => {
         let jobsToProcess = [];
 
         await withDb(async (client) => {
-            // Reset stuck jobs
+            // Reset stuck jobs (processing > 10 mins)
             await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
 
             await client.query('BEGIN');
@@ -244,7 +236,9 @@ const processQueueInternal = async () => {
             await client.query('COMMIT'); 
         });
 
-        logger.info(`Scheduler: Found ${jobsToProcess.length} jobs to process`);
+        if (jobsToProcess.length > 0) {
+            logger.info(`Scheduler: Processing ${jobsToProcess.length} jobs`);
+        }
 
         for (const job of jobsToProcess) {
             try {
@@ -259,11 +253,9 @@ const processQueueInternal = async () => {
                     metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
                 } else if (payload.mediaUrl) {
                     const type = payload.mediaType || 'image';
-                    // Ensure text exists if caption needed, otherwise just link
                     const caption = payload.text ? payload.text : undefined;
                     metaPayload = { type, [type]: { link: payload.mediaUrl, caption } };
                 } else {
-                    // Fallback to text
                     const bodyText = payload.text || ' ';
                     metaPayload = { type: 'text', text: { body: bodyText } };
                 }
@@ -284,7 +276,6 @@ const processQueueInternal = async () => {
                 processedCount++;
             } catch (err) {
                 logger.error("Scheduler Job Failed", { id: job.id, error: err.message });
-                // Mark as failed so it doesn't loop forever
                 await withDb(async (client) => {
                     await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
                 });
@@ -348,7 +339,7 @@ apiRouter.get('/drivers', async (req, res, next) => {
                 status: row.stage, 
                 lastMessage: row.last_message || '...', 
                 lastMessageTime: parseInt(row.last_message_at), 
-                source: 'Organic',
+                source: row.source || 'Organic',
                 notes: row.notes,
                 isHumanMode: row.is_human_mode,
                 humanModeEndsAt: row.human_mode_ends_at ? parseInt(row.human_mode_ends_at) : undefined
@@ -368,6 +359,26 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
             res.json(resDb.rows.map(r => ({ id: r.id, sender: r.direction === 'in' ? 'driver' : 'agent', text: r.text, timestamp: new Date(r.created_at).getTime(), type: r.type || 'text', status: r.status })).reverse());
         });
     } catch (e) { res.json([]); }
+});
+
+// NEW: Documents Route (Fixes 404)
+apiRouter.get('/drivers/:id/documents', async (req, res, next) => {
+    try {
+        await withDb(async (client) => {
+            // Safe query that handles case where table might be missing if init failed
+            const docs = await client.query(`SELECT * FROM driver_documents WHERE candidate_id = $1 ORDER BY created_at DESC`, [req.params.id]);
+            res.json(docs.rows.map(d => ({
+                id: d.id,
+                docType: d.type,
+                url: d.url,
+                verificationStatus: d.status,
+                timestamp: new Date(d.created_at).getTime()
+            })));
+        });
+    } catch (e) { 
+        if (e.code === '42P01') res.json([]); // Return empty if table doesn't exist
+        else next(e); 
+    }
 });
 
 apiRouter.post('/drivers/:id/messages', async (req, res, next) => {
@@ -402,10 +413,6 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
                     [crypto.randomUUID(), driverId, message, scheduledTime]);
             }
         });
-        
-        // Trigger immediate check in background (Fire and Forget)
-        processQueueInternal().catch(err => console.error("Background trigger error", err));
-
         res.json({ success: true });
     } catch (e) { next(e); }
 });
@@ -445,7 +452,7 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
 
             const newPayload = { ...oldPayload, text: text || oldPayload.text };
             const updates = [`payload = $1`];
-            const values = [newPayload]; // Pass object
+            const values = [newPayload]; 
             let idx = 2;
             
             if (scheduledTime) {
@@ -559,11 +566,63 @@ const init = async () => {
     try {
         await withDb(async (client) => {
             await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
-            await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY, phone_number VARCHAR(50) UNIQUE NOT NULL);`);
+            
+            await client.query(`CREATE TABLE IF NOT EXISTS candidates (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                phone_number VARCHAR(50) UNIQUE NOT NULL,
+                name VARCHAR(255),
+                stage VARCHAR(50) DEFAULT 'New',
+                last_message_at BIGINT,
+                last_message TEXT,
+                notes TEXT,
+                source VARCHAR(50) DEFAULT 'Organic',
+                current_node_id VARCHAR(255),
+                is_human_mode BOOLEAN DEFAULT FALSE,
+                human_mode_ends_at BIGINT,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );`);
+            
+            await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                direction VARCHAR(10),
+                text TEXT,
+                type VARCHAR(50),
+                status VARCHAR(50),
+                whatsapp_message_id VARCHAR(255) UNIQUE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );`);
+            
+            await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                payload JSONB,
+                scheduled_time BIGINT,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );`);
+            
+            await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                phone_number_id VARCHAR(50),
+                version_number INT,
+                status VARCHAR(20),
+                settings JSONB,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );`);
+
+            await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                type VARCHAR(50),
+                url TEXT,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );`);
         });
-        logger.info("DB Connection Verified");
+        logger.info("DB Schema Verified (Tables Ready)");
     } catch (e) {
-        logger.error("DB Connection Failed at Startup", { error: e.message });
+        logger.error("DB Initialization Failed", { error: e.message });
     }
 };
 

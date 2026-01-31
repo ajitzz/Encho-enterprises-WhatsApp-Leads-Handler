@@ -81,7 +81,13 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   }, [driver?.isHumanMode, driver?.humanModeEndsAt, driver?.id]);
 
   const loadDocuments = async (driverId: string) => {
-      try { const docs = await liveApiService.getDriverDocuments(driverId); setDocuments(docs); } catch(e) {}
+      try { 
+          const docs = await liveApiService.getDriverDocuments(driverId); 
+          setDocuments(docs || []); 
+      } catch(e) {
+          // Silent fail to avoid alert spam, but documents will be empty
+          setDocuments([]);
+      }
   };
   const loadScheduledMessages = async (driverId: string) => {
       try { const items = await liveApiService.getScheduledMessages(driverId); setScheduledMessages(items); } catch(e) {}
@@ -245,14 +251,27 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
             <div className="w-[450px] bg-white border-l border-gray-200 p-6">
                 <h3 className="text-xs font-bold text-gray-500 uppercase mb-3">Documents</h3>
-                <div className="space-y-3">
-                    {filteredDocuments.map(doc => (
-                        <div key={doc.id} className="bg-white p-3 rounded-xl border border-gray-200 shadow-sm flex justify-between items-center">
-                            <span className="text-xs font-bold capitalize">{doc.docType.replace('_', ' ')}</span>
-                            <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${doc.verificationStatus === 'approved' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>{doc.verificationStatus}</span>
-                        </div>
-                    ))}
-                </div>
+                {filteredDocuments.length === 0 ? (
+                    <div className="text-center p-6 border-2 border-dashed border-gray-100 rounded-xl bg-gray-50">
+                        <FileText size={24} className="mx-auto text-gray-300 mb-2" />
+                        <p className="text-xs text-gray-400">No documents uploaded yet.</p>
+                    </div>
+                ) : (
+                    <div className="space-y-3">
+                        {filteredDocuments.map(doc => (
+                            <div key={doc.id} className="bg-white p-3 rounded-xl border border-gray-200 shadow-sm flex justify-between items-center group hover:border-blue-200 transition-colors">
+                                <div className="flex items-center gap-2">
+                                    <div className="bg-blue-50 p-2 rounded-lg text-blue-600"><FileText size={16} /></div>
+                                    <div className="flex flex-col">
+                                        <span className="text-xs font-bold capitalize text-gray-800">{doc.docType.replace('_', ' ')}</span>
+                                        <span className="text-[9px] text-gray-400">{new Date(doc.timestamp).toLocaleDateString()}</span>
+                                    </div>
+                                </div>
+                                <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${doc.verificationStatus === 'approved' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>{doc.verificationStatus}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
             </div>
           </div>
         </div>
