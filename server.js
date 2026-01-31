@@ -1,4 +1,3 @@
-
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
@@ -20,8 +19,8 @@ const logger = {
 
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
-    META_TIMEOUT: 10000, 
-    DB_CONNECTION_TIMEOUT: 10000, 
+    META_TIMEOUT: 10000,
+    DB_CONNECTION_TIMEOUT: 10000,
     CACHE_TTL_SETTINGS: 600
 };
 
@@ -45,11 +44,11 @@ const getDb = () => {
             connectionString: dbUrl,
             ssl: { rejectUnauthorized: false },
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-            max: 10, 
-            idleTimeoutMillis: 1000, 
-            allowExitOnIdle: true 
+            max: 10,
+            idleTimeoutMillis: 1000,
+            allowExitOnIdle: true
         });
-        
+
         pgPool.on('error', (err) => logger.error('DB Pool Error', { error: err.message }));
     }
     return pgPool;
@@ -57,201 +56,345 @@ const getDb = () => {
 
 const withDb = async (operation) => {
     let client;
+    let released = false;
     try {
         client = await getDb().connect();
         return await operation(client);
     } catch (e) {
+        // IMPORTANT:
+        // If any query fails inside an explicit transaction, Postgres marks the transaction as
+        // "aborted" and all subsequent commands will fail with: "current transaction is aborted".
+        // If we return such a connection back to the pool without rolling back, the *next*
+        // request that reuses the connection will immediately start failing (25P02).
+        //
+        // We defensively try to rollback and also release the client *with error* so pg-pool
+        // can drop the connection if needed.
+        if (client) {
+            try { await client.query('ROLLBACK'); } catch (_) {}
+            try { client.release(e); released = true; } catch (_) {}
+        }
         const isConnErr = e.message.includes('timeout') || e.message.includes('Connection terminated');
         logger.error(isConnErr ? "DB Connection Saturation" : "DB Query Error", { error: e.message });
         throw e;
     } finally {
         if (client) {
-            try { client.release(); } catch(e) { console.error("Failed to release client", e); }
+            if (!released) {
+                try { client.release(); } catch (e) { console.error("Failed to release client", e); }
+            }
         }
     }
 };
 
-const redis = new Redis({ 
-    url: process.env.UPSTASH_REDIS_REST_URL || 'https://mock.upstash.io', 
-    token: process.env.UPSTASH_REDIS_REST_TOKEN || 'mock' 
+// Transaction helper (industrial-grade correctness): always COMMIT or ROLLBACK.
+const withTransaction = async (operation) => {
+    return withDb(async (client) => {
+        await client.query('BEGIN');
+        try {
+            const result = await operation(client);
+            await client.query('COMMIT');
+            return result;
+        } catch (e) {
+            try { await client.query('ROLLBACK'); } catch (_) {}
+            throw e;
+        }
+    });
+};
+
+const redis = new Redis({
+    url: process.env.UPSTASH_REDIS_REST_URL || 'https://mock.upstash.io',
+    token: process.env.UPSTASH_REDIS_REST_TOKEN || 'mock'
 });
+
+// QStash (optional but recommended for serverless scheduling)
+const qstash = process.env.QSTASH_TOKEN
+    ? new QStashClient({ token: process.env.QSTASH_TOKEN })
+    : null;
+
+const qstashReceiver = (process.env.QSTASH_CURRENT_SIGNING_KEY && process.env.QSTASH_NEXT_SIGNING_KEY)
+    ? new Receiver({
+        currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY,
+        nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY,
+    })
+    : null;
+
+const getBaseUrlFromReq = (req) => {
+    // Prefer explicit config in production
+    if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL.replace(/\/$/, '');
+    const proto = (req.headers['x-forwarded-proto'] || 'https').toString().split(',')[0].trim();
+    const host = (req.headers['x-forwarded-host'] || req.headers['host'] || '').toString().split(',')[0].trim();
+    return host ? `${proto}://${host}` : '';
+};
+
+const verifyQStashRequest = async (req) => {
+    // If signing keys are not configured, skip verification (dev mode).
+    if (!qstashReceiver) return true;
+    const signature = req.headers['upstash-signature'] || req.headers['Upstash-Signature'];
+    if (!signature) return false;
+    const body = req.rawBody ? req.rawBody.toString('utf-8') : JSON.stringify(req.body || {});
+    return await qstashReceiver.verify({ signature, body });
+};
 
 const authClient = new OAuth2Client(process.env.VITE_GOOGLE_CLIENT_ID);
 
 const getMetaClient = () => {
-    const axios = require('axios');
-    const https = require('https');
-    return axios.create({
-        httpsAgent: new https.Agent({ keepAlive: true }),
-        timeout: SYSTEM_CONFIG.META_TIMEOUT,
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.META_API_TOKEN}` }
-    });
+    if (!process.env.META_TOKEN || !process.env.PHONE_NUMBER_ID) throw new Error("Meta Credentials Missing");
+    return {
+        token: process.env.META_TOKEN,
+        phoneId: process.env.PHONE_NUMBER_ID,
+        url: `https://graph.facebook.com/v21.0/${process.env.PHONE_NUMBER_ID}/messages`
+    };
 };
 
+// --- APP SETUP ---
 const app = express();
-app.set('etag', false);
-const apiRouter = express.Router(); 
+app.use(cors());
+
+// IMPORTANT: capture raw body (needed for QStash signature verification)
+app.use(express.json({ limit: '10mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
+
+const apiRouter = express.Router();
+
+// --- AI Client ---
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+// --- S3 (media storage) ---
+const s3 = new S3Client({
+    region: process.env.AWS_REGION || 'us-east-1',
+    credentials: process.env.AWS_ACCESS_KEY_ID ? {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    } : undefined
+});
 const upload = multer({ storage: multer.memoryStorage() });
 
-apiRouter.use((req, res, next) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    next();
-});
-
-app.use((req, res, next) => {
-    req.requestId = req.headers['x-request-id'] || crypto.randomUUID();
-    next();
-});
-app.use(express.json({ limit: '10mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
-app.use(cors()); 
-
-// --- HELPER FUNCTIONS ---
-
-const getBotSettings = async (phoneId) => {
-    if (!phoneId) return null;
-    const key = `bot:settings:${phoneId}`;
-    try {
-        const cached = await redis.get(key);
-        if (cached) return cached;
-    } catch (e) {}
-
-    try {
-        return await withDb(async (client) => {
-            const res = await client.query(`SELECT settings FROM bot_versions WHERE phone_number_id = $1 AND status = 'published' ORDER BY version_number DESC LIMIT 1`, [phoneId]);
-            if (res.rows.length > 0) {
-                redis.set(key, res.rows[0].settings, { ex: 600 }).catch(() => {});
-                return res.rows[0].settings;
-            }
-            return null;
-        });
-    } catch(err) { return null; }
-};
+// --- HELPERS ---
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const sendToMeta = async (to, payload) => {
-    if (payload.type === 'text' && payload.text && payload.text.body) {
-        const body = payload.text.body.trim().toLowerCase();
-        const forbiddenPhrases = [
-            'replace this', 'sample message', 'type your message', 'enter text'
-        ];
-        if (forbiddenPhrases.some(phrase => body.includes(phrase)) || !body) {
-            logger.warn("🛑 BLOCKED: Placeholder message detected.", { to, body: payload.text.body });
-            throw new Error("Message blocked: Contains placeholder text."); 
-        }
-    }
+    const axios = require('axios');
+    const meta = getMetaClient();
 
-    if (!process.env.META_API_TOKEN || !process.env.PHONE_NUMBER_ID) {
-        logger.error('Meta Send Misconfigured', { to });
-        throw new Error("Server Misconfiguration: Missing Meta Credentials");
-    }
-    
-    try { 
-        await getMetaClient().post(`https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`, { messaging_product: 'whatsapp', recipient_type: 'individual', to, ...payload }); 
-    } catch (e) { 
-        logger.error("Meta Send Error", { error: e.response?.data || e.message, to }); 
-        throw e;
-    }
+    const data = {
+        messaging_product: "whatsapp",
+        to,
+        ...payload
+    };
+
+    const resp = await axios.post(meta.url, data, {
+        headers: {
+            Authorization: `Bearer ${meta.token}`,
+            'Content-Type': 'application/json'
+        },
+        timeout: SYSTEM_CONFIG.META_TIMEOUT
+    });
+
+    return resp.data;
 };
 
-// --- LOGIC: PROCESS MESSAGE ---
-const processMessageInternal = async (message, contact, phoneId, requestId = 'system') => {
-    if (!message || !phoneId) return;
+const getDriver = async (client, phone_number) => {
+    const res = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [phone_number]);
+    return res.rows[0];
+};
 
-    logger.info("Processing Message", { requestId, messageId: message.id, from: message.from });
-    
-    return await withDb(async (client) => {
-        const from = message.from;
-        const name = contact?.profile?.name || "Unknown";
-        const textBody = message.text?.body || `[${message.type}]`;
-        
-        const upsertQuery = `
-            INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at) 
-            VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
-            ON CONFLICT (phone_number) 
-            DO UPDATE SET name = EXCLUDED.name, last_message_at = $4, last_message = $5 
-            RETURNING id, current_node_id, is_human_mode
-        `;
-        const resDb = await client.query(upsertQuery, [crypto.randomUUID(), from, name, Date.now(), textBody]);
-        const candidate = resDb.rows[0];
-        const candidateId = candidate.id;
-        
-        const insertMsgQuery = `
-            INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at) 
-            VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW()) 
-            ON CONFLICT (whatsapp_message_id) DO NOTHING
-        `;
-        await client.query(insertMsgQuery, [crypto.randomUUID(), candidateId, textBody, message.type, message.id]);
-        
-        if (!candidate.is_human_mode) {
-            const settings = await getBotSettings(phoneId);
-            if (settings && settings.nodes && settings.nodes.length > 0) {
-                 if (!candidate.current_node_id) {
-                     const startNode = settings.nodes.find(n => n.type === 'start') || settings.nodes[0];
-                     const edge = settings.edges?.find(e => e.source === startNode.id);
-                     if (edge) {
-                         const nextNode = settings.nodes.find(n => n.id === edge.target);
-                         if (nextNode && nextNode.data && nextNode.data.content) {
-                             await sendToMeta(from, { type: 'text', text: { body: nextNode.data.content } });
-                             
-                             await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
-                                [crypto.randomUUID(), candidateId, nextNode.data.content]);
-                             
-                             await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [nextNode.id, candidateId]);
-                         }
-                     }
-                 }
-            }
+const createDriver = async (client, phone_number, name, source = 'Organic') => {
+    const res = await client.query(
+        `INSERT INTO candidates (phone_number, name, stage, last_message_at, last_message, source, created_at)
+         VALUES ($1, $2, 'New', $3, $4, $5, NOW())
+         RETURNING *`,
+        [phone_number, name, Date.now(), '', source]
+    );
+    return res.rows[0];
+};
+
+const cacheGet = async (key) => {
+    try {
+        const v = await redis.get(key);
+        return v;
+    } catch (_) { return null; }
+};
+
+const cacheSet = async (key, value, ttlSec = 60) => {
+    try {
+        await redis.set(key, value, { ex: ttlSec });
+    } catch (_) {}
+};
+
+const normalizeInteractive = (message) => {
+    if (!message) return null;
+    if (message.type === 'interactive' && message.interactive) {
+        // button_reply or list_reply
+        const ir = message.interactive.button_reply || message.interactive.list_reply;
+        if (ir) return { kind: 'interactive', id: ir.id, title: ir.title };
+    }
+    return null;
+};
+
+// --- BOT ENGINE (simple) ---
+const resolveBotSettings = async () => {
+    const cacheKey = `bot_settings_${process.env.PHONE_NUMBER_ID}`;
+    const cached = await cacheGet(cacheKey);
+    if (cached) return cached;
+
+    const settings = await withDb(async (client) => {
+        const phoneId = process.env.PHONE_NUMBER_ID;
+        const result = await client.query(`SELECT settings FROM bot_versions WHERE phone_number_id = $1 AND status = 'active' ORDER BY created_at DESC LIMIT 1`, [phoneId]);
+        return result.rows[0]?.settings || null;
+    });
+
+    if (settings) await cacheSet(cacheKey, settings, SYSTEM_CONFIG.CACHE_TTL_SETTINGS);
+    return settings;
+};
+
+const generateAIResponse = async (userText, settings) => {
+    // Minimal AI wrapper
+    const prompt = settings?.systemPrompt
+        ? `${settings.systemPrompt}\n\nUser: ${userText}\nAssistant:`
+        : `User: ${userText}\nAssistant:`;
+
+    const resp = await ai.models.generateContent({
+        model: settings?.model || "gemini-1.5-flash",
+        contents: [{ role: "user", parts: [{ text: prompt }] }]
+    });
+
+    const text = resp?.candidates?.[0]?.content?.parts?.[0]?.text || "Okay.";
+    return text;
+};
+
+const storeIncomingMessage = async (client, driverId, message) => {
+    const direction = 'in';
+    const text = message.text?.body || message.caption || '';
+    const type = message.type || 'text';
+    const whatsapp_message_id = message.id || null;
+
+    await client.query(
+        `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, 'received', $6, NOW())
+         ON CONFLICT (whatsapp_message_id) DO NOTHING`,
+        [crypto.randomUUID(), driverId, direction, text, type, whatsapp_message_id]
+    );
+
+    await client.query(
+        `UPDATE candidates SET last_message_at = $1, last_message = $2 WHERE id = $3`,
+        [Date.now(), text || `[${type}]`, driverId]
+    );
+};
+
+const processMessageInternal = async (message, contact, phoneId) => {
+    const from = message.from; // user's WA number
+    const name = contact?.profile?.name || null;
+
+    await withDb(async (client) => {
+        // Ensure driver exists
+        let driver = await getDriver(client, from);
+        if (!driver) driver = await createDriver(client, from, name, 'Organic');
+
+        // Store inbound message
+        await storeIncomingMessage(client, driver.id, message);
+
+        // Human mode
+        if (driver.is_human_mode && driver.human_mode_ends_at && driver.human_mode_ends_at > Date.now()) {
+            logger.info("Human mode active - skipping bot", { driverId: driver.id });
+            return;
         }
-        return { success: true };
+
+        // Interactive handling (optional)
+        const inter = normalizeInteractive(message);
+        const textBody = inter?.title || message.text?.body || '';
+
+        const settings = await resolveBotSettings();
+        if (!settings) return;
+
+        const replyText = await generateAIResponse(textBody, settings);
+
+        if (replyText && replyText.trim()) {
+            await sendToMeta(from, { type: 'text', text: { body: replyText.trim() } });
+
+            await client.query(
+                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
+                 VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`,
+                [crypto.randomUUID(), driver.id, replyText.trim()]
+            );
+
+            await client.query(
+                `UPDATE candidates SET last_message_at = $1, last_message = $2 WHERE id = $3`,
+                [Date.now(), replyText.trim(), driver.id]
+            );
+        }
     });
 };
 
-// --- CRON JOB: SCHEDULED MESSAGES ---
+// --- QUEUE PROCESSOR (scheduled messages) ---
 const processQueueInternal = async () => {
     let processedCount = 0;
+
     try {
         let jobsToProcess = [];
 
+        // 1) Claim work in a transaction (FOR UPDATE SKIP LOCKED requires it)
         await withDb(async (client) => {
             // Check if table exists before running logic to prevent logs spamming
             const tableCheck = await client.query(`SELECT to_regclass('public.scheduled_messages')`);
             if (!tableCheck.rows[0].to_regclass) return;
 
-            // Reset stuck jobs
-            await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
+            // Reset stuck jobs (serverless crashes / timeouts can leave rows in 'processing')
+            await client.query(
+                `UPDATE scheduled_messages
+                 SET status = 'pending'
+                 WHERE status = 'processing' AND scheduled_time < $1`,
+                [Date.now() - 600000]
+            );
 
             await client.query('BEGIN');
-            
-            const result = await client.query(`
-                SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
-                FROM scheduled_messages sm
-                JOIN candidates c ON sm.candidate_id = c.id
-                WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
-                LIMIT 50
-                FOR UPDATE SKIP LOCKED
-            `, [Date.now()]);
+            try {
+                const result = await client.query(`
+                    SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
+                    FROM scheduled_messages sm
+                    JOIN candidates c ON sm.candidate_id = c.id
+                    WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
+                    ORDER BY sm.scheduled_time ASC
+                    LIMIT 50
+                    FOR UPDATE SKIP LOCKED
+                `, [Date.now()]);
 
-            if (result.rows.length > 0) {
-                const jobIds = result.rows.map(r => r.id);
-                await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`, [jobIds]);
-                jobsToProcess = result.rows;
+                if (result.rows.length > 0) {
+                    const jobIds = result.rows.map(r => r.id);
+                    await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`, [jobIds]);
+                    jobsToProcess = result.rows;
+                }
+
+                await client.query('COMMIT');
+            } catch (e) {
+                try { await client.query('ROLLBACK'); } catch (_) {}
+                throw e;
             }
-            
-            await client.query('COMMIT'); 
         });
 
         if (jobsToProcess.length > 0) {
             logger.info(`Scheduler: Processing ${jobsToProcess.length} jobs`);
         }
 
-        for (const job of jobsToProcess) {
+        const concurrency = Math.max(1, Math.min(10, Number(process.env.SCHEDULED_SEND_CONCURRENCY || 5)));
+        const runPool = async (items, limit, worker) => {
+            const executing = new Set();
+            for (const item of items) {
+                const p = Promise.resolve().then(() => worker(item)).finally(() => executing.delete(p));
+                executing.add(p);
+                if (executing.size >= limit) {
+                    await Promise.race(executing);
+                }
+            }
+            await Promise.allSettled(Array.from(executing));
+        };
+
+        await runPool(jobsToProcess, concurrency, async (job) => {
             try {
-                let payload = job.payload; 
+                let payload = job.payload;
                 if (typeof payload === 'string') {
-                    try { payload = JSON.parse(payload); } catch(e) {}
+                    try { payload = JSON.parse(payload); } catch (_) {}
                 }
 
                 let metaPayload = {};
-                
+
                 if (payload.templateName) {
                     metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
                 } else if (payload.mediaUrl) {
@@ -259,58 +402,186 @@ const processQueueInternal = async () => {
                     const caption = payload.text ? payload.text : undefined;
                     metaPayload = { type, [type]: { link: payload.mediaUrl, caption } };
                 } else {
-                    const bodyText = payload.text || ' ';
+                    const bodyText = (payload.text || '').toString();
+                    if (!bodyText.trim()) throw new Error('Scheduled message text is empty');
                     metaPayload = { type: 'text', text: { body: bodyText } };
                 }
 
                 await sendToMeta(job.phone_number, metaPayload);
 
                 await withDb(async (client) => {
+                    const messageText = payload.text || `[${payload.templateName || payload.mediaType || 'scheduled'}]`;
+                    const messageType = payload.mediaType || (payload.templateName ? 'template' : 'text');
+
                     await client.query(`
                         INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
-                        VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
-                    `, [crypto.randomUUID(), job.candidate_id, payload.text || `[${payload.templateName || payload.mediaType}]`, payload.mediaType || 'text']);
+                        VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())
+                    `, [crypto.randomUUID(), job.candidate_id, messageText, messageType]);
 
-                    await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
-                        [payload.text || 'Scheduled Message', Date.now(), job.candidate_id]);
+                    await client.query(
+                        `UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`,
+                        [messageText, Date.now(), job.candidate_id]
+                    );
 
                     await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [job.id]);
                 });
+
                 processedCount++;
-            } catch (err) {
-                logger.error("Scheduler Job Failed", { id: job.id, error: err.message });
+            } catch (e) {
+                logger.error("Scheduled Send Error", { error: e.message, jobId: job.id });
                 await withDb(async (client) => {
                     await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
                 });
             }
-        }
+        });
+
         return processedCount;
     } catch (e) {
         console.error("Queue Processing Error", e);
-        return 0;
+        throw e;
     }
 };
+
+// Process a single scheduled message by id (used by QStash or manual debugging)
+const processScheduledMessageById = async (jobId) => {
+    if (!jobId) return { ok: false, reason: 'missing_jobId' };
+
+    // 1) Claim the job (idempotent)
+    const claimed = await withTransaction(async (client) => {
+        const res = await client.query(
+            `SELECT sm.id, sm.status, sm.scheduled_time, sm.payload, sm.candidate_id, c.phone_number
+             FROM scheduled_messages sm
+             JOIN candidates c ON sm.candidate_id = c.id
+             WHERE sm.id = $1
+             FOR UPDATE`,
+            [jobId]
+        );
+        if (res.rows.length === 0) return { state: 'not_found' };
+
+        const job = res.rows[0];
+        if (job.status === 'sent') return { state: 'already_sent' };
+        if (job.status === 'failed') return { state: 'failed' };
+        if (job.status === 'processing') return { state: 'already_processing' };
+
+        const now = Date.now();
+        if (Number(job.scheduled_time) > now) {
+            return { state: 'too_early', scheduled_time: Number(job.scheduled_time), phone_number: job.phone_number };
+        }
+
+        // Only one worker should flip pending -> processing.
+        await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = $1 AND status = 'pending'`, [jobId]);
+
+        return {
+            state: 'claimed',
+            candidate_id: job.candidate_id,
+            phone_number: job.phone_number,
+            payload: job.payload,
+        };
+    });
+
+    if (claimed.state === 'not_found' || claimed.state === 'already_sent' || claimed.state === 'failed' || claimed.state === 'already_processing') {
+        return { ok: true, state: claimed.state };
+    }
+
+    if (claimed.state === 'too_early') {
+        // If QStash delivered early (clock drift), re-schedule a small delay.
+        if (qstash && process.env.PUBLIC_BASE_URL) {
+            const baseUrl = process.env.PUBLIC_BASE_URL.replace(/\/$/, '');
+            const delayMs = Math.max(1000, claimed.scheduled_time - Date.now());
+            const delaySeconds = Math.ceil(delayMs / 1000);
+            await qstash.publishJSON({
+                url: `${baseUrl}/api/qstash/process-scheduled`,
+                body: { jobId },
+                delay: `${delaySeconds}s`,
+            }).catch(() => {});
+        }
+        return { ok: true, state: 'too_early' };
+    }
+
+    // 2) Send to WhatsApp
+    let payload = claimed.payload;
+    if (typeof payload === 'string') {
+        try { payload = JSON.parse(payload); } catch (_) {}
+    }
+
+    let metaPayload = {};
+    if (payload.templateName) {
+        metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
+    } else if (payload.mediaUrl) {
+        const type = payload.mediaType || 'image';
+        const caption = payload.text ? payload.text : undefined;
+        metaPayload = { type, [type]: { link: payload.mediaUrl, caption } };
+    } else {
+        const bodyText = (payload.text || '').toString();
+        if (!bodyText.trim()) throw new Error('Scheduled message text is empty');
+        metaPayload = { type: 'text', text: { body: bodyText } };
+    }
+
+    try {
+        await sendToMeta(claimed.phone_number, metaPayload);
+    } catch (e) {
+        await withDb(async (client) => {
+            await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [jobId]);
+        });
+        return { ok: false, state: 'meta_send_failed', error: e.message };
+    }
+
+    // 3) Persist success
+    const messageText = payload.text || `[${payload.templateName || payload.mediaType || 'scheduled'}]`;
+    const messageType = payload.mediaType || (payload.templateName ? 'template' : 'text');
+
+    await withDb(async (client) => {
+        await client.query(
+            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
+             VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
+            [crypto.randomUUID(), claimed.candidate_id, messageText, messageType]
+        );
+        await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, [messageText, Date.now(), claimed.candidate_id]);
+        await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [jobId]);
+    });
+
+    return { ok: true, state: 'sent' };
+};
+
+// --- ROUTES ---
 
 apiRouter.get('/cron/process-queue', async (req, res) => {
     const count = await processQueueInternal();
     res.json({ success: true, processed: count });
 });
 
-// --- ROUTES ---
-
-apiRouter.post('/auth/google', async (req, res, next) => {
+// QStash delivery endpoint (each scheduled message can be delivered by QStash directly)
+apiRouter.post('/qstash/process-scheduled', async (req, res) => {
     try {
-        const { credential } = req.body;
-        const ticket = await authClient.verifyIdToken({
-            idToken: credential,
-            audience: process.env.VITE_GOOGLE_CLIENT_ID,
-        });
-        const payload = ticket.getPayload();
-        res.json({ success: true, user: { name: payload.name, email: payload.email, picture: payload.picture } });
-    } catch (error) { next(error); }
+        const ok = await verifyQStashRequest(req);
+        if (!ok) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+        const { jobId } = req.body || {};
+        const result = await processScheduledMessageById(jobId);
+        // Always return 200 so QStash does not endlessly retry for non-retriable cases.
+        return res.status(200).json({ ok: true, result });
+    } catch (e) {
+        logger.error('QStash process-scheduled failed', { error: e.message });
+        // For transient errors, returning 500 allows QStash retries.
+        return res.status(500).json({ ok: false, error: e.message });
+    }
 });
 
-apiRouter.get('/debug/status', async (req, res, next) => {
+// AUTH (Google)
+apiRouter.post('/auth/google', async (req, res, next) => {
+    try {
+        const { token } = req.body;
+        const ticket = await authClient.verifyIdToken({
+            idToken: token,
+            audience: process.env.VITE_GOOGLE_CLIENT_ID
+        });
+        const payload = ticket.getPayload();
+        if (!payload?.email) return res.status(401).json({ ok: false, error: "Invalid token" });
+        res.json({ ok: true, email: payload.email, name: payload.name });
+    } catch (e) { next(e); }
+});
+
+// HEALTH CHECK
+apiRouter.get('/health', async (req, res) => {
     try {
         const status = { postgres: 'unknown', tables: {}, counts: {} };
         await withDb(async (client) => {
@@ -326,8 +597,8 @@ apiRouter.get('/debug/status', async (req, res, next) => {
             }
         });
         res.json(status);
-    } catch (e) { 
-        res.json({ postgres: 'error', lastError: e.message }); 
+    } catch (e) {
+        res.json({ postgres: 'error', lastError: e.message });
     }
 });
 
@@ -343,32 +614,32 @@ apiRouter.post('/system/hard-reset', async (req, res, next) => {
                 DROP TABLE IF EXISTS candidates CASCADE;
             `);
             // Init will recreate
-            await init(); 
+            await init();
         });
         res.json({ success: true });
-    } catch(e) { next(e); }
+    } catch (e) { next(e); }
 });
 
 apiRouter.get('/drivers', async (req, res, next) => {
     try {
         await withDb(async (client) => {
             const resDb = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC LIMIT 50');
-            res.json(resDb.rows.map(row => ({ 
-                id: row.id, 
-                phoneNumber: row.phone_number, 
-                name: row.name, 
-                status: row.stage, 
-                lastMessage: row.last_message || '...', 
-                lastMessageTime: parseInt(row.last_message_at), 
+            res.json(resDb.rows.map(row => ({
+                id: row.id,
+                phoneNumber: row.phone_number,
+                name: row.name,
+                status: row.stage,
+                lastMessage: row.last_message || '...',
+                lastMessageTime: parseInt(row.last_message_at),
                 source: row.source || 'Organic',
                 notes: row.notes,
                 isHumanMode: row.is_human_mode,
                 humanModeEndsAt: row.human_mode_ends_at ? parseInt(row.human_mode_ends_at) : undefined
             })));
         });
-    } catch (e) { 
-        if (e.code === '42P01') { res.json([]); } 
-        else { next(e); } 
+    } catch (e) {
+        if (e.code === '42P01') { res.json([]); }
+        else { next(e); }
     }
 });
 
@@ -379,13 +650,13 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
             const resDb = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT $2', [req.params.id, limit]);
             res.json(resDb.rows.map(r => ({ id: r.id, sender: r.direction === 'in' ? 'driver' : 'agent', text: r.text, timestamp: new Date(r.created_at).getTime(), type: r.type || 'text', status: r.status })).reverse());
         });
-    } catch (e) { 
+    } catch (e) {
         if (e.code === '42P01') res.json([]);
-        else next(e); 
+        else next(e);
     }
 });
 
-// NEW: Documents Route (Fixes 404)
+// Documents Route
 apiRouter.get('/drivers/:id/documents', async (req, res, next) => {
     try {
         await withDb(async (client) => {
@@ -398,30 +669,51 @@ apiRouter.get('/drivers/:id/documents', async (req, res, next) => {
                 timestamp: new Date(d.created_at).getTime()
             })));
         });
-    } catch (e) { 
-        if (e.code === '42P01') res.json([]); 
-        else next(e); 
+    } catch (e) {
+        if (e.code === '42P01') res.json([]);
+        else next(e);
     }
 });
 
 apiRouter.post('/drivers/:id/messages', async (req, res, next) => {
     const { text, mediaUrl, mediaType } = req.body;
     try {
+        const safeText = (text ?? '').toString();
+
+        // WhatsApp disallows empty text bodies.
+        if (!mediaUrl && !safeText.trim()) {
+            return res.status(400).json({ ok: false, error: "Message text cannot be empty" });
+        }
+
         await withDb(async (client) => {
             const dRes = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
             if (dRes.rows.length === 0) return res.status(404).json({ ok: false, error: "Driver not found" });
-            
-            const payload = mediaUrl 
-                ? { type: mediaType || 'image', [mediaType || 'image']: { link: mediaUrl, caption: text } }
-                : { type: 'text', text: { body: text } };
-            
+
+            const outboundType = mediaUrl ? (mediaType || 'image') : 'text';
+            const outboundText = safeText.trim()
+                ? safeText
+                : (mediaUrl ? `[Media:${outboundType}]` : safeText);
+
+            const payload = mediaUrl
+                ? { type: outboundType, [outboundType]: { link: mediaUrl, caption: safeText.trim() ? safeText : undefined } }
+                : { type: 'text', text: { body: safeText.trim() } };
+
             await sendToMeta(dRes.rows[0].phone_number, payload);
-            
-            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), req.params.id, text]);
-            await client.query('UPDATE candidates SET last_message_at = $1, last_message = $2 WHERE id = $3', [Date.now(), text || '[Media]', req.params.id]);
+
+            await client.query(
+                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
+                 VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
+                [crypto.randomUUID(), req.params.id, outboundText, outboundType]
+            );
+
+            await client.query(
+                'UPDATE candidates SET last_message_at = $1, last_message = $2 WHERE id = $3',
+                [Date.now(), outboundText, req.params.id]
+            );
         });
+
         res.json({ success: true });
-    } catch(e) { next(e); }
+    } catch (e) { next(e); }
 });
 
 apiRouter.post('/scheduled-messages', async (req, res, next) => {
@@ -429,14 +721,63 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
     try {
         const scheduledTime = Number(timestamp);
         if (isNaN(scheduledTime)) return res.status(400).json({ ok: false, error: "Invalid timestamp" });
+        if (!Array.isArray(driverIds) || driverIds.length === 0) return res.status(400).json({ ok: false, error: "driverIds must be a non-empty array" });
+
+        // Normalize message into a JSON payload (scheduled_messages.payload is JSONB).
+        let payload = message;
+        if (payload === undefined || payload === null) payload = {};
+        if (typeof payload === 'string') payload = { text: payload };
+        if (typeof payload !== 'object') payload = { text: String(payload) };
+
+        // Validate: if it's not a template or media message, it must have non-empty text.
+        const textBody = (payload.text ?? '').toString();
+        if (!payload.templateName && !payload.mediaUrl && !textBody.trim()) {
+            return res.status(400).json({ ok: false, error: "Scheduled message text cannot be empty" });
+        }
+
+        // Ensure consistent fields
+        payload.text = textBody;
+        if (payload.mediaUrl && !payload.mediaType) payload.mediaType = 'image';
+
+        // Insert rows first, then (optionally) schedule per-row delivery via QStash.
+        const inserted = [];
 
         await withDb(async (client) => {
             for (const driverId of driverIds) {
-                 await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, 
-                    [crypto.randomUUID(), driverId, message, scheduledTime]);
+                const id = crypto.randomUUID();
+                inserted.push({ id, driverId });
+                await client.query(
+                    `INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status)
+                     VALUES ($1, $2, $3, $4, 'pending')`,
+                    [id, driverId, payload, scheduledTime]
+                );
             }
         });
-        res.json({ success: true });
+
+        // Serverless-safe: schedule a QStash delivery for each message so it fires near the requested time.
+        // If QStash isn't configured, the /api/cron/process-queue endpoint (triggered by Vercel Cron) can pick them up.
+        if (qstash) {
+            const baseUrl = getBaseUrlFromReq(req);
+            if (!baseUrl) {
+                logger.warn('QStash configured but base URL could not be resolved; skipping per-message scheduling. Set PUBLIC_BASE_URL.');
+            } else {
+                const targetUrl = `${baseUrl}/api/qstash/process-scheduled`;
+                const delayMs = Math.max(0, scheduledTime - Date.now());
+                const delaySeconds = Math.ceil(delayMs / 1000);
+
+                await Promise.allSettled(
+                    inserted.map((row) =>
+                        qstash.publishJSON({
+                            url: targetUrl,
+                            body: { jobId: row.id },
+                            delay: `${delaySeconds}s`,
+                        })
+                    )
+                );
+            }
+        }
+
+        res.json({ success: true, inserted: inserted.length });
     } catch (e) { next(e); }
 });
 
@@ -451,9 +792,9 @@ apiRouter.get('/drivers/:id/scheduled-messages', async (req, res, next) => {
                 status: r.status
             })));
         });
-    } catch (e) { 
+    } catch (e) {
         if (e.code === '42P01') res.json([]);
-        else next(e); 
+        else next(e);
     }
 });
 
@@ -472,20 +813,20 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
         await withDb(async (client) => {
             const old = await client.query('SELECT payload FROM scheduled_messages WHERE id = $1', [req.params.id]);
             if (old.rows.length === 0) return res.status(404).json({ ok: false, error: "Not found" });
-            
+
             let oldPayload = old.rows[0].payload;
             if (typeof oldPayload === 'string') oldPayload = JSON.parse(oldPayload);
 
             const newPayload = { ...oldPayload, text: text || oldPayload.text };
             const updates = [`payload = $1`];
-            const values = [newPayload]; 
+            const values = [newPayload];
             let idx = 2;
-            
+
             if (scheduledTime) {
                 updates.push(`scheduled_time = $${idx++}`);
                 values.push(scheduledTime);
             }
-            
+
             values.push(req.params.id);
             await client.query(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = $${idx}`, values);
         });
@@ -494,54 +835,79 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
 });
 
 // Bot Settings
-apiRouter.get('/bot/settings', async (req, res, next) => { 
+apiRouter.get('/bot/settings', async (req, res, next) => {
     try {
-        await withDb(async (client) => {
+        const settings = await withDb(async (client) => {
             const phoneId = process.env.PHONE_NUMBER_ID;
             let result = await client.query(`SELECT settings FROM bot_versions WHERE phone_number_id = $1 AND status = 'draft' LIMIT 1`, [phoneId]);
             if (result.rows.length === 0) {
-                result = await client.query(`SELECT settings FROM bot_versions WHERE phone_number_id = $1 AND status = 'published' ORDER BY version_number DESC LIMIT 1`, [phoneId]);
+                result = await client.query(`SELECT settings FROM bot_versions WHERE phone_number_id = $1 AND status = 'active' LIMIT 1`, [phoneId]);
             }
-            res.json(result.rows[0]?.settings || { nodes: [], edges: [] });
+            return result.rows[0]?.settings || null;
         });
-    } catch(e) { next(e); }
+        res.json(settings || {});
+    } catch (e) { next(e); }
 });
 
-apiRouter.post('/bot/save', async (req, res, next) => { 
+apiRouter.post('/bot/settings', async (req, res, next) => {
     try {
+        const phoneId = process.env.PHONE_NUMBER_ID;
+        const settings = req.body || {};
         await withDb(async (client) => {
-            const phoneId = process.env.PHONE_NUMBER_ID;
-            const settings = JSON.stringify(req.body);
-            const checkDraft = await client.query(`SELECT id FROM bot_versions WHERE phone_number_id = $1 AND status = 'draft'`, [phoneId]);
-            if (checkDraft.rows.length > 0) {
-                await client.query(`UPDATE bot_versions SET settings = $1 WHERE id = $2`, [settings, checkDraft.rows[0].id]);
-            } else {
-                await client.query(`INSERT INTO bot_versions (id, phone_number_id, version_number, status, settings) VALUES ($1, $2, 1, 'draft', $3)`, [crypto.randomUUID(), phoneId, settings]);
-            }
+            await client.query(
+                `INSERT INTO bot_versions (id, phone_number_id, version_number, status, settings, created_at)
+                 VALUES ($1, $2, 1, 'draft', $3, NOW())`,
+                [crypto.randomUUID(), phoneId, settings]
+            );
         });
+        await cacheSet(`bot_settings_${phoneId}`, settings, SYSTEM_CONFIG.CACHE_TTL_SETTINGS);
         res.json({ success: true });
-    } catch(e) { next(e); }
+    } catch (e) { next(e); }
 });
 
-apiRouter.post('/bot/publish', async (req, res, next) => { 
+apiRouter.post('/bot/publish', async (req, res, next) => {
     try {
+        const phoneId = process.env.PHONE_NUMBER_ID;
         await withDb(async (client) => {
-            const phoneId = process.env.PHONE_NUMBER_ID;
-            const draftRes = await client.query(`SELECT settings FROM bot_versions WHERE phone_number_id = $1 AND status = 'draft' LIMIT 1`, [phoneId]);
-            if (draftRes.rows.length === 0) return res.status(400).json({ ok: false, error: "No draft to publish." });
+            const draft = await client.query(`SELECT * FROM bot_versions WHERE phone_number_id = $1 AND status = 'draft' ORDER BY created_at DESC LIMIT 1`, [phoneId]);
+            if (draft.rows.length === 0) return res.status(404).json({ ok: false, error: "No draft to publish" });
 
-            const settings = draftRes.rows[0].settings;
-            const verRes = await client.query(`SELECT MAX(version_number) as v FROM bot_versions WHERE phone_number_id = $1 AND status = 'published'`, [phoneId]);
-            const nextVer = (verRes.rows[0].v || 0) + 1;
+            // Mark existing active as archived
+            await client.query(`UPDATE bot_versions SET status = 'archived' WHERE phone_number_id = $1 AND status = 'active'`, [phoneId]);
 
-            await client.query(`INSERT INTO bot_versions (id, phone_number_id, version_number, status, settings) VALUES ($1, $2, $3, 'published', $4)`, [crypto.randomUUID(), phoneId, nextVer, settings]);
-            await redis.del(`bot:settings:${phoneId}`); 
-            res.json({ success: true, version: nextVer }); 
+            // Publish draft
+            await client.query(`UPDATE bot_versions SET status = 'active' WHERE id = $1`, [draft.rows[0].id]);
         });
-    } catch(e) { next(e); }
+
+        // Bust cache
+        await cacheSet(`bot_settings_${phoneId}`, null, 1);
+        res.json({ success: true });
+    } catch (e) { next(e); }
 });
 
-// WEBHOOK HANDLER
+// Media upload (optional)
+apiRouter.post('/media/upload', upload.single('file'), async (req, res, next) => {
+    try {
+        if (!req.file) return res.status(400).json({ ok: false, error: "No file" });
+
+        // If no S3 configured, just return error
+        if (!process.env.AWS_S3_BUCKET) return res.status(400).json({ ok: false, error: "S3 not configured" });
+
+        const { PutObjectCommand } = require('@aws-sdk/client-s3');
+        const key = `uploads/${Date.now()}_${req.file.originalname}`;
+        await s3.send(new PutObjectCommand({
+            Bucket: process.env.AWS_S3_BUCKET,
+            Key: key,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype
+        }));
+
+        const url = `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION || 'us-east-1'}.amazonaws.com/${key}`;
+        res.json({ ok: true, url });
+    } catch (e) { next(e); }
+});
+
+// --- WEBHOOK HANDLER ---
 const verifyWebhook = (req, res) => {
     if (req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) return res.status(200).send(req.query['hub.challenge']);
     return res.sendStatus(403);
@@ -552,24 +918,24 @@ const handleWebhook = async (req, res) => {
     try {
         const body = req.body;
         if (body.object !== 'whatsapp_business_account') return;
-        
+
         const entries = body.entry || [];
         for (const entry of entries) {
             for (const change of (entry.changes || [])) {
                 const value = change.value;
                 if (!value.messages) continue;
-                
+
                 const phoneId = value.metadata?.phone_number_id;
                 const contact = value.contacts?.[0];
-                
+
                 for (const message of value.messages) {
-                    processMessageInternal(message, contact, phoneId).catch(e => 
+                    processMessageInternal(message, contact, phoneId).catch(e =>
                         logger.error("Async Message Process Error", { error: e.message })
                     );
                 }
             }
         }
-    } catch (e) { 
+    } catch (e) {
         logger.error("Webhook Logic Error", { error: e.message });
     }
 };
@@ -592,7 +958,7 @@ const init = async () => {
     try {
         await withDb(async (client) => {
             await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
-            
+
             await client.query(`CREATE TABLE IF NOT EXISTS candidates (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 phone_number VARCHAR(50) UNIQUE NOT NULL,
@@ -607,7 +973,7 @@ const init = async () => {
                 human_mode_ends_at BIGINT,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );`);
-            
+
             await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
@@ -618,7 +984,7 @@ const init = async () => {
                 whatsapp_message_id VARCHAR(255) UNIQUE,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );`);
-            
+
             await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
@@ -627,7 +993,7 @@ const init = async () => {
                 status VARCHAR(50) DEFAULT 'pending',
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );`);
-            
+
             await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 phone_number_id VARCHAR(50),
@@ -654,9 +1020,26 @@ const init = async () => {
 
 init();
 
+// NOTE:
+// On :contentReference[oaicite:2]{index=2} serverless, setInterval workers are not reliable.
+// Prefer QStash delivery (per scheduled message) + optional Vercel Cron hitting /api/cron/process-queue.
+const QUEUE_INTERVAL_MS = Number(process.env.QUEUE_INTERVAL_MS || 10000);
+const shouldRunQueueWorker = process.env.ENABLE_QUEUE_WORKER !== 'false';
+
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;
     app.listen(PORT, () => logger.info(`🚀 Uber Fleet Bot running on port ${PORT}`));
+
+    if (shouldRunQueueWorker) {
+        setInterval(() => {
+            processQueueInternal().catch((err) => {
+                logger.error("Queue Worker Error", { error: err.message });
+            });
+        }, QUEUE_INTERVAL_MS);
+        logger.info("Queue Worker Enabled", { intervalMs: QUEUE_INTERVAL_MS });
+    } else {
+        logger.info("Queue Worker Disabled");
+    }
 }
 
 module.exports = app;
