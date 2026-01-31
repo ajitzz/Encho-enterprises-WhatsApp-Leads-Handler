@@ -209,6 +209,17 @@ const ensureDbSchema = async () => {
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );
         `);
+        
+        // FIX: Ensure candidate_id exists (Migration for existing tables)
+        await client.query(`
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='scheduled_messages' AND column_name='candidate_id') THEN 
+                    ALTER TABLE scheduled_messages ADD COLUMN candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE; 
+                END IF; 
+            END $$;
+        `);
+
         await client.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_time ON scheduled_messages(scheduled_time) WHERE status = 'pending';`);
 
         await client.query('COMMIT');
