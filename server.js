@@ -20,8 +20,8 @@ const logger = {
 
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
-    META_TIMEOUT: 5000, 
-    DB_CONNECTION_TIMEOUT: 15000, 
+    META_TIMEOUT: 10000, 
+    DB_CONNECTION_TIMEOUT: 30000, // Increased to 30s for serverless DB wake-up
     CACHE_TTL_SETTINGS: 600, 
     LOCK_TTL: 15,
     DEDUPE_TTL: 3600,
@@ -49,9 +49,11 @@ const getDb = () => {
             connectionString: dbUrl,
             ssl: { rejectUnauthorized: false },
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-            max: 5,
-            idleTimeoutMillis: 10000
+            max: 10, // Increased max connections
+            idleTimeoutMillis: 30000,
+            keepAlive: true
         });
+        
         pgPool.on('error', (err) => logger.error('DB Pool Error', { error: err.message }));
     }
     return pgPool;
@@ -126,7 +128,7 @@ const isUUID = (str) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 
 // DB AUTO-MIGRATION (Schema Enforcement)
 let _schemaEnsured = false;
-const ensureDbSchema = async () => {
+const ensureDbSchema = async (retries = 3) => {
     if (_schemaEnsured) return;
 
     let client;
@@ -211,6 +213,7 @@ const ensureDbSchema = async () => {
         `);
         
         // FIX: Ensure candidate_id exists (Migration for existing tables)
+        // This handles cases where the table was created before the column was added
         await client.query(`
             DO $$ 
             BEGIN 
@@ -226,8 +229,18 @@ const ensureDbSchema = async () => {
         _schemaEnsured = true;
         logger.info("DB Schema Verified");
     } catch (e) {
-        if (client) await client.query('ROLLBACK');
-        logger.error("DB Schema Migration Failed", { error: e.message });
+        if (client) {
+            try { await client.query('ROLLBACK'); } catch(e2) {}
+        }
+        logger.error("DB Schema Migration Failed", { error: e.message, attempt: 4 - retries });
+        
+        // Retry logic for connection issues
+        if (retries > 0) {
+            logger.info(`Retrying DB connection in 5s... (${retries} left)`);
+            await new Promise(r => setTimeout(r, 5000));
+            return ensureDbSchema(retries - 1);
+        }
+        throw e;
     } finally {
         if (client) client.release();
     }
