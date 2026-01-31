@@ -1037,17 +1037,17 @@ apiRouter.post('/internal/bot-worker', async (req, res, next) => {
     } catch(e) { next(e); }
 });
 
-// --- GLOBAL ERROR HANDLER ---
+// --- MOUNT ---
+app.use('/api', apiRouter);
+app.use('/', apiRouter);
+
+// --- GLOBAL ERROR HANDLER (Moved to bottom) ---
 app.use((err, req, res, next) => {
     logger.error("Unhandled API Error", { requestId: req.requestId, error: err.message, stack: err.stack, url: req.url });
     if (!res.headersSent) {
         res.status(err.status || 500).json({ ok: false, error: err.message || "Internal Server Error" });
     }
 });
-
-// --- MOUNT ---
-app.use('/api', apiRouter);
-app.use('/', apiRouter);
 
 // --- STARTUP SCHEMA CHECK ---
 ensureDbSchema().then(() => {
