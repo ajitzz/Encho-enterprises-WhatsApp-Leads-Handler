@@ -81,6 +81,7 @@ const s3Client = new S3Client({
 const BUCKET_NAME = process.env.AWS_BUCKET_NAME || 'uber-fleet-assets';
 
 // 5. AI (Gemini)
+// Initialized as 'ai' to match route usage
 const ai = process.env.GEMINI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null;
 
 // 6. Auth (Google)
@@ -120,6 +121,8 @@ app.use(express.json({ limit: '10mb', verify: (req, res, buf) => { req.rawBody =
 app.use(cors()); 
 
 // --- HELPER FUNCTIONS ---
+
+const isUUID = (str) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
 
 // DB AUTO-MIGRATION (Schema Enforcement)
 let _schemaEnsured = false;
@@ -653,7 +656,7 @@ apiRouter.get('/drivers/:id/scheduled-messages', async (req, res, next) => {
     } catch (e) { next(e); } finally { if (client) client.release(); }
 });
 
-// ✅ FIX 500 ERROR: Moved DB connection inside try/catch and added validation
+// ✅ FIX 500 ERROR: Improved input validation and error handling for Scheduled Messages
 apiRouter.post('/scheduled-messages', async (req, res, next) => {
     const { driverIds, message, timestamp } = req.body;
     let client;
@@ -662,12 +665,25 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
             return res.status(400).json({ ok: false, error: "Invalid driverIds array" });
         }
 
-        client = await getDb().connect();
-        for (const driverId of driverIds) {
-             await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, 
-                [crypto.randomUUID(), driverId, JSON.stringify(message), timestamp || Date.now()]);
+        // Validate timestamp
+        const scheduledTime = Number(timestamp);
+        if (isNaN(scheduledTime)) {
+             return res.status(400).json({ ok: false, error: "Invalid timestamp" });
         }
-        res.json({ success: true, count: driverIds.length });
+
+        client = await getDb().connect();
+        
+        // Filter for valid UUIDs to prevent database crashes
+        const validIds = driverIds.filter(id => /^[0-9a-fA-F-]{36}$/.test(id)); // Standard UUID regex
+        if (validIds.length === 0) {
+             return res.status(400).json({ ok: false, error: "No valid UUIDs provided." });
+        }
+
+        for (const driverId of validIds) {
+             await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, 
+                [crypto.randomUUID(), driverId, JSON.stringify(message), scheduledTime]);
+        }
+        res.json({ success: true, count: validIds.length });
     } catch (e) { 
         next(e); 
     } finally { 
@@ -903,30 +919,34 @@ apiRouter.post('/media/sync-s3', async (req, res) => { res.json({ success: true,
 // 6. AI & GEMINI
 // ==========================================
 apiRouter.post('/ai/generate', async (req, res, next) => {
-    if (!genAI) return res.status(503).json({ ok: false, error: "AI Not Configured" });
+    if (!ai) return res.status(503).json({ ok: false, error: "AI Not Configured" });
     try {
         const { model, contents, config } = req.body;
-        const aiModel = genAI.getGenerativeModel({ model: model || 'gemini-1.5-flash' });
-        const result = await aiModel.generateContent({
-            contents: [{ role: 'user', parts: [{ text: contents }] }],
-            generationConfig: config
+        // Use 'gemini-3-flash-preview' as default per instructions
+        const selectedModel = model || 'gemini-3-flash-preview';
+        
+        const response = await ai.models.generateContent({
+            model: selectedModel,
+            contents: contents, // Expecting string or structured object
+            config: config
         });
-        const response = await result.response;
-        res.json({ text: response.text() });
+        res.json({ text: response.text });
     } catch(e) { next(e); }
 });
 
 apiRouter.post('/ai/assistant', async (req, res, next) => {
-    if (!genAI) return res.status(503).json({ ok: false, error: "AI Not Configured" });
+    if (!ai) return res.status(503).json({ ok: false, error: "AI Not Configured" });
     try {
         const { input, history } = req.body;
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-        const chat = model.startChat({
-            history: history.map(h => ({ role: h.role, parts: h.parts })),
-            generationConfig: { maxOutputTokens: 100 }
+        
+        // Create a chat session with history
+        const chat = ai.chats.create({
+            model: 'gemini-3-flash-preview',
+            history: history // Assuming history matches the format [{role: 'user'|'model', parts: [...]}]
         });
-        const result = await chat.sendMessage(input);
-        res.json({ text: result.response.text() });
+        
+        const result = await chat.sendMessage({ message: input });
+        res.json({ text: result.text });
     } catch(e) { next(e); }
 });
 
