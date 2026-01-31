@@ -129,8 +129,16 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     if (!replyText.trim() && !templateName && !selectedMedia) return;
     
     if (showSchedule && scheduleTime) {
-        if (new Date(scheduleTime).getTime() <= Date.now()) { alert("Select future time."); return; }
-        try { await liveApiService.scheduleMessage([driver.id], { text: replyText, templateName: isTemplateMode ? templateName : undefined, mediaUrl: selectedMedia?.url, mediaType: selectedMedia?.type }, new Date(scheduleTime).getTime()); loadScheduledMessages(driver.id); setReplyText(''); setShowSchedule(false); } catch(e: any) { alert(`Failed: ${e.message}`); }
+        if (new Date(scheduleTime).getTime() <= Date.now()) { alert("Select a time in the future."); return; }
+        
+        try { 
+            await liveApiService.scheduleMessage([driver.id], { text: replyText, templateName: isTemplateMode ? templateName : undefined, mediaUrl: selectedMedia?.url, mediaType: selectedMedia?.type }, new Date(scheduleTime).getTime()); 
+            setReplyText(''); 
+            setShowSchedule(false);
+            setScheduleTime('');
+            alert("Message Scheduled Successfully!");
+            await loadScheduledMessages(driver.id); 
+        } catch(e: any) { alert(`Failed: ${e.message}`); }
     } else if (isTemplateMode && templateName) {
         try { await liveApiService.sendMessage(driver.id, replyText, { templateName }); setReplyText(''); setTemplateName(''); setIsTemplateMode(false); } catch(e: any) { alert(`Failed: ${e.message}`); }
     } else if (selectedMedia) {

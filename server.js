@@ -20,14 +20,13 @@ const logger = {
 
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
-    META_TIMEOUT: 5000, // Faster timeout for Meta
-    DB_CONNECTION_TIMEOUT: 5000, // Fail fast if DB is locked
+    META_TIMEOUT: 5000, 
+    DB_CONNECTION_TIMEOUT: 5000,
     CACHE_TTL_SETTINGS: 600
 };
 
 // --- SERVICES INITIALIZATION ---
 
-// 1. Database (Neon Postgres)
 let pgPool = null;
 
 const resolveDbUrl = () =>
@@ -42,17 +41,14 @@ const getDb = () => {
         const dbUrl = resolveDbUrl();
         if (!dbUrl) throw new Error("No Postgres connection string found. Set POSTGRES_URL or DATABASE_URL.");
 
-        // Detect Serverless Environment (Vercel/AWS)
         const isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_VERSION;
 
         pgPool = new Pool({
             connectionString: dbUrl,
             ssl: { rejectUnauthorized: false },
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-            // SERVERLESS OPTIMIZATION:
-            // Keep max low (1) to prevent "too many connections" on Neon Free Tier
             max: 1, 
-            idleTimeoutMillis: 1000, // Close connection immediately after use
+            idleTimeoutMillis: 1000, 
             allowExitOnIdle: true 
         });
         
@@ -61,45 +57,35 @@ const getDb = () => {
     return pgPool;
 };
 
-// Helper: Execute DB operations with strict release
 const withDb = async (operation) => {
     let client;
     try {
         client = await getDb().connect();
         return await operation(client);
     } catch (e) {
-        // If we get a connection error, it means pool is exhausted or DB is down.
-        // We throw so the API returns 500, but we log strictly.
         const isConnErr = e.message.includes('timeout') || e.message.includes('Connection terminated');
         logger.error(isConnErr ? "DB Connection Saturation" : "DB Query Error", { error: e.message });
         throw e;
     } finally {
         if (client) {
-            try { 
-                // Force release the client back to the pool
-                client.release(); 
-            } catch(e) { console.error("Failed to release client", e); }
+            try { client.release(); } catch(e) { console.error("Failed to release client", e); }
         }
     }
 };
 
-// 2. Cache (Upstash Redis)
 const redis = new Redis({ 
     url: process.env.UPSTASH_REDIS_REST_URL || 'https://mock.upstash.io', 
     token: process.env.UPSTASH_REDIS_REST_TOKEN || 'mock' 
 });
 
-// 3. Queue (QStash)
 const qstash = new QStashClient({ token: process.env.QSTASH_TOKEN || 'mock' });
 const qstashReceiver = new Receiver({
     currentSigningKey: process.env.QSTASH_CURRENT_SIGNING_KEY || 'mock',
     nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY || 'mock',
 });
 
-// 4. Auth (Google)
 const authClient = new OAuth2Client(process.env.VITE_GOOGLE_CLIENT_ID);
 
-// 7. Meta API Client
 const getMetaClient = () => {
     const axios = require('axios');
     const https = require('https');
@@ -110,7 +96,6 @@ const getMetaClient = () => {
     });
 };
 
-// --- EXPRESS SETUP ---
 const app = express();
 app.set('etag', false);
 const apiRouter = express.Router(); 
@@ -129,8 +114,6 @@ app.use(express.json({ limit: '10mb', verify: (req, res, buf) => { req.rawBody =
 app.use(cors()); 
 
 // --- HELPER FUNCTIONS ---
-
-const isUUID = (str) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
 
 const getBotSettings = async (phoneId) => {
     if (!phoneId) return null;
@@ -153,7 +136,6 @@ const getBotSettings = async (phoneId) => {
 };
 
 const sendToMeta = async (to, payload) => {
-    // ✅ SAFETY CHECK: Prevent Placeholder Messages
     if (payload.text && payload.text.body) {
         const body = payload.text.body.trim().toLowerCase();
         const forbiddenPhrases = [
@@ -188,7 +170,6 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         const name = contact?.profile?.name || "Unknown";
         const textBody = message.text?.body || `[${message.type}]`;
         
-        // 1. Upsert Candidate
         const upsertQuery = `
             INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at) 
             VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
@@ -200,7 +181,6 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         const candidate = resDb.rows[0];
         const candidateId = candidate.id;
         
-        // 2. Insert Message Log
         const insertMsgQuery = `
             INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at) 
             VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW()) 
@@ -208,7 +188,6 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         `;
         await client.query(insertMsgQuery, [crypto.randomUUID(), candidateId, textBody, message.type, message.id]);
         
-        // 3. Bot Auto-Reply Logic
         if (!candidate.is_human_mode) {
             const settings = await getBotSettings(phoneId);
             if (settings && settings.nodes && settings.nodes.length > 0) {
@@ -218,14 +197,11 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
                      if (edge) {
                          const nextNode = settings.nodes.find(n => n.id === edge.target);
                          if (nextNode && nextNode.data && nextNode.data.content) {
-                             // Send Reply
                              await sendToMeta(from, { type: 'text', text: { body: nextNode.data.content } });
                              
-                             // Log Reply
                              await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
                                 [crypto.randomUUID(), candidateId, nextNode.data.content]);
                              
-                             // Advance State
                              await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [nextNode.id, candidateId]);
                          }
                      }
@@ -237,19 +213,15 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
 };
 
 // --- CRON JOB: SCHEDULED MESSAGES ---
-// NOTE: This replaces the setInterval. It must be called externally (e.g., by the Frontend Heartbeat).
-apiRouter.get('/cron/process-queue', async (req, res) => {
+const processQueueInternal = async () => {
     let processedCount = 0;
-    
     try {
         let jobsToProcess = [];
 
-        // STEP 1: PICK & LOCK (Atomic)
         await withDb(async (client) => {
-            // Safety: Reset stuck 'processing' jobs older than 10 mins back to 'pending'
+            // Reset stuck jobs
             await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
 
-            // Transaction
             await client.query('BEGIN');
             
             const result = await client.query(`
@@ -257,7 +229,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                 FROM scheduled_messages sm
                 JOIN candidates c ON sm.candidate_id = c.id
                 WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
-                LIMIT 5
+                LIMIT 50
                 FOR UPDATE SKIP LOCKED
             `, [Date.now()]);
 
@@ -270,10 +242,14 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
             await client.query('COMMIT'); 
         });
 
-        // STEP 2: PROCESS (Outside Transaction)
         for (const job of jobsToProcess) {
             try {
-                const payload = job.payload; 
+                let payload = job.payload; 
+                // SAFETY: Handle case where payload was double-serialized as a string
+                if (typeof payload === 'string') {
+                    try { payload = JSON.parse(payload); } catch(e) {}
+                }
+
                 let metaPayload = {};
                 
                 if (payload.templateName) {
@@ -282,7 +258,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                     const type = payload.mediaType || 'image';
                     metaPayload = { type, [type]: { link: payload.mediaUrl, caption: payload.text } };
                 } else {
-                    metaPayload = { type: 'text', text: { body: payload.text } };
+                    metaPayload = { type: 'text', text: { body: payload.text || ' ' } };
                 }
 
                 await sendToMeta(job.phone_number, metaPayload);
@@ -291,7 +267,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                     await client.query(`
                         INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
                         VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
-                    `, [crypto.randomUUID(), job.candidate_id, payload.text || 'Media', payload.mediaType || 'text']);
+                    `, [crypto.randomUUID(), job.candidate_id, payload.text || `[${payload.templateName || payload.mediaType}]`, payload.mediaType || 'text']);
 
                     await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
                         [payload.text || 'Scheduled Message', Date.now(), job.candidate_id]);
@@ -306,16 +282,20 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                 });
             }
         }
-        
-        res.json({ success: true, processed: processedCount });
+        return processedCount;
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        console.error("Queue Processing Error", e);
+        return 0;
     }
+};
+
+apiRouter.get('/cron/process-queue', async (req, res) => {
+    const count = await processQueueInternal();
+    res.json({ success: true, processed: count });
 });
 
 // --- ROUTES ---
 
-// Auth
 apiRouter.post('/auth/google', async (req, res, next) => {
     try {
         const { credential } = req.body;
@@ -328,7 +308,6 @@ apiRouter.post('/auth/google', async (req, res, next) => {
     } catch (error) { next(error); }
 });
 
-// Diagnostics
 apiRouter.get('/debug/status', async (req, res, next) => {
     try {
         const status = { postgres: 'unknown', tables: {}, counts: {} };
@@ -350,7 +329,6 @@ apiRouter.get('/debug/status', async (req, res, next) => {
     }
 });
 
-// Dashboard Data
 apiRouter.get('/drivers', async (req, res, next) => {
     try {
         await withDb(async (client) => {
@@ -369,7 +347,7 @@ apiRouter.get('/drivers', async (req, res, next) => {
             })));
         });
     } catch (e) { 
-        if (e.code === '42P01') { res.json([]); } // Table doesn't exist yet
+        if (e.code === '42P01') { res.json([]); } 
         else { next(e); } 
     }
 });
@@ -412,15 +390,71 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
 
         await withDb(async (client) => {
             for (const driverId of driverIds) {
+                 // FIX: Pass 'message' object directly to JSONB column, do NOT stringify it manually.
+                 // The 'pg' driver handles serialization for us.
                  await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, 
-                    [crypto.randomUUID(), driverId, JSON.stringify(message), scheduledTime]);
+                    [crypto.randomUUID(), driverId, message, scheduledTime]);
             }
+        });
+        
+        // Trigger immediate check in background (Fire and Forget)
+        processQueueInternal().catch(err => console.error("Background trigger error", err));
+
+        res.json({ success: true });
+    } catch (e) { next(e); }
+});
+
+apiRouter.get('/drivers/:id/scheduled-messages', async (req, res, next) => {
+    try {
+        await withDb(async (client) => {
+            const result = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 ORDER BY scheduled_time ASC`, [req.params.id]);
+            res.json(result.rows.map(r => ({
+                id: r.id,
+                scheduledTime: parseInt(r.scheduled_time),
+                payload: typeof r.payload === 'string' ? JSON.parse(r.payload) : r.payload,
+                status: r.status
+            })));
+        });
+    } catch (e) { next(e); }
+});
+
+apiRouter.delete('/scheduled-messages/:id', async (req, res, next) => {
+    try {
+        await withDb(async (client) => {
+            await client.query('DELETE FROM scheduled_messages WHERE id = $1', [req.params.id]);
         });
         res.json({ success: true });
     } catch (e) { next(e); }
 });
 
-// Bot Configuration
+apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
+    const { text, scheduledTime } = req.body;
+    try {
+        await withDb(async (client) => {
+            const old = await client.query('SELECT payload FROM scheduled_messages WHERE id = $1', [req.params.id]);
+            if (old.rows.length === 0) return res.status(404).json({ ok: false, error: "Not found" });
+            
+            let oldPayload = old.rows[0].payload;
+            if (typeof oldPayload === 'string') oldPayload = JSON.parse(oldPayload);
+
+            const newPayload = { ...oldPayload, text: text || oldPayload.text };
+            const updates = [`payload = $1`];
+            const values = [newPayload]; // Pass object
+            let idx = 2;
+            
+            if (scheduledTime) {
+                updates.push(`scheduled_time = $${idx++}`);
+                values.push(scheduledTime);
+            }
+            
+            values.push(req.params.id);
+            await client.query(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = $${idx}`, values);
+        });
+        res.json({ success: true });
+    } catch (e) { next(e); }
+});
+
+// Bot Settings
 apiRouter.get('/bot/settings', async (req, res, next) => { 
     try {
         await withDb(async (client) => {
@@ -468,16 +502,14 @@ apiRouter.post('/bot/publish', async (req, res, next) => {
     } catch(e) { next(e); }
 });
 
-// WEBHOOK HANDLER (CRITICAL FIX)
+// WEBHOOK HANDLER
 const verifyWebhook = (req, res) => {
     if (req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) return res.status(200).send(req.query['hub.challenge']);
     return res.sendStatus(403);
 };
 
 const handleWebhook = async (req, res) => {
-    // 1. Immediately acknowledge to Meta to prevent retries/timeout
     res.sendStatus(200);
-
     try {
         const body = req.body;
         if (body.object !== 'whatsapp_business_account') return;
@@ -491,7 +523,6 @@ const handleWebhook = async (req, res) => {
                 const phoneId = value.metadata?.phone_number_id;
                 const contact = value.contacts?.[0];
                 
-                // Process in background - do not await
                 for (const message of value.messages) {
                     processMessageInternal(message, contact, phoneId).catch(e => 
                         logger.error("Async Message Process Error", { error: e.message })
@@ -518,12 +549,10 @@ app.use((err, req, res, next) => {
     }
 });
 
-// Initialization
 const init = async () => {
     try {
         await withDb(async (client) => {
             await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
-            // Check basic table
             await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY, phone_number VARCHAR(50) UNIQUE NOT NULL);`);
         });
         logger.info("DB Connection Verified");
