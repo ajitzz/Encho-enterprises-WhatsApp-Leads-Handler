@@ -48,11 +48,7 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
     payload JSONB,
     scheduled_time BIGINT,
     status VARCHAR(50) DEFAULT 'pending',
-    attempts INT DEFAULT 0,
-    last_error TEXT,
-    sent_at TIMESTAMP WITH TIME ZONE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- Indexes for performance
@@ -60,4 +56,3 @@ CREATE INDEX IF NOT EXISTS idx_candidates_phone ON candidates(phone_number);
 CREATE INDEX IF NOT EXISTS idx_messages_candidate ON candidate_messages(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON candidate_messages(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_scheduled_time ON scheduled_messages(scheduled_time) WHERE status = 'pending';
-CREATE INDEX IF NOT EXISTS idx_scheduled_status_time ON scheduled_messages(status, scheduled_time);

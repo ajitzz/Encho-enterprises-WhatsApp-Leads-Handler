@@ -1,10 +1,11 @@
+
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Redis } = require('@upstash/redis');
 const { Client: QStashClient, Receiver } = require('@upstash/qstash');
 const { Pool } = require('pg');
-const { S3Client, ListObjectsV2Command, PutObjectCommand, DeleteObjectCommand, CopyObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, ListObjectsV2Command, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const multer = require('multer');
 const { OAuth2Client } = require('google-auth-library');
 const { GoogleGenAI } = require('@google/genai');
@@ -19,13 +20,11 @@ const logger = {
 
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
-    META_TIMEOUT: 5000,
-    DB_CONNECTION_TIMEOUT: 15000,
-    CACHE_TTL_SETTINGS: 600,
+    META_TIMEOUT: 5000, 
+    DB_CONNECTION_TIMEOUT: 15000, 
+    CACHE_TTL_SETTINGS: 600, 
     LOCK_TTL: 15,
-    DEDUPE_TTL: 3600,
-    SCHEDULE_BATCH_SIZE: parseInt(process.env.SCHEDULE_BATCH_SIZE || '25', 10),
-    SCHEDULE_POLL_INTERVAL_MS: parseInt(process.env.SCHEDULE_POLL_INTERVAL_MS || '15000', 10)
+    DEDUPE_TTL: 3600 
 };
 
 // --- SERVICES INITIALIZATION ---
@@ -58,9 +57,9 @@ const getDb = () => {
 };
 
 // 2. Cache (Upstash Redis)
-const redis = new Redis({
-    url: process.env.UPSTASH_REDIS_REST_URL || 'https://mock.upstash.io',
-    token: process.env.UPSTASH_REDIS_REST_TOKEN || 'mock'
+const redis = new Redis({ 
+    url: process.env.UPSTASH_REDIS_REST_URL || 'https://mock.upstash.io', 
+    token: process.env.UPSTASH_REDIS_REST_TOKEN || 'mock' 
 });
 
 // 3. Queue (QStash)
@@ -79,10 +78,6 @@ const s3Client = new S3Client({
     }
 });
 const BUCKET_NAME = process.env.AWS_BUCKET_NAME || 'uber-fleet-assets';
-const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
-
-const isS3Configured = () =>
-    Boolean(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY && process.env.AWS_BUCKET_NAME);
 
 // 5. AI (Gemini)
 const genAI = process.env.GEMINI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null;
@@ -104,7 +99,7 @@ const getMetaClient = () => {
 // --- EXPRESS SETUP ---
 const app = express();
 app.set('etag', false); // ✅ prevent 304 empty-body issues in SPA
-const apiRouter = express.Router();
+const apiRouter = express.Router(); 
 const upload = multer({ storage: multer.memoryStorage() });
 
 // ✅ Disable caching for ALL API responses (prevents 304/empty JSON issues)
@@ -122,7 +117,7 @@ app.use((req, res, next) => {
     next();
 });
 app.use(express.json({ limit: '10mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
-app.use(cors());
+app.use(cors()); 
 
 // --- HELPER FUNCTIONS ---
 
@@ -134,7 +129,7 @@ const ensureDbSchema = async () => {
     const client = await getDb().connect();
     try {
         await client.query('BEGIN');
-
+        
         // Extensions (optional in managed Postgres)
         try { await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'); }
         catch (e) { logger.warn('uuid-ossp extension unavailable (continuing)', { error: e.message }); }
@@ -153,6 +148,7 @@ const ensureDbSchema = async () => {
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );
         `);
+        // Add robust columns needed for Logic and UI
         await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS notes TEXT;`);
         await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_message TEXT;`);
         await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;`);
@@ -175,7 +171,15 @@ const ensureDbSchema = async () => {
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );
         `);
-
+        // Evolution: Ensure whatsapp_message_id exists
+        await client.query(`
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='candidate_messages' AND column_name='whatsapp_message_id') THEN 
+                    ALTER TABLE candidate_messages ADD COLUMN whatsapp_message_id VARCHAR(255) UNIQUE; 
+                END IF; 
+            END $$;
+        `);
         await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_candidate ON candidate_messages(candidate_id);`);
         await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_wa_id ON candidate_messages(whatsapp_message_id);`);
         await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_created ON candidate_messages(created_at DESC);`);
@@ -200,19 +204,10 @@ const ensureDbSchema = async () => {
                 payload JSONB,
                 scheduled_time BIGINT,
                 status VARCHAR(50) DEFAULT 'pending',
-                attempts INT DEFAULT 0,
-                last_error TEXT,
-                sent_at TIMESTAMP WITH TIME ZONE,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );
         `);
-        await client.query(`ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS attempts INT DEFAULT 0;`);
-        await client.query(`ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS last_error TEXT;`);
-        await client.query(`ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP WITH TIME ZONE;`);
-        await client.query(`ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();`);
         await client.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_time ON scheduled_messages(scheduled_time) WHERE status = 'pending';`);
-        await client.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_status_time ON scheduled_messages(status, scheduled_time);`);
 
         await client.query('COMMIT');
         _schemaEnsured = true;
@@ -227,15 +222,15 @@ const ensureDbSchema = async () => {
 
 // ROBUST URL RESOLVER (Fixes QStash localhost issues)
 function getBaseUrl(req) {
-    const envBase = process.env.PUBLIC_BASE_URL ? process.env.PUBLIC_BASE_URL.trim() : '';
-    if (envBase) return envBase.replace(/\/$/, "");
+  const envBase = process.env.PUBLIC_BASE_URL ? process.env.PUBLIC_BASE_URL.trim() : '';
+  if (envBase) return envBase.replace(/\/$/, "");
 
-    const vercelUrl = process.env.VERCEL_URL ? process.env.VERCEL_URL.trim() : '';
-    if (vercelUrl) return `https://${vercelUrl.replace(/\/$/, "")}`;
+  const vercelUrl = process.env.VERCEL_URL ? process.env.VERCEL_URL.trim() : '';
+  if (vercelUrl) return `https://${vercelUrl.replace(/\/$/, "")}`;
 
-    const proto = (req.headers["x-forwarded-proto"] || req.protocol || "http").toString();
-    const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString();
-    return `${proto}://${host}`.replace(/\/$/, "");
+  const proto = (req.headers["x-forwarded-proto"] || req.protocol || "http").toString();
+  const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString();
+  return `${proto}://${host}`.replace(/\/$/, "");
 }
 
 // Worker Helper: Only fetches PUBLISHED settings
@@ -255,51 +250,7 @@ const getBotSettings = async (phoneId) => {
             return res.rows[0].settings;
         }
         return null;
-    } catch (err) {
-        return null;
-    } finally {
-        client.release();
-    }
-};
-
-const resolveMediaType = (key) => {
-    const ext = key.split('.').pop().toLowerCase();
-    if (['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext)) return 'image';
-    if (['mp4', 'mov', 'webm'].includes(ext)) return 'video';
-    return 'document';
-};
-
-const buildMediaUrl = (key) => `https://${BUCKET_NAME}.s3.${AWS_REGION}.amazonaws.com/${key}`;
-
-const listS3Objects = async (prefix) => {
-    const items = [];
-    let continuationToken;
-    do {
-        const command = new ListObjectsV2Command({
-            Bucket: BUCKET_NAME,
-            Prefix: prefix,
-            ContinuationToken: continuationToken
-        });
-        const response = await s3Client.send(command);
-        items.push(...(response.Contents || []));
-        continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
-    } while (continuationToken);
-    return items;
-};
-
-const buildShowcaseManifest = async ({ folderId, title }) => {
-    if (!isS3Configured()) return { title, items: [] };
-    const prefix = folderId ? `${folderId.replace(/^\//, '').replace(/\/$/, '')}/` : '';
-    const objects = await listS3Objects(prefix);
-    const items = objects
-        .filter((obj) => obj.Key && !obj.Key.endsWith('/'))
-        .map((obj) => ({
-            id: obj.Key,
-            url: buildMediaUrl(obj.Key),
-            type: resolveMediaType(obj.Key),
-            filename: obj.Key.replace(prefix, '')
-        }));
-    return { title, items };
+    } catch(err) { return null; } finally { client.release(); }
 };
 
 const sendToMeta = async (to, payload) => {
@@ -308,88 +259,20 @@ const sendToMeta = async (to, payload) => {
         const body = payload.text.body.trim().toLowerCase();
         if (!body || body.includes('replace this') || body.includes('sample message') || body.includes('type your message')) {
             logger.warn("Blocked Placeholder/Empty Message", { to, body: payload.text.body });
-            return { ok: false, error: 'blocked_placeholder' };
+            return;
         }
     }
 
     if (!process.env.META_API_TOKEN || !process.env.PHONE_NUMBER_ID) {
         logger.error('Meta Send Misconfigured (missing META_API_TOKEN or PHONE_NUMBER_ID)', { to });
-        return { ok: false, error: 'missing_meta_configuration' };
+        return;
     }
 
-    try {
-        await getMetaClient().post(`https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`, { messaging_product: 'whatsapp', recipient_type: 'individual', to, ...payload });
-        return { ok: true };
-    } catch (e) {
-        logger.error("Meta Send Error", { error: e.response?.data || e.message, to });
-        return { ok: false, error: e.response?.data || e.message };
+    try { 
+        await getMetaClient().post(`https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`, { messaging_product: 'whatsapp', recipient_type: 'individual', to, ...payload }); 
+    } catch (e) { 
+        logger.error("Meta Send Error", { error: e.response?.data || e.message, to }); 
     }
-};
-
-const normalizeScheduledPayload = (payload) => {
-    if (!payload) return {};
-    if (typeof payload === 'string') {
-        try {
-            return JSON.parse(payload);
-        } catch (e) {
-            return {};
-        }
-    }
-    return payload;
-};
-
-const resolveTimestamp = (timestamp) => {
-    if (typeof timestamp === 'number' && Number.isFinite(timestamp)) return timestamp;
-    if (typeof timestamp === 'string' && timestamp.trim()) {
-        const parsed = Date.parse(timestamp);
-        if (!Number.isNaN(parsed)) return parsed;
-    }
-    return null;
-};
-
-const buildTemplatePayload = ({ templateName, templateLanguage, text }) => {
-    const language = templateLanguage || process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US';
-    const payload = {
-        type: 'template',
-        template: {
-            name: templateName,
-            language: { code: language }
-        }
-    };
-
-    if (text && text.trim()) {
-        payload.template.components = [{
-            type: 'body',
-            parameters: [{ type: 'text', text: text.trim() }]
-        }];
-    }
-
-    return payload;
-};
-
-const buildWhatsAppPayload = ({ text, mediaUrl, mediaType, templateName, templateLanguage }) => {
-    if (templateName) {
-        return buildTemplatePayload({ templateName, templateLanguage, text });
-    }
-
-    if (mediaUrl) {
-        const type = mediaType || 'image';
-        return {
-            type,
-            [type]: {
-                link: mediaUrl,
-                ...(text ? { caption: text } : {})
-            }
-        };
-    }
-
-    return { type: 'text', text: { body: text || '' } };
-};
-
-const summarizePayload = (payload) => {
-    if (payload.templateName) return `Template: ${payload.templateName}`;
-    if (payload.text) return payload.text;
-    return payload.mediaUrl ? '[Media]' : '';
 };
 
 // CORE PROCESSING LOGIC (Shared by Worker and Fallback)
@@ -414,62 +297,64 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
 
     logger.info("Processing Message", { requestId, messageId: message.id, from: message.from });
     const client = await getDb().connect();
-
+    
     try {
         const from = message.from;
         const name = contact?.profile?.name || "Unknown";
         const textBody = message.text?.body || `[${message.type}]`;
-
+        
         // Upsert Candidate (Include last_message update)
+        // We also retrieve current_node_id to know where they are in the bot flow
         const upsertQuery = `
-            INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at)
-            VALUES ($1, $2, $3, 'New', $4, $5, NOW())
-            ON CONFLICT (phone_number)
-            DO UPDATE SET name = EXCLUDED.name, last_message_at = $4, last_message = $5
+            INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at) 
+            VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
+            ON CONFLICT (phone_number) 
+            DO UPDATE SET name = EXCLUDED.name, last_message_at = $4, last_message = $5 
             RETURNING id, current_node_id, is_human_mode
         `;
         const resDb = await client.query(upsertQuery, [crypto.randomUUID(), from, name, Date.now(), textBody]);
         const candidate = resDb.rows[0];
         const candidateId = candidate.id;
-
+        
         logger.info("Candidate Upserted", { requestId, candidateId });
 
         // Insert Message
         const insertMsgQuery = `
-            INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
-            VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW())
+            INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at) 
+            VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW()) 
             ON CONFLICT (whatsapp_message_id) DO NOTHING
         `;
         await client.query(insertMsgQuery, [crypto.randomUUID(), candidateId, textBody, message.type, message.id]);
-
+        
         // --- BOT AUTO-REPLY LOGIC ---
+        // Only reply if not in Human Mode
         if (!candidate.is_human_mode) {
             const settings = await getBotSettings(phoneId);
             if (settings && settings.nodes && settings.nodes.length > 0) {
-                logger.info("Bot Logic Active", { requestId });
-
-                if (!candidate.current_node_id) {
-                    const startNode = settings.nodes.find(n => n.type === 'start') || settings.nodes[0];
-                    const edge = settings.edges?.find(e => e.source === startNode.id);
-                    if (edge) {
-                        const nextNode = settings.nodes.find(n => n.id === edge.target);
-                        if (nextNode && nextNode.data && nextNode.data.content) {
-                            await sendToMeta(from, { type: 'text', text: { body: nextNode.data.content } });
-
-                            await client.query(
-                                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`,
-                                [crypto.randomUUID(), candidateId, nextNode.data.content]
-                            );
-
-                            await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [nextNode.id, candidateId]);
-                        }
-                    }
-                }
+                 logger.info("Bot Logic Active", { requestId });
+                 
+                 // Simple Logic: If no current node, find start node and reply
+                 // Real implementation would traverse edges based on input
+                 if (!candidate.current_node_id) {
+                     const startNode = settings.nodes.find(n => n.type === 'start') || settings.nodes[0];
+                     const edge = settings.edges?.find(e => e.source === startNode.id);
+                     if (edge) {
+                         const nextNode = settings.nodes.find(n => n.id === edge.target);
+                         if (nextNode && nextNode.data && nextNode.data.content) {
+                             await sendToMeta(from, { type: 'text', text: { body: nextNode.data.content } });
+                             
+                             await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
+                                [crypto.randomUUID(), candidateId, nextNode.data.content]);
+                             
+                             await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [nextNode.id, candidateId]);
+                         }
+                     }
+                 }
             }
         }
         return { success: true };
-    } finally {
-        client.release();
+    } finally { 
+        client.release(); 
     }
 };
 
@@ -496,15 +381,18 @@ const enqueueIncomingMessageJob = async (req, message, contact, phoneId) => {
         logger.info("QStash Dispatched", { requestId, qstashId: res.messageId, workerUrl });
     } catch (e) {
         logger.error("Queue Publish Failed - Sync Fallback", { requestId, error: e.message });
-        // 3. Fallback on Failure
+        // 3. Fallback on Failure (Critical for Data Integrity)
         return processMessageInternal(message, contact, phoneId, requestId);
     }
 };
 
+
 // ✅ Webhook Persistence Helper
+// Persist inbound WhatsApp messages immediately so they always show in UI,
+// even if QStash/worker fails or DB has intermittent issues.
 const persistInboundMessage = async (message, contact, requestId = 'system') => {
     if (!message?.from) return;
-    await ensureDbSchema();
+    await ensureDbSchema(); // safe - will no-op after first run
 
     const client = await getDb().connect();
     try {
@@ -535,134 +423,6 @@ const persistInboundMessage = async (message, contact, requestId = 'system') => 
     }
 };
 
-const authorizeInternalRequest = async (req) => {
-    const signature = req.headers["upstash-signature"];
-    const secretHeader = req.headers["x-internal-secret"];
-    const expectedSecret = process.env.INTERNAL_WORKER_SECRET;
-
-    if (expectedSecret && secretHeader === expectedSecret) {
-        return true;
-    }
-
-    if (signature && process.env.QSTASH_CURRENT_SIGNING_KEY) {
-        try {
-            const body = req.rawBody ? req.rawBody.toString() : JSON.stringify(req.body);
-            return await qstashReceiver.verify({ signature, body });
-        } catch (e) {
-            logger.warn("Worker Signature Verification Failed", { error: e.message });
-        }
-    }
-
-    return !process.env.QSTASH_CURRENT_SIGNING_KEY || process.env.QSTASH_CURRENT_SIGNING_KEY === 'mock';
-};
-
-const processScheduledMessages = async ({ source = 'manual' } = {}) => {
-    await ensureDbSchema();
-    const now = Date.now();
-    const client = await getDb().connect();
-    let scheduledRows = [];
-
-    try {
-        await client.query('BEGIN');
-        const dueRes = await client.query(
-            `
-            WITH due AS (
-                SELECT id
-                FROM scheduled_messages
-                WHERE status = 'pending' AND scheduled_time <= $1
-                ORDER BY scheduled_time ASC
-                LIMIT $2
-                FOR UPDATE SKIP LOCKED
-            )
-            UPDATE scheduled_messages
-            SET status = 'processing', updated_at = NOW()
-            WHERE id IN (SELECT id FROM due)
-            RETURNING *;
-            `,
-            [now, SYSTEM_CONFIG.SCHEDULE_BATCH_SIZE]
-        );
-        await client.query('COMMIT');
-        scheduledRows = dueRes.rows;
-    } catch (e) {
-        await client.query('ROLLBACK');
-        logger.error("Scheduled Message Claim Failed", { error: e.message, source });
-    } finally {
-        client.release();
-    }
-
-    if (scheduledRows.length === 0) {
-        return { processed: 0, sent: 0, failed: 0 };
-    }
-
-    let sent = 0;
-    let failed = 0;
-
-    for (const row of scheduledRows) {
-        const workerClient = await getDb().connect();
-        try {
-            const payload = normalizeScheduledPayload(row.payload);
-            if (!payload || (!payload.text && !payload.mediaUrl && !payload.templateName)) {
-                await workerClient.query(
-                    `UPDATE scheduled_messages SET status = 'failed', last_error = $2, attempts = attempts + 1, updated_at = NOW() WHERE id = $1`,
-                    [row.id, 'empty_payload']
-                );
-                failed += 1;
-                continue;
-            }
-
-            const candidateRes = await workerClient.query('SELECT phone_number FROM candidates WHERE id = $1', [row.candidate_id]);
-            if (candidateRes.rows.length === 0) {
-                await workerClient.query(
-                    `UPDATE scheduled_messages SET status = 'failed', last_error = $2, attempts = attempts + 1, updated_at = NOW() WHERE id = $1`,
-                    [row.id, 'candidate_not_found']
-                );
-                failed += 1;
-                continue;
-            }
-
-            const metaPayload = buildWhatsAppPayload(payload);
-            const sendResult = await sendToMeta(candidateRes.rows[0].phone_number, metaPayload);
-            if (!sendResult.ok) {
-                await workerClient.query(
-                    `UPDATE scheduled_messages SET status = 'failed', last_error = $2, attempts = attempts + 1, updated_at = NOW() WHERE id = $1`,
-                    [row.id, sendResult.error || 'meta_send_failed']
-                );
-                failed += 1;
-                continue;
-            }
-
-            const messageType = payload.templateName ? 'template' : (payload.mediaUrl ? (payload.mediaType || 'media') : 'text');
-            const summary = summarizePayload(payload) || '[Media]';
-
-            await workerClient.query(
-                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
-                 VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
-                [crypto.randomUUID(), row.candidate_id, payload.text || summary, messageType]
-            );
-            await workerClient.query(
-                `UPDATE candidates SET last_message_at = $1, last_message = $2, updated_at = NOW() WHERE id = $3`,
-                [Date.now(), summary, row.candidate_id]
-            );
-            await workerClient.query(
-                `UPDATE scheduled_messages SET status = 'sent', sent_at = NOW(), last_error = NULL, updated_at = NOW() WHERE id = $1`,
-                [row.id]
-            );
-            sent += 1;
-        } catch (e) {
-            await workerClient.query(
-                `UPDATE scheduled_messages SET status = 'failed', last_error = $2, attempts = attempts + 1, updated_at = NOW() WHERE id = $1`,
-                [row.id, e.message || 'processing_error']
-            );
-            failed += 1;
-        } finally {
-            workerClient.release();
-        }
-    }
-
-    logger.info("Scheduled Message Batch Processed", { source, processed: scheduledRows.length, sent, failed });
-    return { processed: scheduledRows.length, sent, failed };
-};
-
 // --- ROUTE GROUPS ---
 
 // ==========================================
@@ -676,16 +436,75 @@ apiRouter.post('/auth/google', async (req, res, next) => {
             audience: process.env.VITE_GOOGLE_CLIENT_ID,
         });
         const payload = ticket.getPayload();
-        res.json({ user: { email: payload.email, name: payload.name } });
-    } catch (e) { next(e); }
+        res.json({ success: true, user: { name: payload.name, email: payload.email, picture: payload.picture } });
+    } catch (error) {
+        next(error); 
+    }
 });
 
 // ==========================================
-// 2. SYSTEM SETTINGS
+// 2. SYSTEM & DIAGNOSTICS
 // ==========================================
+apiRouter.get('/debug/status', async (req, res, next) => {
+    try {
+        const status = {
+            postgres: 'unknown',
+            redis: 'unknown',
+            s3: 'unknown',
+            tables: { candidates: false, bot_versions: false },
+            counts: { candidates: 0 },
+            workerUrl: `${getBaseUrl(req)}/api/internal/bot-worker`,
+            env: {
+                hasPostgres: !!process.env.POSTGRES_URL,
+                hasRedis: !!process.env.UPSTASH_REDIS_REST_URL,
+                hasQStash: !!process.env.QSTASH_TOKEN,
+                publicUrl: process.env.PUBLIC_BASE_URL || 'NOT_SET'
+            }
+        };
+
+        const client = await getDb().connect();
+        try {
+            await client.query('SELECT 1');
+            status.postgres = 'connected';
+            const tRes = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
+            const tables = tRes.rows.map(r => r.table_name);
+            status.tables.candidates = tables.includes('candidates');
+            status.tables.bot_versions = tables.includes('bot_versions');
+            if (status.tables.candidates) {
+                const cRes = await client.query('SELECT COUNT(*) FROM candidates');
+                status.counts.candidates = parseInt(cRes.rows[0].count);
+            }
+        } catch (e) { status.postgres = 'error'; status.lastError = e.message; }
+        finally { client.release(); }
+
+        try { await redis.ping(); status.redis = 'connected'; } catch(e) { status.redis = 'error'; }
+        try { await s3Client.send(new ListObjectsV2Command({ Bucket: BUCKET_NAME, MaxKeys: 1 })); status.s3 = 'connected'; } catch(e) { status.s3 = e.message; }
+
+        res.json(status);
+    } catch (e) { next(e); }
+});
+
+apiRouter.get('/system/stats', (req, res) => res.redirect('/api/debug/status'));
+
+apiRouter.post('/system/init-db', async (req, res, next) => {
+    try {
+        await ensureDbSchema();
+        res.json({ success: true, message: "Schema verification complete" });
+    } catch (e) { next(e); }
+});
+
+apiRouter.post('/system/seed-db', async (req, res, next) => {
+    const client = await getDb().connect();
+    try {
+        const id = crypto.randomUUID();
+        await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message) VALUES ($1, '+919876543210', 'Test Driver', 'New', $2, 'Hello world') ON CONFLICT DO NOTHING`, [id, Date.now()]);
+        res.json({ success: true });
+    } catch(e) { next(e); } finally { client.release(); }
+});
+
 apiRouter.get('/system/settings', async (req, res) => {
-    const settings = await redis.get('system:settings');
-    res.json(settings || {});
+    const s = await redis.get('system:settings').catch(() => null);
+    res.json(s || { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true });
 });
 
 apiRouter.patch('/system/settings', async (req, res) => {
@@ -702,21 +521,22 @@ apiRouter.post('/system/webhook', async (req, res) => { res.json({ success: true
 apiRouter.get('/drivers', async (req, res, next) => {
     const client = await getDb().connect();
     try {
+        // Ensuring we fetch last_message so UI is not empty
         const resDb = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC LIMIT 50');
-        res.json(resDb.rows.map(row => ({
-            id: row.id,
-            phoneNumber: row.phone_number,
-            name: row.name,
-            status: row.stage,
-            lastMessage: row.last_message || '...',
-            lastMessageTime: row.last_message_at ? parseInt(row.last_message_at) : undefined,
+        res.json(resDb.rows.map(row => ({ 
+            id: row.id, 
+            phoneNumber: row.phone_number, 
+            name: row.name, 
+            status: row.stage, 
+            lastMessage: row.last_message || '...', 
+            lastMessageTime: parseInt(row.last_message_at), 
             source: 'Organic',
             notes: row.notes,
             isHumanMode: row.is_human_mode,
             humanModeEndsAt: row.human_mode_ends_at ? parseInt(row.human_mode_ends_at) : undefined
         })));
     } catch (e) {
-        if (e.code === '42P01') { res.json([]); }
+        if (e.code === '42P01') { res.json([]); } 
         else { next(e); }
     } finally { client.release(); }
 });
@@ -750,51 +570,39 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
     const client = await getDb().connect();
     try {
         const limit = parseInt(req.query.limit) || 50;
-        const resDb = await client.query(
-            'SELECT * FROM candidate_messages WHERE candidate_id = (SELECT id FROM candidates WHERE phone_number = $1 OR id = $1 LIMIT 1) ORDER BY created_at DESC LIMIT $2',
-            [req.params.id, limit]
-        );
+        const resDb = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = (SELECT id FROM candidates WHERE phone_number = $1 OR id = $1 LIMIT 1) ORDER BY created_at DESC LIMIT $2', [req.params.id, limit]);
         res.json(resDb.rows.map(r => ({
-            id: r.id,
-            sender: r.direction === 'in' ? 'driver' : 'agent',
-            text: r.text,
-            timestamp: new Date(r.created_at).getTime(),
-            type: r.type || 'text',
-            status: r.status
+            id: r.id, sender: r.direction === 'in' ? 'driver' : 'agent', text: r.text, timestamp: new Date(r.created_at).getTime(), type: r.type || 'text', status: r.status
         })).reverse());
     } catch (e) { res.json([]); } finally { client.release(); }
 });
 
 apiRouter.post('/drivers/:id/messages', async (req, res, next) => {
-    const { text, mediaUrl, mediaType, templateName, templateLanguage } = req.body;
+    const { text, mediaUrl, mediaType } = req.body;
     const client = await getDb().connect();
     try {
         const dRes = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
         if (dRes.rows.length === 0) return res.status(404).json({ ok: false, error: "Driver not found" });
-
-        const payload = buildWhatsAppPayload({ text, mediaUrl, mediaType, templateName, templateLanguage });
-
-        const sendResult = await sendToMeta(dRes.rows[0].phone_number, payload);
-        if (!sendResult.ok) {
-            return res.status(502).json({ ok: false, error: sendResult.error || 'Failed to send message' });
-        }
-
-        const messageType = templateName ? 'template' : (mediaUrl ? (mediaType || 'media') : 'text');
-        await client.query(
-            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
-            [crypto.randomUUID(), req.params.id, text, messageType]
-        );
-        await client.query('UPDATE candidates SET last_message_at = $1, last_message = $2 WHERE id = $3', [Date.now(), summarizePayload({ text, mediaUrl, templateName }) || '[Media]', req.params.id]);
+        
+        const payload = mediaUrl 
+            ? { type: mediaType || 'image', [mediaType || 'image']: { link: mediaUrl, caption: text } }
+            : { type: 'text', text: { body: text } };
+        
+        await sendToMeta(dRes.rows[0].phone_number, payload);
+        
+        await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), req.params.id, text]);
+        await client.query('UPDATE candidates SET last_message_at = $1, last_message = $2 WHERE id = $3', [Date.now(), text || '[Media]', req.params.id]);
         res.json({ success: true });
-    } catch (e) { next(e); } finally { client.release(); }
+    } catch(e) { next(e); } finally { client.release(); }
 });
 
-// Alias for generic send
+// Alias for generic send (requested by user spec)
 apiRouter.post('/messages/send', async (req, res, next) => {
+    // Expects { driverId: '...', text: '...' }
     const { driverId, text, mediaUrl, mediaType } = req.body;
     if (!driverId) return res.status(400).json({ ok: false, error: 'driverId required' });
-
     req.params.id = driverId;
+    // Route to the existing handler logic
     return apiRouter.handle({ ...req, url: `/drivers/${driverId}/messages`, method: 'POST' }, res, next);
 });
 
@@ -804,159 +612,64 @@ apiRouter.get('/drivers/:id/documents', async (req, res) => { res.json([]); });
 apiRouter.get('/drivers/:id/scheduled-messages', async (req, res, next) => {
     const client = await getDb().connect();
     try {
-        await ensureDbSchema();
         const result = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 ORDER BY scheduled_time ASC`, [req.params.id]);
         res.json(result.rows.map(r => ({
             id: r.id,
             scheduledTime: parseInt(r.scheduled_time),
-            payload: normalizeScheduledPayload(r.payload),
+            payload: r.payload,
             status: r.status
         })));
-    } catch (e) {
-        if (e.code === '42P01') {
-            try {
-                await ensureDbSchema();
-                const retry = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 ORDER BY scheduled_time ASC`, [req.params.id]);
-                return res.json(retry.rows.map(r => ({
-                    id: r.id,
-                    scheduledTime: parseInt(r.scheduled_time),
-                    payload: normalizeScheduledPayload(r.payload),
-                    status: r.status
-                })));
-            } catch (retryError) {
-                return next(retryError);
-            }
-        }
-        next(e);
-    } finally { client.release(); }
+    } catch (e) { next(e); } finally { client.release(); }
 });
 
 apiRouter.post('/scheduled-messages', async (req, res, next) => {
     const { driverIds, message, timestamp } = req.body;
     const client = await getDb().connect();
     try {
-        await ensureDbSchema();
-        if (!Array.isArray(driverIds) || driverIds.length === 0) {
-            return res.status(400).json({ ok: false, error: 'driverIds must be a non-empty array' });
-        }
-        const scheduledTime = resolveTimestamp(timestamp) ?? Date.now();
-        if (!Number.isFinite(scheduledTime)) {
-            return res.status(400).json({ ok: false, error: 'Invalid scheduled timestamp' });
-        }
         for (const driverId of driverIds) {
-            await client.query(
-                `INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`,
-                [crypto.randomUUID(), driverId, JSON.stringify(message), scheduledTime]
-            );
+             await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, 
+                [crypto.randomUUID(), driverId, JSON.stringify(message), timestamp || Date.now()]);
         }
         res.json({ success: true, count: driverIds.length });
-    } catch (e) {
-        if (e.code === '42P01') {
-            try {
-                await ensureDbSchema();
-                const scheduledTime = resolveTimestamp(timestamp) ?? Date.now();
-                if (!Number.isFinite(scheduledTime)) {
-                    return res.status(400).json({ ok: false, error: 'Invalid scheduled timestamp' });
-                }
-                const payload = message || {};
-                for (const driverId of driverIds || []) {
-                    await client.query(
-                        `INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`,
-                        [crypto.randomUUID(), driverId, JSON.stringify(payload), scheduledTime]
-                    );
-                }
-                return res.json({ success: true, count: (driverIds || []).length });
-            } catch (retryError) {
-                return next(retryError);
-            }
-        }
-        next(e);
-    } finally { client.release(); }
+    } catch (e) { next(e); } finally { client.release(); }
 });
 
 apiRouter.delete('/scheduled-messages/:id', async (req, res, next) => {
     const client = await getDb().connect();
     try {
-        await ensureDbSchema();
         await client.query('DELETE FROM scheduled_messages WHERE id = $1', [req.params.id]);
         res.json({ success: true });
-    } catch (e) {
-        if (e.code === '42P01') {
-            try {
-                await ensureDbSchema();
-                await client.query('DELETE FROM scheduled_messages WHERE id = $1', [req.params.id]);
-                return res.json({ success: true });
-            } catch (retryError) {
-                return next(retryError);
-            }
-        }
-        next(e);
-    } finally { client.release(); }
+    } catch (e) { next(e); } finally { client.release(); }
 });
 
 apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
     const { text, scheduledTime } = req.body;
     const client = await getDb().connect();
     try {
-        await ensureDbSchema();
         const old = await client.query('SELECT payload FROM scheduled_messages WHERE id = $1', [req.params.id]);
         if (old.rows.length === 0) return res.status(404).json({ ok: false, error: "Not found" });
-
-        const existingPayload = normalizeScheduledPayload(old.rows[0].payload);
-        const newPayload = { ...existingPayload, text: text || existingPayload.text };
+        
+        const newPayload = { ...old.rows[0].payload, text: text || old.rows[0].payload.text };
         const updates = [`payload = $1`];
         const values = [JSON.stringify(newPayload)];
         let idx = 2;
-
-        const resolvedScheduledTime = scheduledTime !== undefined ? resolveTimestamp(scheduledTime) : null;
-        if (scheduledTime !== undefined && resolvedScheduledTime === null) {
-            return res.status(400).json({ ok: false, error: 'Invalid scheduled timestamp' });
-        }
-        if (resolvedScheduledTime !== null) {
+        
+        if (scheduledTime) {
             updates.push(`scheduled_time = $${idx++}`);
-            values.push(resolvedScheduledTime);
+            values.push(scheduledTime);
         }
-
+        
         values.push(req.params.id);
         await client.query(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = $${idx}`, values);
         res.json({ success: true });
-    } catch (e) {
-        if (e.code === '42P01') {
-            try {
-                await ensureDbSchema();
-                const old = await client.query('SELECT payload FROM scheduled_messages WHERE id = $1', [req.params.id]);
-                if (old.rows.length === 0) return res.status(404).json({ ok: false, error: "Not found" });
-
-                const existingPayload = normalizeScheduledPayload(old.rows[0].payload);
-                const newPayload = { ...existingPayload, text: text || existingPayload.text };
-                const updates = [`payload = $1`];
-                const values = [JSON.stringify(newPayload)];
-                let idx = 2;
-
-                const resolvedScheduledTime = scheduledTime !== undefined ? resolveTimestamp(scheduledTime) : null;
-                if (scheduledTime !== undefined && resolvedScheduledTime === null) {
-                    return res.status(400).json({ ok: false, error: 'Invalid scheduled timestamp' });
-                }
-                if (resolvedScheduledTime !== null) {
-                    updates.push(`scheduled_time = $${idx++}`);
-                    values.push(resolvedScheduledTime);
-                }
-
-                values.push(req.params.id);
-                await client.query(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = $${idx}`, values);
-                return res.json({ success: true });
-            } catch (retryError) {
-                return next(retryError);
-            }
-        }
-        next(e);
-    } finally { client.release(); }
+    } catch (e) { next(e); } finally { client.release(); }
 });
 
 // ==========================================
 // 4. BOT SETTINGS
 // ==========================================
-apiRouter.get('/bot/settings', async (req, res, next) => {
+
+apiRouter.get('/bot/settings', async (req, res, next) => { 
     const client = await getDb().connect();
     try {
         const phoneId = process.env.PHONE_NUMBER_ID;
@@ -971,12 +684,12 @@ apiRouter.get('/bot/settings', async (req, res, next) => {
             );
         }
         res.json(result.rows[0]?.settings || { nodes: [], edges: [], steps: [] });
-    } catch (e) { next(e); } finally { client.release(); }
+    } catch(e) { next(e); } finally { client.release(); }
 });
 
 apiRouter.get('/bot-settings', (req, res) => res.redirect('/api/bot/settings'));
 
-apiRouter.post('/bot/save', async (req, res, next) => {
+apiRouter.post('/bot/save', async (req, res, next) => { 
     const client = await getDb().connect();
     try {
         const phoneId = process.env.PHONE_NUMBER_ID;
@@ -993,10 +706,10 @@ apiRouter.post('/bot/save', async (req, res, next) => {
             await client.query(`INSERT INTO bot_versions (id, phone_number_id, version_number, status, settings) VALUES ($1, $2, 1, 'draft', $3)`, [crypto.randomUUID(), phoneId, settings]);
         }
         res.json({ success: true });
-    } catch (e) { next(e); } finally { client.release(); }
+    } catch(e) { next(e); } finally { client.release(); }
 });
 
-apiRouter.post('/bot/publish', async (req, res, next) => {
+apiRouter.post('/bot/publish', async (req, res, next) => { 
     const client = await getDb().connect();
     try {
         const phoneId = process.env.PHONE_NUMBER_ID;
@@ -1009,10 +722,10 @@ apiRouter.post('/bot/publish', async (req, res, next) => {
         const nextVer = (verRes.rows[0].v || 0) + 1;
 
         await client.query(`INSERT INTO bot_versions (id, phone_number_id, version_number, status, settings) VALUES ($1, $2, $3, 'published', $4)`, [crypto.randomUUID(), phoneId, nextVer, settings]);
-        await redis.del(`bot:settings:${phoneId}`);
-
-        res.json({ success: true, version: nextVer });
-    } catch (e) { next(e); } finally { client.release(); }
+        await redis.del(`bot:settings:${phoneId}`); 
+        
+        res.json({ success: true, version: nextVer }); 
+    } catch(e) { next(e); } finally { client.release(); }
 });
 
 // ==========================================
@@ -1020,16 +733,15 @@ apiRouter.post('/bot/publish', async (req, res, next) => {
 // ==========================================
 apiRouter.get('/media', async (req, res, next) => {
     const prefix = req.query.path && req.query.path !== '/' ? req.query.path.replace(/^\//, '') + '/' : '';
-    // ✅ If S3 not configured, return empty library (prevents UI errors)
-    if (!isS3Configured()) {
+    // ✅ If S3 is not configured, return empty library (prevents UI 404/500)
+    if (!process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY || !process.env.AWS_BUCKET_NAME) {
         return res.json({ folders: [], files: [] });
     }
     try {
         const command = new ListObjectsV2Command({ Bucket: BUCKET_NAME, Prefix: prefix, Delimiter: '/' });
         const response = await s3Client.send(command);
-
+        
         const publicFolders = await redis.smembers('system:public_folders');
-        const syncedMedia = (await redis.hgetall('media:sync')) || {};
 
         const folders = (response.CommonPrefixes || []).map(p => {
             const name = p.Prefix.replace(prefix, '').replace('/', '');
@@ -1044,15 +756,15 @@ apiRouter.get('/media', async (req, res, next) => {
 
         const files = (response.Contents || []).map(c => {
             if (c.Key === prefix) return null;
-            if (c.Key.endsWith('/')) return null;
-            const type = resolveMediaType(c.Key);
-            const synced = syncedMedia?.[c.Key];
+            const ext = c.Key.split('.').pop().toLowerCase();
+            let type = 'document';
+            if (['jpg','jpeg','png','gif'].includes(ext)) type = 'image';
+            if (['mp4','mov'].includes(ext)) type = 'video';
             return {
                 id: c.Key,
                 filename: c.Key.replace(prefix, ''),
-                url: buildMediaUrl(c.Key),
-                type,
-                media_id: synced ? JSON.parse(synced).media_id : undefined
+                url: `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${c.Key}`,
+                type
             };
         }).filter(Boolean);
 
@@ -1062,9 +774,6 @@ apiRouter.get('/media', async (req, res, next) => {
 
 apiRouter.post('/media/upload', upload.single('file'), async (req, res, next) => {
     if (!req.file) return res.status(400).json({ ok: false, error: 'No file' });
-    if (!isS3Configured()) {
-        return res.status(503).json({ ok: false, error: 'S3 not configured' });
-    }
     const path = req.body.path && req.body.path !== '/' ? req.body.path.replace(/^\//, '') + '/' : '';
     try {
         await s3Client.send(new PutObjectCommand({
@@ -1072,61 +781,34 @@ apiRouter.post('/media/upload', upload.single('file'), async (req, res, next) =>
             Key: `${path}${req.file.originalname}`,
             Body: req.file.buffer,
             ContentType: req.file.mimetype,
-            ACL: 'public-read'
+            ACL: 'public-read' 
         }));
         res.json({ success: true });
     } catch (e) { next(e); }
 });
 
 apiRouter.post('/media/folders', async (req, res, next) => {
-    if (!isS3Configured()) {
-        return res.status(503).json({ ok: false, error: 'S3 not configured' });
-    }
     const { name, parentPath } = req.body;
     const path = parentPath && parentPath !== '/' ? parentPath.replace(/^\//, '') + '/' : '';
     try {
         await s3Client.send(new PutObjectCommand({ Bucket: BUCKET_NAME, Key: `${path}${name}/`, Body: '' }));
         res.json({ success: true });
-    } catch (e) { next(e); }
+    } catch(e) { next(e); }
 });
 
 apiRouter.delete('/media/files/:id', async (req, res, next) => {
-    if (!isS3Configured()) {
-        return res.status(503).json({ ok: false, error: 'S3 not configured' });
-    }
     try { await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: req.params.id })); res.json({ success: true }); }
-    catch (e) { next(e); }
+    catch(e) { next(e); }
 });
 
 apiRouter.delete('/media/folders/:id', async (req, res, next) => {
-    if (!isS3Configured()) {
-        return res.status(503).json({ ok: false, error: 'S3 not configured' });
-    }
     try { await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: req.params.id + '/' })); res.json({ success: true }); }
-    catch (e) { next(e); }
+    catch(e) { next(e); }
 });
 
 apiRouter.post('/media/folders/:id/public', async (req, res) => {
     await redis.sadd('system:public_folders', req.params.id);
     await redis.set('system:active_showcase', req.params.id);
-    const folderName = req.params.id.split('/').pop();
-    if (folderName) {
-        await redis.hset('system:public_folder_names', { [folderName]: req.params.id });
-    }
-    if (isS3Configured()) {
-        try {
-            const manifest = await buildShowcaseManifest({ folderId: req.params.id, title: folderName || 'Showcase' });
-            await s3Client.send(new PutObjectCommand({
-                Bucket: BUCKET_NAME,
-                Key: `manifests/${encodeURIComponent(folderName || 'showcase')}.json`,
-                Body: JSON.stringify(manifest),
-                ContentType: 'application/json',
-                ACL: 'public-read'
-            }));
-        } catch (e) {
-            logger.warn("Failed to publish showcase manifest", { error: e.message });
-        }
-    }
     res.json({ success: true });
 });
 
@@ -1141,91 +823,53 @@ apiRouter.get('/showcase/status', async (req, res) => {
     res.json({ active: true, folderId: active, folderName: active.split('/').pop() });
 });
 
-apiRouter.post('/media/:id/sync', async (req, res) => {
-    if (!isS3Configured()) {
-        return res.status(503).json({ ok: false, error: 'S3 not configured' });
-    }
-    const fileKey = req.params.id;
-    const mediaId = crypto.randomUUID();
-    await redis.hset('media:sync', { [fileKey]: JSON.stringify({ media_id: mediaId, syncedAt: Date.now() }) });
-    res.json({ success: true, mediaId });
-});
-
-apiRouter.post('/media/sync-s3', async (req, res) => {
-    if (!isS3Configured()) {
-        return res.status(503).json({ ok: false, error: 'S3 not configured' });
-    }
-    try {
-        const objects = await listS3Objects('');
-        const count = objects.filter((obj) => obj.Key && !obj.Key.endsWith('/')).length;
-        res.json({ success: true, added: count });
-    } catch (e) {
-        logger.error("S3 Sync Failed", { error: e.message });
-        res.status(500).json({ ok: false, error: 'Failed to sync from S3' });
-    }
-});
-
-apiRouter.patch('/media/folders/:id', async (req, res, next) => {
-    if (!isS3Configured()) {
-        return res.status(503).json({ ok: false, error: 'S3 not configured' });
-    }
-    const newName = (req.body?.name || '').trim();
-    if (!newName) return res.status(400).json({ ok: false, error: 'New folder name required' });
-
-    const oldPrefix = `${req.params.id.replace(/\/$/, '')}/`;
-    const parentPath = oldPrefix.split('/').slice(0, -2).join('/');
-    const newPrefix = `${parentPath ? `${parentPath}/` : ''}${newName}/`;
-
-    if (oldPrefix === newPrefix) return res.json({ success: true, moved: 0 });
-
-    try {
-        const objects = await listS3Objects(oldPrefix);
-        let moved = 0;
-        for (const obj of objects) {
-            if (!obj.Key) continue;
-            const newKey = obj.Key.replace(oldPrefix, newPrefix);
-            await s3Client.send(new CopyObjectCommand({
-                Bucket: BUCKET_NAME,
-                CopySource: `${BUCKET_NAME}/${obj.Key}`,
-                Key: newKey,
-                ACL: 'public-read'
-            }));
-            await s3Client.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: obj.Key }));
-            moved += 1;
-        }
-        res.json({ success: true, moved });
-    } catch (e) {
-        next(e);
-    }
-});
-
-apiRouter.get('/showcase', async (req, res, next) => {
-    try {
+apiRouter.get('/showcase/:folderName?', async (req, res, next) => {
+    let folderName = req.params.folderName;
+    if (!folderName) {
         const active = await redis.get('system:active_showcase');
-        const publicFolders = await redis.smembers('system:public_folders');
-        const folderId = active || publicFolders[0];
-        if (!folderId) return res.json({ title: 'Showcase', items: [] });
-        const folderName = folderId.split('/').pop();
-        const manifest = await buildShowcaseManifest({ folderId, title: folderName || 'Showcase' });
-        res.json(manifest);
-    } catch (e) { next(e); }
-});
-
-apiRouter.get('/showcase/:name', async (req, res, next) => {
+        if (active) folderName = active;
+        else return res.json({ items: [], title: 'No Showcase Active' });
+    }
+    const prefix = folderName.endsWith('/') ? folderName : `${folderName}/`;
     try {
-        const name = decodeURIComponent(req.params.name);
-        const mapped = await redis.hget('system:public_folder_names', name);
-        const publicFolders = await redis.smembers('system:public_folders');
-        const folderId = mapped || publicFolders.find((id) => id.split('/').pop() === name);
-        if (!folderId) return res.json({ title: name || 'Showcase', items: [] });
-        const manifest = await buildShowcaseManifest({ folderId, title: name || 'Showcase' });
-        res.json(manifest);
-    } catch (e) { next(e); }
+        const command = new ListObjectsV2Command({ Bucket: BUCKET_NAME, Prefix: prefix });
+        const response = await s3Client.send(command);
+        const items = (response.Contents || []).map(c => {
+             if (c.Key === prefix) return null;
+             const ext = c.Key.split('.').pop().toLowerCase();
+             let type = 'image';
+             if (['mp4','mov'].includes(ext)) type = 'video';
+             if (['pdf','doc'].includes(ext)) type = 'document';
+             return {
+                 id: c.Key,
+                 url: `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${c.Key}`,
+                 type,
+                 filename: c.Key.replace(prefix, '')
+             };
+        }).filter(Boolean);
+        res.json({ title: folderName.replace(/\/$/, ''), items });
+    } catch(e) { next(e); }
 });
 
+apiRouter.post('/media/sync-s3', async (req, res) => { res.json({ success: true, added: 0 }); });
+
 // ==========================================
-// 6. AI ASSISTANT
+// 6. AI & GEMINI
 // ==========================================
+apiRouter.post('/ai/generate', async (req, res, next) => {
+    if (!genAI) return res.status(503).json({ ok: false, error: "AI Not Configured" });
+    try {
+        const { model, contents, config } = req.body;
+        const aiModel = genAI.getGenerativeModel({ model: model || 'gemini-1.5-flash' });
+        const result = await aiModel.generateContent({
+            contents: [{ role: 'user', parts: [{ text: contents }] }],
+            generationConfig: config
+        });
+        const response = await result.response;
+        res.json({ text: response.text() });
+    } catch(e) { next(e); }
+});
+
 apiRouter.post('/ai/assistant', async (req, res, next) => {
     if (!genAI) return res.status(503).json({ ok: false, error: "AI Not Configured" });
     try {
@@ -1237,27 +881,7 @@ apiRouter.post('/ai/assistant', async (req, res, next) => {
         });
         const result = await chat.sendMessage(input);
         res.json({ text: result.response.text() });
-    } catch (e) { next(e); }
-});
-
-apiRouter.post('/ai/generate', async (req, res, next) => {
-    if (!genAI) return res.status(503).json({ ok: false, error: "AI Not Configured" });
-    try {
-        const { contents, config, model } = req.body || {};
-        const { systemInstruction, ...generationConfig } = config || {};
-        const normalizedContents = typeof contents === 'string'
-            ? [{ role: 'user', parts: [{ text: contents }]}]
-            : contents;
-        const aiModel = genAI.getGenerativeModel({
-            model: model || 'gemini-1.5-flash',
-            systemInstruction
-        });
-        const result = await aiModel.generateContent({
-            contents: normalizedContents,
-            generationConfig
-        });
-        res.json({ text: result.response.text() });
-    } catch (e) { next(e); }
+    } catch(e) { next(e); }
 });
 
 // ==========================================
@@ -1283,14 +907,14 @@ const handleWebhook = async (req, res, next) => {
                 const contact = value.contacts?.[0];
 
                 for (const message of value.messages) {
-                    // ✅ Persist immediately so UI always shows messages
+                    // ✅ Step 1: Persist immediately (never lose UI visibility)
                     try {
                         await persistInboundMessage(message, contact, req.requestId);
                     } catch (e) {
                         logger.error("Webhook persist failed (continuing)", { requestId: req.requestId, error: e.message, waMessageId: message?.id });
                     }
 
-                    // ✅ Bot processing async
+                    // ✅ Step 2: Enqueue bot processing (async / fault-tolerant)
                     await enqueueIncomingMessageJob(req, message, contact, phoneId);
                 }
             }
@@ -1302,11 +926,11 @@ const handleWebhook = async (req, res, next) => {
     }
 };
 
-// Root path
+// Root path (Meta config)
 app.get('/webhook', verifyWebhook);
 app.post('/webhook', handleWebhook);
 
-// ✅ Alias for /api/webhook
+// ✅ Alias for /api/webhook (your manual test)
 apiRouter.get('/webhook', verifyWebhook);
 apiRouter.post('/webhook', handleWebhook);
 
@@ -1314,7 +938,26 @@ apiRouter.post('/webhook', handleWebhook);
 // 8. WORKER (Queue Handler)
 // ==========================================
 apiRouter.post('/internal/bot-worker', async (req, res, next) => {
-    const isAuthorized = await authorizeInternalRequest(req);
+    const signature = req.headers["upstash-signature"];
+    const secretHeader = req.headers["x-internal-secret"];
+    const expectedSecret = process.env.INTERNAL_WORKER_SECRET;
+
+    let isAuthorized = false;
+
+    if (expectedSecret && secretHeader === expectedSecret) {
+        isAuthorized = true;
+    } 
+    else if (signature && process.env.QSTASH_CURRENT_SIGNING_KEY) {
+        try {
+            const body = req.rawBody ? req.rawBody.toString() : JSON.stringify(req.body);
+            isAuthorized = await qstashReceiver.verify({ signature, body });
+        } catch (e) {
+            logger.warn("Worker Signature Verification Failed", { error: e.message });
+        }
+    } 
+    else if (!process.env.QSTASH_CURRENT_SIGNING_KEY || process.env.QSTASH_CURRENT_SIGNING_KEY === 'mock') {
+        isAuthorized = true;
+    }
 
     if (!isAuthorized) {
         logger.warn("Unauthorized Worker Access");
@@ -1325,121 +968,7 @@ apiRouter.post('/internal/bot-worker', async (req, res, next) => {
         const { message, contact, phoneId } = req.body;
         await processMessageInternal(message, contact, phoneId, req.headers['x-request-id']);
         res.json({ success: true });
-    } catch (e) { next(e); }
-});
-
-apiRouter.post('/internal/scheduled-messages/run', async (req, res, next) => {
-    const isAuthorized = await authorizeInternalRequest(req);
-
-    if (!isAuthorized) {
-        logger.warn("Unauthorized Scheduler Access");
-        return res.status(401).json({ ok: false, error: "Unauthorized" });
-    }
-
-    try {
-        const result = await processScheduledMessages({ source: 'manual' });
-        res.json({ success: true, ...result });
-    } catch (e) { next(e); }
-});
-
-// ==========================================
-// 9. SYSTEM DIAGNOSTICS
-// ==========================================
-apiRouter.get('/debug/status', async (req, res) => {
-    const result = {
-        postgres: 'unknown',
-        redis: 'unknown',
-        tables: { candidates: false, bot_versions: false },
-        counts: { candidates: 0 },
-        lastError: null,
-        workerUrl: null,
-        env: {
-            hasPostgres: Boolean(resolveDbUrl()),
-            hasRedis: Boolean(process.env.UPSTASH_REDIS_REST_URL),
-            hasQStash: Boolean(process.env.QSTASH_TOKEN && process.env.QSTASH_TOKEN !== 'mock'),
-            publicUrl: process.env.PUBLIC_BASE_URL || process.env.VERCEL_URL || ''
-        }
-    };
-
-    try {
-        const client = await getDb().connect();
-        try {
-            await client.query('SELECT 1');
-            result.postgres = 'connected';
-            const tableCheck = await client.query(`
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                AND table_name IN ('candidates', 'bot_versions')
-            `);
-            const tableNames = tableCheck.rows.map(r => r.table_name);
-            result.tables = {
-                candidates: tableNames.includes('candidates'),
-                bot_versions: tableNames.includes('bot_versions')
-            };
-            if (result.tables.candidates) {
-                const countRes = await client.query('SELECT COUNT(*)::int AS count FROM candidates');
-                result.counts.candidates = countRes.rows[0]?.count || 0;
-            }
-        } finally {
-            client.release();
-        }
-    } catch (e) {
-        result.postgres = 'error';
-        result.lastError = e.message;
-    }
-
-    try {
-        await redis.set('healthcheck', Date.now(), { ex: 5 });
-        result.redis = 'connected';
-    } catch (e) {
-        result.redis = 'error';
-        result.lastError = result.lastError || e.message;
-    }
-
-    const baseUrl = getBaseUrl(req);
-    result.workerUrl = `${baseUrl}/api/internal/bot-worker`;
-
-    res.json(result);
-});
-
-apiRouter.post('/system/init-db', async (req, res) => {
-    try {
-        await ensureDbSchema();
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ ok: false, error: e.message });
-    }
-});
-
-apiRouter.post('/system/seed-db', async (req, res) => {
-    const client = await getDb().connect();
-    try {
-        await ensureDbSchema();
-        const existing = await client.query('SELECT COUNT(*)::int AS count FROM candidates');
-        if (existing.rows[0]?.count > 0) {
-            return res.json({ success: true, skipped: true });
-        }
-        await client.query('BEGIN');
-        const candidateId = crypto.randomUUID();
-        await client.query(
-            `INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
-            [candidateId, '+15555550123', 'Demo Driver', 'New', Date.now(), 'Interested in onboarding']
-        );
-        await client.query(
-            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
-             VALUES ($1, $2, 'in', $3, 'text', 'received', NOW())`,
-            [crypto.randomUUID(), candidateId, 'Hello, I want to apply.']
-        );
-        await client.query('COMMIT');
-        res.json({ success: true });
-    } catch (e) {
-        await client.query('ROLLBACK');
-        res.status(500).json({ ok: false, error: e.message });
-    } finally {
-        client.release();
-    }
+    } catch(e) { next(e); }
 });
 
 // --- GLOBAL ERROR HANDLER ---
@@ -1461,19 +990,7 @@ ensureDbSchema().then(() => {
 
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;
-    app.listen(PORT, () => logger.info(`🚀 WhatsApp Leads Handler running on port ${PORT}`));
-
-    if (process.env.SCHEDULED_MESSAGES_ENABLED !== 'false') {
-        const runScheduler = async (source) => {
-            try {
-                await processScheduledMessages({ source });
-            } catch (e) {
-                logger.error("Scheduled Message Loop Failed", { error: e.message, source });
-            }
-        };
-        setTimeout(() => runScheduler('startup'), 1000);
-        setInterval(() => runScheduler('interval'), SYSTEM_CONFIG.SCHEDULE_POLL_INTERVAL_MS);
-    }
+    app.listen(PORT, () => logger.info(`🚀 Uber Fleet Bot running on port ${PORT}`));
 }
 
 module.exports = app;
