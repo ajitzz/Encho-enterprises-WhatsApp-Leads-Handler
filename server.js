@@ -21,7 +21,7 @@ const logger = {
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
     META_TIMEOUT: 8000, 
-    DB_CONNECTION_TIMEOUT: 15000, // Reduced to fail faster than Gateway (usually 60s or 10s)
+    DB_CONNECTION_TIMEOUT: 15000, 
     CACHE_TTL_SETTINGS: 600, 
     LOCK_TTL: 15,
     DEDUPE_TTL: 3600,
@@ -239,15 +239,28 @@ const ensureDbSchema = async () => {
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 );
             `);
-            // Fix missing column migration
+            
+            // ✅ FIX: Robust column migration to prevent 500 errors
             await client.query(`
                 DO $$ 
                 BEGIN 
+                    -- Fix 1: Ensure candidate_id exists
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='scheduled_messages' AND column_name='candidate_id') THEN 
                         ALTER TABLE scheduled_messages ADD COLUMN candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE; 
                     END IF; 
+                    
+                    -- Fix 2: Ensure payload exists (Fixes 'column payload does not exist' error)
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='scheduled_messages' AND column_name='payload') THEN 
+                        ALTER TABLE scheduled_messages ADD COLUMN payload JSONB; 
+                    END IF;
+
+                    -- Fix 3: Ensure scheduled_time exists
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='scheduled_messages' AND column_name='scheduled_time') THEN 
+                        ALTER TABLE scheduled_messages ADD COLUMN scheduled_time BIGINT; 
+                    END IF;
                 END $$;
             `);
+            
             await client.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_time ON scheduled_messages(scheduled_time) WHERE status = 'pending';`);
 
             await client.query('COMMIT');
@@ -456,7 +469,7 @@ const processScheduledJobs = async () => {
 
                     await client.query(`
                         INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
-                        VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())
+                        VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
                     `, [crypto.randomUUID(), job.candidate_id, payload.text || `[${payload.templateName || payload.mediaType}]`, payload.mediaType || 'text']);
 
                     await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
