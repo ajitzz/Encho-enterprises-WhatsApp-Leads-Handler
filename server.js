@@ -266,18 +266,10 @@ const processQueueInternal = async () => {
                 await sendToMeta(job.phone_number, metaPayload);
 
                 await withDb(async (client) => {
-                    const messageType = payload.templateName
-                        ? 'template'
-                        : (payload.mediaType || 'text');
                     await client.query(`
                         INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
-                        VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())
-                    `, [
-                        crypto.randomUUID(),
-                        job.candidate_id,
-                        payload.text || `[${payload.templateName || payload.mediaType || 'scheduled'}]`,
-                        messageType
-                    ]);
+                        VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
+                    `, [crypto.randomUUID(), job.candidate_id, payload.text || `[${payload.templateName || payload.mediaType}]`, payload.mediaType || 'text']);
 
                     await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
                         [payload.text || 'Scheduled Message', Date.now(), job.candidate_id]);
