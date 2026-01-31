@@ -1,6 +1,6 @@
 
 import React, { useEffect, useState, useRef } from 'react';
-import { Database, Server, Shield, X, AlertTriangle, Zap, RefreshCw, AlertCircle, DatabaseZap, Workflow } from 'lucide-react';
+import { Database, Server, Shield, X, AlertTriangle, Zap, RefreshCw, AlertCircle, DatabaseZap, Workflow, Trash2 } from 'lucide-react';
 import { SystemStats } from '../types';
 
 interface DiagnosticStats extends SystemStats {
@@ -58,6 +58,17 @@ export const SystemMonitor = () => {
             const res = await fetch('/api/debug/status', { headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }});
             if(res.ok) { const d = await res.json(); setStats(prev => ({...prev!, tables: d.tables, counts: d.counts})); }
         } catch(e) { setDbActionStatus('Failed'); }
+    };
+
+    const handleHardReset = async () => {
+        if(!window.confirm("CRITICAL WARNING:\n\nThis will DELETE ALL DATA (Messages, Leads, Settings) and recreate the database tables.\n\nUse this only if you see '500 Internal Server Errors' continuously.\n\nAre you sure?")) return;
+        
+        setDbActionStatus('Resetting DB...');
+        try {
+            await fetch('/api/system/hard-reset', { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` } });
+            setDbActionStatus('Database Reset Complete. Reloading...');
+            setTimeout(() => window.location.reload(), 2000);
+        } catch(e) { setDbActionStatus('Reset Failed'); }
     };
 
     const handleSeedDB = async () => {
@@ -139,22 +150,16 @@ export const SystemMonitor = () => {
                             </div>
                         )}
 
-                        {isDbError && (
-                            <div className="bg-red-900/30 border border-red-800 p-4 rounded-lg">
-                                <div className="flex items-center gap-2 text-red-400 font-bold mb-2"><AlertCircle size={18} /> Connection Failed</div>
-                                <p className="text-xs text-gray-300 mb-2">Postgres Error: <span className="font-mono text-red-300">{stats.lastError || 'Unknown'}</span></p>
+                        <div className="bg-amber-900/30 border border-amber-800 p-4 rounded-lg">
+                            <div className="flex items-center justify-between mb-2">
+                                <div className="flex items-center gap-2 text-amber-400 font-bold"><AlertTriangle size={18} /> Hard Reset Database</div>
+                                {dbActionStatus && <span className="text-xs text-green-400">{dbActionStatus}</span>}
                             </div>
-                        )}
-
-                        {isTablesMissing && (
-                            <div className="bg-amber-900/30 border border-amber-800 p-4 rounded-lg">
-                                <div className="flex items-center justify-between mb-2">
-                                    <div className="flex items-center gap-2 text-amber-400 font-bold"><AlertTriangle size={18} /> Tables Missing</div>
-                                    {dbActionStatus && <span className="text-xs text-green-400">{dbActionStatus}</span>}
-                                </div>
-                                <button onClick={handleInitDB} className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2"><DatabaseZap size={14} /> Initialize Database Schema</button>
-                            </div>
-                        )}
+                            <p className="text-xs text-gray-400 mb-3">Use this if you see 500 errors. It will delete and recreate all tables with correct columns.</p>
+                            <button onClick={handleHardReset} className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2">
+                                <Trash2 size={14} /> FIX: DROP & RECREATE TABLES
+                            </button>
+                        </div>
 
                         {isDbEmpty && (
                             <div className="bg-blue-900/30 border border-blue-800 p-4 rounded-lg">

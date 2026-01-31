@@ -45,7 +45,7 @@ const getDb = () => {
             connectionString: dbUrl,
             ssl: { rejectUnauthorized: false },
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-            max: 10, // Increased to 10 to handle dashboard + scheduler + webhook concurrency
+            max: 10, 
             idleTimeoutMillis: 1000, 
             allowExitOnIdle: true 
         });
@@ -163,7 +163,6 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         const name = contact?.profile?.name || "Unknown";
         const textBody = message.text?.body || `[${message.type}]`;
         
-        // Ensure table exists via init, but handle duplicate inserts gracefully
         const upsertQuery = `
             INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at) 
             VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
@@ -213,7 +212,11 @@ const processQueueInternal = async () => {
         let jobsToProcess = [];
 
         await withDb(async (client) => {
-            // Reset stuck jobs (processing > 10 mins)
+            // Check if table exists before running logic to prevent logs spamming
+            const tableCheck = await client.query(`SELECT to_regclass('public.scheduled_messages')`);
+            if (!tableCheck.rows[0].to_regclass) return;
+
+            // Reset stuck jobs
             await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
 
             await client.query('BEGIN');
@@ -328,6 +331,24 @@ apiRouter.get('/debug/status', async (req, res, next) => {
     }
 });
 
+// SYSTEM RESET ROUTE
+apiRouter.post('/system/hard-reset', async (req, res, next) => {
+    try {
+        await withDb(async (client) => {
+            await client.query(`
+                DROP TABLE IF EXISTS driver_documents CASCADE;
+                DROP TABLE IF EXISTS scheduled_messages CASCADE;
+                DROP TABLE IF EXISTS candidate_messages CASCADE;
+                DROP TABLE IF EXISTS bot_versions CASCADE;
+                DROP TABLE IF EXISTS candidates CASCADE;
+            `);
+            // Init will recreate
+            await init(); 
+        });
+        res.json({ success: true });
+    } catch(e) { next(e); }
+});
+
 apiRouter.get('/drivers', async (req, res, next) => {
     try {
         await withDb(async (client) => {
@@ -358,14 +379,16 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
             const resDb = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT $2', [req.params.id, limit]);
             res.json(resDb.rows.map(r => ({ id: r.id, sender: r.direction === 'in' ? 'driver' : 'agent', text: r.text, timestamp: new Date(r.created_at).getTime(), type: r.type || 'text', status: r.status })).reverse());
         });
-    } catch (e) { res.json([]); }
+    } catch (e) { 
+        if (e.code === '42P01') res.json([]);
+        else next(e); 
+    }
 });
 
 // NEW: Documents Route (Fixes 404)
 apiRouter.get('/drivers/:id/documents', async (req, res, next) => {
     try {
         await withDb(async (client) => {
-            // Safe query that handles case where table might be missing if init failed
             const docs = await client.query(`SELECT * FROM driver_documents WHERE candidate_id = $1 ORDER BY created_at DESC`, [req.params.id]);
             res.json(docs.rows.map(d => ({
                 id: d.id,
@@ -376,7 +399,7 @@ apiRouter.get('/drivers/:id/documents', async (req, res, next) => {
             })));
         });
     } catch (e) { 
-        if (e.code === '42P01') res.json([]); // Return empty if table doesn't exist
+        if (e.code === '42P01') res.json([]); 
         else next(e); 
     }
 });
@@ -428,7 +451,10 @@ apiRouter.get('/drivers/:id/scheduled-messages', async (req, res, next) => {
                 status: r.status
             })));
         });
-    } catch (e) { next(e); }
+    } catch (e) { 
+        if (e.code === '42P01') res.json([]);
+        else next(e); 
+    }
 });
 
 apiRouter.delete('/scheduled-messages/:id', async (req, res, next) => {
