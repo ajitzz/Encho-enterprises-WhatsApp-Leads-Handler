@@ -82,8 +82,8 @@ export default function App() {
           } catch(e) { console.error("Heartbeat skipped"); }
       };
 
-      // Run every 30 seconds
-      const interval = setInterval(triggerCron, 30000);
+      // Run every 10 seconds (More aggressive for testing)
+      const interval = setInterval(triggerCron, 10000);
       triggerCron(); // Run immediately on load
 
       return () => clearInterval(interval);

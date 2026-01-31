@@ -20,7 +20,7 @@ const logger = {
 
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
-    META_TIMEOUT: 5000, 
+    META_TIMEOUT: 10000, 
     DB_CONNECTION_TIMEOUT: 5000,
     CACHE_TTL_SETTINGS: 600
 };
@@ -136,21 +136,23 @@ const getBotSettings = async (phoneId) => {
 };
 
 const sendToMeta = async (to, payload) => {
-    if (payload.text && payload.text.body) {
+    // Safety: Check for placeholder text unless it's a pure media message
+    if (payload.type === 'text' && payload.text && payload.text.body) {
         const body = payload.text.body.trim().toLowerCase();
         const forbiddenPhrases = [
             'replace this', 'sample message', 'type your message', 'enter text'
         ];
         if (forbiddenPhrases.some(phrase => body.includes(phrase)) || !body) {
-            logger.warn("🛑 BLOCKED: Attempted to send placeholder message.", { to, body: payload.text.body });
-            return; 
+            logger.warn("🛑 BLOCKED: Placeholder message detected.", { to, body: payload.text.body });
+            throw new Error("Message blocked: Contains placeholder text."); 
         }
     }
 
     if (!process.env.META_API_TOKEN || !process.env.PHONE_NUMBER_ID) {
         logger.error('Meta Send Misconfigured', { to });
-        return;
+        throw new Error("Server Misconfiguration: Missing Meta Credentials");
     }
+    
     try { 
         await getMetaClient().post(`https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`, { messaging_product: 'whatsapp', recipient_type: 'individual', to, ...payload }); 
     } catch (e) { 
@@ -242,10 +244,11 @@ const processQueueInternal = async () => {
             await client.query('COMMIT'); 
         });
 
+        logger.info(`Scheduler: Found ${jobsToProcess.length} jobs to process`);
+
         for (const job of jobsToProcess) {
             try {
                 let payload = job.payload; 
-                // SAFETY: Handle case where payload was double-serialized as a string
                 if (typeof payload === 'string') {
                     try { payload = JSON.parse(payload); } catch(e) {}
                 }
@@ -256,9 +259,13 @@ const processQueueInternal = async () => {
                     metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
                 } else if (payload.mediaUrl) {
                     const type = payload.mediaType || 'image';
-                    metaPayload = { type, [type]: { link: payload.mediaUrl, caption: payload.text } };
+                    // Ensure text exists if caption needed, otherwise just link
+                    const caption = payload.text ? payload.text : undefined;
+                    metaPayload = { type, [type]: { link: payload.mediaUrl, caption } };
                 } else {
-                    metaPayload = { type: 'text', text: { body: payload.text || ' ' } };
+                    // Fallback to text
+                    const bodyText = payload.text || ' ';
+                    metaPayload = { type: 'text', text: { body: bodyText } };
                 }
 
                 await sendToMeta(job.phone_number, metaPayload);
@@ -276,7 +283,8 @@ const processQueueInternal = async () => {
                 });
                 processedCount++;
             } catch (err) {
-                logger.error("Job Failed", { id: job.id, error: err.message });
+                logger.error("Scheduler Job Failed", { id: job.id, error: err.message });
+                // Mark as failed so it doesn't loop forever
                 await withDb(async (client) => {
                     await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
                 });
@@ -390,8 +398,6 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
 
         await withDb(async (client) => {
             for (const driverId of driverIds) {
-                 // FIX: Pass 'message' object directly to JSONB column, do NOT stringify it manually.
-                 // The 'pg' driver handles serialization for us.
                  await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, 
                     [crypto.randomUUID(), driverId, message, scheduledTime]);
             }

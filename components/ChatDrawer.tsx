@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Driver, Message, LeadStatus, ScheduledMessage, DriverDocument } from '../types';
 import { 
   X, Send, Image as ImageIcon, Video, CheckCircle, Headset, MicOff, Phone, 
-  FileText, Calendar, Clock, Paperclip, LayoutTemplate, Edit2, Trash2, Zap, Globe, Facebook
+  FileText, Calendar, Clock, Paperclip, LayoutTemplate, Edit2, Trash2, Zap, Globe, Facebook, AlertTriangle
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 import { MediaSelectorModal } from './MediaSelectorModal';
@@ -194,15 +194,28 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     <div className="space-y-4 pt-4 border-t border-gray-200 mt-4">
                         <div className="flex justify-center"><span className="text-xs font-bold text-gray-400 uppercase tracking-wider bg-gray-100 px-3 py-1 rounded-full">Scheduled Queue</span></div>
                         {scheduledMessages.map(msg => (
-                            <div key={msg.id} className="flex justify-end opacity-80">
-                                <div className="max-w-[80%] rounded-2xl rounded-tr-none border-2 border-dashed border-amber-300 bg-amber-50 p-4 relative group">
-                                    <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white rounded p-1 shadow-sm">
-                                        <button onClick={() => handleSendNowScheduled(msg.id)} className="p-1 text-green-600"><Zap size={14}/></button>
-                                        <button onClick={() => openEditModal(msg)} className="p-1 text-blue-600"><Edit2 size={14}/></button>
-                                        <button onClick={() => handleCancelScheduled(msg.id)} className="p-1 text-red-600"><Trash2 size={14}/></button>
+                            <div key={msg.id} className="flex justify-end opacity-90">
+                                <div className={`max-w-[80%] rounded-2xl rounded-tr-none border-2 border-dashed p-4 relative group ${
+                                    msg.status === 'failed' ? 'border-red-300 bg-red-50' : 
+                                    msg.status === 'sent' ? 'border-green-300 bg-green-50' :
+                                    msg.status === 'processing' ? 'border-blue-300 bg-blue-50' :
+                                    'border-amber-300 bg-amber-50'
+                                }`}>
+                                    <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white rounded p-1 shadow-sm z-10">
+                                        {msg.status !== 'sent' && <button onClick={() => handleSendNowScheduled(msg.id)} className="p-1 text-green-600" title="Send Now"><Zap size={14}/></button>}
+                                        {msg.status !== 'sent' && <button onClick={() => openEditModal(msg)} className="p-1 text-blue-600" title="Edit"><Edit2 size={14}/></button>}
+                                        <button onClick={() => handleCancelScheduled(msg.id)} className="p-1 text-red-600" title="Delete"><Trash2 size={14}/></button>
                                     </div>
-                                    <div className="flex items-center gap-2 mb-2 text-amber-700 text-xs font-bold"><Clock size={12} /> {new Date(msg.scheduledTime).toLocaleString()}</div>
-                                    <p className="text-sm text-gray-600 italic">{msg.payload.text || '[Media Only]'}</p>
+                                    <div className={`flex items-center gap-2 mb-2 text-xs font-bold ${
+                                        msg.status === 'failed' ? 'text-red-700' : 
+                                        msg.status === 'sent' ? 'text-green-700' :
+                                        'text-amber-700'
+                                    }`}>
+                                        <Clock size={12} /> {new Date(msg.scheduledTime).toLocaleString()}
+                                        <span className="uppercase bg-white/50 px-1 rounded ml-auto">{msg.status}</span>
+                                    </div>
+                                    <p className="text-sm text-gray-700 italic">{msg.payload.text || '[Media Only]'}</p>
+                                    {msg.status === 'failed' && <p className="text-xs text-red-600 mt-2 flex items-center gap-1 font-bold"><AlertTriangle size={12} /> Delivery Failed</p>}
                                 </div>
                             </div>
                         ))}
