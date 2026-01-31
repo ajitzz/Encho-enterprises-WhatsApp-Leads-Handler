@@ -440,13 +440,15 @@ const persistInboundMessage = async (message, contact, requestId = 'system') => 
 
 // --- SCHEDULER LOGIC ---
 const processScheduledJobs = async () => {
+    let jobsToProcess = [];
+
+    // STEP 1: PICK & LOCK (Fast DB Interaction)
     try {
         await withDb(async (client) => {
-            // 1. Safety: Reset stuck 'processing' jobs older than 10 mins back to 'pending'
-            // This handles cases where the server crashed mid-send
+            // Safety: Reset stuck 'processing' jobs older than 10 mins back to 'pending'
             await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
 
-            // 2. Transaction: Lock and mark as processing IMMEDIATELY
+            // Transaction: Lock and mark as processing IMMEDIATELY
             await client.query('BEGIN');
             
             const res = await client.query(`
@@ -458,54 +460,64 @@ const processScheduledJobs = async () => {
                 FOR UPDATE SKIP LOCKED
             `, [Date.now()]);
 
-            if (res.rows.length === 0) {
-                await client.query('COMMIT');
-                return;
+            if (res.rows.length > 0) {
+                const jobIds = res.rows.map(r => r.id);
+                await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`, [jobIds]);
+                jobsToProcess = res.rows;
+                logger.info(`Scheduler: Locked ${jobsToProcess.length} messages for processing`);
             }
-
-            // Immediately mark as processing so next tick doesn't pick them up
-            const jobIds = res.rows.map(r => r.id);
-            await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`, [jobIds]);
             
             await client.query('COMMIT'); 
-
-            if (res.rows.length > 0) logger.info(`Scheduler: Processing ${res.rows.length} messages`);
-
-            // 3. Process External API Calls (Outside DB Lock)
-            for (const job of res.rows) {
-                try {
-                    const payload = job.payload; 
-                    const phone = job.phone_number;
-                    let metaPayload = {};
-                    if (payload.templateName) {
-                         metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
-                    } else if (payload.mediaUrl) {
-                        const type = payload.mediaType || 'image';
-                        metaPayload = { type, [type]: { link: payload.mediaUrl, caption: payload.text } };
-                    } else {
-                        metaPayload = { type: 'text', text: { body: payload.text } };
-                    }
-
-                    await sendToMeta(phone, metaPayload);
-
-                    // 4. Update Status to Sent
-                    await client.query(`
-                        INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
-                        VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
-                    `, [crypto.randomUUID(), job.candidate_id, payload.text || `[${payload.templateName || payload.mediaType}]`, payload.mediaType || 'text']);
-
-                    await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
-                        [payload.text || 'Scheduled Message', Date.now(), job.candidate_id]);
-
-                    await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [job.id]);
-                } catch (err) {
-                    logger.error("Failed to process scheduled message", { jobId: job.id, error: err.message });
-                    await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
-                }
-            }
-        });
+        }); // Connection released here
     } catch (e) {
-        logger.error("Scheduler Cycle Error", { error: e.message });
+        logger.error("Scheduler Cycle Error (Locking Phase)", { error: e.message });
+        return;
+    }
+
+    if (jobsToProcess.length === 0) return;
+
+    // STEP 2: PROCESS EXTERNAL API & UPDATE (Iterative DB Interaction)
+    for (const job of jobsToProcess) {
+        let status = 'sent';
+        try {
+            const payload = job.payload; 
+            const phone = job.phone_number;
+            let metaPayload = {};
+            if (payload.templateName) {
+                    metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
+            } else if (payload.mediaUrl) {
+                const type = payload.mediaType || 'image';
+                metaPayload = { type, [type]: { link: payload.mediaUrl, caption: payload.text } };
+            } else {
+                metaPayload = { type: 'text', text: { body: payload.text } };
+            }
+
+            // Heavy external call (No DB connection held here)
+            await sendToMeta(phone, metaPayload);
+
+            // Update Success
+            await withDb(async (client) => {
+                await client.query(`
+                    INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
+                    VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
+                `, [crypto.randomUUID(), job.candidate_id, payload.text || `[${payload.templateName || payload.mediaType}]`, payload.mediaType || 'text']);
+
+                await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
+                    [payload.text || 'Scheduled Message', Date.now(), job.candidate_id]);
+
+                await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [job.id]);
+            });
+
+        } catch (err) {
+            logger.error("Failed to process scheduled message", { jobId: job.id, error: err.message });
+            status = 'failed';
+            // Update Failure
+            try {
+                await withDb(async (client) => {
+                    await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
+                });
+            } catch(e) { console.error("Failed to update job status", e); }
+        }
     }
 };
 
