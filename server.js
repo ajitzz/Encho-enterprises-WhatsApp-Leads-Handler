@@ -654,23 +654,9 @@ const init = async () => {
 
 init();
 
-const QUEUE_INTERVAL_MS = Number(process.env.QUEUE_INTERVAL_MS || 10000);
-const shouldRunQueueWorker = process.env.ENABLE_QUEUE_WORKER !== 'false';
-
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;
     app.listen(PORT, () => logger.info(`🚀 Uber Fleet Bot running on port ${PORT}`));
-
-    if (shouldRunQueueWorker) {
-        setInterval(() => {
-            processQueueInternal().catch((err) => {
-                logger.error("Queue Worker Error", { error: err.message });
-            });
-        }, QUEUE_INTERVAL_MS);
-        logger.info("Queue Worker Enabled", { intervalMs: QUEUE_INTERVAL_MS });
-    } else {
-        logger.info("Queue Worker Disabled");
-    }
 }
 
 module.exports = app;
