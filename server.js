@@ -442,6 +442,13 @@ const persistInboundMessage = async (message, contact, requestId = 'system') => 
 const processScheduledJobs = async () => {
     try {
         await withDb(async (client) => {
+            // 1. Safety: Reset stuck 'processing' jobs older than 10 mins back to 'pending'
+            // This handles cases where the server crashed mid-send
+            await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
+
+            // 2. Transaction: Lock and mark as processing IMMEDIATELY
+            await client.query('BEGIN');
+            
             const res = await client.query(`
                 SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
                 FROM scheduled_messages sm
@@ -451,8 +458,20 @@ const processScheduledJobs = async () => {
                 FOR UPDATE SKIP LOCKED
             `, [Date.now()]);
 
+            if (res.rows.length === 0) {
+                await client.query('COMMIT');
+                return;
+            }
+
+            // Immediately mark as processing so next tick doesn't pick them up
+            const jobIds = res.rows.map(r => r.id);
+            await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`, [jobIds]);
+            
+            await client.query('COMMIT'); 
+
             if (res.rows.length > 0) logger.info(`Scheduler: Processing ${res.rows.length} messages`);
 
+            // 3. Process External API Calls (Outside DB Lock)
             for (const job of res.rows) {
                 try {
                     const payload = job.payload; 
@@ -469,6 +488,7 @@ const processScheduledJobs = async () => {
 
                     await sendToMeta(phone, metaPayload);
 
+                    // 4. Update Status to Sent
                     await client.query(`
                         INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
                         VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
