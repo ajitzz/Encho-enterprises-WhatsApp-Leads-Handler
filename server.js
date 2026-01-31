@@ -21,7 +21,7 @@ const logger = {
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
     META_TIMEOUT: 8000, 
-    DB_CONNECTION_TIMEOUT: 15000, 
+    DB_CONNECTION_TIMEOUT: 15000, // Reduced to fail faster than Gateway
     CACHE_TTL_SETTINGS: 600, 
     LOCK_TTL: 15,
     DEDUPE_TTL: 3600,
@@ -53,10 +53,9 @@ const getDb = () => {
             ssl: { rejectUnauthorized: false },
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
             // Critical for Serverless: Limit pool to 1 to prevent connection exhaustion 
-            // when multiple lambdas spin up simultaneously.
             max: isServerless ? 1 : 10, 
             idleTimeoutMillis: 30000,
-            allowExitOnIdle: true // Allow process to exit if idle
+            allowExitOnIdle: true 
         });
         
         pgPool.on('error', (err) => logger.error('DB Pool Error', { error: err.message }));
@@ -77,14 +76,14 @@ const withDb = async (operation, retries = 2) => {
             lastError = e;
             const isConnectionError = e.message.includes('timeout') || 
                                       e.message.includes('ECONNRESET') || 
-                                      e.message.includes('57P01') || // Admin shutdown
+                                      e.message.includes('57P01') || 
                                       e.message.includes('Connection terminated');
             
             if (isConnectionError && i < retries) {
-                const delay = 1000 * (i + 1); // Linear backoff: 1s, 2s...
+                const delay = 1000 * (i + 1); 
                 logger.warn(`DB Connection Failed. Retrying in ${delay}ms...`, { attempt: i + 1, error: e.message });
                 if (client) {
-                    try { client.release(true); } catch(err) {} // Force release
+                    try { client.release(true); } catch(err) {} 
                     client = null;
                 }
                 await new Promise(r => setTimeout(r, delay));
@@ -165,7 +164,7 @@ app.use(cors());
 
 const isUUID = (str) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
 
-// DB AUTO-MIGRATION
+// DB AUTO-MIGRATION & HEALING
 let _schemaEnsured = false;
 const ensureDbSchema = async () => {
     if (_schemaEnsured) return;
@@ -229,6 +228,7 @@ const ensureDbSchema = async () => {
                 );
             `);
 
+            // ✅ CRITICAL FIX: Ensure 'payload' column exists to prevent 500 error
             await client.query(`
                 CREATE TABLE IF NOT EXISTS scheduled_messages (
                     id UUID PRIMARY KEY,
@@ -239,32 +239,24 @@ const ensureDbSchema = async () => {
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 );
             `);
-            
-            // ✅ FIX: Robust column migration to prevent 500 errors
             await client.query(`
                 DO $$ 
                 BEGIN 
-                    -- Fix 1: Ensure candidate_id exists
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='scheduled_messages' AND column_name='candidate_id') THEN 
                         ALTER TABLE scheduled_messages ADD COLUMN candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE; 
                     END IF; 
-                    
-                    -- Fix 2: Ensure payload exists (Fixes 'column payload does not exist' error)
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='scheduled_messages' AND column_name='payload') THEN 
                         ALTER TABLE scheduled_messages ADD COLUMN payload JSONB; 
                     END IF;
-
-                    -- Fix 3: Ensure scheduled_time exists
                     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='scheduled_messages' AND column_name='scheduled_time') THEN 
                         ALTER TABLE scheduled_messages ADD COLUMN scheduled_time BIGINT; 
                     END IF;
                 END $$;
             `);
-            
             await client.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_time ON scheduled_messages(scheduled_time) WHERE status = 'pending';`);
 
             await client.query('COMMIT');
-        }, 1); // Only 1 retry for schema check to avoid long startup
+        }, 1); 
         _schemaEnsured = true;
         logger.info("DB Schema Verified");
     } catch (e) {
@@ -303,13 +295,23 @@ const getBotSettings = async (phoneId) => {
 };
 
 const sendToMeta = async (to, payload) => {
+    // ✅ SAFETY CHECK: Prevent Placeholder Messages
     if (payload.text && payload.text.body) {
         const body = payload.text.body.trim().toLowerCase();
-        if (!body || body.includes('replace this') || body.includes('sample message') || body.includes('type your message')) {
-            logger.warn("Blocked Placeholder/Empty Message", { to, body: payload.text.body });
-            return;
+        const forbiddenPhrases = [
+            'replace this', 
+            'sample message', 
+            'type your message', 
+            'enter text', 
+            'insert message'
+        ];
+        
+        if (forbiddenPhrases.some(phrase => body.includes(phrase)) || !body) {
+            logger.warn("🛑 BLOCKED: Attempted to send placeholder message.", { to, body: payload.text.body });
+            return; // Silently fail to protect user experience
         }
     }
+
     if (!process.env.META_API_TOKEN || !process.env.PHONE_NUMBER_ID) {
         logger.error('Meta Send Misconfigured', { to });
         return;
@@ -652,7 +654,6 @@ apiRouter.get('/drivers/:id/scheduled-messages', async (req, res, next) => {
     } catch (e) { next(e); }
 });
 
-// ✅ FIX: Robust Scheduling with Retry
 apiRouter.post('/scheduled-messages', async (req, res, next) => {
     const { driverIds, message, timestamp } = req.body;
     try {
@@ -752,9 +753,6 @@ apiRouter.post('/bot/publish', async (req, res, next) => {
         });
     } catch(e) { next(e); }
 });
-
-// ... (Media and AI routes preserved as is, they don't use DB heavily) ...
-// For brevity, skipping to Webhook & Worker which use DB
 
 const verifyWebhook = (req, res) => {
     if (req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) return res.status(200).send(req.query['hub.challenge']);
