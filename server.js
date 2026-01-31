@@ -346,19 +346,25 @@ const processQueueInternal = async () => {
 
             await client.query('BEGIN');
             try {
-                const result = await client.query(`
-                    SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
-                    FROM scheduled_messages sm
-                    JOIN candidates c ON sm.candidate_id = c.id
-                    WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
-                    ORDER BY sm.scheduled_time ASC
-                    LIMIT 50
-                    FOR UPDATE SKIP LOCKED
-                `, [Date.now()]);
+               const result = await client.query(`
+  SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
+  FROM scheduled_messages sm
+  JOIN candidates c ON c.id = sm.candidate_id
+  WHERE sm.status = 'pending'
+    AND sm.scheduled_time <= $1
+  ORDER BY sm.scheduled_time ASC
+  LIMIT 10
+  FOR UPDATE SKIP LOCKED
+`, [Date.now()]);
+
 
                 if (result.rows.length > 0) {
                     const jobIds = result.rows.map(r => r.id);
-                    await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`, [jobIds]);
+                    await client.query(
+  `UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`,
+  [jobIds]
+);
+
                     jobsToProcess = result.rows;
                 }
 
