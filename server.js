@@ -140,34 +140,6 @@ app.use(express.json({
 }));
 
 // --- META CLIENT ---
-const getMetaClient = () => {
-    const axios = require('axios');
-    const https = require('https');
-    return axios.create({
-        httpsAgent: new https.Agent({ keepAlive: true }),
-        timeout: SYSTEM_CONFIG.META_TIMEOUT,
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.META_API_TOKEN}` }
-    });
-};
-
-const metaClient = getMetaClient();
-
-const sendToMeta = async (phoneNumber, payload) => {
-    const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-    if (!phoneId) throw new Error("WHATSAPP_PHONE_NUMBER_ID missing");
-    const url = `https://graph.facebook.com/v21.0/${phoneId}/messages`;
-
-    const to = (phoneNumber || '').toString().replace(/\D/g, '');
-    if (!to) throw new Error("Invalid phone number");
-
-    const body = {
-        messaging_product: "whatsapp",
-        to,
-        ...payload
-    };
-
-    await metaClient.post(url, body);
-};
 
 // --- HELPERS ---
 const getBaseUrlFromReq = (req) => {
@@ -210,7 +182,10 @@ const getActiveBotSettings = async (client) => {
     const r = await client.query(
         `SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1`
     );
-    const settings = (r.rows[0] && r.rows[0].settings) ? r.rows[0].settings : null;
+    let settings = (r.rows[0] && r.rows[0].settings) ? r.rows[0].settings : null;
+    if (settings && typeof settings === 'string') {
+        try { settings = JSON.parse(settings); } catch (_) {}
+    }
 
     // Cache it
     if (settings) {
@@ -232,6 +207,9 @@ const processQueueInternal = async () => {
     const batchSize = Math.max(1, Math.min(25, Number(process.env.QUEUE_BATCH_SIZE || 10)));
 
     try {
+        const settings = await getSystemSettings();
+        if (!settings.sending_enabled) return 0;
+
         let jobsToProcess = [];
 
         // 1) Claim work in a transaction (FOR UPDATE SKIP LOCKED requires it)
@@ -769,8 +747,900 @@ apiRouter.post('/bot/publish', async (req, res, next) => {
 });
 
 // --- WEBHOOK HANDLERS (keep your existing logic) ---
-const verifyWebhook = (req, res) => {
-    const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN;
+const DEFAULT_SYSTEM_SETTINGS = {
+    webhook_ingest_enabled: true,
+    automation_enabled: true,
+    sending_enabled: true
+};
+
+const SYSTEM_SETTINGS_KEY = 'system:settings';
+const META_CREDENTIALS_KEY = 'system:meta_credentials';
+
+const getSystemSettings = async () => {
+    try {
+        const cached = await redis.get(SYSTEM_SETTINGS_KEY);
+        if (cached && typeof cached === 'object') return { ...DEFAULT_SYSTEM_SETTINGS, ...cached };
+        if (cached && typeof cached === 'string') return { ...DEFAULT_SYSTEM_SETTINGS, ...JSON.parse(cached) };
+    } catch (_) {}
+    return { ...DEFAULT_SYSTEM_SETTINGS };
+};
+
+const updateSystemSettings = async (updates) => {
+    const current = await getSystemSettings();
+    const next = { ...current, ...updates };
+    try { await redis.set(SYSTEM_SETTINGS_KEY, next); } catch (_) {}
+    return next;
+};
+
+const getMetaCredentials = async () => {
+    let stored = {};
+    try {
+        const cached = await redis.get(META_CREDENTIALS_KEY);
+        if (cached && typeof cached === 'object') stored = cached;
+        if (cached && typeof cached === 'string') stored = JSON.parse(cached);
+    } catch (_) {}
+
+    return {
+        phoneNumberId: stored.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID || process.env.PHONE_NUMBER_ID || process.env.META_PHONE_NUMBER_ID || '',
+        apiToken: stored.apiToken || process.env.META_API_TOKEN || process.env.META_TOKEN || process.env.WHATSAPP_API_TOKEN || '',
+        verifyToken: stored.verifyToken || process.env.META_WEBHOOK_VERIFY_TOKEN || process.env.VERIFY_TOKEN || ''
+    };
+};
+
+const updateMetaCredentials = async (updates) => {
+    const current = await getMetaCredentials();
+    const next = { ...current, ...updates };
+    try { await redis.set(META_CREDENTIALS_KEY, next); } catch (_) {}
+    return next;
+};
+
+const getMetaClient = (token) => {
+    const axios = require('axios');
+    const https = require('https');
+    return axios.create({
+        httpsAgent: new https.Agent({ keepAlive: true }),
+        timeout: SYSTEM_CONFIG.META_TIMEOUT,
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }
+    });
+};
+
+const sendToMeta = async (phoneNumber, payload) => {
+    const { phoneNumberId, apiToken } = await getMetaCredentials();
+    if (!phoneNumberId) throw new Error("WHATSAPP_PHONE_NUMBER_ID missing");
+    if (!apiToken) throw new Error("META_API_TOKEN missing");
+    const url = `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`;
+
+    const to = (phoneNumber || '').toString().replace(/\D/g, '');
+    if (!to) throw new Error("Invalid phone number");
+
+    const body = {
+        messaging_product: "whatsapp",
+        to,
+        ...payload
+    };
+
+    const metaClient = getMetaClient(apiToken);
+    await metaClient.post(url, body);
+};
+
+const verifyWebhook = async (req, res) => {
+    const { verifyToken } = await getMetaCredentials();
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
-    const challenge = r
+    const challenge = req.query['hub.challenge'];
+
+    if (mode === 'subscribe' && token && verifyToken && token === verifyToken) {
+        res.status(200).send(challenge);
+    } else {
+        res.sendStatus(403);
+    }
+};
+
+const fetchMediaUrl = async (mediaId) => {
+    if (!mediaId) return null;
+    const { apiToken } = await getMetaCredentials();
+    if (!apiToken) return null;
+    const metaClient = getMetaClient(apiToken);
+    const res = await metaClient.get(`https://graph.facebook.com/v21.0/${mediaId}`);
+    return res.data?.url || null;
+};
+
+const parseIncomingMessage = async (message, value) => {
+    const type = message.type;
+    const timestamp = Number(message.timestamp) * 1000 || Date.now();
+    const from = message.from;
+    let text = '';
+    let payload = {};
+    let mediaUrl = null;
+    let mediaType = type;
+    let whatsappMessageId = message.id;
+
+    if (type === 'text') {
+        text = message.text?.body || '';
+    } else if (type === 'button') {
+        text = message.button?.text || '';
+    } else if (type === 'interactive') {
+        const interactive = message.interactive || {};
+        if (interactive.type === 'button_reply') {
+            text = interactive.button_reply?.title || interactive.button_reply?.id || '';
+        } else if (interactive.type === 'list_reply') {
+            text = interactive.list_reply?.title || interactive.list_reply?.id || '';
+        }
+    } else if (type === 'image' || type === 'video' || type === 'document' || type === 'audio') {
+        const media = message[type] || {};
+        mediaUrl = await fetchMediaUrl(media.id);
+        text = media.caption || '';
+        payload = { ...media, url: mediaUrl };
+    } else if (type === 'location') {
+        text = message.location?.name || 'Shared location';
+        payload = message.location || {};
+    }
+
+    if (!text && mediaUrl) {
+        text = `[${type}]`;
+    }
+
+    return { from, timestamp, text, payload, mediaUrl, mediaType, whatsappMessageId };
+};
+
+const getCandidateVariables = async (candidateId) => {
+    const key = `candidate:variables:${candidateId}`;
+    try {
+        const cached = await redis.get(key);
+        if (!cached) return {};
+        if (typeof cached === 'object') return cached;
+        return JSON.parse(cached);
+    } catch (_) {
+        return {};
+    }
+};
+
+const setCandidateVariables = async (candidateId, variables) => {
+    const key = `candidate:variables:${candidateId}`;
+    try { await redis.set(key, variables); } catch (_) {}
+};
+
+const updateCandidateField = async (client, candidateId, field, value) => {
+    const allowed = new Set(['name', 'notes', 'stage', 'source']);
+    if (!allowed.has(field)) return false;
+    await client.query(`UPDATE candidates SET ${field} = $1 WHERE id = $2`, [value, candidateId]);
+    return true;
+};
+
+const buildMetaPayload = (message) => {
+    if (message.mediaUrl) {
+        const type = message.mediaType || 'image';
+        const caption = message.text ? message.text : undefined;
+        return { metaPayload: { type, [type]: { link: message.mediaUrl, caption } }, messageType: type };
+    }
+
+    if (message.buttons && message.buttons.length > 0) {
+        const buttons = message.buttons.slice(0, 3).map((btn, idx) => ({
+            type: 'reply',
+            reply: { id: btn.id || `btn_${idx + 1}`, title: btn.title }
+        }));
+        return {
+            metaPayload: {
+                type: 'interactive',
+                interactive: {
+                    type: 'button',
+                    body: { text: message.text || 'Select an option' },
+                    action: { buttons }
+                }
+            },
+            messageType: 'interactive'
+        };
+    }
+
+    if (message.listSections && message.listSections.length > 0) {
+        return {
+            metaPayload: {
+                type: 'interactive',
+                interactive: {
+                    type: 'list',
+                    body: { text: message.text || 'Select an option' },
+                    action: {
+                        button: 'Select',
+                        sections: message.listSections
+                    }
+                }
+            },
+            messageType: 'interactive'
+        };
+    }
+
+    const bodyText = (message.text || '').toString();
+    return { metaPayload: { type: 'text', text: { body: bodyText.trim() ? bodyText : '...' } }, messageType: 'text' };
+};
+
+const sendBotMessage = async (candidateId, phoneNumber, message) => {
+    const { metaPayload, messageType } = buildMetaPayload(message);
+    await sendToMeta(phoneNumber, metaPayload);
+
+    await withDb(async (client) => {
+        const messageText = message.text || `[${messageType}]`;
+        await client.query(`
+            INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
+            VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())
+        `, [crypto.randomUUID(), candidateId, messageText, messageType]);
+
+        await client.query(
+            `UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`,
+            [messageText, Date.now(), candidateId]
+        );
+    });
+};
+
+const runStepFlow = async (candidate, incomingText, settings) => {
+    const steps = settings.steps || [];
+    if (steps.length === 0) return;
+    const stepMap = new Map(steps.map(step => [step.id, step]));
+    const entryStepId = settings.entryPointId || steps[0].id;
+
+    const currentStepId = candidate.current_node_id;
+    const currentStep = currentStepId ? stepMap.get(currentStepId) : null;
+
+    if (!currentStep) {
+        const entryStep = stepMap.get(entryStepId);
+        if (!entryStep) return;
+        await sendBotMessage(candidate.id, candidate.phone_number, {
+            text: entryStep.message,
+            mediaUrl: entryStep.mediaUrl,
+            mediaType: entryStep.mediaType,
+            buttons: entryStep.options?.map((opt, idx) => ({ id: `${entryStep.id}_${idx}`, title: opt }))
+        });
+        await withDb(async (client) => {
+            await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [entryStep.id, candidate.id]);
+        });
+        return;
+    }
+
+    if (currentStep.saveToField) {
+        await withDb(async (client) => {
+            const saved = await updateCandidateField(client, candidate.id, currentStep.saveToField, incomingText);
+            if (!saved) {
+                const vars = await getCandidateVariables(candidate.id);
+                vars[currentStep.saveToField] = incomingText;
+                await setCandidateVariables(candidate.id, vars);
+            }
+        });
+    }
+
+    let nextStepId = currentStep.nextStepId;
+    if (currentStep.routes && incomingText) {
+        const match = Object.keys(currentStep.routes).find(key =>
+            incomingText.toLowerCase().includes(key.toLowerCase())
+        );
+        if (match) nextStepId = currentStep.routes[match];
+    }
+
+    if (!nextStepId) {
+        await withDb(async (client) => {
+            await client.query(`UPDATE candidates SET current_node_id = NULL WHERE id = $1`, [candidate.id]);
+        });
+        return;
+    }
+
+    const nextStep = stepMap.get(nextStepId);
+    if (!nextStep) return;
+
+    await sendBotMessage(candidate.id, candidate.phone_number, {
+        text: nextStep.message,
+        mediaUrl: nextStep.mediaUrl,
+        mediaType: nextStep.mediaType,
+        buttons: nextStep.options?.map((opt, idx) => ({ id: `${nextStep.id}_${idx}`, title: opt }))
+    });
+
+    await withDb(async (client) => {
+        await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [nextStep.id, candidate.id]);
+    });
+};
+
+const runNodeFlow = async (candidate, incomingText, incomingPayload, settings) => {
+    const nodes = settings.nodes || [];
+    const edges = settings.edges || [];
+    if (nodes.length === 0) return;
+
+    const nodeMap = new Map(nodes.map(node => [node.id, node]));
+    const edgesFrom = edges.reduce((acc, edge) => {
+        if (!acc[edge.source]) acc[edge.source] = [];
+        acc[edge.source].push(edge.target);
+        return acc;
+    }, {});
+
+    const getNextByEdge = (nodeId) => (edgesFrom[nodeId] || [])[0];
+    const getStartNode = () => nodes.find(n => n.data?.type === 'start') || nodes[0];
+
+    const advance = async (startNodeId) => {
+        let nodeId = startNodeId;
+        let guard = 0;
+        while (nodeId && guard < 10) {
+            guard++;
+            const node = nodeMap.get(nodeId);
+            if (!node) return null;
+            const data = node.data || {};
+            const type = data.type;
+
+            if (type === 'end') {
+                await withDb(async (client) => {
+                    await client.query(`UPDATE candidates SET current_node_id = NULL WHERE id = $1`, [candidate.id]);
+                });
+                return null;
+            }
+
+            if (type === 'status' && data.targetStatus) {
+                await withDb(async (client) => {
+                    await client.query(`UPDATE candidates SET stage = $1 WHERE id = $2`, [data.targetStatus, candidate.id]);
+                });
+                nodeId = getNextByEdge(nodeId);
+                continue;
+            }
+
+            if (type === 'handoff') {
+                await withDb(async (client) => {
+                    await client.query(`UPDATE candidates SET is_human_mode = TRUE WHERE id = $1`, [candidate.id]);
+                });
+                if (data.content) {
+                    await sendBotMessage(candidate.id, candidate.phone_number, { text: data.content });
+                }
+                await withDb(async (client) => {
+                    await client.query(`UPDATE candidates SET current_node_id = NULL WHERE id = $1`, [candidate.id]);
+                });
+                return null;
+            }
+
+            if (type === 'condition') {
+                const vars = await getCandidateVariables(candidate.id);
+                const conditions = data.conditions || [];
+                let matched = null;
+                for (const cond of conditions) {
+                    const value = vars[cond.variable];
+                    if (cond.operator === 'equals' && value == cond.value) matched = cond.nextStepId;
+                    if (cond.operator === 'contains' && typeof value === 'string' && value.includes(cond.value)) matched = cond.nextStepId;
+                    if (cond.operator === 'greater_than' && Number(value) > Number(cond.value)) matched = cond.nextStepId;
+                    if (cond.operator === 'less_than' && Number(value) < Number(cond.value)) matched = cond.nextStepId;
+                    if (cond.operator === 'exists' && value !== undefined && value !== null && value !== '') matched = cond.nextStepId;
+                    if (matched) break;
+                }
+                nodeId = matched || data.defaultNextStepId || getNextByEdge(nodeId);
+                continue;
+            }
+
+            if (['message', 'question', 'buttons', 'list', 'document'].includes(type)) {
+                const message = {
+                    text: data.content || '',
+                    mediaUrl: data.mediaUrl,
+                    mediaType: data.mediaType,
+                    buttons: data.buttons,
+                    listSections: data.listSections
+                };
+                await sendBotMessage(candidate.id, candidate.phone_number, message);
+
+                if (['question', 'buttons', 'list', 'document'].includes(type)) {
+                    await withDb(async (client) => {
+                        await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [nodeId, candidate.id]);
+                    });
+                    return nodeId;
+                }
+
+                nodeId = getNextByEdge(nodeId);
+                continue;
+            }
+
+            nodeId = getNextByEdge(nodeId);
+        }
+        return nodeId;
+    };
+
+    const currentNodeId = candidate.current_node_id;
+    const currentNode = currentNodeId ? nodeMap.get(currentNodeId) : null;
+    const currentType = currentNode?.data?.type;
+
+    if (currentNodeId && ['question', 'buttons', 'list', 'document'].includes(currentType)) {
+        const variableName = currentNode?.data?.variable;
+        if (variableName) {
+            const vars = await getCandidateVariables(candidate.id);
+            vars[variableName] = incomingText || incomingPayload || '';
+            await setCandidateVariables(candidate.id, vars);
+        }
+        const nextNodeId = getNextByEdge(currentNodeId) || currentNode?.data?.defaultNextStepId;
+        await advance(nextNodeId);
+        return;
+    }
+
+    const startNode = getStartNode();
+    if (!startNode) return;
+    await advance(startNode.id);
+};
+
+const processIncomingLead = async (incoming, value) => {
+    if (!incoming?.from) return;
+
+    const systemSettings = await getSystemSettings();
+    if (!systemSettings.webhook_ingest_enabled) return;
+
+    const phoneNumber = incoming.from;
+    const messageText = incoming.text || '';
+    const messageType = incoming.mediaType || (incoming.mediaUrl ? 'media' : 'text');
+
+    await withDb(async (client) => {
+        const existing = await client.query(
+            'SELECT id FROM candidate_messages WHERE whatsapp_message_id = $1',
+            [incoming.whatsappMessageId]
+        );
+        if (existing.rows.length > 0) return;
+
+        let candidate = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [phoneNumber]);
+        let candidateRow = candidate.rows[0];
+
+        if (!candidateRow) {
+            const name = value?.contacts?.[0]?.profile?.name || 'Unknown';
+            const insert = await client.query(
+                `INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at, source)
+                 VALUES ($1, $2, $3, 'New', $4, $5, $6)
+                 RETURNING *`,
+                [crypto.randomUUID(), phoneNumber, name, messageText, Date.now(), 'Organic']
+            );
+            candidateRow = insert.rows[0];
+        }
+
+        await client.query(
+            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
+             VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW())`,
+            [crypto.randomUUID(), candidateRow.id, messageText, messageType, incoming.whatsappMessageId || null]
+        );
+
+        await client.query(
+            `UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`,
+            [messageText, Date.now(), candidateRow.id]
+        );
+
+        if (incoming.mediaType === 'document' && incoming.mediaUrl) {
+            await client.query(
+                `INSERT INTO driver_documents (id, candidate_id, type, url, status, created_at)
+                 VALUES ($1, $2, $3, $4, 'pending', NOW())`,
+                [crypto.randomUUID(), candidateRow.id, 'document', incoming.mediaUrl]
+            );
+        }
+    });
+
+    const candidate = await withDb(async (client) => {
+        const res = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [phoneNumber]);
+        return res.rows[0];
+    });
+    if (!candidate) return;
+
+    if (candidate.is_human_mode && candidate.human_mode_ends_at && Number(candidate.human_mode_ends_at) < Date.now()) {
+        await withDb(async (client) => {
+            await client.query(`UPDATE candidates SET is_human_mode = FALSE, human_mode_ends_at = NULL WHERE id = $1`, [candidate.id]);
+        });
+    }
+
+    if (candidate.is_human_mode) return;
+    if (!systemSettings.automation_enabled) return;
+
+    const settings = await withDb(async (client) => await getActiveBotSettings(client));
+    if (!settings) return;
+
+    if (settings.nodes && settings.nodes.length > 0) {
+        await runNodeFlow(candidate, messageText, incoming.payload, settings);
+    } else if (settings.steps && settings.steps.length > 0) {
+        await runStepFlow(candidate, messageText, settings);
+    }
+};
+
+const handleWebhook = async (req, res) => {
+    const payload = req.body;
+    res.status(200).send('EVENT_RECEIVED');
+
+    try {
+        const entries = payload.entry || [];
+        for (const entry of entries) {
+            const changes = entry.changes || [];
+            for (const change of changes) {
+                const value = change.value || {};
+                if (!value.messages) continue;
+                for (const message of value.messages) {
+                    const incoming = await parseIncomingMessage(message, value);
+                    await processIncomingLead(incoming, value);
+                }
+            }
+        }
+    } catch (e) {
+        logger.error('Webhook processing failed', { error: e.message });
+    }
+};
+
+// --- SYSTEM & MEDIA HELPERS ---
+const requireAuth = async (req, res, next) => {
+    const requireAuthFlag = process.env.REQUIRE_AUTH === 'true' || !!process.env.ADMIN_EMAILS;
+    if (!requireAuthFlag) return next();
+
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    if (!token) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+
+    try {
+        const ticket = await authClient.verifyIdToken({
+            idToken: token,
+            audience: process.env.VITE_GOOGLE_CLIENT_ID,
+        });
+        const payload = ticket.getPayload();
+        const allowList = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim()).filter(Boolean);
+        if (allowList.length > 0 && !allowList.includes(payload.email)) {
+            return res.status(403).json({ ok: false, error: 'Access denied' });
+        }
+        req.user = payload;
+        return next();
+    } catch (e) {
+        return res.status(401).json({ ok: false, error: 'Invalid credentials' });
+    }
+};
+
+const path = require('path');
+const fs = require('fs');
+
+const MEDIA_ROOT = path.join(process.cwd(), 'media_storage');
+const MEDIA_INDEX = path.join(MEDIA_ROOT, 'media_index.json');
+
+const ensureMediaRoot = () => {
+    if (!fs.existsSync(MEDIA_ROOT)) fs.mkdirSync(MEDIA_ROOT, { recursive: true });
+    if (!fs.existsSync(MEDIA_INDEX)) fs.writeFileSync(MEDIA_INDEX, JSON.stringify({ files: {}, folders: {} }, null, 2));
+};
+
+const readMediaIndex = () => {
+    ensureMediaRoot();
+    try {
+        return JSON.parse(fs.readFileSync(MEDIA_INDEX, 'utf8'));
+    } catch (_) {
+        return { files: {}, folders: {} };
+    }
+};
+
+const writeMediaIndex = (data) => {
+    ensureMediaRoot();
+    fs.writeFileSync(MEDIA_INDEX, JSON.stringify(data, null, 2));
+};
+
+const safeMediaPath = (requestedPath) => {
+    const normalized = path.posix.normalize(`/${requestedPath || ''}`);
+    const safePath = normalized.replace(/\.\./g, '');
+    return safePath;
+};
+
+const listMedia = (requestedPath) => {
+    ensureMediaRoot();
+    const index = readMediaIndex();
+    const safePath = safeMediaPath(requestedPath);
+    const folderEntries = Object.values(index.folders).filter(folder => folder.parent_path === safePath);
+    const fileEntries = Object.values(index.files).filter(file => file.path === safePath);
+    return { folders: folderEntries, files: fileEntries };
+};
+
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const uploadPath = safeMediaPath(req.body.path || '/');
+        const fullPath = path.join(MEDIA_ROOT, uploadPath);
+        fs.mkdirSync(fullPath, { recursive: true });
+        cb(null, fullPath);
+    },
+    filename: (req, file, cb) => {
+        cb(null, `${Date.now()}_${file.originalname}`);
+    }
+});
+const upload = multer({ storage });
+
+// --- ADDITIONAL API ROUTES ---
+apiRouter.patch('/drivers/:id', async (req, res, next) => {
+    try {
+        const updates = req.body || {};
+        const fields = [];
+        const values = [];
+        let idx = 1;
+        const allowed = ['name', 'stage', 'notes', 'source', 'is_human_mode', 'human_mode_ends_at', 'current_node_id'];
+        for (const key of allowed) {
+            if (updates[key] !== undefined) {
+                fields.push(`${key} = $${idx++}`);
+                values.push(updates[key]);
+            }
+        }
+        if (fields.length === 0) return res.json({ ok: true });
+        values.push(req.params.id);
+        await withDb(async (client) => {
+            await client.query(`UPDATE candidates SET ${fields.join(', ')} WHERE id = $${idx}`, values);
+        });
+        res.json({ ok: true });
+    } catch (e) { next(e); }
+});
+
+apiRouter.post('/ai/assistant', async (req, res) => {
+    try {
+        const { input, history } = req.body || {};
+        const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+        if (!apiKey) return res.status(400).json({ error: 'Missing GEMINI_API_KEY' });
+        const ai = new GoogleGenAI({ apiKey });
+        const messages = (history || []).map((item) => ({
+            role: item.role || 'user',
+            parts: [{ text: item.content || '' }]
+        }));
+        messages.push({ role: 'user', parts: [{ text: input || '' }] });
+        const result = await ai.models.generateContent({
+            model: 'gemini-1.5-flash',
+            contents: messages
+        });
+        const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        res.json({ reply: text });
+    } catch (e) {
+        logger.error('AI assistant failed', { error: e.message });
+        res.status(500).json({ error: 'AI assistant failed' });
+    }
+});
+
+apiRouter.post('/ai/generate', async (req, res) => {
+    try {
+        const { prompt } = req.body || {};
+        const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+        if (!apiKey) return res.status(400).json({ error: 'Missing GEMINI_API_KEY' });
+        const ai = new GoogleGenAI({ apiKey });
+        const result = await ai.models.generateContent({
+            model: 'gemini-1.5-flash',
+            contents: [{ role: 'user', parts: [{ text: prompt || '' }] }]
+        });
+        const text = result?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        res.json({ text });
+    } catch (e) {
+        logger.error('AI generate failed', { error: e.message });
+        res.status(500).json({ error: 'AI generate failed' });
+    }
+});
+
+apiRouter.get('/system/settings', requireAuth, async (req, res) => {
+    const settings = await getSystemSettings();
+    res.json(settings);
+});
+
+apiRouter.patch('/system/settings', requireAuth, async (req, res) => {
+    const next = await updateSystemSettings(req.body || {});
+    res.json(next);
+});
+
+apiRouter.post('/system/credentials', requireAuth, async (req, res) => {
+    const { phoneNumberId, apiToken } = req.body || {};
+    const next = await updateMetaCredentials({ phoneNumberId, apiToken });
+    res.json({ ok: true, credentials: { phoneNumberId: next.phoneNumberId } });
+});
+
+apiRouter.post('/system/webhook', requireAuth, async (req, res) => {
+    const { verifyToken } = req.body || {};
+    const next = await updateMetaCredentials({ verifyToken });
+    res.json({ ok: true, verifyToken: next.verifyToken });
+});
+
+apiRouter.post('/system/init-db', requireAuth, async (req, res, next) => {
+    try {
+        await init();
+        res.json({ ok: true });
+    } catch (e) { next(e); }
+});
+
+apiRouter.post('/system/seed-db', requireAuth, async (req, res, next) => {
+    try {
+        await withDb(async (client) => {
+            await client.query(
+                `INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at, source)
+                 VALUES ($1, $2, $3, 'New', $4, $5, $6)
+                 ON CONFLICT (phone_number) DO NOTHING`,
+                [crypto.randomUUID(), '15550001111', 'Sample Lead', 'Hello!', Date.now(), 'Manual']
+            );
+        });
+        res.json({ ok: true });
+    } catch (e) { next(e); }
+});
+
+apiRouter.get('/showcase/status', async (req, res) => {
+    const index = readMediaIndex();
+    const folder = Object.values(index.folders).find(f => f.is_public_showcase);
+    if (!folder) return res.json({ active: false });
+    res.json({ active: true, folderName: folder.name, folderId: folder.id });
+});
+
+apiRouter.get('/showcase/:folder?', async (req, res) => {
+    const index = readMediaIndex();
+    const folderName = req.params.folder;
+    const folder = Object.values(index.folders).find(f => f.name === folderName && f.is_public_showcase);
+    if (!folder) return res.status(404).json({ error: 'Not found' });
+    const content = listMedia(folder.parent_path === '/' ? `/${folder.name}` : folder.parent_path + '/' + folder.name);
+    res.json(content);
+});
+
+apiRouter.get('/media', requireAuth, async (req, res) => {
+    const pathQuery = req.query.path || '/';
+    const data = listMedia(pathQuery);
+    res.json(data);
+});
+
+apiRouter.get('/media/file/:id', async (req, res) => {
+    const index = readMediaIndex();
+    const file = index.files[req.params.id];
+    if (!file) return res.status(404).send('Not found');
+    res.sendFile(path.join(MEDIA_ROOT, file.path, file.filename));
+});
+
+apiRouter.post('/media/upload', requireAuth, upload.single('file'), async (req, res) => {
+    const index = readMediaIndex();
+    const uploadPath = safeMediaPath(req.body.path || '/');
+    const id = crypto.randomUUID();
+    const file = req.file;
+    const record = {
+        id,
+        url: `/api/media/file/${id}`,
+        filename: file.filename,
+        type: file.mimetype,
+        path: uploadPath,
+        media_id: null
+    };
+    index.files[id] = record;
+    writeMediaIndex(index);
+    res.json({ ok: true, file: record });
+});
+
+apiRouter.post('/media/:id/sync', requireAuth, async (req, res) => {
+    const index = readMediaIndex();
+    const file = index.files[req.params.id];
+    if (!file) return res.status(404).json({ error: 'Not found' });
+    if (!file.media_id) {
+        file.media_id = `pending_${Date.now()}`;
+        index.files[req.params.id] = file;
+        writeMediaIndex(index);
+    }
+    res.json({ ok: true, media_id: file.media_id });
+});
+
+apiRouter.post('/media/sync-s3', requireAuth, async (req, res) => {
+    res.json({ ok: true, added: 0 });
+});
+
+apiRouter.post('/media/folders', requireAuth, async (req, res) => {
+    const { name, parentPath } = req.body || {};
+    const index = readMediaIndex();
+    const id = crypto.randomUUID();
+    const parent = safeMediaPath(parentPath || '/');
+    const record = { id, name, parent_path: parent, is_public_showcase: false };
+    index.folders[id] = record;
+    writeMediaIndex(index);
+    res.json({ ok: true, folder: record });
+});
+
+apiRouter.patch('/media/folders/:id', requireAuth, async (req, res) => {
+    const index = readMediaIndex();
+    const folder = index.folders[req.params.id];
+    if (!folder) return res.status(404).json({ error: 'Not found' });
+    folder.name = req.body?.name || folder.name;
+    index.folders[req.params.id] = folder;
+    writeMediaIndex(index);
+    res.json({ ok: true, folder });
+});
+
+apiRouter.post('/media/folders/:id/public', requireAuth, async (req, res) => {
+    const index = readMediaIndex();
+    const folder = index.folders[req.params.id];
+    if (!folder) return res.status(404).json({ error: 'Not found' });
+    folder.is_public_showcase = true;
+    index.folders[req.params.id] = folder;
+    writeMediaIndex(index);
+    res.json({ ok: true, folder });
+});
+
+apiRouter.delete('/media/folders/:id/public', requireAuth, async (req, res) => {
+    const index = readMediaIndex();
+    const folder = index.folders[req.params.id];
+    if (!folder) return res.status(404).json({ error: 'Not found' });
+    folder.is_public_showcase = false;
+    index.folders[req.params.id] = folder;
+    writeMediaIndex(index);
+    res.json({ ok: true, folder });
+});
+
+apiRouter.delete('/media/files/:id', requireAuth, async (req, res) => {
+    const index = readMediaIndex();
+    const file = index.files[req.params.id];
+    if (!file) return res.status(404).json({ error: 'Not found' });
+    try {
+        fs.unlinkSync(path.join(MEDIA_ROOT, file.path, file.filename));
+    } catch (_) {}
+    delete index.files[req.params.id];
+    writeMediaIndex(index);
+    res.json({ ok: true });
+});
+
+apiRouter.delete('/media/folders/:id', requireAuth, async (req, res) => {
+    const index = readMediaIndex();
+    const folder = index.folders[req.params.id];
+    if (!folder) return res.status(404).json({ error: 'Not found' });
+    delete index.folders[req.params.id];
+    writeMediaIndex(index);
+    res.json({ ok: true });
+});
+
+// --- INIT DATABASE ---
+const init = async () => {
+    await withDb(async (client) => {
+        await client.query(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`);
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS candidates (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                phone_number VARCHAR(50) UNIQUE NOT NULL,
+                name VARCHAR(255),
+                stage VARCHAR(50) DEFAULT 'New',
+                last_message_at BIGINT,
+                last_message TEXT,
+                notes TEXT,
+                source VARCHAR(50) DEFAULT 'Organic',
+                current_node_id VARCHAR(255),
+                is_human_mode BOOLEAN DEFAULT FALSE,
+                human_mode_ends_at BIGINT,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )`);
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS candidate_messages (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                direction VARCHAR(10) CHECK (direction IN ('in', 'out')),
+                text TEXT,
+                type VARCHAR(50),
+                status VARCHAR(50),
+                whatsapp_message_id VARCHAR(255) UNIQUE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )`);
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS scheduled_messages (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                payload JSONB,
+                scheduled_time BIGINT,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )`);
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS bot_versions (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                phone_number_id VARCHAR(50),
+                version_number INT,
+                status VARCHAR(20) CHECK (status IN ('draft', 'published', 'archived')),
+                settings JSONB,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )`);
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS driver_documents (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                type VARCHAR(50),
+                url TEXT,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_candidates_phone ON candidates(phone_number)`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_candidates_last_msg ON candidates(last_message_at DESC)`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_status ON scheduled_messages(status, scheduled_time)`);
+    });
+};
+
+// --- ROUTES ---
+app.get('/webhook', verifyWebhook);
+app.post('/webhook', handleWebhook);
+app.use('/api', apiRouter);
+
+app.get('/ping', (req, res) => res.send('pong'));
+
+app.use((err, req, res, next) => {
+    logger.error('API Error', { error: err.message });
+    res.status(500).json({ error: err.message });
+});
+
+const port = process.env.PORT || 3000;
+if (require.main === module) {
+    init().catch((err) => logger.error('Init failed', { error: err.message }));
+    app.listen(port, () => logger.info(`Server listening on ${port}`));
+}
+
+module.exports = app;
