@@ -18,5 +18,8 @@
     "api/index.js": {
       "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    { "path": "/api/cron/process-queue", "schedule": "*/1 * * * *" }
+  ]
 }
