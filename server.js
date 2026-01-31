@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const { Redis } = require('@upstash/redis');
 const { Client: QStashClient, Receiver } = require('@upstash/qstash');
 const { Pool } = require('pg');
-const { S3Client, ListObjectsV2Command, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client } = require('@aws-sdk/client-s3');
 const multer = require('multer');
 const { OAuth2Client } = require('google-auth-library');
 const { GoogleGenAI } = require('@google/genai');
@@ -20,12 +20,9 @@ const logger = {
 
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
-    META_TIMEOUT: 8000, 
-    DB_CONNECTION_TIMEOUT: 15000, // Reduced to fail faster than Gateway
-    CACHE_TTL_SETTINGS: 600, 
-    LOCK_TTL: 15,
-    DEDUPE_TTL: 3600,
-    SCHEDULER_INTERVAL_MS: 60000 
+    META_TIMEOUT: 5000, // Faster timeout for Meta
+    DB_CONNECTION_TIMEOUT: 5000, // Fail fast if DB is locked
+    CACHE_TTL_SETTINGS: 600
 };
 
 // --- SERVICES INITIALIZATION ---
@@ -52,9 +49,10 @@ const getDb = () => {
             connectionString: dbUrl,
             ssl: { rejectUnauthorized: false },
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-            // Critical for Serverless: Limit pool to 1 to prevent connection exhaustion 
-            max: isServerless ? 1 : 10, 
-            idleTimeoutMillis: 30000,
+            // SERVERLESS OPTIMIZATION:
+            // Keep max low (1) to prevent "too many connections" on Neon Free Tier
+            max: 1, 
+            idleTimeoutMillis: 1000, // Close connection immediately after use
             allowExitOnIdle: true 
         });
         
@@ -63,40 +61,26 @@ const getDb = () => {
     return pgPool;
 };
 
-// Helper: Execute DB operations with Auto-Retry for "Wake Up" scenarios
-const withDb = async (operation, retries = 2) => {
+// Helper: Execute DB operations with strict release
+const withDb = async (operation) => {
     let client;
-    let lastError;
-    
-    for (let i = 0; i <= retries; i++) {
-        try {
-            client = await getDb().connect();
-            return await operation(client);
-        } catch (e) {
-            lastError = e;
-            const isConnectionError = e.message.includes('timeout') || 
-                                      e.message.includes('ECONNRESET') || 
-                                      e.message.includes('57P01') || 
-                                      e.message.includes('Connection terminated');
-            
-            if (isConnectionError && i < retries) {
-                const delay = 1000 * (i + 1); 
-                logger.warn(`DB Connection Failed. Retrying in ${delay}ms...`, { attempt: i + 1, error: e.message });
-                if (client) {
-                    try { client.release(true); } catch(err) {} 
-                    client = null;
-                }
-                await new Promise(r => setTimeout(r, delay));
-                continue;
-            }
-            throw e;
-        } finally {
-            if (client) {
-                try { client.release(); } catch(e) {}
-            }
+    try {
+        client = await getDb().connect();
+        return await operation(client);
+    } catch (e) {
+        // If we get a connection error, it means pool is exhausted or DB is down.
+        // We throw so the API returns 500, but we log strictly.
+        const isConnErr = e.message.includes('timeout') || e.message.includes('Connection terminated');
+        logger.error(isConnErr ? "DB Connection Saturation" : "DB Query Error", { error: e.message });
+        throw e;
+    } finally {
+        if (client) {
+            try { 
+                // Force release the client back to the pool
+                client.release(); 
+            } catch(e) { console.error("Failed to release client", e); }
         }
     }
-    throw lastError;
 };
 
 // 2. Cache (Upstash Redis)
@@ -112,20 +96,7 @@ const qstashReceiver = new Receiver({
     nextSigningKey: process.env.QSTASH_NEXT_SIGNING_KEY || 'mock',
 });
 
-// 4. Storage (AWS S3)
-const s3Client = new S3Client({
-    region: process.env.AWS_REGION || 'us-east-1',
-    credentials: {
-        accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
-        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || ''
-    }
-});
-const BUCKET_NAME = process.env.AWS_BUCKET_NAME || 'uber-fleet-assets';
-
-// 5. AI (Gemini)
-const ai = process.env.GEMINI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null;
-
-// 6. Auth (Google)
+// 4. Auth (Google)
 const authClient = new OAuth2Client(process.env.VITE_GOOGLE_CLIENT_ID);
 
 // 7. Meta API Client
@@ -147,9 +118,6 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 apiRouter.use((req, res, next) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    res.setHeader('Surrogate-Control', 'no-store');
     next();
 });
 
@@ -163,116 +131,6 @@ app.use(cors());
 // --- HELPER FUNCTIONS ---
 
 const isUUID = (str) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
-
-// DB AUTO-MIGRATION & HEALING
-let _schemaEnsured = false;
-const ensureDbSchema = async () => {
-    if (_schemaEnsured) return;
-    try {
-        await withDb(async (client) => {
-            await client.query('BEGIN');
-            try { await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'); } catch (e) {}
-
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS candidates (
-                    id UUID PRIMARY KEY,
-                    phone_number VARCHAR(50) UNIQUE NOT NULL,
-                    name VARCHAR(255),
-                    stage VARCHAR(50) DEFAULT 'New',
-                    last_message_at BIGINT,
-                    variables JSONB DEFAULT '{}',
-                    tags TEXT[],
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                );
-            `);
-            await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS notes TEXT;`);
-            await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_message TEXT;`);
-            await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS is_human_mode BOOLEAN DEFAULT FALSE;`);
-            await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS human_mode_ends_at BIGINT;`);
-            await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS current_node_id VARCHAR(255);`);
-            await client.query(`CREATE INDEX IF NOT EXISTS idx_candidates_phone ON candidates(phone_number);`);
-            await client.query(`CREATE INDEX IF NOT EXISTS idx_candidates_last_msg ON candidates(last_message_at DESC);`);
-
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS candidate_messages (
-                    id UUID PRIMARY KEY,
-                    candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
-                    direction VARCHAR(10) CHECK (direction IN ('in', 'out')),
-                    text TEXT,
-                    type VARCHAR(50),
-                    status VARCHAR(50),
-                    whatsapp_message_id VARCHAR(255) UNIQUE,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                );
-            `);
-            await client.query(`
-                DO $$ 
-                BEGIN 
-                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='candidate_messages' AND column_name='whatsapp_message_id') THEN 
-                        ALTER TABLE candidate_messages ADD COLUMN whatsapp_message_id VARCHAR(255) UNIQUE; 
-                    END IF; 
-                END $$;
-            `);
-            await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_candidate ON candidate_messages(candidate_id);`);
-            await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_created ON candidate_messages(created_at DESC);`);
-
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS bot_versions (
-                    id UUID PRIMARY KEY,
-                    phone_number_id VARCHAR(50),
-                    version_number INT,
-                    status VARCHAR(20) CHECK (status IN ('draft', 'published', 'archived')),
-                    settings JSONB,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                );
-            `);
-
-            // ✅ CRITICAL FIX: Ensure 'payload' column exists to prevent 500 error
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS scheduled_messages (
-                    id UUID PRIMARY KEY,
-                    candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
-                    payload JSONB,
-                    scheduled_time BIGINT,
-                    status VARCHAR(50) DEFAULT 'pending',
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                );
-            `);
-            await client.query(`
-                DO $$ 
-                BEGIN 
-                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='scheduled_messages' AND column_name='candidate_id') THEN 
-                        ALTER TABLE scheduled_messages ADD COLUMN candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE; 
-                    END IF; 
-                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='scheduled_messages' AND column_name='payload') THEN 
-                        ALTER TABLE scheduled_messages ADD COLUMN payload JSONB; 
-                    END IF;
-                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='scheduled_messages' AND column_name='scheduled_time') THEN 
-                        ALTER TABLE scheduled_messages ADD COLUMN scheduled_time BIGINT; 
-                    END IF;
-                END $$;
-            `);
-            await client.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_time ON scheduled_messages(scheduled_time) WHERE status = 'pending';`);
-
-            await client.query('COMMIT');
-        }, 1); 
-        _schemaEnsured = true;
-        logger.info("DB Schema Verified");
-    } catch (e) {
-        logger.error("DB Schema Check Failed (Skipping to allow app start)", { error: e.message });
-    }
-};
-
-function getBaseUrl(req) {
-  const envBase = process.env.PUBLIC_BASE_URL ? process.env.PUBLIC_BASE_URL.trim() : '';
-  if (envBase) return envBase.replace(/\/$/, "");
-  const vercelUrl = process.env.VERCEL_URL ? process.env.VERCEL_URL.trim() : '';
-  if (vercelUrl) return `https://${vercelUrl.replace(/\/$/, "")}`;
-  const proto = (req.headers["x-forwarded-proto"] || req.protocol || "http").toString();
-  const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString();
-  return `${proto}://${host}`.replace(/\/$/, "");
-}
 
 const getBotSettings = async (phoneId) => {
     if (!phoneId) return null;
@@ -299,16 +157,11 @@ const sendToMeta = async (to, payload) => {
     if (payload.text && payload.text.body) {
         const body = payload.text.body.trim().toLowerCase();
         const forbiddenPhrases = [
-            'replace this', 
-            'sample message', 
-            'type your message', 
-            'enter text', 
-            'insert message'
+            'replace this', 'sample message', 'type your message', 'enter text'
         ];
-        
         if (forbiddenPhrases.some(phrase => body.includes(phrase)) || !body) {
             logger.warn("🛑 BLOCKED: Attempted to send placeholder message.", { to, body: payload.text.body });
-            return; // Silently fail to protect user experience
+            return; 
         }
     }
 
@@ -324,18 +177,9 @@ const sendToMeta = async (to, payload) => {
     }
 };
 
+// --- LOGIC: PROCESS MESSAGE ---
 const processMessageInternal = async (message, contact, phoneId, requestId = 'system') => {
-    if (!message || !phoneId) throw new Error("Invalid Payload");
-
-    if (message.id) {
-        const key = `wa:msg:${message.id}`;
-        try {
-            if (process.env.UPSTASH_REDIS_REST_URL && !process.env.UPSTASH_REDIS_REST_URL.includes('mock')) {
-                const locked = await redis.set(key, "1", { nx: true, ex: 3600 });
-                if (!locked) return { success: true, duplicate: true };
-            }
-        } catch (e) {}
-    }
+    if (!message || !phoneId) return;
 
     logger.info("Processing Message", { requestId, messageId: message.id, from: message.from });
     
@@ -344,6 +188,7 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         const name = contact?.profile?.name || "Unknown";
         const textBody = message.text?.body || `[${message.type}]`;
         
+        // 1. Upsert Candidate
         const upsertQuery = `
             INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at) 
             VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
@@ -355,6 +200,7 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         const candidate = resDb.rows[0];
         const candidateId = candidate.id;
         
+        // 2. Insert Message Log
         const insertMsgQuery = `
             INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at) 
             VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW()) 
@@ -362,6 +208,7 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         `;
         await client.query(insertMsgQuery, [crypto.randomUUID(), candidateId, textBody, message.type, message.id]);
         
+        // 3. Bot Auto-Reply Logic
         if (!candidate.is_human_mode) {
             const settings = await getBotSettings(phoneId);
             if (settings && settings.nodes && settings.nodes.length > 0) {
@@ -371,9 +218,14 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
                      if (edge) {
                          const nextNode = settings.nodes.find(n => n.id === edge.target);
                          if (nextNode && nextNode.data && nextNode.data.content) {
+                             // Send Reply
                              await sendToMeta(from, { type: 'text', text: { body: nextNode.data.content } });
+                             
+                             // Log Reply
                              await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
                                 [crypto.randomUUID(), candidateId, nextNode.data.content]);
+                             
+                             // Advance State
                              await client.query(`UPDATE candidates SET current_node_id = $1 WHERE id = $2`, [nextNode.id, candidateId]);
                          }
                      }
@@ -384,147 +236,86 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
     });
 };
 
-const enqueueIncomingMessageJob = async (req, message, contact, phoneId) => {
-    const requestId = req.requestId;
-    const baseUrl = getBaseUrl(req);
-    const workerUrl = `${baseUrl}/api/internal/bot-worker`;
-
-    if (!process.env.QSTASH_TOKEN || process.env.QSTASH_TOKEN === 'mock') {
-        return processMessageInternal(message, contact, phoneId, requestId);
-    }
-
+// --- CRON JOB: SCHEDULED MESSAGES ---
+// NOTE: This replaces the setInterval. It must be called externally (e.g., by the Frontend Heartbeat).
+apiRouter.get('/cron/process-queue', async (req, res) => {
+    let processedCount = 0;
+    
     try {
-        await qstash.publishJSON({
-            url: workerUrl,
-            body: { message, contact, phoneId },
-            retries: 3,
-            headers: { 'x-request-id': requestId }
-        });
-    } catch (e) {
-        logger.error("Queue Publish Failed - Sync Fallback", { error: e.message });
-        return processMessageInternal(message, contact, phoneId, requestId);
-    }
-};
+        let jobsToProcess = [];
 
-const persistInboundMessage = async (message, contact, requestId = 'system') => {
-    if (!message?.from) return;
-    await ensureDbSchema(); 
-
-    try {
-        await withDb(async (client) => {
-            const from = message.from;
-            const name = contact?.profile?.name || "Unknown";
-            const textBody = message?.text?.body || `[${message.type}]`;
-
-            const upsertQuery = `
-                INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at, updated_at)
-                VALUES ($1, $2, $3, 'New', $4, $5, NOW(), NOW())
-                ON CONFLICT (phone_number)
-                DO UPDATE SET name = EXCLUDED.name, last_message_at = $4, last_message = $5, updated_at = NOW()
-                RETURNING id
-            `;
-            const cRes = await client.query(upsertQuery, [crypto.randomUUID(), from, name, Date.now(), textBody]);
-            const candidateId = cRes.rows[0].id;
-
-            const insertMsgQuery = `
-                INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
-                VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW())
-                ON CONFLICT (whatsapp_message_id) DO NOTHING
-            `;
-            await client.query(insertMsgQuery, [crypto.randomUUID(), candidateId, textBody, message.type, message.id]);
-        });
-    } catch(e) {
-        logger.error("Persist Failed", { error: e.message });
-    }
-};
-
-// --- SCHEDULER LOGIC ---
-const processScheduledJobs = async () => {
-    let jobsToProcess = [];
-
-    // STEP 1: PICK & LOCK (Fast DB Interaction)
-    try {
+        // STEP 1: PICK & LOCK (Atomic)
         await withDb(async (client) => {
             // Safety: Reset stuck 'processing' jobs older than 10 mins back to 'pending'
             await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
 
-            // Transaction: Lock and mark as processing IMMEDIATELY
+            // Transaction
             await client.query('BEGIN');
             
-            const res = await client.query(`
+            const result = await client.query(`
                 SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
                 FROM scheduled_messages sm
                 JOIN candidates c ON sm.candidate_id = c.id
                 WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
-                LIMIT 10
+                LIMIT 5
                 FOR UPDATE SKIP LOCKED
             `, [Date.now()]);
 
-            if (res.rows.length > 0) {
-                const jobIds = res.rows.map(r => r.id);
+            if (result.rows.length > 0) {
+                const jobIds = result.rows.map(r => r.id);
                 await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`, [jobIds]);
-                jobsToProcess = res.rows;
-                logger.info(`Scheduler: Locked ${jobsToProcess.length} messages for processing`);
+                jobsToProcess = result.rows;
             }
             
             await client.query('COMMIT'); 
-        }); // Connection released here
-    } catch (e) {
-        logger.error("Scheduler Cycle Error (Locking Phase)", { error: e.message });
-        return;
-    }
+        });
 
-    if (jobsToProcess.length === 0) return;
-
-    // STEP 2: PROCESS EXTERNAL API & UPDATE (Iterative DB Interaction)
-    for (const job of jobsToProcess) {
-        let status = 'sent';
-        try {
-            const payload = job.payload; 
-            const phone = job.phone_number;
-            let metaPayload = {};
-            if (payload.templateName) {
-                    metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
-            } else if (payload.mediaUrl) {
-                const type = payload.mediaType || 'image';
-                metaPayload = { type, [type]: { link: payload.mediaUrl, caption: payload.text } };
-            } else {
-                metaPayload = { type: 'text', text: { body: payload.text } };
-            }
-
-            // Heavy external call (No DB connection held here)
-            await sendToMeta(phone, metaPayload);
-
-            // Update Success
-            await withDb(async (client) => {
-                await client.query(`
-                    INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
-                    VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
-                `, [crypto.randomUUID(), job.candidate_id, payload.text || `[${payload.templateName || payload.mediaType}]`, payload.mediaType || 'text']);
-
-                await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
-                    [payload.text || 'Scheduled Message', Date.now(), job.candidate_id]);
-
-                await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [job.id]);
-            });
-
-        } catch (err) {
-            logger.error("Failed to process scheduled message", { jobId: job.id, error: err.message });
-            status = 'failed';
-            // Update Failure
+        // STEP 2: PROCESS (Outside Transaction)
+        for (const job of jobsToProcess) {
             try {
+                const payload = job.payload; 
+                let metaPayload = {};
+                
+                if (payload.templateName) {
+                    metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
+                } else if (payload.mediaUrl) {
+                    const type = payload.mediaType || 'image';
+                    metaPayload = { type, [type]: { link: payload.mediaUrl, caption: payload.text } };
+                } else {
+                    metaPayload = { type: 'text', text: { body: payload.text } };
+                }
+
+                await sendToMeta(job.phone_number, metaPayload);
+
+                await withDb(async (client) => {
+                    await client.query(`
+                        INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
+                        VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
+                    `, [crypto.randomUUID(), job.candidate_id, payload.text || 'Media', payload.mediaType || 'text']);
+
+                    await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
+                        [payload.text || 'Scheduled Message', Date.now(), job.candidate_id]);
+
+                    await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [job.id]);
+                });
+                processedCount++;
+            } catch (err) {
+                logger.error("Job Failed", { id: job.id, error: err.message });
                 await withDb(async (client) => {
                     await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
                 });
-            } catch(e) { console.error("Failed to update job status", e); }
+            }
         }
+        
+        res.json({ success: true, processed: processedCount });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
-};
-
-setInterval(processScheduledJobs, SYSTEM_CONFIG.SCHEDULER_INTERVAL_MS);
+});
 
 // --- ROUTES ---
 
+// Auth
 apiRouter.post('/auth/google', async (req, res, next) => {
     try {
         const { credential } = req.body;
@@ -537,15 +328,10 @@ apiRouter.post('/auth/google', async (req, res, next) => {
     } catch (error) { next(error); }
 });
 
+// Diagnostics
 apiRouter.get('/debug/status', async (req, res, next) => {
     try {
-        const status = {
-            postgres: 'unknown',
-            tables: { candidates: false, bot_versions: false },
-            counts: { candidates: 0 },
-            env: { hasPostgres: !!process.env.POSTGRES_URL }
-        };
-
+        const status = { postgres: 'unknown', tables: {}, counts: {} };
         await withDb(async (client) => {
             await client.query('SELECT 1');
             status.postgres = 'connected';
@@ -564,30 +350,7 @@ apiRouter.get('/debug/status', async (req, res, next) => {
     }
 });
 
-apiRouter.get('/system/stats', (req, res) => res.redirect('/api/debug/status'));
-apiRouter.post('/system/init-db', async (req, res, next) => {
-    try { await ensureDbSchema(); res.json({ success: true, message: "Schema verification complete" }); } catch (e) { next(e); }
-});
-apiRouter.post('/system/seed-db', async (req, res, next) => {
-    try {
-        await withDb(async (client) => {
-            const id = crypto.randomUUID();
-            await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message) VALUES ($1, '+919876543210', 'Test Driver', 'New', $2, 'Hello world') ON CONFLICT DO NOTHING`, [id, Date.now()]);
-        });
-        res.json({ success: true });
-    } catch(e) { next(e); }
-});
-apiRouter.get('/system/settings', async (req, res) => {
-    const s = await redis.get('system:settings').catch(() => null);
-    res.json(s || { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true });
-});
-apiRouter.patch('/system/settings', async (req, res) => {
-    await redis.set('system:settings', req.body);
-    res.json(req.body);
-});
-apiRouter.post('/system/credentials', async (req, res) => { res.json({ success: true }); });
-apiRouter.post('/system/webhook', async (req, res) => { res.json({ success: true }); });
-
+// Dashboard Data
 apiRouter.get('/drivers', async (req, res, next) => {
     try {
         await withDb(async (client) => {
@@ -606,38 +369,16 @@ apiRouter.get('/drivers', async (req, res, next) => {
             })));
         });
     } catch (e) { 
-        if (e.code === '42P01') { res.json([]); } 
+        if (e.code === '42P01') { res.json([]); } // Table doesn't exist yet
         else { next(e); } 
     }
-});
-
-apiRouter.patch('/drivers/:id', async (req, res, next) => {
-    const { status, tags, variables, name, notes, isHumanMode, humanModeEndsAt } = req.body;
-    try {
-        await withDb(async (client) => {
-            const updates = []; const values = []; let idx = 1;
-            if (status) { updates.push(`stage = $${idx++}`); values.push(status); }
-            if (name) { updates.push(`name = $${idx++}`); values.push(name); }
-            if (tags) { updates.push(`tags = $${idx++}`); values.push(tags); }
-            if (variables) { updates.push(`variables = COALESCE(variables, '{}'::jsonb) || $${idx++}::jsonb`); values.push(JSON.stringify(variables)); }
-            if (notes !== undefined) { updates.push(`notes = $${idx++}`); values.push(notes); }
-            if (isHumanMode !== undefined) { updates.push(`is_human_mode = $${idx++}`); values.push(isHumanMode); }
-            if (humanModeEndsAt !== undefined) { updates.push(`human_mode_ends_at = $${idx++}`); values.push(humanModeEndsAt); }
-
-            if (updates.length > 0) {
-                updates.push(`updated_at = NOW()`); values.push(req.params.id);
-                await client.query(`UPDATE candidates SET ${updates.join(', ')} WHERE id = $${idx}`, values);
-            }
-        });
-        res.json({ success: true });
-    } catch (e) { next(e); }
 });
 
 apiRouter.get('/drivers/:id/messages', async (req, res) => {
     try {
         await withDb(async (client) => {
             const limit = parseInt(req.query.limit) || 50;
-            const resDb = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = (SELECT id FROM candidates WHERE phone_number = $1 OR id = $1 LIMIT 1) ORDER BY created_at DESC LIMIT $2', [req.params.id, limit]);
+            const resDb = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT $2', [req.params.id, limit]);
             res.json(resDb.rows.map(r => ({ id: r.id, sender: r.direction === 'in' ? 'driver' : 'agent', text: r.text, timestamp: new Date(r.created_at).getTime(), type: r.type || 'text', status: r.status })).reverse());
         });
     } catch (e) { res.json([]); }
@@ -663,82 +404,23 @@ apiRouter.post('/drivers/:id/messages', async (req, res, next) => {
     } catch(e) { next(e); }
 });
 
-apiRouter.post('/messages/send', async (req, res, next) => {
-    const { driverId, text, mediaUrl, mediaType } = req.body;
-    if (!driverId) return res.status(400).json({ ok: false, error: 'driverId required' });
-    req.params.id = driverId;
-    return apiRouter.handle({ ...req, url: `/drivers/${driverId}/messages`, method: 'POST' }, res, next);
-});
-
-apiRouter.get('/drivers/:id/documents', async (req, res) => { res.json([]); });
-
-apiRouter.get('/drivers/:id/scheduled-messages', async (req, res, next) => {
-    try {
-        await withDb(async (client) => {
-            const result = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 ORDER BY scheduled_time ASC`, [req.params.id]);
-            res.json(result.rows.map(r => ({
-                id: r.id,
-                scheduledTime: parseInt(r.scheduled_time),
-                payload: r.payload,
-                status: r.status
-            })));
-        });
-    } catch (e) { next(e); }
-});
-
 apiRouter.post('/scheduled-messages', async (req, res, next) => {
     const { driverIds, message, timestamp } = req.body;
     try {
-        if (!driverIds || !Array.isArray(driverIds) || driverIds.length === 0) return res.status(400).json({ ok: false, error: "Invalid driverIds" });
         const scheduledTime = Number(timestamp);
         if (isNaN(scheduledTime)) return res.status(400).json({ ok: false, error: "Invalid timestamp" });
 
-        const validIds = driverIds.filter(id => /^[0-9a-fA-F-]{36}$/.test(id));
-        if (validIds.length === 0) return res.status(400).json({ ok: false, error: "No valid UUIDs" });
-
         await withDb(async (client) => {
-            for (const driverId of validIds) {
+            for (const driverId of driverIds) {
                  await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, 
                     [crypto.randomUUID(), driverId, JSON.stringify(message), scheduledTime]);
             }
         });
-        res.json({ success: true, count: validIds.length });
-    } catch (e) { next(e); }
-});
-
-apiRouter.delete('/scheduled-messages/:id', async (req, res, next) => {
-    try {
-        await withDb(async (client) => {
-            await client.query('DELETE FROM scheduled_messages WHERE id = $1', [req.params.id]);
-        });
         res.json({ success: true });
     } catch (e) { next(e); }
 });
 
-apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
-    const { text, scheduledTime } = req.body;
-    try {
-        await withDb(async (client) => {
-            const old = await client.query('SELECT payload FROM scheduled_messages WHERE id = $1', [req.params.id]);
-            if (old.rows.length === 0) return res.status(404).json({ ok: false, error: "Not found" });
-            
-            const newPayload = { ...old.rows[0].payload, text: text || old.rows[0].payload.text };
-            const updates = [`payload = $1`];
-            const values = [JSON.stringify(newPayload)];
-            let idx = 2;
-            
-            if (scheduledTime) {
-                updates.push(`scheduled_time = $${idx++}`);
-                values.push(scheduledTime);
-            }
-            
-            values.push(req.params.id);
-            await client.query(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = $${idx}`, values);
-        });
-        res.json({ success: true });
-    } catch (e) { next(e); }
-});
-
+// Bot Configuration
 apiRouter.get('/bot/settings', async (req, res, next) => { 
     try {
         await withDb(async (client) => {
@@ -747,7 +429,7 @@ apiRouter.get('/bot/settings', async (req, res, next) => {
             if (result.rows.length === 0) {
                 result = await client.query(`SELECT settings FROM bot_versions WHERE phone_number_id = $1 AND status = 'published' ORDER BY version_number DESC LIMIT 1`, [phoneId]);
             }
-            res.json(result.rows[0]?.settings || { nodes: [], edges: [], steps: [] });
+            res.json(result.rows[0]?.settings || { nodes: [], edges: [] });
         });
     } catch(e) { next(e); }
 });
@@ -773,7 +455,7 @@ apiRouter.post('/bot/publish', async (req, res, next) => {
         await withDb(async (client) => {
             const phoneId = process.env.PHONE_NUMBER_ID;
             const draftRes = await client.query(`SELECT settings FROM bot_versions WHERE phone_number_id = $1 AND status = 'draft' LIMIT 1`, [phoneId]);
-            if (draftRes.rows.length === 0) return res.status(400).json({ ok: false, error: "No draft changes to publish." });
+            if (draftRes.rows.length === 0) return res.status(400).json({ ok: false, error: "No draft to publish." });
 
             const settings = draftRes.rows[0].settings;
             const verRes = await client.query(`SELECT MAX(version_number) as v FROM bot_versions WHERE phone_number_id = $1 AND status = 'published'`, [phoneId]);
@@ -786,30 +468,40 @@ apiRouter.post('/bot/publish', async (req, res, next) => {
     } catch(e) { next(e); }
 });
 
+// WEBHOOK HANDLER (CRITICAL FIX)
 const verifyWebhook = (req, res) => {
     if (req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) return res.status(200).send(req.query['hub.challenge']);
     return res.sendStatus(403);
 };
 
-const handleWebhook = async (req, res, next) => {
+const handleWebhook = async (req, res) => {
+    // 1. Immediately acknowledge to Meta to prevent retries/timeout
+    res.sendStatus(200);
+
     try {
         const body = req.body;
-        if (body.object !== 'whatsapp_business_account') return res.sendStatus(404);
+        if (body.object !== 'whatsapp_business_account') return;
+        
         const entries = body.entry || [];
         for (const entry of entries) {
             for (const change of (entry.changes || [])) {
                 const value = change.value;
                 if (!value.messages) continue;
+                
                 const phoneId = value.metadata?.phone_number_id;
                 const contact = value.contacts?.[0];
+                
+                // Process in background - do not await
                 for (const message of value.messages) {
-                    persistInboundMessage(message, contact, req.requestId).catch(e => logger.error("Async Persist Failed", {error: e.message}));
-                    await enqueueIncomingMessageJob(req, message, contact, phoneId);
+                    processMessageInternal(message, contact, phoneId).catch(e => 
+                        logger.error("Async Message Process Error", { error: e.message })
+                    );
                 }
             }
         }
-        return res.sendStatus(200);
-    } catch (e) { return next(e); }
+    } catch (e) { 
+        logger.error("Webhook Logic Error", { error: e.message });
+    }
 };
 
 app.get('/webhook', verifyWebhook);
@@ -817,41 +509,30 @@ app.post('/webhook', handleWebhook);
 apiRouter.get('/webhook', verifyWebhook);
 apiRouter.post('/webhook', handleWebhook);
 
-apiRouter.post('/internal/bot-worker', async (req, res, next) => {
-    const signature = req.headers["upstash-signature"];
-    const secretHeader = req.headers["x-internal-secret"];
-    const expectedSecret = process.env.INTERNAL_WORKER_SECRET;
-    let isAuthorized = false;
-
-    if (expectedSecret && secretHeader === expectedSecret) isAuthorized = true;
-    else if (signature && process.env.QSTASH_CURRENT_SIGNING_KEY) {
-        try {
-            const body = req.rawBody ? req.rawBody.toString() : JSON.stringify(req.body);
-            isAuthorized = await qstashReceiver.verify({ signature, body });
-        } catch (e) {}
-    } 
-    else if (!process.env.QSTASH_CURRENT_SIGNING_KEY || process.env.QSTASH_CURRENT_SIGNING_KEY === 'mock') isAuthorized = true;
-
-    if (!isAuthorized) return res.status(401).json({ ok: false, error: "Unauthorized" });
-
-    try {
-        const { message, contact, phoneId } = req.body;
-        await processMessageInternal(message, contact, phoneId, req.headers['x-request-id']);
-        res.json({ success: true });
-    } catch(e) { next(e); }
-});
-
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
 
 app.use((err, req, res, next) => {
-    logger.error("Unhandled API Error", { requestId: req.requestId, error: err.message });
     if (!res.headersSent) {
         res.status(err.status || 500).json({ ok: false, error: err.message || "Internal Server Error" });
     }
 });
 
-ensureDbSchema().then(() => logger.info("Startup DB Check Complete")).catch(e => {});
+// Initialization
+const init = async () => {
+    try {
+        await withDb(async (client) => {
+            await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
+            // Check basic table
+            await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY, phone_number VARCHAR(50) UNIQUE NOT NULL);`);
+        });
+        logger.info("DB Connection Verified");
+    } catch (e) {
+        logger.error("DB Connection Failed at Startup", { error: e.message });
+    }
+};
+
+init();
 
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;

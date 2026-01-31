@@ -67,6 +67,28 @@ export default function App() {
       return process.env.NODE_ENV === 'production' ? 'live' : 'mock';
   });
 
+  // --- HEARTBEAT CRON TRIGGER ---
+  // Since we are on Vercel Serverless, we cannot rely on server-side setInterval.
+  // This client-side effect pings the server to process the queue as long as the dashboard is open.
+  useEffect(() => {
+      if (dataSource !== 'live' || !isAuthenticated) return;
+      
+      const triggerCron = async () => {
+          try {
+              // We use fetch directly to avoid auth headers if public, but here we add them just in case
+              await fetch('/api/cron/process-queue', {
+                  headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }
+              });
+          } catch(e) { console.error("Heartbeat skipped"); }
+      };
+
+      // Run every 30 seconds
+      const interval = setInterval(triggerCron, 30000);
+      triggerCron(); // Run immediately on load
+
+      return () => clearInterval(interval);
+  }, [dataSource, isAuthenticated]);
+
   const changeDataSource = (mode: 'mock' | 'live') => {
       setDataSource(mode);
       localStorage.setItem('uber_fleet_data_source', mode);
