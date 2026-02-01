@@ -146,6 +146,7 @@ apiRouter.post('/scheduled-messages', async (req, res) => {
                 // FIX: Manually generate UUID to prevent DB null error
                 const msgId = crypto.randomUUID();
                 
+                // Explicitly insert 'id'
                 await client.query(
                     `INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`,
                     [msgId, driverId, payloadObj, time]
@@ -378,7 +379,7 @@ apiRouter.post('/webhook', async (req, res) => {
                     if (replyNode && replyNode.data?.content) {
                         const replyText = replyNode.data.content;
                         // Avoid Placeholders
-                        if (!/replace this|sample message/i.test(replyText)) {
+                        if (!/replace this|sample message|enter your message|type your message|enter text/i.test(replyText)) {
                             await sendToMeta(from, { type: 'text', text: { body: replyText } });
                             
                             const botMsgId = crypto.randomUUID();
@@ -399,129 +400,4 @@ apiRouter.post('/webhook', async (req, res) => {
 
 apiRouter.get('/webhook', (req, res) => {
     if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
-        res.status(200).send(req.query['hub.challenge']);
-    } else {
-        res.sendStatus(403);
-    }
-});
-
-// --- 5. DATA GETTERS ---
-apiRouter.get('/drivers', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC NULLS LAST LIMIT 50');
-            res.json(r.rows.map(row => ({
-                id: row.id, phoneNumber: row.phone_number, name: row.name, status: row.stage, 
-                lastMessage: row.last_message, lastMessageTime: parseInt(row.last_message_at || '0'), 
-                source: row.source, isHumanMode: row.is_human_mode
-            })));
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.get('/drivers/:id/messages', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const limit = parseInt(req.query.limit) || 50;
-            const r = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT $2', [req.params.id, limit]);
-            
-            const messages = await Promise.all(r.rows.map(async (row) => {
-                let text = row.text, mediaUrl = null;
-                if (['image', 'video', 'document'].includes(row.type) && row.text && row.text.startsWith('{')) {
-                    try {
-                        const p = JSON.parse(row.text);
-                        if (p.url) mediaUrl = await refreshMediaUrl(p.url);
-                        text = JSON.stringify({ ...p, url: mediaUrl }); 
-                    } catch (e) { text = row.text; }
-                }
-                return { 
-                    id: row.id, 
-                    sender: row.direction === 'in' ? 'driver' : 'agent', 
-                    text, imageUrl: row.type === 'image' ? mediaUrl : null, 
-                    videoUrl: row.type === 'video' ? mediaUrl : null,
-                    timestamp: new Date(row.created_at).getTime(), 
-                    type: row.type || 'text', status: row.status
-                };
-            }));
-            res.json(messages.reverse());
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.get('/media', async (req, res) => {
-    const path = req.query.path || '';
-    const prefix = path === '/' ? '' : (path.startsWith('/') ? path.substring(1) : path) + '/';
-    try {
-        const command = new ListObjectsV2Command({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Prefix: prefix, Delimiter: '/' });
-        const data = await s3Client.send(command);
-        const folders = (data.CommonPrefixes || []).map(p => ({ id: p.Prefix, name: p.Prefix.replace(prefix, '').replace('/', '') }));
-        const files = await Promise.all((data.Contents || []).map(async (o) => {
-            const filename = o.Key.replace(prefix, '');
-            if (!filename) return null;
-            const url = await refreshMediaUrl(`https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.amazonaws.com/${o.Key}`);
-            let type = 'document';
-            if (filename.match(/\.(jpg|jpeg|png|gif|webp)$/i)) type = 'image';
-            if (filename.match(/\.(mp4|mov|webm)$/i)) type = 'video';
-            return { id: o.Key, url, filename, type };
-        }));
-        res.json({ folders, files: files.filter(Boolean) });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/media/upload', upload.single('file'), async (req, res) => {
-    if (!req.file) return res.status(400).json({ error: "No file" });
-    const path = req.body.path || '';
-    const prefix = path === '/' ? '' : (path.startsWith('/') ? path.substring(1) : path) + '/';
-    const key = `${prefix}${req.file.originalname}`;
-    try {
-        await s3Client.send(new PutObjectCommand({ 
-            Bucket: SYSTEM_CONFIG.AWS_BUCKET, 
-            Key: key, 
-            Body: req.file.buffer, 
-            ContentType: req.file.mimetype 
-        }));
-        res.json({ success: true, key });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.get('/bot/settings', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const r = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
-            res.json(r.rows[0]?.settings || { isEnabled: false, nodes: [], edges: [] });
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/bot/save', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const newId = crypto.randomUUID();
-            await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [newId, req.body]);
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.get('/drivers/:id/documents', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM driver_documents WHERE candidate_id = $1', [req.params.id]);
-            const docs = await Promise.all(r.rows.map(async d => ({
-                id: d.id, docType: d.type, url: await refreshMediaUrl(d.url), verificationStatus: d.status, timestamp: new Date(d.created_at).getTime()
-            })));
-            res.json(docs);
-        });
-    } catch (e) { res.json([]); }
-});
-
-app.use('/api', apiRouter);
-app.use('/', apiRouter);
-
-if (require.main === module) {
-    const PORT = process.env.PORT || 3001;
-    app.listen(PORT, () => {
-        console.log(`Server running on ${PORT}`);
-    });
-}
-module.exports = app;
+        res.status(2
