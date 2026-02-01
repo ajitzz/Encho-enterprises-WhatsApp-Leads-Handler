@@ -29,11 +29,9 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
   const [bulkMessage, setBulkMessage] = useState('');
   const [selectedMedia, setSelectedMedia] = useState<{url: string, type: 'image' | 'video' | 'document'} | null>(null);
   const [showMediaPicker, setShowMediaPicker] = useState(false);
-  const [templateName, setTemplateName] = useState('');
   
   const [isScheduled, setIsScheduled] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
-  const [buttons, setButtons] = useState<MessageButton[]>([]);
 
   const sections = [
     { id: 'All', label: 'All Leads', icon: Users, color: 'text-gray-600' },
@@ -65,13 +63,7 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
   };
 
   const executeBulkSend = async () => {
-    // BLOCKED PHRASES
-    if (/replace this|sample message|type your message/i.test(bulkMessage)) {
-        alert("Please remove placeholder text.");
-        return;
-    }
-
-    if (!bulkMessage.trim() && !selectedMedia && !templateName) return;
+    if (!bulkMessage.trim() && !selectedMedia) return;
     
     // Time Validation
     let timestamp = Date.now();
@@ -92,19 +84,15 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
         await liveApiService.scheduleMessage(selectedIds, {
             text: bulkMessage,
             mediaUrl: selectedMedia?.url,
-            mediaType: selectedMedia?.type,
-            buttons: buttons.length > 0 ? (buttons as any) : undefined,
-            templateName: templateName || undefined
+            mediaType: selectedMedia?.type
         }, timestamp);
-        onBulkSend(selectedIds, bulkMessage, selectedMedia?.url, selectedMedia?.type, buttons as any, templateName, timestamp);
+        onBulkSend(selectedIds, bulkMessage, selectedMedia?.url, selectedMedia?.type, undefined, undefined, timestamp);
     } catch (e: any) { alert(`Failed: ${e.message}`); return; }
 
     // Reset Form
     setShowBulkCompose(false);
     setBulkMessage(''); 
-    setTemplateName(''); 
     setSelectedMedia(null); 
-    setButtons([]); 
     setIsScheduled(false); 
     setScheduleTime(''); 
     setSelectedIds([]);
@@ -164,7 +152,20 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
                       <button onClick={() => setShowBulkCompose(false)}><X size={20} className="text-gray-400" /></button>
                   </div>
                   <div className="p-6 flex-1 flex flex-col overflow-y-auto space-y-4">
-                      <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 text-xs text-blue-800">Sending to <strong>{selectedIds.length}</strong> recipients.</div>
+                      {selectedMedia && (
+                          <div className="relative bg-gray-100 rounded-lg p-2 border border-gray-200 flex items-center gap-3">
+                              <Paperclip size={16} className="text-blue-600" />
+                              <span className="text-xs font-mono truncate flex-1">{selectedMedia.type.toUpperCase()} Selected</span>
+                              <button onClick={() => setSelectedMedia(null)} className="hover:text-red-600"><X size={14} /></button>
+                          </div>
+                      )}
+                      
+                      <div className="flex gap-2">
+                          <button onClick={() => setShowMediaPicker(true)} className="text-xs flex items-center gap-1 bg-gray-100 hover:bg-gray-200 px-3 py-1.5 rounded border border-gray-200 transition-colors">
+                              <Paperclip size={12} /> Attach Media
+                          </button>
+                      </div>
+
                       <div className="p-3 rounded-lg border bg-gray-50">
                           <label className="text-xs font-bold text-gray-600 flex items-center gap-2 mb-2"><Clock size={14} /> Schedule Send</label>
                           <div className="flex items-center gap-2 mb-2">
@@ -176,7 +177,7 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
                       <textarea value={bulkMessage} onChange={(e) => setBulkMessage(e.target.value)} className="w-full p-4 bg-gray-50 border border-gray-200 rounded-xl resize-none min-h-[120px] text-sm focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Type message..." />
                   </div>
                   <div className="p-6 border-t border-gray-100 bg-gray-50">
-                      <button onClick={executeBulkSend} disabled={(!bulkMessage.trim() && !selectedMedia && !templateName)} className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                      <button onClick={executeBulkSend} disabled={(!bulkMessage.trim() && !selectedMedia)} className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold hover:bg-blue-700 disabled:opacity-50 transition-colors">
                           {isScheduled ? 'Schedule Broadcast' : 'Send Broadcast Now'}
                       </button>
                   </div>

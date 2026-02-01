@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, ScheduledMessage, DriverDocument } from '../types';
 import { 
   X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock
@@ -76,9 +76,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       try { 
           const docs = await liveApiService.getDriverDocuments(driverId); 
           setDocuments(docs || []); 
-      } catch(e) { 
-          setDocuments([]); // Graceful fail for 500 error
-      }
+      } catch(e) { setDocuments([]); }
   };
 
   const loadScheduledMessages = async (driverId: string) => {
@@ -101,7 +99,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
   const openEditModal = (msg: ScheduledMessage) => {
       setEditingMessage(msg);
-      // Ensure text is string (Handle object payload safely)
+      // Safe parsing of payload
       let txt = '';
       if(msg.payload) {
           if (typeof msg.payload === 'string') txt = msg.payload;
@@ -128,9 +126,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
   if (!driver) return null;
 
-  const handleSend = async (e?: React.FormEvent) => {
-    // PREVENT FORM SUBMISSION REFRESH (CRITICAL FIX)
-    if (e) e.preventDefault();
+  // --- SEND HANDLER (Fixes Async Listener Error) ---
+  const handleSend = async (e?: React.MouseEvent | React.FormEvent) => {
+    if (e) e.preventDefault(); // STOP FORM SUBMISSION
 
     if (!replyText.trim() && !selectedMedia) return;
     setIsSending(true);
@@ -138,9 +136,15 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     try {
         if (showSchedule && scheduleTime) {
             if (new Date(scheduleTime).getTime() <= Date.now()) { throw new Error("Select a time in the future."); }
+            
+            // Correct Payload for Scheduler
             await liveApiService.scheduleMessage(
                 [driver.id], 
-                { text: replyText, mediaUrl: selectedMedia?.url, mediaType: selectedMedia?.type }, 
+                { 
+                    text: replyText, 
+                    mediaUrl: selectedMedia?.url, 
+                    mediaType: selectedMedia?.type 
+                }, 
                 new Date(scheduleTime).getTime()
             ); 
             setShowSchedule(false); setScheduleTime('');
@@ -159,10 +163,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     }
   };
 
-  // Safe Render for Message Text to prevent React Error #31
   const renderMessageText = (rawText: any) => {
       if (!rawText) return null;
-      if (typeof rawText !== 'string') return null; // Don't render complex objects
+      if (typeof rawText !== 'string') return null; 
       
       try {
           if (rawText.trim().startsWith('{')) {
@@ -208,9 +211,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
           <div className="flex-1 flex overflow-hidden">
             <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px] relative">
               
-              {/* MESSAGES AREA */}
+              {/* MESSAGES */}
               <div className="flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4">
-                
                 {localMessages.map((msg) => (
                     <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
                         <div className={`max-w-[80%] rounded-2xl shadow-sm overflow-hidden ${msg.sender === 'driver' ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' : 'bg-blue-600 text-white rounded-tr-none'}`}>
@@ -226,7 +228,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     </div>
                 ))}
                 
-                {/* SCHEDULED MESSAGES */}
+                {/* SCHEDULED */}
                 {scheduledMessages.length > 0 && (
                     <div className="flex flex-col gap-4 mt-6">
                         <div className="flex items-center gap-2 justify-center opacity-50">
@@ -284,7 +286,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                 </div>
                 <div className="flex gap-3">
                   <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Type a message..." className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20 shadow-inner" disabled={isSending} />
-                  <button type="button" onClick={(e) => handleSend(e)} disabled={(!replyText.trim() && !selectedMedia) || isSending} className="self-end p-3 rounded-xl bg-black text-white hover:bg-gray-800 w-12 h-12 flex items-center justify-center disabled:opacity-50">
+                  <button type="button" onClick={handleSend} disabled={(!replyText.trim() && !selectedMedia) || isSending} className="self-end p-3 rounded-xl bg-black text-white hover:bg-gray-800 w-12 h-12 flex items-center justify-center disabled:opacity-50">
                       {isSending ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
                   </button>
                 </div>
