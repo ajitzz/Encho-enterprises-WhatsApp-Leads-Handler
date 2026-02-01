@@ -206,26 +206,18 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
 // --- CRON JOB: SCHEDULED MESSAGES ---
 const processQueueInternal = async () => {
     let processedCount = 0;
-    // Removed outer try-catch to allow errors to propagate to the route handler for proper 200 { success: false } response
     let jobsToProcess = [];
 
-    await withDb(async (client) => {
-        // SAFEGUARD: Create table if missing (Prevent Crash) - ensuring NOT NULL constraint on candidate_id matches schema
-        await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
-            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-            candidate_id UUID NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
-            payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-            scheduled_time BIGINT NOT NULL,
-            status VARCHAR(50) NOT NULL DEFAULT 'pending',
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );`);
+    // Removed the CREATE TABLE safeguard here. It belongs in init().
+    // Also removed outer try-catch to allow critical errors to propagate to the route handler.
 
+    await withDb(async (client) => {
         // Reset stuck jobs (processing > 10 mins)
         await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
 
         await client.query('BEGIN');
         
-        // Lock rows for processing
+        // Lock rows for processing using SKIP LOCKED for concurrency safety
         const result = await client.query(`
             SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
             FROM scheduled_messages sm
