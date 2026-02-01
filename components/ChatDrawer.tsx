@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Driver, Message, ScheduledMessage, DriverDocument } from '../types';
 import { 
-  X, Send, Headset, MicOff, Clock, Paperclip, LayoutTemplate, Edit2, Trash2, Zap, AlertTriangle, FileText, Download, Loader2
+  X, Send, Headset, MicOff, Clock, Paperclip, LayoutTemplate, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 import { MediaSelectorModal } from './MediaSelectorModal';
@@ -20,7 +20,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [templateName, setTemplateName] = useState('');
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
-  const [timeLeft, setTimeLeft] = useState<string>('');
   const [isSending, setIsSending] = useState(false);
   
   const [showMediaPicker, setShowMediaPicker] = useState(false);
@@ -29,10 +28,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [documents, setDocuments] = useState<DriverDocument[]>([]);
   const [docFilter, setDocFilter] = useState<'all' | 'license' | 'rc_book' | 'id_proof'>('all');
   
-  const [loadingHistory, setLoadingHistory] = useState(false);
   const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>([]);
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
   
+  // EDIT STATE
   const [editingMessage, setEditingMessage] = useState<ScheduledMessage | null>(null);
   const [editTime, setEditTime] = useState('');
   const [editText, setEditText] = useState('');
@@ -54,24 +53,26 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       if (!driver) return;
       const pollMessages = async () => {
           try {
-              const latestMessages = await liveApiService.getDriverMessages(driver.id, 50);
+              // Poll Both
+              const [latestMsgs, latestSched] = await Promise.all([
+                  liveApiService.getDriverMessages(driver.id, 50),
+                  liveApiService.getScheduledMessages(driver.id)
+              ]);
+
+              // Update Messages
               setLocalMessages(prev => {
-                  if (latestMessages.length === 0) return prev;
-                  // If we have outgoing optimistic messages (status='sending'), keep them until confirmed
+                  if (latestMsgs.length === 0) return prev;
                   const optimistic = prev.filter(m => m.status === 'sending');
-                  
-                  // Filter out optimistic ones from latest if they match (deduplication)
-                  const incoming = latestMessages.filter(m => !optimistic.some(opt => opt.text === m.text && Math.abs(opt.timestamp - m.timestamp) < 5000));
-                  
-                  // Simple check for new content
+                  const incoming = latestMsgs.filter(m => !optimistic.some(opt => opt.text === m.text && Math.abs(opt.timestamp - m.timestamp) < 5000));
                   const prevLastId = prev.length > 0 ? prev[prev.length - 1].id : '';
-                  const newLastId = latestMessages[latestMessages.length - 1].id;
-                  
-                  if (latestMessages.length !== prev.length || newLastId !== prevLastId) {
-                      return latestMessages; 
-                  }
+                  const newLastId = latestMsgs[latestMsgs.length - 1].id;
+                  if (latestMsgs.length !== prev.length || newLastId !== prevLastId) return latestMsgs;
                   return prev;
               });
+
+              // Update Scheduled
+              setScheduledMessages(latestSched);
+
           } catch (e) {}
       };
       const interval = setInterval(pollMessages, 3000);
@@ -79,33 +80,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   }, [driver?.id]);
 
   useEffect(() => {
-    if (messagesEndRef.current && !loadingHistory) {
+    if (messagesEndRef.current) {
         messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [localMessages.length, driver?.id]);
-
-  // Human Mode Timer
-  useEffect(() => {
-      if (!driver?.isHumanMode || !driver?.humanModeEndsAt) {
-          setTimeLeft('');
-          return;
-      }
-      const updateTimer = () => {
-          const now = Date.now();
-          const diff = (driver.humanModeEndsAt || 0) - now;
-          if (diff <= 0) {
-              setTimeLeft('00:00');
-              onUpdateDriver(driver.id, { isHumanMode: false });
-          } else {
-              const minutes = Math.floor(diff / 60000);
-              const seconds = Math.floor((diff % 60000) / 1000);
-              setTimeLeft(`${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`);
-          }
-      };
-      updateTimer(); 
-      const interval = setInterval(updateTimer, 1000);
-      return () => clearInterval(interval);
-  }, [driver?.isHumanMode, driver?.humanModeEndsAt, driver?.id]);
+  }, [localMessages.length, scheduledMessages.length, driver?.id]);
 
   const loadDocuments = async (driverId: string) => {
       try { const docs = await liveApiService.getDriverDocuments(driverId); setDocuments(docs || []); } catch(e) { setDocuments([]); }
@@ -116,18 +94,23 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   };
 
   const handleCancelScheduled = async (msgId: string) => {
-      if (!window.confirm("Cancel this scheduled message?")) return;
+      if (!window.confirm("Delete this scheduled message?")) return;
       try { await liveApiService.cancelScheduledMessage(msgId); setScheduledMessages(prev => prev.filter(m => m.id !== msgId)); } catch (e: any) { alert(`Error: ${e.message}`); }
   };
 
   const handleSendNowScheduled = async (msgId: string) => {
       if (!window.confirm("Send this message immediately?")) return;
-      try { await liveApiService.updateScheduledMessage(msgId, { scheduledTime: Date.now() }); setScheduledMessages(prev => prev.filter(m => m.id !== msgId)); alert("Message queued for immediate delivery."); } catch (e: any) { alert(`Error: ${e.message}`); }
+      try { 
+          await liveApiService.updateScheduledMessage(msgId, { scheduledTime: Date.now() }); 
+          alert("Message queued for immediate delivery."); 
+          loadScheduledMessages(driver!.id); // refresh to remove from list
+      } catch (e: any) { alert(`Error: ${e.message}`); }
   };
 
   const openEditModal = (msg: ScheduledMessage) => {
       setEditingMessage(msg);
       setEditText(msg.payload.text || '');
+      // Formatting date for input type="datetime-local"
       const date = new Date(msg.scheduledTime);
       const isoString = new Date(date.getTime() - (date.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
       setEditTime(isoString);
@@ -135,17 +118,14 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
   const saveEditedMessage = async () => {
       if (!editingMessage || !editTime) return;
-      if (new Date(editTime).getTime() <= Date.now()) { alert("Time must be in the future."); return; }
-      try { await liveApiService.updateScheduledMessage(editingMessage.id, { text: editText, scheduledTime: new Date(editTime).getTime() }); setEditingMessage(null); if (driver) loadScheduledMessages(driver.id); } catch(e: any) { alert(`Update failed: ${e.message}`); }
-  };
-
-  const handleLoadMore = async () => {
-      if (!driver || localMessages.length === 0) return;
-      setLoadingHistory(true);
+      const newTime = new Date(editTime).getTime();
+      if (newTime <= Date.now()) { alert("Time must be in the future."); return; }
+      
       try { 
-          const olderMessages = await liveApiService.getDriverMessages(driver.id, 50, localMessages[0].timestamp); 
-          if (olderMessages.length > 0) setLocalMessages(prev => [...olderMessages, ...prev]);
-      } catch(e) {} finally { setLoadingHistory(false); }
+          await liveApiService.updateScheduledMessage(editingMessage.id, { text: editText, scheduledTime: newTime }); 
+          setEditingMessage(null); 
+          if (driver) loadScheduledMessages(driver.id); 
+      } catch(e: any) { alert(`Update failed: ${e.message}`); }
   };
 
   const filteredDocuments = useMemo(() => {
@@ -156,74 +136,70 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   if (!driver) return null;
 
   const handleSend = async () => {
-    const BLOCKED = ['replace this', 'sample message', 'type your message'];
-    if (BLOCKED.some(b => replyText.toLowerCase().includes(b))) {
-        alert("Please replace placeholder text before sending.");
-        return;
-    }
-
     if (!replyText.trim() && !templateName && !selectedMedia) return;
-    
     setIsSending(true);
-
-    // OPTIMISTIC UPDATE
-    const tempMsg: Message = {
-        id: `temp_${Date.now()}`,
-        sender: 'agent',
-        text: replyText || (selectedMedia ? '' : ''),
-        timestamp: Date.now(),
-        type: selectedMedia ? selectedMedia.type as any : 'text',
-        imageUrl: selectedMedia?.type === 'image' ? selectedMedia.url : undefined,
-        videoUrl: selectedMedia?.type === 'video' ? selectedMedia.url : undefined,
-        status: 'sending'
-    };
-    
-    if (!showSchedule) setLocalMessages(prev => [...prev, tempMsg]);
 
     try {
         if (showSchedule && scheduleTime) {
+            // SCHEDULE SEND
             if (new Date(scheduleTime).getTime() <= Date.now()) { throw new Error("Select a time in the future."); }
-            await liveApiService.scheduleMessage([driver.id], { text: replyText, templateName: isTemplateMode ? templateName : undefined, mediaUrl: selectedMedia?.url, mediaType: selectedMedia?.type }, new Date(scheduleTime).getTime()); 
+            await liveApiService.scheduleMessage(
+                [driver.id], 
+                { text: replyText, templateName: isTemplateMode ? templateName : undefined, mediaUrl: selectedMedia?.url, mediaType: selectedMedia?.type }, 
+                new Date(scheduleTime).getTime()
+            ); 
             setShowSchedule(false); setScheduleTime('');
-            alert("Message Scheduled Successfully!");
             await loadScheduledMessages(driver.id); 
         } else if (isTemplateMode && templateName) {
+            // TEMPLATE SEND
             await liveApiService.sendMessage(driver.id, replyText, { templateName }); 
-            setTemplateName(''); setIsTemplateMode(false);
         } else if (selectedMedia) {
+            // MEDIA SEND
             await liveApiService.sendMessage(driver.id, replyText, { mediaUrl: selectedMedia.url, mediaType: selectedMedia.type }); 
-            setSelectedMedia(null);
         } else {
+            // TEXT SEND
             await onSendMessage(replyText);
         }
+        
+        // RESET UI
         setReplyText('');
+        setSelectedMedia(null);
+        setTemplateName('');
+        setIsTemplateMode(false);
+        
     } catch(e: any) {
         alert(`Failed: ${e.message}`);
-        setLocalMessages(prev => prev.filter(m => m.id !== tempMsg.id)); // Remove optimistic msg on failure
     } finally {
         setIsSending(false);
     }
   };
 
-  const handleKeyPress = (e: React.KeyboardEvent) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } };
+  // Helper to render media preview inside bubbles
+  const renderMediaPreview = (url?: string, type?: string) => {
+      if (!url) return null;
+      if (type === 'video') return <div className="w-full aspect-video bg-black rounded mb-2"><video src={url} controls className="w-full h-full object-contain" /></div>;
+      return <div className="w-full aspect-video bg-gray-100 rounded mb-2"><img src={url} className="w-full h-full object-cover rounded" alt="media" /></div>;
+  };
 
   return (
     <div className="fixed inset-0 z-50 overflow-hidden">
       <div className="absolute inset-0 bg-black/30 backdrop-blur-sm transition-opacity" onClick={onClose} />
       <div className="absolute inset-y-0 right-0 flex max-w-full pl-10 pointer-events-none">
         <div className="pointer-events-auto w-screen max-w-5xl bg-white shadow-2xl flex flex-col h-full">
+          
+          {/* Header */}
           <div className="bg-black text-white px-6 py-4 flex items-center justify-between shadow-md z-10">
             <div className="flex items-center gap-4">
                <div className="h-10 w-10 bg-gray-800 rounded-full flex items-center justify-center text-lg font-bold">{driver.name.charAt(0)}</div>
                <div>
-                 <div className="flex items-center gap-2"><h2 className="text-xl font-semibold">{driver.name}</h2><span className="bg-gray-700 text-[10px] px-2 py-0.5 rounded-full">{driver.source}</span></div>
+                 <div className="flex items-center gap-2"><h2 className="text-xl font-semibold">{driver.name}</h2></div>
                  <p className="text-gray-400 text-sm font-mono">{driver.phoneNumber}</p>
                </div>
             </div>
             <div className="flex items-center gap-4">
                <div className="flex items-center gap-2 bg-gray-900 rounded-lg p-1 border border-gray-800">
                     <button onClick={() => onUpdateDriver(driver.id, { isHumanMode: !driver.isHumanMode })} className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${driver.isHumanMode ? 'bg-amber-500 text-black' : 'text-gray-400 hover:text-white'}`}>
-                        {driver.isHumanMode ? <Headset size={14} /> : <MicOff size={14} />} {driver.isHumanMode ? 'Human Agent Mode' : 'Automation Active'}
+                        {driver.isHumanMode ? <Headset size={14} /> : <MicOff size={14} />} {driver.isHumanMode ? 'Human Agent' : 'Bot Active'}
                     </button>
                </div>
               <button onClick={onClose} className="p-2 hover:bg-gray-800 rounded-full transition-colors"><X size={20} /></button>
@@ -232,55 +208,24 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
           <div className="flex-1 flex overflow-hidden">
             <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px] relative">
+              
+              {/* MESSAGES AREA */}
               <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4">
-                {localMessages.length >= 50 && <div className="flex justify-center"><button onClick={handleLoadMore} disabled={loadingHistory} className="text-xs bg-white border border-gray-300 rounded-full px-4 py-2">Load Previous</button></div>}
                 
+                {/* 1. History Messages */}
                 {localMessages.map((msg) => (
                     <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
                         <div className={`max-w-[80%] rounded-2xl shadow-sm overflow-hidden ${msg.sender === 'driver' ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' : 'bg-blue-600 text-white rounded-tr-none'}`}>
-                            {/* MEDIA RENDERING */}
-                            {(msg.headerImageUrl || msg.imageUrl) && (
-                                <div className="w-full aspect-video overflow-hidden bg-black/5 relative cursor-pointer" onClick={() => window.open(msg.headerImageUrl || msg.imageUrl, '_blank')}>
-                                    <img src={msg.headerImageUrl || msg.imageUrl} className="w-full h-full object-cover" alt="attachment" />
-                                </div>
-                            )}
-                            {msg.videoUrl && (
-                                <div className="w-full aspect-video overflow-hidden bg-black relative">
-                                    <video src={msg.videoUrl} controls className="w-full h-full" />
-                                </div>
-                            )}
-                            {/* DOCUMENT RENDERING */}
-                            {msg.type === 'document' && msg.text && msg.text.startsWith('{') && (() => {
-                                try {
-                                    const parsed = JSON.parse(msg.text);
-                                    return (
-                                        <div className="p-3 bg-gray-50 border-b border-gray-100 flex items-center gap-3">
-                                            <div className="p-2 bg-red-100 text-red-600 rounded">
-                                                <FileText size={20} />
-                                            </div>
-                                            <div className="flex-1 min-w-0">
-                                                <div className="text-sm font-bold text-gray-800 truncate">{parsed.filename || 'Document'}</div>
-                                                <div className="text-[10px] text-gray-500 uppercase">PDF / DOC</div>
-                                            </div>
-                                            <a href={parsed.url} target="_blank" rel="noopener noreferrer" className="p-2 text-blue-600 hover:bg-blue-50 rounded transition-colors" title="Download">
-                                                <Download size={16} />
-                                            </a>
-                                        </div>
-                                    );
-                                } catch(e) { return null; }
-                            })()}
-
+                            {renderMediaPreview(msg.imageUrl || msg.videoUrl, msg.videoUrl ? 'video' : 'image')}
                             <div className="px-4 py-3">
-                                {msg.templateName && <div className="text-[10px] uppercase font-bold opacity-50 mb-1 flex items-center gap-1"><LayoutTemplate size={10} /> Template: {msg.templateName}</div>}
-                                
                                 {msg.text && !msg.text.startsWith('{') && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
+                                {/* JSON Caption Support */}
                                 {msg.text && msg.text.startsWith('{') && (() => {
                                     try {
-                                        const parsed = JSON.parse(msg.text);
-                                        return parsed.caption ? <p className="text-sm leading-relaxed whitespace-pre-wrap">{parsed.caption}</p> : null;
+                                        const p = JSON.parse(msg.text);
+                                        return p.caption ? <p className="text-sm leading-relaxed whitespace-pre-wrap">{p.caption}</p> : null;
                                     } catch(e) { return <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>; }
                                 })()}
-
                                 <div className="text-[10px] mt-1 text-right opacity-60 flex justify-end gap-1 items-center">
                                     {msg.status === 'sending' && <Clock size={10} className="animate-spin" />}
                                     {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
@@ -290,9 +235,44 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     </div>
                 ))}
                 
+                {/* 2. Scheduled Messages (INLINE) */}
+                {scheduledMessages.length > 0 && (
+                    <div className="flex flex-col gap-4 mt-6">
+                        <div className="flex items-center gap-2 justify-center opacity-50">
+                            <div className="h-px bg-gray-300 w-12"></div>
+                            <span className="text-xs font-bold text-gray-500 uppercase tracking-wider flex items-center gap-1"><CalendarClock size={12}/> Scheduled Queue</span>
+                            <div className="h-px bg-gray-300 w-12"></div>
+                        </div>
+                        {scheduledMessages.map(msg => (
+                            <div key={msg.id} className="flex justify-end animate-in slide-in-from-bottom-2">
+                                <div className="max-w-[85%] bg-amber-50 border-2 border-dashed border-amber-300 rounded-2xl rounded-tr-none p-1 relative group">
+                                    {/* Action Bar */}
+                                    <div className="flex items-center justify-between px-3 py-2 border-b border-amber-200/50 mb-2">
+                                        <div className="flex items-center gap-1.5 text-xs font-bold text-amber-700">
+                                            <Clock size={12} /> {new Date(msg.scheduledTime).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})}
+                                        </div>
+                                        <div className="flex items-center gap-1">
+                                            <button onClick={() => handleSendNowScheduled(msg.id)} className="p-1.5 bg-green-100 text-green-700 rounded hover:bg-green-200 transition-colors" title="Send Now"><Zap size={14}/></button>
+                                            <button onClick={() => openEditModal(msg)} className="p-1.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition-colors" title="Edit"><Edit2 size={14}/></button>
+                                            <button onClick={() => handleCancelScheduled(msg.id)} className="p-1.5 bg-red-100 text-red-700 rounded hover:bg-red-200 transition-colors" title="Delete"><Trash2 size={14}/></button>
+                                        </div>
+                                    </div>
+
+                                    {/* Content */}
+                                    <div className="px-3 pb-3">
+                                        {renderMediaPreview(msg.payload.mediaUrl, msg.payload.mediaType)}
+                                        <p className="text-sm text-gray-800 whitespace-pre-wrap">{msg.payload.text || <span className="italic text-gray-400">Media Only</span>}</p>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+                
                 <div ref={messagesEndRef} />
               </div>
 
+              {/* INPUT AREA */}
               <div className="p-4 bg-white border-t border-gray-200 relative">
                 {selectedMedia && (
                     <div className="absolute bottom-full left-0 right-0 bg-gray-100 p-2 border-t border-gray-200 flex items-center justify-between px-4">
@@ -303,18 +283,23 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     </div>
                 )}
                 {showSchedule && (
-                    <div className="absolute bottom-[calc(100%+10px)] left-4 right-4 bg-white rounded-xl shadow-2xl border border-gray-200 p-4 z-20">
-                        <div className="flex justify-between mb-2"><h4 className="font-bold text-gray-800">Schedule</h4><button onClick={() => setShowSchedule(false)}><X size={16} /></button></div>
+                    <div className="absolute bottom-[calc(100%+10px)] left-4 right-4 bg-white rounded-xl shadow-2xl border border-gray-200 p-4 z-20 animate-in slide-in-from-bottom-2">
+                        <div className="flex justify-between mb-2"><h4 className="font-bold text-gray-800">Schedule Message</h4><button onClick={() => setShowSchedule(false)}><X size={16} /></button></div>
                         <input type="datetime-local" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} className="w-full p-2 border rounded-lg text-sm" />
                     </div>
                 )}
                 <div className="flex gap-2 mb-3">
                     <button onClick={() => setShowMediaPicker(true)} disabled={isSending} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${selectedMedia ? 'bg-blue-100 text-blue-700 border-blue-200' : 'border-gray-200 hover:bg-gray-50'}`}><Paperclip size={12} /> Attach</button>
-                    <button onClick={() => setIsTemplateMode(!isTemplateMode)} disabled={isSending} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${isTemplateMode ? 'bg-purple-100 text-purple-700 border-purple-200' : 'border-gray-200 hover:bg-gray-50'}`}><LayoutTemplate size={12} /> Template</button>
                     <button onClick={() => setShowSchedule(!showSchedule)} disabled={isSending} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${showSchedule ? 'bg-amber-100 text-amber-700 border-amber-200' : 'border-gray-200 hover:bg-gray-50'}`}><Clock size={12} /> Schedule</button>
                 </div>
                 <div className="flex gap-3">
-                  <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} onKeyDown={handleKeyPress} placeholder={isTemplateMode ? "Body Parameter..." : "Type a message..."} className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20 shadow-inner" disabled={isSending} />
+                  <textarea 
+                    value={replyText} 
+                    onChange={(e) => setReplyText(e.target.value)} 
+                    placeholder="Type a message..." 
+                    className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20 shadow-inner" 
+                    disabled={isSending} 
+                  />
                   <button onClick={handleSend} disabled={(!replyText.trim() && !templateName && !selectedMedia) || isSending} className="self-end p-3 rounded-xl bg-black text-white hover:bg-gray-800 w-12 h-12 flex items-center justify-center disabled:opacity-50">
                       {isSending ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
                   </button>
@@ -322,7 +307,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
               </div>
             </div>
 
-            <div className="w-[450px] bg-white border-l border-gray-200 p-6">
+            {/* DOCUMENTS SIDEBAR */}
+            <div className="w-[400px] bg-white border-l border-gray-200 p-6">
                 <h3 className="text-xs font-bold text-gray-500 uppercase mb-3">Documents</h3>
                 {filteredDocuments.length === 0 ? (
                     <div className="text-center p-6 border-2 border-dashed border-gray-100 rounded-xl bg-gray-50">
@@ -340,7 +326,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                                         <span className="text-[9px] text-gray-400">{new Date(doc.timestamp).toLocaleDateString()}</span>
                                     </div>
                                 </div>
-                                <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${doc.verificationStatus === 'approved' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>{doc.verificationStatus}</span>
+                                <a href={doc.url} target="_blank" rel="noreferrer" className="text-gray-400 hover:text-blue-600 p-1"><Download size={14}/></a>
                             </div>
                         ))}
                     </div>
@@ -350,13 +336,26 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
         </div>
       </div>
       
+      {/* EDIT MODAL */}
       {editingMessage && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-              <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6 space-y-4">
-                  <h3 className="font-bold">Edit Message</h3>
-                  <input type="datetime-local" value={editTime} onChange={(e) => setEditTime(e.target.value)} className="w-full p-2 border rounded" />
-                  <textarea value={editText} onChange={(e) => setEditText(e.target.value)} className="w-full p-2 border rounded h-24" />
-                  <div className="flex gap-2"><button onClick={() => setEditingMessage(null)} className="flex-1 py-2 border rounded">Cancel</button><button onClick={saveEditedMessage} className="flex-1 py-2 bg-blue-600 text-white rounded">Save</button></div>
+              <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6 space-y-4 animate-in zoom-in-95">
+                  <div className="flex justify-between items-center border-b pb-2">
+                      <h3 className="font-bold text-gray-900">Edit Scheduled Message</h3>
+                      <button onClick={() => setEditingMessage(null)}><X size={18} /></button>
+                  </div>
+                  <div>
+                      <label className="text-xs font-bold text-gray-500 mb-1 block">Date & Time</label>
+                      <input type="datetime-local" value={editTime} onChange={(e) => setEditTime(e.target.value)} className="w-full p-2 border rounded bg-gray-50" />
+                  </div>
+                  <div>
+                      <label className="text-xs font-bold text-gray-500 mb-1 block">Message</label>
+                      <textarea value={editText} onChange={(e) => setEditText(e.target.value)} className="w-full p-2 border rounded h-24 resize-none bg-gray-50 focus:bg-white transition-colors" />
+                  </div>
+                  <div className="flex gap-2 pt-2">
+                      <button onClick={() => setEditingMessage(null)} className="flex-1 py-2 border rounded-lg font-bold text-gray-600 hover:bg-gray-50">Cancel</button>
+                      <button onClick={saveEditedMessage} className="flex-1 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700">Save Changes</button>
+                  </div>
               </div>
           </div>
       )}
