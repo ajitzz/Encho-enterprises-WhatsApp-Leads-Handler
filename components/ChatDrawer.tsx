@@ -85,7 +85,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
           const docs = await liveApiService.getDriverDocuments(driverId); 
           setDocuments(docs || []); 
       } catch(e) {
-          // Silent fail to avoid alert spam, but documents will be empty
           setDocuments([]);
       }
   };
@@ -135,16 +134,21 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     if (!replyText.trim() && !templateName && !selectedMedia) return;
     
     if (showSchedule && scheduleTime) {
-        if (new Date(scheduleTime).getTime() <= Date.now()) { alert("Select a time in the future."); return; }
+        const scheduledTs = new Date(scheduleTime).getTime();
+        if (isNaN(scheduledTs)) { alert("Invalid date"); return; }
+        if (scheduledTs <= Date.now()) { alert("Select a time in the future."); return; }
         
         try { 
-            await liveApiService.scheduleMessage([driver.id], { text: replyText, templateName: isTemplateMode ? templateName : undefined, mediaUrl: selectedMedia?.url, mediaType: selectedMedia?.type }, new Date(scheduleTime).getTime()); 
+            await liveApiService.scheduleMessage([driver.id], { text: replyText, templateName: isTemplateMode ? templateName : undefined, mediaUrl: selectedMedia?.url, mediaType: selectedMedia?.type }, scheduledTs); 
             setReplyText(''); 
             setShowSchedule(false);
             setScheduleTime('');
             alert("Message Scheduled Successfully!");
             await loadScheduledMessages(driver.id); 
-        } catch(e: any) { alert(`Failed: ${e.message}`); }
+        } catch(e: any) { 
+            console.error(e);
+            alert(`Scheduling Failed: ${e.message || "Server Error"}`); 
+        }
     } else if (isTemplateMode && templateName) {
         try { await liveApiService.sendMessage(driver.id, replyText, { templateName }); setReplyText(''); setTemplateName(''); setIsTemplateMode(false); } catch(e: any) { alert(`Failed: ${e.message}`); }
     } else if (selectedMedia) {
