@@ -42,47 +42,33 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   // --- INITIALIZATION ---
   useEffect(() => {
     if (driver) {
-        // Initialize local messages from driver prop
         setLocalMessages(driver.messages || []);
         loadDocuments(driver.id);
         loadScheduledMessages(driver.id);
     }
   }, [driver]);
 
-  // --- REAL-TIME POLLING (THE FIX) ---
+  // --- REAL-TIME POLLING ---
   useEffect(() => {
       if (!driver) return;
-
-      // Poll for new messages every 3 seconds
       const pollMessages = async () => {
           try {
-              // Fetch latest 50 messages
               const latestMessages = await liveApiService.getDriverMessages(driver.id, 50);
-              
               setLocalMessages(prev => {
-                  // Only update if there are new messages or changes (by comparing IDs of last message)
                   if (latestMessages.length === 0) return prev;
-                  
                   const prevLastId = prev.length > 0 ? prev[prev.length - 1].id : '';
                   const newLastId = latestMessages[latestMessages.length - 1].id;
-                  
-                  // Simple check: if lengths differ or last ID differs, update
-                  // Ideally we merge, but replacing is safer for consistency here
                   if (latestMessages.length !== prev.length || newLastId !== prevLastId) {
                       return latestMessages;
                   }
                   return prev;
               });
-          } catch (e) {
-              console.error("Polling error", e);
-          }
+          } catch (e) {}
       };
-
       const interval = setInterval(pollMessages, 3000);
       return () => clearInterval(interval);
   }, [driver?.id]);
 
-  // Scroll to bottom on new messages
   useEffect(() => {
     if (messagesEndRef.current && !loadingHistory) {
         messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -113,10 +99,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   }, [driver?.isHumanMode, driver?.humanModeEndsAt, driver?.id]);
 
   const loadDocuments = async (driverId: string) => {
-      try { 
-          const docs = await liveApiService.getDriverDocuments(driverId); 
-          setDocuments(docs || []); 
-      } catch(e) { setDocuments([]); }
+      try { const docs = await liveApiService.getDriverDocuments(driverId); setDocuments(docs || []); } catch(e) { setDocuments([]); }
   };
 
   const loadScheduledMessages = async (driverId: string) => {
@@ -152,9 +135,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       setLoadingHistory(true);
       try { 
           const olderMessages = await liveApiService.getDriverMessages(driver.id, 50, localMessages[0].timestamp); 
-          if (olderMessages.length > 0) {
-              setLocalMessages(prev => [...olderMessages, ...prev]);
-          } 
+          if (olderMessages.length > 0) setLocalMessages(prev => [...olderMessages, ...prev]);
       } catch(e) {} finally { setLoadingHistory(false); }
   };
 
@@ -166,7 +147,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   if (!driver) return null;
 
   const handleSend = async () => {
-    // BLOCKED PHRASES CHECK
     const BLOCKED = ['replace this', 'sample message', 'type your message'];
     if (BLOCKED.some(b => replyText.toLowerCase().includes(b))) {
         alert("Please replace placeholder text before sending.");
@@ -175,28 +155,25 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
     if (!replyText.trim() && !templateName && !selectedMedia) return;
     
-    // OPTIMISTIC UPDATE: Add message to UI immediately
+    // OPTIMISTIC UPDATE
     const tempMsg: Message = {
         id: `temp_${Date.now()}`,
         sender: 'agent',
-        text: replyText || (selectedMedia ? `[${selectedMedia.type}]` : ''),
+        text: replyText || (selectedMedia ? '' : ''),
         timestamp: Date.now(),
         type: selectedMedia ? selectedMedia.type as any : 'text',
+        imageUrl: selectedMedia?.type === 'image' ? selectedMedia.url : undefined,
+        videoUrl: selectedMedia?.type === 'video' ? selectedMedia.url : undefined,
         status: 'sending'
     };
     
-    if (!showSchedule) {
-        setLocalMessages(prev => [...prev, tempMsg]);
-    }
+    if (!showSchedule) setLocalMessages(prev => [...prev, tempMsg]);
 
     if (showSchedule && scheduleTime) {
         if (new Date(scheduleTime).getTime() <= Date.now()) { alert("Select a time in the future."); return; }
-        
         try { 
             await liveApiService.scheduleMessage([driver.id], { text: replyText, templateName: isTemplateMode ? templateName : undefined, mediaUrl: selectedMedia?.url, mediaType: selectedMedia?.type }, new Date(scheduleTime).getTime()); 
-            setReplyText(''); 
-            setShowSchedule(false);
-            setScheduleTime('');
+            setReplyText(''); setShowSchedule(false); setScheduleTime('');
             alert("Message Scheduled Successfully!");
             await loadScheduledMessages(driver.id); 
         } catch(e: any) { alert(`Failed: ${e.message}`); }
@@ -238,10 +215,22 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px] relative">
               <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4">
                 {localMessages.length >= 50 && <div className="flex justify-center"><button onClick={handleLoadMore} disabled={loadingHistory} className="text-xs bg-white border border-gray-300 rounded-full px-4 py-2">Load Previous</button></div>}
+                
                 {localMessages.map((msg) => (
                     <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
                         <div className={`max-w-[80%] rounded-2xl shadow-sm overflow-hidden ${msg.sender === 'driver' ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' : 'bg-blue-600 text-white rounded-tr-none'}`}>
-                            {(msg.headerImageUrl || msg.imageUrl) && (<div className="w-full aspect-video overflow-hidden bg-black/5 relative"><img src={msg.headerImageUrl || msg.imageUrl} className="w-full h-full object-cover" /></div>)}
+                            {/* MEDIA RENDERING */}
+                            {(msg.headerImageUrl || msg.imageUrl) && (
+                                <div className="w-full aspect-video overflow-hidden bg-black/5 relative cursor-pointer" onClick={() => window.open(msg.headerImageUrl || msg.imageUrl, '_blank')}>
+                                    <img src={msg.headerImageUrl || msg.imageUrl} className="w-full h-full object-cover" alt="attachment" />
+                                </div>
+                            )}
+                            {msg.videoUrl && (
+                                <div className="w-full aspect-video overflow-hidden bg-black relative">
+                                    <video src={msg.videoUrl} controls className="w-full h-full" />
+                                </div>
+                            )}
+
                             <div className="px-4 py-3">
                                 {msg.templateName && <div className="text-[10px] uppercase font-bold opacity-50 mb-1 flex items-center gap-1"><LayoutTemplate size={10} /> Template: {msg.templateName}</div>}
                                 {msg.text && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
@@ -259,27 +248,17 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                         <div className="flex justify-center"><span className="text-xs font-bold text-gray-400 uppercase tracking-wider bg-gray-100 px-3 py-1 rounded-full">Scheduled Queue</span></div>
                         {scheduledMessages.map(msg => (
                             <div key={msg.id} className="flex justify-end opacity-90">
-                                <div className={`max-w-[80%] rounded-2xl rounded-tr-none border-2 border-dashed p-4 relative group ${
-                                    msg.status === 'failed' ? 'border-red-300 bg-red-50' : 
-                                    msg.status === 'sent' ? 'border-green-300 bg-green-50' :
-                                    msg.status === 'processing' ? 'border-blue-300 bg-blue-50' :
-                                    'border-amber-300 bg-amber-50'
-                                }`}>
+                                <div className="max-w-[80%] rounded-2xl rounded-tr-none border-2 border-dashed p-4 relative group border-amber-300 bg-amber-50">
                                     <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white rounded p-1 shadow-sm z-10">
-                                        {msg.status !== 'sent' && <button onClick={() => handleSendNowScheduled(msg.id)} className="p-1 text-green-600" title="Send Now"><Zap size={14}/></button>}
-                                        {msg.status !== 'sent' && <button onClick={() => openEditModal(msg)} className="p-1 text-blue-600" title="Edit"><Edit2 size={14}/></button>}
+                                        <button onClick={() => handleSendNowScheduled(msg.id)} className="p-1 text-green-600" title="Send Now"><Zap size={14}/></button>
+                                        <button onClick={() => openEditModal(msg)} className="p-1 text-blue-600" title="Edit"><Edit2 size={14}/></button>
                                         <button onClick={() => handleCancelScheduled(msg.id)} className="p-1 text-red-600" title="Delete"><Trash2 size={14}/></button>
                                     </div>
-                                    <div className={`flex items-center gap-2 mb-2 text-xs font-bold ${
-                                        msg.status === 'failed' ? 'text-red-700' : 
-                                        msg.status === 'sent' ? 'text-green-700' :
-                                        'text-amber-700'
-                                    }`}>
+                                    <div className="flex items-center gap-2 mb-2 text-xs font-bold text-amber-700">
                                         <Clock size={12} /> {new Date(msg.scheduledTime).toLocaleString()}
                                         <span className="uppercase bg-white/50 px-1 rounded ml-auto">{msg.status}</span>
                                     </div>
                                     <p className="text-sm text-gray-700 italic">{msg.payload.text || '[Media Only]'}</p>
-                                    {msg.status === 'failed' && <p className="text-xs text-red-600 mt-2 flex items-center gap-1 font-bold"><AlertTriangle size={12} /> Delivery Failed</p>}
                                 </div>
                             </div>
                         ))}
@@ -289,6 +268,14 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
               </div>
 
               <div className="p-4 bg-white border-t border-gray-200 relative">
+                {selectedMedia && (
+                    <div className="absolute bottom-full left-0 right-0 bg-gray-100 p-2 border-t border-gray-200 flex items-center justify-between px-4">
+                        <div className="flex items-center gap-2 text-xs font-bold text-gray-700">
+                            <Paperclip size={12} /> Selected: {selectedMedia.type.toUpperCase()}
+                        </div>
+                        <button onClick={() => setSelectedMedia(null)}><X size={14} /></button>
+                    </div>
+                )}
                 {showSchedule && (
                     <div className="absolute bottom-[calc(100%+10px)] left-4 right-4 bg-white rounded-xl shadow-2xl border border-gray-200 p-4 z-20">
                         <div className="flex justify-between mb-2"><h4 className="font-bold text-gray-800">Schedule</h4><button onClick={() => setShowSchedule(false)}><X size={16} /></button></div>
@@ -296,7 +283,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     </div>
                 )}
                 <div className="flex gap-2 mb-3">
-                    <button onClick={() => setShowMediaPicker(true)} className="px-3 py-1.5 rounded-full text-xs font-bold border border-gray-200 flex items-center gap-1 hover:bg-gray-50"><Paperclip size={12} /> Attach</button>
+                    <button onClick={() => setShowMediaPicker(true)} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${selectedMedia ? 'bg-blue-100 text-blue-700 border-blue-200' : 'border-gray-200 hover:bg-gray-50'}`}><Paperclip size={12} /> Attach</button>
                     <button onClick={() => setIsTemplateMode(!isTemplateMode)} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${isTemplateMode ? 'bg-purple-100 text-purple-700 border-purple-200' : 'border-gray-200 hover:bg-gray-50'}`}><LayoutTemplate size={12} /> Template</button>
                     <button onClick={() => setShowSchedule(!showSchedule)} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${showSchedule ? 'bg-amber-100 text-amber-700 border-amber-200' : 'border-gray-200 hover:bg-gray-50'}`}><Clock size={12} /> Schedule</button>
                 </div>

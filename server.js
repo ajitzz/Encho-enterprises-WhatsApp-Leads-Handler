@@ -3,12 +3,13 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Redis } = require('@upstash/redis');
-const { Client: QStashClient, Receiver } = require('@upstash/qstash');
 const { Pool } = require('pg');
 const multer = require('multer');
 const { OAuth2Client } = require('google-auth-library');
 const axios = require('axios');
 const https = require('https');
+const { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 require('dotenv').config();
 
 // --- OBSERVABILITY ---
@@ -22,25 +23,28 @@ const logger = {
 const SYSTEM_CONFIG = {
     META_TIMEOUT: 15000,
     DB_CONNECTION_TIMEOUT: 10000,
-    CACHE_TTL_SETTINGS: 600
+    CACHE_TTL_SETTINGS: 600,
+    AWS_REGION: process.env.AWS_REGION || 'us-east-1',
+    AWS_BUCKET: process.env.AWS_BUCKET_NAME || 'uber-fleet-assets'
 };
 
-// --- SERVICES INITIALIZATION ---
+// --- S3 CLIENT SETUP ---
+const s3Client = new S3Client({
+    region: SYSTEM_CONFIG.AWS_REGION,
+    credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+    }
+});
 
+const upload = multer({ storage: multer.memoryStorage() });
+
+// --- DB CONNECTION ---
 let pgPool = null;
-
-const resolveDbUrl = () =>
-    process.env.POSTGRES_URL ||
-    process.env.DATABASE_URL ||
-    process.env.POSTGRES_PRISMA_URL ||
-    process.env.POSTGRES_URL_NON_POOLING ||
-    "";
-
 const getDb = () => {
     if (!pgPool) {
-        const dbUrl = resolveDbUrl();
-        if (!dbUrl) throw new Error("No Postgres connection string found. Set POSTGRES_URL or DATABASE_URL.");
-
+        const dbUrl = process.env.POSTGRES_URL || process.env.DATABASE_URL;
+        if (!dbUrl) throw new Error("No Postgres connection string found.");
         pgPool = new Pool({
             connectionString: dbUrl,
             ssl: { rejectUnauthorized: false },
@@ -49,13 +53,11 @@ const getDb = () => {
             idleTimeoutMillis: 1000,
             allowExitOnIdle: true
         });
-
         pgPool.on('error', (err) => logger.error('DB Pool Error', { error: err.message }));
     }
     return pgPool;
 };
 
-// Robust DB Wrapper with Retry Logic for Serverless
 const withDb = async (operation) => {
     let client;
     try {
@@ -65,9 +67,7 @@ const withDb = async (operation) => {
         logger.error("DB Operation Failed", { error: e.message });
         throw e;
     } finally {
-        if (client) {
-            try { client.release(); } catch (e) { console.error("Failed to release client", e); }
-        }
+        if (client) try { client.release(); } catch (e) {}
     }
 };
 
@@ -76,9 +76,7 @@ const redis = new Redis({
     token: process.env.UPSTASH_REDIS_REST_TOKEN || 'mock'
 });
 
-const authClient = new OAuth2Client(process.env.VITE_GOOGLE_CLIENT_ID);
-
-// --- META API CLIENT (AXIOS) ---
+// --- META API CLIENT ---
 const getMetaClient = () => {
     return axios.create({
         httpsAgent: new https.Agent({ keepAlive: true }),
@@ -90,34 +88,26 @@ const getMetaClient = () => {
     });
 };
 
-// --- OUTBOUND MESSAGING CORE ---
+// --- CORE: SEND TO WHATSAPP ---
 const sendToMeta = async (phoneNumber, payload) => {
-    // 1. SAFETY CHECK: Block Placeholder Messages
-    if (payload.type === 'text' && payload.text && payload.text.body) {
+    // 1. Block Placeholders
+    if (payload.type === 'text' && payload.text?.body) {
         const body = payload.text.body.toLowerCase();
-        const forbidden = ['replace this', 'sample message', 'type your message', 'insert text'];
-        if (forbidden.some(f => body.includes(f))) {
-            logger.warn("🛑 BLOCKED: Placeholder message detected.", { to: phoneNumber });
+        if (['replace this', 'sample message', 'type your message'].some(f => body.includes(f))) {
             throw new Error("Message blocked: Contains placeholder text.");
         }
     }
 
-    const phoneId = process.env.PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID;
-    if (!phoneId) throw new Error("PHONE_NUMBER_ID missing in env");
+    const phoneId = process.env.PHONE_NUMBER_ID;
+    if (!phoneId) throw new Error("PHONE_NUMBER_ID missing");
     
-    // Clean Phone Number
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
     if (!to) throw new Error("Invalid phone number");
 
     const url = `https://graph.facebook.com/v18.0/${phoneId}/messages`;
     
     try {
-        const fullPayload = {
-            messaging_product: "whatsapp",
-            recipient_type: "individual",
-            to,
-            ...payload
-        };
+        const fullPayload = { messaging_product: "whatsapp", recipient_type: "individual", to, ...payload };
         await getMetaClient().post(url, fullPayload);
     } catch (e) {
         logger.error("Meta Send Error", { error: e.response?.data || e.message, to });
@@ -131,19 +121,14 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 // --- BOT ENGINE ---
-
 const getBotSettings = async () => {
-    // Try Redis
     try {
         const cached = await redis.get(`bot:settings:${process.env.PHONE_NUMBER_ID}`);
         if (cached) return cached;
     } catch (_) {}
-
-    // Fallback DB
     return await withDb(async (client) => {
         const res = await client.query(`SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1`);
         if (res.rows.length > 0) {
-            // Cache for 10 mins
             try { await redis.set(`bot:settings:${process.env.PHONE_NUMBER_ID}`, res.rows[0].settings, { ex: 600 }); } catch (_) {}
             return res.rows[0].settings;
         }
@@ -151,25 +136,19 @@ const getBotSettings = async () => {
     });
 };
 
-// --- INBOUND PROCESSING CORE ---
+// --- INBOUND MESSAGE PROCESSOR ---
 const processMessageInternal = async (message, contact, phoneId) => {
     if (!message || !phoneId) return;
-
-    // CRITICAL: Normalize phone number (Remove +, spaces, dashes)
     const from = message.from.replace(/\D/g, '');
     const name = contact?.profile?.name || "Unknown";
     
-    // Extract text content safely
     let textBody = '';
     if (message.type === 'text') textBody = message.text?.body;
-    else if (message.type === 'interactive') {
-        textBody = message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || '[Interactive]';
-    } else {
-        textBody = `[${message.type}]`;
-    }
+    else if (message.type === 'interactive') textBody = message.interactive?.button_reply?.title || '[Interactive]';
+    else textBody = `[${message.type.toUpperCase()}]`;
 
     await withDb(async (client) => {
-        // 1. Upsert Candidate (Driver)
+        // 1. Upsert Candidate
         const upsertQuery = `
             INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at) 
             VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
@@ -180,7 +159,7 @@ const processMessageInternal = async (message, contact, phoneId) => {
         const resDb = await client.query(upsertQuery, [crypto.randomUUID(), from, name, Date.now(), textBody]);
         const candidate = resDb.rows[0];
 
-        // 2. Save Incoming Message
+        // 2. Save Message
         const insertMsgQuery = `
             INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at) 
             VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW()) 
@@ -188,161 +167,223 @@ const processMessageInternal = async (message, contact, phoneId) => {
         `;
         await client.query(insertMsgQuery, [crypto.randomUUID(), candidate.id, textBody, message.type, message.id]);
 
-        // 3. BOT LOGIC
-        if (candidate.is_human_mode) {
-            if (candidate.human_mode_ends_at && Date.now() > Number(candidate.human_mode_ends_at)) {
-                await client.query(`UPDATE candidates SET is_human_mode = FALSE WHERE id = $1`, [candidate.id]);
-            } else {
-                logger.info(`Skipping bot for ${from} (Human Mode Active)`);
-                return;
-            }
-        }
+        // 3. Bot Logic
+        if (candidate.is_human_mode) return;
 
         const settings = await getBotSettings();
-        if (!settings || !settings.nodes || settings.nodes.length === 0) return;
+        if (!settings?.nodes?.length) return;
 
         let nextNode = null;
         if (!candidate.current_node_id) {
             nextNode = settings.nodes.find(n => n.type === 'start') || settings.nodes[0];
-            if (nextNode) {
-                const edge = settings.edges?.find(e => e.source === nextNode.id);
-                if (edge) nextNode = settings.nodes.find(n => n.id === edge.target);
-            }
+            const edge = settings.edges?.find(e => e.source === nextNode?.id);
+            if (edge) nextNode = settings.nodes.find(n => n.id === edge.target);
         } else {
             const edges = settings.edges?.filter(e => e.source === candidate.current_node_id) || [];
-            if (edges.length === 1) {
-                nextNode = settings.nodes.find(n => n.id === edges[0].target);
-            } else if (edges.length > 1) {
-                if (message.type === 'interactive') {
-                    const btnId = message.interactive?.button_reply?.id || message.interactive?.button_reply?.title;
-                    const matchingEdge = edges.find(e => e.sourceHandle === btnId);
-                    if (matchingEdge) nextNode = settings.nodes.find(n => n.id === matchingEdge.target);
-                }
-                if (!nextNode) return;
+            if (edges.length === 1) nextNode = settings.nodes.find(n => n.id === edges[0].target);
+            else if (message.type === 'interactive') {
+                const btnId = message.interactive?.button_reply?.id || message.interactive?.button_reply?.title;
+                const match = edges.find(e => e.sourceHandle === btnId);
+                if (match) nextNode = settings.nodes.find(n => n.id === match.target);
             }
         }
 
-        if (nextNode && nextNode.data) {
-            if (nextNode.data.content) {
-                const payload = { type: 'text', text: { body: nextNode.data.content } };
-                if (nextNode.data.type === 'buttons' && nextNode.data.buttons) {
-                    payload.type = 'interactive';
-                    payload.interactive = {
-                        type: "button",
-                        body: { text: nextNode.data.content },
-                        action: {
-                            buttons: nextNode.data.buttons.map(b => ({
-                                type: "reply",
-                                reply: { id: b.id || b.title, title: b.title.substring(0, 20) } 
-                            }))
-                        }
-                    };
-                }
-                await sendToMeta(from, payload);
-                await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), candidate.id, nextNode.data.content]);
-                await client.query(`UPDATE candidates SET current_node_id = $1, last_message_at = $2 WHERE id = $3`, [nextNode.id, Date.now(), candidate.id]);
+        if (nextNode?.data?.content) {
+            const payload = { type: 'text', text: { body: nextNode.data.content } };
+            if (nextNode.data.type === 'buttons' && nextNode.data.buttons) {
+                payload.type = 'interactive';
+                payload.interactive = {
+                    type: "button",
+                    body: { text: nextNode.data.content },
+                    action: { buttons: nextNode.data.buttons.map(b => ({ type: "reply", reply: { id: b.id || b.title, title: b.title.substring(0, 20) } })) }
+                };
             }
+            await sendToMeta(from, payload);
+            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), candidate.id, nextNode.data.content]);
+            await client.query(`UPDATE candidates SET current_node_id = $1, last_message_at = $2 WHERE id = $3`, [nextNode.id, Date.now(), candidate.id]);
         }
     });
 };
 
-// --- SCHEDULER: PROCESS QUEUE ---
-const processQueueInternal = async () => {
-    let jobsToProcess = [];
-    
-    // 1. Fetch and Lock Pending Jobs
-    await withDb(async (client) => {
-        // Cleanup stuck jobs > 10 mins
-        await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
-
-        // Select jobs due for sending
-        const result = await client.query(`
-            SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
-            FROM scheduled_messages sm
-            JOIN candidates c ON sm.candidate_id = c.id
-            WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
-            LIMIT 50
-            FOR UPDATE OF sm SKIP LOCKED
-        `, [Date.now()]);
-
-        if (result.rows.length > 0) {
-            jobsToProcess = result.rows;
-            const ids = jobsToProcess.map(j => j.id);
-            // Mark as processing to release DB lock quickly
-            await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`, [ids]);
-        }
-    });
-
-    if (jobsToProcess.length === 0) return 0;
-    logger.info(`Scheduler: Processing ${jobsToProcess.length} jobs`);
-
-    let processedCount = 0;
-    
-    // 2. Process Jobs (Iterate)
-    for (const job of jobsToProcess) {
-        try {
-            let payload = job.payload;
-            if (typeof payload === 'string') payload = JSON.parse(payload);
-
-            let metaPayload = {};
-            
-            // Construct Meta Payload
-            if (payload.templateName) {
-                metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
-            } else if (payload.mediaUrl) {
-                const type = payload.mediaType || 'image';
-                const caption = payload.text ? payload.text : undefined;
-                metaPayload = { type, [type]: { link: payload.mediaUrl, caption } };
-            } else {
-                const bodyText = payload.text || ' ';
-                metaPayload = { type: 'text', text: { body: bodyText } };
-            }
-
-            // Send via WhatsApp
-            await sendToMeta(job.phone_number, metaPayload);
-
-            // Update DB (Success)
-            await withDb(async (client) => {
-                await client.query(`
-                    INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
-                    VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
-                `, [crypto.randomUUID(), job.candidate_id, payload.text || `[${payload.templateName || payload.mediaType}]`, payload.mediaType || 'text']);
-
-                await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
-                    [payload.text || 'Scheduled Message', Date.now(), job.candidate_id]);
-
-                await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [job.id]);
-            });
-            processedCount++;
-
-        } catch (err) {
-            logger.error("Scheduler Job Failed", { id: job.id, error: err.message });
-            await withDb(async (client) => {
-                await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
-            });
-        }
-    }
-    return processedCount;
-};
-
-
-// --- ROUTES ---
+// --- ROUTER ---
 const apiRouter = express.Router();
 
-// CRON Endpoint (Called by App.tsx Heartbeat or External Cron)
-apiRouter.get('/cron/process-queue', async (req, res) => {
+// 1. S3 MEDIA ROUTES (NEW)
+apiRouter.get('/media', async (req, res) => {
+    const path = req.query.path || '';
+    const prefix = path === '/' ? '' : (path.startsWith('/') ? path.substring(1) : path) + '/';
+    
     try {
-        const count = await processQueueInternal();
-        res.status(200).json({ success: true, processed: count });
+        const command = new ListObjectsV2Command({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Prefix: prefix,
+            Delimiter: '/'
+        });
+        const data = await s3Client.send(command);
+        
+        const folders = (data.CommonPrefixes || []).map(p => ({
+            id: p.Prefix,
+            name: p.Prefix.replace(prefix, '').replace('/', ''),
+            parent_path: path
+        }));
+
+        const files = (data.Contents || []).map(o => {
+            const filename = o.Key.replace(prefix, '');
+            if (!filename) return null; // Filter out the folder placeholder itself
+            
+            // Generate public URL (assuming public read) OR signed URL
+            const url = `https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.${SYSTEM_CONFIG.AWS_REGION}.amazonaws.com/${o.Key}`;
+            let type = 'document';
+            if (filename.match(/\.(jpg|jpeg|png|gif|webp)$/i)) type = 'image';
+            if (filename.match(/\.(mp4|mov|webm)$/i)) type = 'video';
+            
+            return { id: o.Key, url, filename, type };
+        }).filter(Boolean);
+
+        res.json({ folders, files });
     } catch (e) {
-        logger.error("Cron Error", { error: e.message });
-        res.status(500).json({ success: false, error: e.message });
+        logger.error("S3 List Error", { error: e.message });
+        res.status(500).json({ error: "Failed to list media" });
     }
 });
 
+apiRouter.post('/media/upload', upload.single('file'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: "No file provided" });
+    
+    const path = req.body.path || '';
+    const prefix = path === '/' ? '' : (path.startsWith('/') ? path.substring(1) : path) + '/';
+    const key = `${prefix}${req.file.originalname}`;
+
+    try {
+        await s3Client.send(new PutObjectCommand({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Key: key,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype,
+            // ACL: 'public-read' // Enable if bucket policies allow, otherwise use Bucket Policy
+        }));
+        res.json({ success: true, key });
+    } catch (e) {
+        logger.error("S3 Upload Error", { error: e.message });
+        res.status(500).json({ error: "Upload failed" });
+    }
+});
+
+apiRouter.delete('/media/files/:id(*)', async (req, res) => {
+    try {
+        await s3Client.send(new DeleteObjectCommand({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Key: req.params.id
+        }));
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: "Delete failed" });
+    }
+});
+
+apiRouter.post('/media/folders', async (req, res) => {
+    const { name, parentPath } = req.body;
+    const prefix = parentPath === '/' ? '' : (parentPath.startsWith('/') ? parentPath.substring(1) : parentPath) + '/';
+    const key = `${prefix}${name}/`; // Ending with / creates a folder concept in S3
+
+    try {
+        await s3Client.send(new PutObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key }));
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: "Folder creation failed" });
+    }
+});
+
+// 2. MESSAGING ROUTES
+apiRouter.post('/drivers/:id/messages', async (req, res, next) => {
+    const { text, mediaUrl, mediaType } = req.body;
+    try {
+        await withDb(async (client) => {
+            const dRes = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
+            if (dRes.rows.length === 0) return res.status(404).json({error: "Driver not found"});
+            const phone = dRes.rows[0].phone_number;
+
+            // Construct Payload
+            let payload;
+            if (mediaUrl) {
+                payload = { 
+                    type: mediaType || 'image', 
+                    [mediaType || 'image']: { link: mediaUrl, caption: text } 
+                };
+            } else {
+                payload = { type: 'text', text: { body: text } };
+            }
+
+            await sendToMeta(phone, payload);
+
+            // Store URL in text field for history if it's media
+            // Format: JSON string if media, else plain text
+            const dbText = mediaUrl ? JSON.stringify({ url: mediaUrl, caption: text }) : text;
+            const dbType = mediaUrl ? (mediaType || 'image') : 'text';
+
+            await client.query(
+                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
+                [crypto.randomUUID(), req.params.id, dbText, dbType]
+            );
+            
+            await client.query(
+                `UPDATE candidates SET last_message = $1, last_message_at = $2, is_human_mode = TRUE WHERE id = $3`,
+                [text || '[Media Sent]', Date.now(), req.params.id]
+            );
+        });
+        res.json({ success: true });
+    } catch (e) { next(e); }
+});
+
+apiRouter.get('/drivers/:id/messages', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const limit = parseInt(req.query.limit) || 50;
+            const resDb = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT $2', [req.params.id, limit]);
+            
+            // Map and parse JSON content for media
+            const messages = resDb.rows.map(r => {
+                let text = r.text;
+                let imageUrl = null;
+                let videoUrl = null;
+
+                // Check if text is JSON media payload
+                if (['image', 'video', 'document'].includes(r.type) && r.text?.startsWith('{')) {
+                    try {
+                        const parsed = JSON.parse(r.text);
+                        text = parsed.caption || '';
+                        if (r.type === 'image') imageUrl = parsed.url;
+                        if (r.type === 'video') videoUrl = parsed.url;
+                    } catch (e) {
+                        // fallback if not JSON
+                        text = r.text;
+                    }
+                }
+
+                return { 
+                    id: r.id, 
+                    sender: r.direction === 'in' ? 'driver' : 'agent', 
+                    text, 
+                    imageUrl,
+                    videoUrl,
+                    timestamp: new Date(r.created_at).getTime(), 
+                    type: r.type || 'text', 
+                    status: r.status, 
+                    whatsapp_message_id: r.whatsapp_message_id 
+                };
+            });
+            
+            res.json(messages.reverse());
+        });
+    } catch (e) { 
+        if (e.code === '42P01') res.json([]);
+        else res.status(500).json({ error: e.message });
+    }
+});
+
+// 3. WEBHOOK & CRON
 apiRouter.get('/webhook', (req, res) => {
-    const VERIFY_TOKEN = process.env.VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN;
-    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
+    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
         res.status(200).send(req.query['hub.challenge']);
     } else {
         res.sendStatus(403);
@@ -353,48 +394,15 @@ apiRouter.post('/webhook', async (req, res) => {
     res.sendStatus(200); 
     try {
         const body = req.body;
-        if (body.object === 'whatsapp_business_account') {
-            const entry = body.entry?.[0];
-            const changes = entry?.changes?.[0];
-            const value = changes?.value;
-            if (value?.messages) {
-                const phoneId = value.metadata?.phone_number_id;
-                const contacts = value.contacts || [];
-                for (const message of value.messages) {
-                    const contact = contacts.find(c => c.wa_id === message.from) || {};
-                    processMessageInternal(message, contact, phoneId).catch(err => 
-                        logger.error("Msg Process Error", { err: err.message, from: message.from })
-                    );
-                }
+        if (body.object === 'whatsapp_business_account' && body.entry?.[0]?.changes?.[0]?.value?.messages) {
+            const value = body.entry[0].changes[0].value;
+            const contacts = value.contacts || [];
+            for (const message of value.messages) {
+                const contact = contacts.find(c => c.wa_id === message.from) || {};
+                processMessageInternal(message, contact, value.metadata?.phone_number_id).catch(e => logger.error(e));
             }
         }
-    } catch (e) {
-        logger.error("Webhook Parse Error", { error: e.message });
-    }
-});
-
-apiRouter.post('/ai/generate', async (req, res) => {
-    const { contents, config, model } = req.body;
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return res.status(500).json({error: "Missing GEMINI_API_KEY"});
-    const targetModel = model || 'gemini-1.5-flash'; 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey}`;
-    const payload = {
-        contents: typeof contents === 'string' ? [{ parts: [{ text: contents }] }] : contents,
-        generationConfig: {}
-    };
-    if (config) {
-        if (config.systemInstruction) payload.systemInstruction = { parts: [{ text: config.systemInstruction }] };
-        if (config.responseMimeType) payload.generationConfig.responseMimeType = config.responseMimeType;
-        if (config.responseSchema) payload.generationConfig.responseSchema = config.responseSchema;
-    }
-    try {
-        const response = await axios.post(url, payload);
-        const text = response.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-        res.json({ text });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { logger.error(e); }
 });
 
 apiRouter.get('/drivers', async (req, res, next) => {
@@ -412,37 +420,6 @@ apiRouter.get('/drivers', async (req, res, next) => {
                 isHumanMode: row.is_human_mode
             })));
         });
-    } catch (e) { next(e); }
-});
-
-apiRouter.get('/drivers/:id/messages', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const limit = parseInt(req.query.limit) || 50;
-            const resDb = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT $2', [req.params.id, limit]);
-            res.json(resDb.rows.map(r => ({ id: r.id, sender: r.direction === 'in' ? 'driver' : 'agent', text: r.text, timestamp: new Date(r.created_at).getTime(), type: r.type || 'text', status: r.status, whatsapp_message_id: r.whatsapp_message_id })).reverse());
-        });
-    } catch (e) { 
-        if (e.code === '42P01') res.json([]);
-        else next(e); 
-    }
-});
-
-apiRouter.post('/drivers/:id/messages', async (req, res, next) => {
-    const { text, mediaUrl, mediaType } = req.body;
-    try {
-        await withDb(async (client) => {
-            const dRes = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
-            if (dRes.rows.length === 0) return res.status(404).json({error: "Driver not found"});
-            const phone = dRes.rows[0].phone_number;
-            const payload = mediaUrl 
-                ? { type: mediaType || 'image', [mediaType || 'image']: { link: mediaUrl, caption: text } }
-                : { type: 'text', text: { body: text } };
-            await sendToMeta(phone, payload);
-            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), req.params.id, text || '[Media]']);
-            await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2, is_human_mode = TRUE WHERE id = $3`, [text || '[Media]', Date.now(), req.params.id]);
-        });
-        res.json({ success: true });
     } catch (e) { next(e); }
 });
 
