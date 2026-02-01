@@ -1,9 +1,9 @@
 
--- ⚠️ WARNING: THIS WILL RESET YOUR DATABASE ⚠️
+-- ⚠️ WARNING: THIS WILL RESET YOUR DATABASE STRUCTURE ⚠️
 
 BEGIN;
 
--- 1. Clean up existing tables
+-- 1. Clean up existing tables to ensure clean slate
 DROP TABLE IF EXISTS scheduled_messages CASCADE;
 DROP TABLE IF EXISTS candidate_messages CASCADE;
 DROP TABLE IF EXISTS driver_documents CASCADE;
@@ -41,7 +41,7 @@ CREATE TABLE candidate_messages (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 5. Scheduled Messages (The Core Fix)
+-- 5. Scheduled Messages
 CREATE TABLE scheduled_messages (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
