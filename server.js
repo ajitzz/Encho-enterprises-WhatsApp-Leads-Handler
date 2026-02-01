@@ -161,6 +161,7 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         const name = contact?.profile?.name || "Unknown";
         const textBody = message.text?.body || `[${message.type}]`;
         
+        // Use the exact schema columns
         const upsertQuery = `
             INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at) 
             VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
@@ -210,7 +211,7 @@ const processQueueInternal = async () => {
         let jobsToProcess = [];
 
         await withDb(async (client) => {
-            // SAFEGUARD: Check if table exists to avoid log spamming on new deploys
+            // Check if table exists (safe check)
             const check = await client.query(`SELECT to_regclass('public.scheduled_messages')`);
             if(!check.rows[0].to_regclass) return;
 
@@ -219,7 +220,7 @@ const processQueueInternal = async () => {
 
             await client.query('BEGIN');
             
-            // Lock rows for processing
+            // Lock rows for processing. Schema has 'status' checked constraint.
             const result = await client.query(`
                 SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
                 FROM scheduled_messages sm
@@ -330,7 +331,7 @@ apiRouter.get('/debug/status', async (req, res, next) => {
     }
 });
 
-// SYSTEM RESET ROUTE
+// SYSTEM RESET ROUTE (Executes the user-provided reset logic)
 apiRouter.post('/system/hard-reset', async (req, res, next) => {
     try {
         await withDb(async (client) => {
@@ -341,7 +342,7 @@ apiRouter.post('/system/hard-reset', async (req, res, next) => {
                 DROP TABLE IF EXISTS bot_versions CASCADE;
                 DROP TABLE IF EXISTS candidates CASCADE;
             `);
-            // Init will recreate
+            // Init will recreate tables based on the new schema
             await init(); 
         });
         res.json({ success: true });
@@ -430,16 +431,7 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
         if (isNaN(scheduledTime)) return res.status(400).json({ ok: false, error: "Invalid timestamp" });
 
         await withDb(async (client) => {
-            // Auto-create table if missing
-            await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
-                payload JSONB,
-                scheduled_time BIGINT,
-                status VARCHAR(50) DEFAULT 'pending',
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            );`);
-
+            // NOTE: Table creation removed from here as init() handles it now.
             for (const driverId of driverIds) {
                  await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, 
                     [crypto.randomUUID(), driverId, message, scheduledTime]);
@@ -602,58 +594,68 @@ const init = async () => {
         await withDb(async (client) => {
             await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
             
+            // Candidates
             await client.query(`CREATE TABLE IF NOT EXISTS candidates (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 phone_number VARCHAR(50) UNIQUE NOT NULL,
                 name VARCHAR(255),
-                stage VARCHAR(50) DEFAULT 'New',
+                stage VARCHAR(50) NOT NULL DEFAULT 'New',
                 last_message_at BIGINT,
                 last_message TEXT,
                 notes TEXT,
-                source VARCHAR(50) DEFAULT 'Organic',
+                source VARCHAR(50) NOT NULL DEFAULT 'Organic',
                 current_node_id VARCHAR(255),
-                is_human_mode BOOLEAN DEFAULT FALSE,
+                is_human_mode BOOLEAN NOT NULL DEFAULT FALSE,
                 human_mode_ends_at BIGINT,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );`);
             
+            // Messages
             await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
-                direction VARCHAR(10),
+                candidate_id UUID NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+                direction VARCHAR(10) NOT NULL CHECK (direction IN ('in','out')),
                 text TEXT,
-                type VARCHAR(50),
-                status VARCHAR(50),
+                type VARCHAR(50) NOT NULL DEFAULT 'text',
+                status VARCHAR(50) NOT NULL DEFAULT 'sent',
                 whatsapp_message_id VARCHAR(255) UNIQUE,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );`);
             
+            // Scheduled Messages (Strict Constraints)
             await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
-                payload JSONB,
-                scheduled_time BIGINT,
-                status VARCHAR(50) DEFAULT 'pending',
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                candidate_id UUID NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+                payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                scheduled_time BIGINT NOT NULL,
+                status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','processing','sent','failed')),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );`);
             
+            // Bot Versions
             await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 phone_number_id VARCHAR(50),
                 version_number INT,
                 status VARCHAR(20),
                 settings JSONB,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );`);
 
+            // Documents
             await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
-                type VARCHAR(50),
-                url TEXT,
-                status VARCHAR(50) DEFAULT 'pending',
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                candidate_id UUID NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+                type VARCHAR(50) NOT NULL,
+                url TEXT NOT NULL,
+                status VARCHAR(50) NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );`);
+            
+            // Indices (Safe creation)
+            await client.query(`CREATE INDEX IF NOT EXISTS idx_candidates_phone ON candidates(phone_number);`);
+            await client.query(`CREATE INDEX IF NOT EXISTS idx_candidates_last_msg ON candidates(last_message_at DESC);`);
+            await client.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_status ON scheduled_messages(status, scheduled_time);`);
         });
         logger.info("DB Schema Verified (Tables Ready)");
     } catch (e) {
