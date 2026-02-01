@@ -90,8 +90,8 @@ const signS3Url = async (url) => {
         const command = new GetObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key });
         return await getSignedUrl(s3Client, command, { expiresIn: 3600 });
     } catch (e) {
-        logger.warn("S3 Signing Failed (File might be missing)", { url, error: e.message });
-        return url; // Return original URL if signing fails
+        // Return original URL if signing fails (e.g., file deleted), prevent crash
+        return url; 
     }
 };
 
@@ -159,7 +159,6 @@ const apiRouter = express.Router();
 // --- 0. SELF-HEALING DB INIT ---
 const ensureTablesExist = async () => {
     await withDb(async (client) => {
-        // Driver Documents Table
         await client.query(`
             CREATE TABLE IF NOT EXISTS driver_documents (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -170,7 +169,6 @@ const ensureTablesExist = async () => {
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );
         `);
-        // Scheduled Messages Table
         await client.query(`
              CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -199,6 +197,7 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
                 const mediaRes = await prepareMediaPayload(mediaUrl, mediaType || 'image', text);
                 metaPayload = mediaRes.metaPayload;
                 dbType = mediaRes.dbType;
+                // Save stringified meta for history reconstruction
                 dbText = JSON.stringify({ url: mediaUrl, caption: text, sentAs: dbType });
             } else {
                 metaPayload = { type: 'text', text: { body: text } };
@@ -227,6 +226,7 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
             
             const messages = await Promise.all(resDb.rows.map(async (r) => {
                 let text = r.text, mediaUrl = null;
+                // Parse old JSON messages safely
                 if (['image', 'video', 'document'].includes(r.type) && r.text && r.text.startsWith('{')) {
                     try {
                         const parsed = JSON.parse(r.text);
@@ -281,6 +281,7 @@ apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => {
                 if (typeof payload === 'string') {
                     try { payload = JSON.parse(payload); } catch(e) { payload = { text: payload }; }
                 }
+                // Sign URL for preview
                 if (payload.mediaUrl) payload.mediaUrl = await signS3Url(payload.mediaUrl);
                 
                 return {
@@ -319,7 +320,7 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
 
             if (text !== undefined) payload.text = text;
             
-            // FIX: Pass payload object directly for JSONB
+            // FIX: Pass payload object directly for JSONB update
             if (scheduledTime) {
                 await client.query(`UPDATE scheduled_messages SET payload = $1, scheduled_time = $2 WHERE id = $3`, [payload, scheduledTime, req.params.id]);
             } else {
@@ -407,7 +408,6 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ... (Other Routes: Bot, Media, Webhook remain standard) ...
 apiRouter.get('/bot/settings', async (req, res) => {
     try {
         const cached = await redis.get(`bot:settings:${process.env.PHONE_NUMBER_ID}`);
