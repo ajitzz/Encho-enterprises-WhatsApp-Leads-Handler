@@ -5,7 +5,8 @@ const { Redis } = require('@upstash/redis');
 const { Pool } = require('pg');
 const multer = require('multer');
 const { OAuth2Client } = require('google-auth-library');
-const axios = require('axios'); // Required for direct AI API calls
+const axios = require('axios'); // Integrated for direct API calls
+const https = require('https'); // Moved to top level for optimization
 require('dotenv').config();
 
 // --- OBSERVABILITY ---
@@ -76,7 +77,6 @@ const redis = new Redis({
 const authClient = new OAuth2Client(process.env.VITE_GOOGLE_CLIENT_ID);
 
 const getMetaClient = () => {
-    const https = require('https');
     return axios.create({
         httpsAgent: new https.Agent({ keepAlive: true }),
         timeout: SYSTEM_CONFIG.META_TIMEOUT,
@@ -218,6 +218,7 @@ const processQueueInternal = async () => {
             await client.query('BEGIN');
             
             // Lock rows for processing using SKIP LOCKED for concurrency safety.
+            // Using 'FOR UPDATE OF sm' ensures we lock the specific rows in the joined query.
             const result = await client.query(`
                 SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
                 FROM scheduled_messages sm
@@ -298,7 +299,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
     }
 });
 
-// --- AI GENERATION ROUTES (Replaces ESM SDK) ---
+// --- AI GENERATION ROUTES (Direct API via Axios) ---
 
 apiRouter.post('/ai/generate', async (req, res) => {
     const { contents, config, model } = req.body;
@@ -309,7 +310,6 @@ apiRouter.post('/ai/generate', async (req, res) => {
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`;
     
-    // Map frontend 'contents' (string or SDK object) to REST API format
     let apiContents = [];
     if (typeof contents === 'string') {
         apiContents = [{ role: 'user', parts: [{ text: contents }] }];
