@@ -5,6 +5,7 @@ const { Redis } = require('@upstash/redis');
 const { Pool } = require('pg');
 const multer = require('multer');
 const { OAuth2Client } = require('google-auth-library');
+const axios = require('axios'); // Required for direct AI API calls
 require('dotenv').config();
 
 // --- OBSERVABILITY ---
@@ -75,7 +76,6 @@ const redis = new Redis({
 const authClient = new OAuth2Client(process.env.VITE_GOOGLE_CLIENT_ID);
 
 const getMetaClient = () => {
-    const axios = require('axios');
     const https = require('https');
     return axios.create({
         httpsAgent: new https.Agent({ keepAlive: true }),
@@ -210,9 +210,6 @@ const processQueueInternal = async () => {
     let processedCount = 0;
     let jobsToProcess = [];
 
-    // Removed the CREATE TABLE safeguard here. It belongs in init().
-    // Removed outer try-catch to allow critical errors to propagate to the route handler.
-
     await withDb(async (client) => {
         // Reset stuck jobs (processing > 10 mins)
         await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
@@ -221,7 +218,6 @@ const processQueueInternal = async () => {
             await client.query('BEGIN');
             
             // Lock rows for processing using SKIP LOCKED for concurrency safety.
-            // Important: Use 'FOR UPDATE OF sm' to only lock the message rows, NOT the candidate rows.
             const result = await client.query(`
                 SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
                 FROM scheduled_messages sm
@@ -297,11 +293,83 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
         const count = await processQueueInternal();
         res.status(200).json({ success: true, processed: count });
     } catch (e) {
-        // Return 200 with error to prevent 500 alerting systems, but log error
         logger.error("Cron Error", { error: e.message });
         res.status(200).json({ success: false, error: e.message });
     }
 });
+
+// --- AI GENERATION ROUTES (Replaces ESM SDK) ---
+
+apiRouter.post('/ai/generate', async (req, res) => {
+    const { contents, config, model } = req.body;
+    const geminiModel = model || 'gemini-2.0-flash-exp';
+    const apiKey = process.env.GEMINI_API_KEY;
+    
+    if (!apiKey) return res.status(500).json({error: "Missing GEMINI_API_KEY"});
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`;
+    
+    // Map frontend 'contents' (string or SDK object) to REST API format
+    let apiContents = [];
+    if (typeof contents === 'string') {
+        apiContents = [{ role: 'user', parts: [{ text: contents }] }];
+    } else if (Array.isArray(contents)) {
+        apiContents = contents;
+    } else if (typeof contents === 'object') {
+        apiContents = [contents];
+    }
+
+    const payload = {
+        contents: apiContents,
+        generationConfig: {},
+    };
+
+    if (config) {
+        if (config.systemInstruction) {
+            payload.systemInstruction = { parts: [{ text: config.systemInstruction }] };
+        }
+        if (config.responseMimeType) payload.generationConfig.responseMimeType = config.responseMimeType;
+        if (config.responseSchema) payload.generationConfig.responseSchema = config.responseSchema;
+        if (config.temperature) payload.generationConfig.temperature = config.temperature;
+    }
+
+    try {
+        const response = await axios.post(url, payload);
+        const text = response.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        res.json({ text });
+    } catch (e) {
+        logger.error("AI Generation Error", { error: e.response?.data || e.message });
+        res.status(500).json({ error: e.response?.data || e.message });
+    }
+});
+
+apiRouter.post('/ai/assistant', async (req, res) => {
+    const { input, history } = req.body;
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return res.status(500).json({error: "Missing GEMINI_API_KEY"});
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`;
+
+    const apiContents = [...(history || [])];
+    if (input) {
+        apiContents.push({ role: 'user', parts: [{ text: input }] });
+    }
+
+    const payload = {
+        contents: apiContents,
+        systemInstruction: { parts: [{ text: "You are Fleet Commander, a helpful assistant for the Uber Fleet dashboard." }] }
+    };
+
+    try {
+        const response = await axios.post(url, payload);
+        const text = response.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        res.json({ text });
+    } catch (e) {
+        logger.error("AI Assistant Error", { error: e.response?.data || e.message });
+        res.status(500).json({ error: e.message });
+    }
+});
+
 
 // --- ROUTES ---
 
