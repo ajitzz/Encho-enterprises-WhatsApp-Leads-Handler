@@ -3,7 +3,9 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Redis } = require('@upstash/redis');
+const { Client: QStashClient, Receiver } = require('@upstash/qstash');
 const { Pool } = require('pg');
+const { S3Client } = require('@aws-sdk/client-s3');
 const multer = require('multer');
 const { OAuth2Client } = require('google-auth-library');
 const { GoogleGenAI } = require('@google/genai');
@@ -210,16 +212,15 @@ const processQueueInternal = async () => {
         let jobsToProcess = [];
 
         await withDb(async (client) => {
-            // SAFEGUARD: Check if table exists to avoid log spamming on new deploys
-            const check = await client.query(`SELECT to_regclass('public.scheduled_messages')`);
-            if(!check.rows[0].to_regclass) return;
+            // Check if table exists before running logic to prevent logs spamming
+            const tableCheck = await client.query(`SELECT to_regclass('public.scheduled_messages')`);
+            if (!tableCheck.rows[0].to_regclass) return;
 
-            // Reset stuck jobs (processing > 10 mins)
+            // Reset stuck jobs
             await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
 
             await client.query('BEGIN');
             
-            // Lock rows for processing
             const result = await client.query(`
                 SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
                 FROM scheduled_messages sm
@@ -430,16 +431,6 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
         if (isNaN(scheduledTime)) return res.status(400).json({ ok: false, error: "Invalid timestamp" });
 
         await withDb(async (client) => {
-            // Auto-create table if missing
-            await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
-                payload JSONB,
-                scheduled_time BIGINT,
-                status VARCHAR(50) DEFAULT 'pending',
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-            );`);
-
             for (const driverId of driverIds) {
                  await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, 
                     [crypto.randomUUID(), driverId, message, scheduledTime]);
