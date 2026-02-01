@@ -299,10 +299,11 @@ const processQueueInternal = async () => {
 apiRouter.get('/cron/process-queue', async (req, res) => {
     try {
         const count = await processQueueInternal();
-        res.json({ success: true, processed: count });
+        res.status(200).json({ success: true, processed: count });
     } catch (e) {
         // Return 200 with error to prevent 500 alerting systems, but log error
-        res.json({ success: false, error: e.message });
+        console.error("Cron Error", e);
+        res.status(200).json({ success: false, error: e.message });
     }
 });
 
