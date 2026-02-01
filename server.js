@@ -5,7 +5,6 @@ const { Redis } = require('@upstash/redis');
 const { Pool } = require('pg');
 const multer = require('multer');
 const { OAuth2Client } = require('google-auth-library');
-// REMOVED: const { GoogleGenAI } = require('@google/genai'); // This package is ESM-only and crashes CommonJS require()
 require('dotenv').config();
 
 // --- OBSERVABILITY ---
@@ -127,9 +126,12 @@ const getBotSettings = async (phoneId) => {
 const sendToMeta = async (to, payload) => {
     if (payload.type === 'text' && payload.text && payload.text.body) {
         const body = payload.text.body.trim().toLowerCase();
+        // EXPANDED Forbidden list to catch common placeholder text variants
         const forbiddenPhrases = [
-            'replace this', 'sample message', 'type your message', 'enter text'
+            'replace this', 'sample message', 'type your message', 'enter text', 
+            'insert text', 'your text here', 'message body', '[message]'
         ];
+        
         if (forbiddenPhrases.some(phrase => body.includes(phrase)) || !body) {
             logger.warn("🛑 BLOCKED: Placeholder message detected.", { to, body: payload.text.body });
             throw new Error("Message blocked: Contains placeholder text."); 
