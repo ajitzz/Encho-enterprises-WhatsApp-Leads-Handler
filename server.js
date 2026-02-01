@@ -211,16 +211,22 @@ const processQueueInternal = async () => {
         let jobsToProcess = [];
 
         await withDb(async (client) => {
-            // Check if table exists (safe check)
-            const check = await client.query(`SELECT to_regclass('public.scheduled_messages')`);
-            if(!check.rows[0].to_regclass) return;
+            // Ensure table exists to prevent crashes
+            await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                scheduled_time BIGINT NOT NULL,
+                status VARCHAR(50) NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );`);
 
             // Reset stuck jobs (processing > 10 mins)
             await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
 
             await client.query('BEGIN');
             
-            // Lock rows for processing. Schema has 'status' checked constraint.
+            // Lock rows for processing
             const result = await client.query(`
                 SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
                 FROM scheduled_messages sm
@@ -292,8 +298,13 @@ const processQueueInternal = async () => {
 };
 
 apiRouter.get('/cron/process-queue', async (req, res) => {
-    const count = await processQueueInternal();
-    res.json({ success: true, processed: count });
+    try {
+        const count = await processQueueInternal();
+        res.json({ success: true, processed: count });
+    } catch (e) {
+        // Return 200 with error details to prevent 500 crash in frontend polling
+        res.json({ success: false, error: e.message });
+    }
 });
 
 // --- ROUTES ---
@@ -628,7 +639,7 @@ const init = async () => {
                 candidate_id UUID NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
                 payload JSONB NOT NULL DEFAULT '{}'::jsonb,
                 scheduled_time BIGINT NOT NULL,
-                status VARCHAR(50) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','processing','sent','failed')),
+                status VARCHAR(50) NOT NULL DEFAULT 'pending',
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );`);
             

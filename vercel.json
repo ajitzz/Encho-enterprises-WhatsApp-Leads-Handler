@@ -19,6 +19,6 @@
       "maxDuration": 60
     }
   },"crons": [
-    { "path": "/api/cron/process-queue", "schedule": "0 2 * * *" }
+    { "path": "/api/cron/process-queue", "schedule": "* * * * *" }
   ]
 }
