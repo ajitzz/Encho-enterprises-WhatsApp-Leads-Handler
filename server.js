@@ -5,31 +5,28 @@ const crypto = require('crypto');
 const { Redis } = require('@upstash/redis');
 const { Pool } = require('pg');
 const multer = require('multer');
-const { OAuth2Client } = require('google-auth-library');
 const axios = require('axios');
 const https = require('https');
-const { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, ListObjectsV2Command, GetObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 require('dotenv').config();
 
-// --- OBSERVABILITY & LOGGING ---
+// --- LOGGING & CONFIG ---
 const logger = {
     info: (msg, meta = {}) => console.log(JSON.stringify({ level: 'INFO', msg, timestamp: new Date().toISOString(), ...meta })),
     error: (msg, meta = {}) => console.error(JSON.stringify({ level: 'ERROR', msg, timestamp: new Date().toISOString(), ...meta })),
     warn: (msg, meta = {}) => console.warn(JSON.stringify({ level: 'WARN', msg, timestamp: new Date().toISOString(), ...meta })),
 };
 
-// --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
     META_TIMEOUT: 15000,
     DB_CONNECTION_TIMEOUT: 10000,
-    CACHE_TTL_SETTINGS: 600,
     AWS_REGION: process.env.AWS_REGION || 'us-east-1',
     AWS_BUCKET: process.env.AWS_BUCKET_NAME || 'uber-fleet-assets',
-    WHATSAPP_MEDIA_LIMIT_BYTES: 15 * 1024 * 1024, // ~15MB Safety Buffer (WhatsApp limit is 16MB)
+    WHATSAPP_MEDIA_LIMIT_BYTES: 15 * 1024 * 1024,
 };
 
-// --- S3 CLIENT SETUP ---
+// --- CLIENTS ---
 const s3Client = new S3Client({
     region: SYSTEM_CONFIG.AWS_REGION,
     credentials: {
@@ -40,22 +37,19 @@ const s3Client = new S3Client({
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// --- DB CONNECTION (SSL FIX) ---
 let pgPool = null;
 const getDb = () => {
     if (!pgPool) {
-        const connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
-        if (!connectionString) throw new Error("No Postgres connection string found.");
-
+        if (!process.env.POSTGRES_URL && !process.env.DATABASE_URL) {
+             throw new Error("DB Connection String Missing");
+        }
         pgPool = new Pool({
-            connectionString,
+            connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
             max: 10,
-            idleTimeoutMillis: 1000,
             allowExitOnIdle: true,
-            ssl: { rejectUnauthorized: false } 
+            ssl: { rejectUnauthorized: false }
         });
-
         pgPool.on('error', (err) => logger.error('DB Pool Error', { error: err.message }));
     }
     return pgPool;
@@ -79,56 +73,59 @@ const redis = new Redis({
     token: process.env.UPSTASH_REDIS_REST_TOKEN || 'mock'
 });
 
-// --- META API CLIENT ---
-const getMetaClient = () => {
-    return axios.create({
-        httpsAgent: new https.Agent({ keepAlive: true }),
-        timeout: SYSTEM_CONFIG.META_TIMEOUT,
-        headers: { 
-            'Content-Type': 'application/json', 
-            'Authorization': `Bearer ${process.env.META_API_TOKEN}` 
+const getMetaClient = () => axios.create({
+    httpsAgent: new https.Agent({ keepAlive: true }),
+    timeout: SYSTEM_CONFIG.META_TIMEOUT,
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.META_API_TOKEN}` }
+});
+
+// --- HELPER: S3 URL SIGNER ---
+const signS3Url = async (url) => {
+    if (!url || !url.includes(SYSTEM_CONFIG.AWS_BUCKET)) return url;
+    try {
+        const urlObj = new URL(url);
+        let key = decodeURIComponent(urlObj.pathname.substring(1));
+        if (key.startsWith(SYSTEM_CONFIG.AWS_BUCKET + '/')) {
+            key = key.substring(SYSTEM_CONFIG.AWS_BUCKET.length + 1);
         }
-    });
+        const command = new GetObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key });
+        return await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+    } catch (e) {
+        return url;
+    }
 };
 
-// --- SMART MEDIA HANDLING (Senior Developer Logic) ---
+// --- HELPER: PREPARE MEDIA FOR META ---
 const prepareMediaPayload = async (url, requestedType, caption) => {
     let sendUrl = url;
     let finalType = requestedType;
     let filename = 'file';
 
-    // 1. Is it an S3 URL?
     if (url.includes(SYSTEM_CONFIG.AWS_BUCKET) && url.includes('amazonaws.com')) {
         try {
             const urlObj = new URL(url);
             let key = decodeURIComponent(urlObj.pathname.substring(1));
-            
             if (urlObj.hostname.startsWith('s3')) {
                  if (key.startsWith(SYSTEM_CONFIG.AWS_BUCKET + '/')) {
                     key = key.substring(SYSTEM_CONFIG.AWS_BUCKET.length + 1);
                  }
             }
-
             filename = key.split('/').pop();
 
-            // 2. Fetch Metadata from S3 (Size & Mime)
+            // Check Size
             const head = await s3Client.send(new HeadObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key }));
             const fileSize = head.ContentLength || 0;
 
-            // 3. Smart Type Switching Logic
-            if (fileSize > SYSTEM_CONFIG.WHATSAPP_MEDIA_LIMIT_BYTES) {
-                if (['video', 'image', 'audio'].includes(requestedType)) {
-                    logger.warn(`File ${key} is ${fileSize} bytes. Converting ${requestedType} -> document.`);
-                    finalType = 'document';
-                }
+            if (fileSize > SYSTEM_CONFIG.WHATSAPP_MEDIA_LIMIT_BYTES && ['video', 'image', 'audio'].includes(requestedType)) {
+                logger.warn(`File too large (${fileSize}). Sending as document.`);
+                finalType = 'document';
             }
 
-            // 4. Generate Fresh Presigned URL
+            // Sign URL
             const command = new GetObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key });
             sendUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
-
         } catch (e) {
-            logger.error("Media Prep Failed", { error: e.message, url });
+            logger.error("S3 Prep Failed", { error: e.message });
         }
     }
 
@@ -137,17 +134,12 @@ const prepareMediaPayload = async (url, requestedType, caption) => {
     if (caption) payload[finalType].caption = caption;
     if (finalType === 'document') payload[finalType].filename = filename;
 
-    return { 
-        metaPayload: payload, 
-        dbType: finalType,
-        originalUrl: url 
-    };
+    return { metaPayload: payload, dbType: finalType, originalUrl: url };
 };
 
 const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
-    
     try {
         await getMetaClient().post(`https://graph.facebook.com/v18.0/${phoneId}/messages`, {
             messaging_product: "whatsapp",
@@ -156,18 +148,22 @@ const sendToMeta = async (phoneNumber, payload) => {
             ...payload
         });
     } catch (e) {
-        logger.error("Meta API Fail", { error: e.response?.data || e.message, to });
+        logger.error("Meta Send Failed", { error: e.response?.data || e.message });
         throw e;
     }
 };
 
+// --- EXPRESS APP ---
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 const apiRouter = express.Router();
 
-// --- MESSAGING ENDPOINTS ---
+// ----------------------
+// 1. MESSAGING ROUTES
+// ----------------------
+
 apiRouter.post('/drivers/:id/messages', async (req, res) => {
     const { text, mediaUrl, mediaType } = req.body;
     try {
@@ -181,9 +177,10 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
             let dbText = text;
 
             if (mediaUrl) {
-                const mediaResult = await prepareMediaPayload(mediaUrl, mediaType || 'image', text);
-                metaPayload = mediaResult.metaPayload;
-                dbType = mediaResult.dbType;
+                const mediaRes = await prepareMediaPayload(mediaUrl, mediaType || 'image', text);
+                metaPayload = mediaRes.metaPayload;
+                dbType = mediaRes.dbType;
+                // Store serialized JSON for media messages to prevent rendering errors
                 dbText = JSON.stringify({ url: mediaUrl, caption: text, sentAs: dbType });
             } else {
                 metaPayload = { type: 'text', text: { body: text } };
@@ -192,7 +189,7 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
             await sendToMeta(phone, metaPayload);
 
             await client.query(
-                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`,
+                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
                 [crypto.randomUUID(), req.params.id, dbText, dbType]
             );
             await client.query(
@@ -215,30 +212,30 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
             const messages = await Promise.all(resDb.rows.map(async (r) => {
                 let text = r.text;
                 let mediaUrl = null;
+                let parsedCaption = '';
                 
-                if (['image', 'video', 'document'].includes(r.type) && r.text?.startsWith('{')) {
+                // Safe JSON parsing for media messages
+                if (['image', 'video', 'document'].includes(r.type) && r.text && r.text.startsWith('{')) {
                     try {
                         const parsed = JSON.parse(r.text);
-                        text = parsed.caption || '';
-                        let viewUrl = parsed.url;
-                        if (viewUrl && viewUrl.includes(SYSTEM_CONFIG.AWS_BUCKET)) {
-                             try {
-                                 const urlObj = new URL(viewUrl);
-                                 let key = decodeURIComponent(urlObj.pathname.substring(1));
-                                 if (key.startsWith(SYSTEM_CONFIG.AWS_BUCKET)) key = key.substring(SYSTEM_CONFIG.AWS_BUCKET.length + 1);
-                                 const command = new GetObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key });
-                                 viewUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
-                             } catch(e) {}
+                        parsedCaption = parsed.caption || '';
+                        
+                        // Resign URL for frontend display
+                        if (parsed.url) {
+                            mediaUrl = await signS3Url(parsed.url);
                         }
-                        mediaUrl = viewUrl;
-                        if(r.type === 'document') text = JSON.stringify({ ...parsed, url: viewUrl }); 
-                    } catch (e) { text = r.text; }
+                        
+                        // Ensure text is a string for the frontend
+                        text = JSON.stringify({ ...parsed, url: mediaUrl }); 
+                    } catch (e) { 
+                        text = r.text; // Fallback to raw text
+                    }
                 }
 
                 return { 
                     id: r.id, 
                     sender: r.direction === 'in' ? 'driver' : 'agent', 
-                    text, 
+                    text: text, // Ensure this is always a string!
                     imageUrl: r.type === 'image' ? mediaUrl : null,
                     videoUrl: r.type === 'video' ? mediaUrl : null,
                     timestamp: new Date(r.created_at).getTime(), 
@@ -251,17 +248,19 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- SCHEDULING ENDPOINTS ---
+// ----------------------
+// 2. SCHEDULING ROUTES
+// ----------------------
 
 apiRouter.post('/scheduled-messages', async (req, res) => {
     const { driverIds, message, timestamp, mediaUrl, mediaType } = req.body;
     try {
         const scheduledTime = Number(timestamp);
-        if (isNaN(scheduledTime)) return res.status(400).json({ ok: false, error: "Invalid timestamp" });
+        if (isNaN(scheduledTime)) return res.status(400).json({ error: "Invalid timestamp" });
         
-        // Ensure payload structure is consistent
+        // Construct payload safely
         const payloadObj = {
-            text: message || '',
+            text: message || '', // Ensure empty string if null
             mediaUrl: mediaUrl || null,
             mediaType: mediaType || 'text'
         };
@@ -273,22 +272,31 @@ apiRouter.post('/scheduled-messages', async (req, res) => {
             }
         });
         res.json({ success: true });
-    } catch (e) { 
-        logger.error("Schedule Error", { error: e.message });
-        res.status(500).json({ error: e.message }); 
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => {
     try {
         await withDb(async (client) => {
-            const result = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 ORDER BY scheduled_time ASC`, [req.params.id]);
-            res.json(result.rows.map(r => ({
-                id: r.id,
-                scheduledTime: parseInt(r.scheduled_time),
-                payload: typeof r.payload === 'string' ? JSON.parse(r.payload) : r.payload,
-                status: r.status
-            })));
+            const result = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status = 'pending' ORDER BY scheduled_time ASC`, [req.params.id]);
+            // Sign the URLs for the UI Preview
+            const mapped = await Promise.all(result.rows.map(async r => {
+                let payload = r.payload;
+                if (typeof payload === 'string') payload = JSON.parse(payload);
+                
+                // Sign URL for preview if exists
+                if (payload.mediaUrl) {
+                    payload.mediaUrl = await signS3Url(payload.mediaUrl);
+                }
+                
+                return {
+                    id: r.id,
+                    scheduledTime: parseInt(r.scheduled_time),
+                    payload: payload, 
+                    status: r.status
+                };
+            }));
+            res.json(mapped);
         });
     } catch (e) { res.json([]); }
 });
@@ -307,7 +315,7 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
     try {
         await withDb(async (client) => {
             const old = await client.query('SELECT payload FROM scheduled_messages WHERE id = $1', [req.params.id]);
-            if (old.rows.length === 0) return res.status(404).json({ ok: false, error: "Not found" });
+            if (old.rows.length === 0) return res.status(404).json({ error: "Not found" });
             
             let payload = old.rows[0].payload;
             if (typeof payload === 'string') payload = JSON.parse(payload);
@@ -315,77 +323,98 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
             if (text !== undefined) payload.text = text;
             
             if (scheduledTime) {
-                await client.query(`UPDATE scheduled_messages SET payload = $1, scheduled_time = $2 WHERE id = $3`, [payload, scheduledTime, req.params.id]);
+                await client.query(`UPDATE scheduled_messages SET payload = $1, scheduled_time = $2 WHERE id = $3`, [JSON.stringify(payload), scheduledTime, req.params.id]);
             } else {
-                await client.query(`UPDATE scheduled_messages SET payload = $1 WHERE id = $2`, [payload, req.params.id]);
+                await client.query(`UPDATE scheduled_messages SET payload = $1 WHERE id = $2`, [JSON.stringify(payload), req.params.id]);
             }
         });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- CRON JOB (Process Queue with MEDIA HANDLING) ---
-apiRouter.get('/cron/process-queue', async (req, res) => {
+// ----------------------
+// 3. BOT & SETTINGS (FIXED 404s)
+// ----------------------
+
+apiRouter.get('/bot/settings', async (req, res) => {
     try {
-        let processedCount = 0;
+        const cached = await redis.get(`bot:settings:${process.env.PHONE_NUMBER_ID}`);
+        if (cached) return res.json(cached);
+        
         await withDb(async (client) => {
-            // Clean stuck jobs
-            await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
-
-            const result = await client.query(`
-                SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
-                FROM scheduled_messages sm
-                JOIN candidates c ON sm.candidate_id = c.id
-                WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
-                LIMIT 20
-                FOR UPDATE OF sm SKIP LOCKED
-            `, [Date.now()]);
-
-            for (const job of result.rows) {
-                try {
-                    await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = $1`, [job.id]);
-
-                    let payload = job.payload;
-                    if (typeof payload === 'string') payload = JSON.parse(payload);
-
-                    // RE-USE SMART MEDIA LOGIC for Scheduled Messages
-                    let metaPayload;
-                    let dbType = 'text';
-                    let dbText = payload.text;
-
-                    if (payload.mediaUrl) {
-                        // Generate signed URL and check size limits right before sending
-                        const mediaRes = await prepareMediaPayload(payload.mediaUrl, payload.mediaType || 'image', payload.text);
-                        metaPayload = mediaRes.metaPayload;
-                        dbType = mediaRes.dbType;
-                        dbText = JSON.stringify({ url: payload.mediaUrl, caption: payload.text, sentAs: dbType });
-                    } else if (payload.templateName) {
-                        metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
-                        dbType = 'template';
-                    } else {
-                        metaPayload = { type: 'text', text: { body: payload.text || ' ' } };
-                    }
-
-                    await sendToMeta(job.phone_number, metaPayload);
-
-                    await client.query(
-                        `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`,
-                        [crypto.randomUUID(), job.candidate_id, dbText, dbType]
-                    );
-                    await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [job.id]);
-                    processedCount++;
-
-                } catch (jobErr) {
-                    logger.error("Job Failed", { id: job.id, err: jobErr.message });
-                    await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
-                }
+            const result = await client.query(`SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1`);
+            if (result.rows.length > 0) {
+                res.json(result.rows[0].settings);
+            } else {
+                res.json({ isEnabled: false, steps: [] }); // Default
             }
         });
-        res.json({ processed: processedCount });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+apiRouter.post('/bot/save', async (req, res) => {
+    try {
+        await redis.set(`bot:settings:${process.env.PHONE_NUMBER_ID}`, req.body);
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/bot/publish', async (req, res) => {
+    try {
+        const settings = await redis.get(`bot:settings:${process.env.PHONE_NUMBER_ID}`);
+        if (!settings) return res.status(400).json({ error: "No draft found" });
+        
+        await withDb(async (client) => {
+            await client.query(
+                `INSERT INTO bot_versions (id, phone_number_id, version_number, status, settings, created_at) VALUES ($1, $2, 1, 'published', $3, NOW())`,
+                [crypto.randomUUID(), process.env.PHONE_NUMBER_ID, JSON.stringify(settings)]
+            );
+        });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ----------------------
+// 4. DOCUMENTS & DRIVERS (FIXED 404s)
+// ----------------------
+
+apiRouter.get('/drivers', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const resDb = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC NULLS LAST LIMIT 50');
+            res.json(resDb.rows.map(row => ({
+                id: row.id,
+                phoneNumber: row.phone_number,
+                name: row.name,
+                status: row.stage,
+                lastMessage: row.last_message,
+                lastMessageTime: parseInt(row.last_message_at || '0'),
+                source: row.source,
+                isHumanMode: row.is_human_mode
+            })));
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/drivers/:id/documents', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const result = await client.query('SELECT * FROM driver_documents WHERE candidate_id = $1', [req.params.id]);
+            const docs = await Promise.all(result.rows.map(async r => ({
+                id: r.id,
+                docType: r.type,
+                url: await signS3Url(r.url),
+                verificationStatus: r.status,
+                timestamp: new Date(r.created_at).getTime()
+            })));
+            res.json(docs);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ----------------------
+// 5. MEDIA HANDLING
+// ----------------------
 
 apiRouter.get('/media', async (req, res) => {
     const path = req.query.path || '';
@@ -397,8 +426,7 @@ apiRouter.get('/media', async (req, res) => {
         const files = await Promise.all((data.Contents || []).map(async (o) => {
             const filename = o.Key.replace(prefix, '');
             if (!filename) return null;
-            const getCommand = new GetObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: o.Key });
-            const url = await getSignedUrl(s3Client, getCommand, { expiresIn: 3600 });
+            const url = await signS3Url(`https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.amazonaws.com/${o.Key}`);
             let type = 'document';
             if (filename.match(/\.(jpg|jpeg|png|gif|webp)$/i)) type = 'image';
             if (filename.match(/\.(mp4|mov|webm)$/i)) type = 'video';
@@ -424,49 +452,91 @@ apiRouter.post('/media/upload', upload.single('file'), async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.get('/drivers', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const resDb = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC NULLS LAST LIMIT 50');
-            res.json(resDb.rows.map(row => ({
-                id: row.id,
-                phoneNumber: row.phone_number,
-                name: row.name,
-                status: row.stage,
-                lastMessage: row.last_message,
-                lastMessageTime: parseInt(row.last_message_at || '0'),
-                source: row.source,
-                isHumanMode: row.is_human_mode
-            })));
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
+// ----------------------
+// 6. CRON JOB (CRITICAL FIX FOR CRASH)
+// ----------------------
 
-apiRouter.get('/webhook', (req, res) => {
-    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
-        res.status(200).send(req.query['hub.challenge']);
-    } else {
-        res.sendStatus(403);
+apiRouter.get('/cron/process-queue', async (req, res) => {
+    try {
+        let processedCount = 0;
+        await withDb(async (client) => {
+            await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
+            
+            // Fetch pending jobs
+            const result = await client.query(`
+                SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
+                FROM scheduled_messages sm
+                JOIN candidates c ON sm.candidate_id = c.id
+                WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
+                LIMIT 20
+                FOR UPDATE OF sm SKIP LOCKED
+            `, [Date.now()]);
+
+            for (const job of result.rows) {
+                try {
+                    await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = $1`, [job.id]);
+
+                    let payload = job.payload;
+                    if (typeof payload === 'string') payload = JSON.parse(payload);
+
+                    // Re-process media for fresh signing
+                    let metaPayload;
+                    let dbType = 'text';
+                    let dbText = payload.text || ''; // FORCE STRING
+
+                    if (payload.mediaUrl) {
+                        const mediaRes = await prepareMediaPayload(payload.mediaUrl, payload.mediaType || 'image', payload.text);
+                        metaPayload = mediaRes.metaPayload;
+                        dbType = mediaRes.dbType;
+                        dbText = JSON.stringify({ url: payload.mediaUrl, caption: payload.text, sentAs: dbType });
+                    } else if (payload.templateName) {
+                        metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
+                        dbType = 'template';
+                    } else {
+                        metaPayload = { type: 'text', text: { body: payload.text || ' ' } };
+                    }
+
+                    await sendToMeta(job.phone_number, metaPayload);
+
+                    await client.query(
+                        `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
+                        [crypto.randomUUID(), job.candidate_id, dbText, dbType]
+                    );
+                    await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [job.id]);
+                    processedCount++;
+                } catch (jobErr) {
+                    logger.error("Job Failed", { id: job.id, err: jobErr.message });
+                    await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
+                }
+            }
+        });
+        res.json({ processed: processedCount });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
 });
 
-apiRouter.post('/webhook', async (req, res) => {
-    res.sendStatus(200); 
-    try {
-        const body = req.body;
-        // Basic inbound processing placeholder - ensure full logic exists in real usage
-        if (body.object === 'whatsapp_business_account') { /* Processing logic here */ }
-    } catch (e) { logger.error("Webhook Error", e); }
+apiRouter.get('/debug/status', (req, res) => res.json({ status: 'ok', time: new Date() }));
+apiRouter.post('/webhook', (req, res) => res.sendStatus(200)); 
+apiRouter.get('/webhook', (req, res) => {
+    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
+        res.status(200).send(req.query['hub.challenge']);
+    } else res.sendStatus(403);
 });
 
+// Mount Routes
 app.use('/api', apiRouter);
+// Fallback
 app.use('/', apiRouter);
+
+// 404 Handler (Must be last)
+app.use((req, res) => {
+    res.status(404).json({ error: `Route Not Found: ${req.url}` });
+});
 
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;
-    app.listen(PORT, () => {
-        logger.info(`🚀 Server running on port ${PORT}`);
-    });
+    app.listen(PORT, () => logger.info(`Server running on ${PORT}`));
 }
 
 module.exports = app;
