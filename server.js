@@ -69,7 +69,7 @@ const refreshMediaUrl = async (url) => {
         return await getSignedUrl(s3Client, command, { expiresIn: 3600 });
     } catch (e) {
         console.error("S3 Refresh Failed:", e.message);
-        return url;
+        return url; // Return original if refresh fails
     }
 };
 
@@ -78,6 +78,7 @@ const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
     
+    // Prevent empty text error from Meta
     if (payload.type === 'text' && (!payload.text?.body || !payload.text.body.trim())) {
         console.warn("Skipped sending empty message");
         return;
@@ -103,33 +104,22 @@ app.use(express.json({ limit: '50mb' }));
 
 const apiRouter = express.Router();
 
-// --- 1. SYSTEM & DEBUG ROUTES (FIXED 404) ---
+// --- 1. DEBUG & SYSTEM ---
 apiRouter.get('/debug/status', async (req, res) => {
     try {
         await withDb(async (client) => {
-            // Check connectivity
-            const tablesRes = await client.query(`
-                SELECT table_name 
-                FROM information_schema.tables 
-                WHERE table_schema = 'public'
-            `);
+            const tablesRes = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
             const tables = tablesRes.rows.map(r => r.table_name);
-            
             const countRes = await client.query('SELECT COUNT(*) as c FROM candidates');
             
             res.json({
                 postgres: 'connected',
                 tables: {
                     candidates: tables.includes('candidates'),
-                    bot_versions: tables.includes('bot_versions'),
                     scheduled_messages: tables.includes('scheduled_messages')
                 },
                 counts: { candidates: parseInt(countRes.rows[0].c) },
-                env: {
-                    hasPostgres: !!process.env.POSTGRES_URL,
-                    hasS3: !!process.env.AWS_ACCESS_KEY_ID,
-                    publicUrl: process.env.PUBLIC_BASE_URL || 'localhost'
-                }
+                env: { publicUrl: process.env.PUBLIC_BASE_URL }
             });
         });
     } catch (e) {
@@ -137,13 +127,14 @@ apiRouter.get('/debug/status', async (req, res) => {
     }
 });
 
-// --- 2. SCHEDULING (FIXED 500 ERROR) ---
+// --- 2. SCHEDULING (CRITICAL FIX FOR 500 ERROR) ---
 apiRouter.post('/scheduled-messages', async (req, res) => {
     const { driverIds, message, timestamp, mediaUrl, mediaType } = req.body;
     try {
         const time = Number(timestamp);
         if (isNaN(time)) throw new Error("Invalid Timestamp");
 
+        // Construct JSON Payload
         const payloadObj = {
             text: message || '',
             mediaUrl: mediaUrl || null,
@@ -152,8 +143,9 @@ apiRouter.post('/scheduled-messages', async (req, res) => {
 
         await withDb(async (client) => {
             for (const driverId of driverIds) {
-                // FIX: Generate UUID explicitly in Node.js to avoid DB default issues
+                // FIX: Manually generate UUID to prevent DB null error
                 const msgId = crypto.randomUUID();
+                
                 await client.query(
                     `INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`,
                     [msgId, driverId, payloadObj, time]
@@ -199,7 +191,6 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
     try {
         await withDb(async client => {
             const { scheduledTime, text } = req.body;
-            // Fetch existing to preserve other fields
             const existing = await client.query('SELECT payload FROM scheduled_messages WHERE id = $1', [req.params.id]);
             if (existing.rows.length === 0) return res.status(404).json({error: "Not Found"});
             
@@ -216,14 +207,14 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- 3. CRON JOB (S3 SIGNING FIX) ---
+// --- 3. CRON JOB (FIXED S3 EXPIRY) ---
 apiRouter.get('/cron/process-queue', async (req, res) => {
     try {
         let processed = 0;
         let errors = 0;
 
         await withDb(async (client) => {
-            // Lock rows
+            // Lock pending jobs
             const jobs = await client.query(`
                 SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
                 FROM scheduled_messages sm
@@ -244,12 +235,13 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                     let dbText = text || '';
                     
                     if (mediaUrl) {
-                        // CRITICAL: Refresh URL here
+                        // CRITICAL: Refresh URL immediately before sending
                         const freshUrl = await refreshMediaUrl(mediaUrl);
                         metaPayload = {
                             type: mediaType || 'image',
                             [mediaType || 'image']: { link: freshUrl, caption: text }
                         };
+                        // Store structure for history
                         dbText = JSON.stringify({ url: mediaUrl, caption: text, sentAs: mediaType });
                     } else {
                         metaPayload = { type: 'text', text: { body: text || ' ' } };
@@ -257,7 +249,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
 
                     await sendToMeta(job.phone_number, metaPayload);
 
-                    // Archive
+                    // Archive to history
                     const msgId = crypto.randomUUID();
                     await client.query(
                         `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
@@ -317,7 +309,7 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
 });
 
 apiRouter.post('/webhook', async (req, res) => {
-    res.sendStatus(200); // Ack immediately
+    res.sendStatus(200); // Ack to Meta
 
     const body = req.body;
     if (!body.object) return;
@@ -353,7 +345,7 @@ apiRouter.post('/webhook', async (req, res) => {
                 await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [textBody, Date.now(), candidate.id]);
             }
 
-            // Save Message
+            // Save Incoming
             const dbMsgId = crypto.randomUUID();
             await client.query(
                 `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, 'text', $4, 'received', NOW())`,
@@ -366,6 +358,7 @@ apiRouter.post('/webhook', async (req, res) => {
                 const settings = botRes.rows[0]?.settings;
 
                 if (settings && settings.nodes) {
+                    // Logic to find next step
                     const startNode = settings.nodes.find(n => n.type === 'start');
                     const currentNodeId = candidate.current_bot_step_id;
                     let nextStepId = null;
@@ -375,6 +368,7 @@ apiRouter.post('/webhook', async (req, res) => {
                         const edge = settings.edges.find(e => e.source === startNode?.id);
                         if (edge) nextStepId = edge.target;
                     } else {
+                        // Find edges from current node
                         const edge = settings.edges.find(e => e.source === currentNodeId);
                         if (edge) nextStepId = edge.target;
                     }
@@ -411,7 +405,7 @@ apiRouter.get('/webhook', (req, res) => {
     }
 });
 
-// --- 5. OTHER ROUTES (GETTERS) ---
+// --- 5. DATA GETTERS ---
 apiRouter.get('/drivers', async (req, res) => {
     try {
         await withDb(async (client) => {
@@ -521,7 +515,6 @@ apiRouter.get('/drivers/:id/documents', async (req, res) => {
     } catch (e) { res.json([]); }
 });
 
-// Mount Routes
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
 
