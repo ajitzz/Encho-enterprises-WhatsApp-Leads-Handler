@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Driver, Message, ScheduledMessage, DriverDocument } from '../types';
 import { 
-  X, Send, Headset, MicOff, Clock, Paperclip, LayoutTemplate, Edit2, Trash2, Zap, AlertTriangle, FileText
+  X, Send, Headset, MicOff, Clock, Paperclip, LayoutTemplate, Edit2, Trash2, Zap, AlertTriangle, FileText, Download
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 import { MediaSelectorModal } from './MediaSelectorModal';
@@ -230,10 +230,38 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                                     <video src={msg.videoUrl} controls className="w-full h-full" />
                                 </div>
                             )}
+                            {/* DOCUMENT RENDERING */}
+                            {msg.type === 'document' && msg.text && msg.text.startsWith('{') && (() => {
+                                try {
+                                    const parsed = JSON.parse(msg.text);
+                                    return (
+                                        <div className="p-3 bg-gray-50 border-b border-gray-100 flex items-center gap-3">
+                                            <div className="p-2 bg-red-100 text-red-600 rounded">
+                                                <FileText size={20} />
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <div className="text-sm font-bold text-gray-800 truncate">{parsed.filename || 'Document'}</div>
+                                                <div className="text-[10px] text-gray-500 uppercase">PDF / DOC</div>
+                                            </div>
+                                            <a href={parsed.url} target="_blank" rel="noopener noreferrer" className="p-2 text-blue-600 hover:bg-blue-50 rounded transition-colors" title="Download">
+                                                <Download size={16} />
+                                            </a>
+                                        </div>
+                                    );
+                                } catch(e) { return null; }
+                            })()}
 
                             <div className="px-4 py-3">
                                 {msg.templateName && <div className="text-[10px] uppercase font-bold opacity-50 mb-1 flex items-center gap-1"><LayoutTemplate size={10} /> Template: {msg.templateName}</div>}
-                                {msg.text && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
+                                
+                                {msg.text && !msg.text.startsWith('{') && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
+                                {msg.text && msg.text.startsWith('{') && (() => {
+                                    try {
+                                        const parsed = JSON.parse(msg.text);
+                                        return parsed.caption ? <p className="text-sm leading-relaxed whitespace-pre-wrap">{parsed.caption}</p> : null;
+                                    } catch(e) { return <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>; }
+                                })()}
+
                                 <div className="text-[10px] mt-1 text-right opacity-60 flex justify-end gap-1 items-center">
                                     {msg.status === 'sending' && <Clock size={10} className="animate-spin" />}
                                     {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}

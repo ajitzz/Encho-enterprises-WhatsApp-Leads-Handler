@@ -8,7 +8,8 @@ const multer = require('multer');
 const { OAuth2Client } = require('google-auth-library');
 const axios = require('axios');
 const https = require('https');
-const { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
+// ADDED: GetObjectCommand for URL signing
+const { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 require('dotenv').config();
 
@@ -86,6 +87,45 @@ const getMetaClient = () => {
             'Authorization': `Bearer ${process.env.META_API_TOKEN}` 
         }
     });
+};
+
+// --- HELPER: MEDIA PAYLOAD GENERATOR (THE FIX) ---
+const prepareMediaPayload = async (url, type, caption) => {
+    const s3Host = `${SYSTEM_CONFIG.AWS_BUCKET}.s3.${SYSTEM_CONFIG.AWS_REGION}.amazonaws.com`;
+    let sendUrl = url;
+    let dbUrl = url;
+
+    // 1. Detect if this is an S3 URL (Standard or Presigned)
+    // We want to Strip existing signatures and Re-sign fresh for WhatsApp
+    if (url.includes('s3') && url.includes('amazonaws.com') && url.includes(SYSTEM_CONFIG.AWS_BUCKET)) {
+        try {
+            // Parse URL to get Key
+            const urlObj = new URL(url);
+            // Decode path to handle spaces/special chars in keys
+            const key = decodeURIComponent(urlObj.pathname.substring(1)); // remove leading slash
+            
+            // A. Generate Fresh Signed URL (Valid 1 Hour) for Meta
+            const command = new GetObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key });
+            sendUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+            
+            // B. Create Clean Permanent URL for Database (No Expiry)
+            dbUrl = `https://${s3Host}/${encodeURIComponent(key)}`;
+        } catch (e) {
+            logger.warn("S3 Signing Failed, using original URL", { error: e.message });
+        }
+    }
+
+    const payload = { type };
+    payload[type] = { link: sendUrl };
+    if (caption) payload[type].caption = caption;
+
+    // 2. Add Filename for Documents (Critical for WhatsApp Delivery)
+    if (type === 'document') {
+        const filename = dbUrl.split('/').pop()?.split('?')[0] || 'document.pdf';
+        payload[type].filename = decodeURIComponent(filename);
+    }
+
+    return { metaPayload: payload, dbUrl, dbType: type };
 };
 
 // --- CORE: SEND TO WHATSAPP ---
@@ -208,7 +248,7 @@ const processMessageInternal = async (message, contact, phoneId) => {
 // --- ROUTER ---
 const apiRouter = express.Router();
 
-// 1. S3 MEDIA ROUTES (NEW)
+// 1. S3 MEDIA ROUTES (IMPROVED SIGNING)
 apiRouter.get('/media', async (req, res) => {
     const path = req.query.path || '';
     const prefix = path === '/' ? '' : (path.startsWith('/') ? path.substring(1) : path) + '/';
@@ -227,20 +267,22 @@ apiRouter.get('/media', async (req, res) => {
             parent_path: path
         }));
 
-        const files = (data.Contents || []).map(o => {
+        const files = await Promise.all((data.Contents || []).map(async (o) => {
             const filename = o.Key.replace(prefix, '');
-            if (!filename) return null; // Filter out the folder placeholder itself
+            if (!filename) return null;
             
-            // Generate public URL (assuming public read) OR signed URL
-            const url = `https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.${SYSTEM_CONFIG.AWS_REGION}.amazonaws.com/${o.Key}`;
+            // GENERATE PRESIGNED URL FOR UI BROWSING
+            const getCommand = new GetObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: o.Key });
+            const url = await getSignedUrl(s3Client, getCommand, { expiresIn: 3600 }); // 1 Hour
+            
             let type = 'document';
             if (filename.match(/\.(jpg|jpeg|png|gif|webp)$/i)) type = 'image';
             if (filename.match(/\.(mp4|mov|webm)$/i)) type = 'video';
             
             return { id: o.Key, url, filename, type };
-        }).filter(Boolean);
+        }));
 
-        res.json({ folders, files });
+        res.json({ folders, files: files.filter(Boolean) });
     } catch (e) {
         logger.error("S3 List Error", { error: e.message });
         res.status(500).json({ error: "Failed to list media" });
@@ -249,7 +291,6 @@ apiRouter.get('/media', async (req, res) => {
 
 apiRouter.post('/media/upload', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file provided" });
-    
     const path = req.body.path || '';
     const prefix = path === '/' ? '' : (path.startsWith('/') ? path.substring(1) : path) + '/';
     const key = `${prefix}${req.file.originalname}`;
@@ -260,7 +301,6 @@ apiRouter.post('/media/upload', upload.single('file'), async (req, res) => {
             Key: key,
             Body: req.file.buffer,
             ContentType: req.file.mimetype,
-            // ACL: 'public-read' // Enable if bucket policies allow, otherwise use Bucket Policy
         }));
         res.json({ success: true, key });
     } catch (e) {
@@ -284,8 +324,7 @@ apiRouter.delete('/media/files/:id(*)', async (req, res) => {
 apiRouter.post('/media/folders', async (req, res) => {
     const { name, parentPath } = req.body;
     const prefix = parentPath === '/' ? '' : (parentPath.startsWith('/') ? parentPath.substring(1) : parentPath) + '/';
-    const key = `${prefix}${name}/`; // Ending with / creates a folder concept in S3
-
+    const key = `${prefix}${name}/`;
     try {
         await s3Client.send(new PutObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key }));
         res.json({ success: true });
@@ -294,7 +333,7 @@ apiRouter.post('/media/folders', async (req, res) => {
     }
 });
 
-// 2. MESSAGING ROUTES
+// 2. MESSAGING ROUTES (ENHANCED FOR MEDIA DELIVERY)
 apiRouter.post('/drivers/:id/messages', async (req, res, next) => {
     const { text, mediaUrl, mediaType } = req.body;
     try {
@@ -303,24 +342,25 @@ apiRouter.post('/drivers/:id/messages', async (req, res, next) => {
             if (dRes.rows.length === 0) return res.status(404).json({error: "Driver not found"});
             const phone = dRes.rows[0].phone_number;
 
-            // Construct Payload
-            let payload;
+            let metaPayload;
+            let dbText = text;
+            let dbType = 'text';
+
             if (mediaUrl) {
-                payload = { 
-                    type: mediaType || 'image', 
-                    [mediaType || 'image']: { link: mediaUrl, caption: text } 
-                };
+                // Generate Safe Payload (Presigned for Meta, Clean for DB)
+                const result = await prepareMediaPayload(mediaUrl, mediaType || 'image', text);
+                metaPayload = result.metaPayload;
+                dbType = result.dbType;
+                // Store JSON string with PERMANENT clean URL
+                dbText = JSON.stringify({ url: result.dbUrl, caption: text });
             } else {
-                payload = { type: 'text', text: { body: text } };
+                metaPayload = { type: 'text', text: { body: text } };
             }
 
-            await sendToMeta(phone, payload);
+            // Send to Meta (Uses Presigned URL if Media)
+            await sendToMeta(phone, metaPayload);
 
-            // Store URL in text field for history if it's media
-            // Format: JSON string if media, else plain text
-            const dbText = mediaUrl ? JSON.stringify({ url: mediaUrl, caption: text }) : text;
-            const dbType = mediaUrl ? (mediaType || 'image') : 'text';
-
+            // Save to DB (Uses Clean URL)
             await client.query(
                 `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
                 [crypto.randomUUID(), req.params.id, dbText, dbType]
@@ -342,7 +382,7 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
             const resDb = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT $2', [req.params.id, limit]);
             
             // Map and parse JSON content for media
-            const messages = resDb.rows.map(r => {
+            const messages = await Promise.all(resDb.rows.map(async (r) => {
                 let text = r.text;
                 let imageUrl = null;
                 let videoUrl = null;
@@ -352,10 +392,24 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
                     try {
                         const parsed = JSON.parse(r.text);
                         text = parsed.caption || '';
-                        if (r.type === 'image') imageUrl = parsed.url;
-                        if (r.type === 'video') videoUrl = parsed.url;
+                        
+                        // IF IT'S S3, WE MUST RESIGN IT FOR THE UI TO SEE IT
+                        let viewUrl = parsed.url;
+                        if (viewUrl.includes(SYSTEM_CONFIG.AWS_BUCKET) && !viewUrl.includes('X-Amz-Signature')) {
+                             try {
+                                 const urlObj = new URL(viewUrl);
+                                 const key = decodeURIComponent(urlObj.pathname.substring(1));
+                                 const command = new GetObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key });
+                                 viewUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+                             } catch(e) {}
+                        }
+
+                        if (r.type === 'image') imageUrl = viewUrl;
+                        if (r.type === 'video') videoUrl = viewUrl;
+                        // Attach URL to text for documents so UI can open it
+                        if (r.type === 'document') text = JSON.stringify({ ...parsed, url: viewUrl }); 
+
                     } catch (e) {
-                        // fallback if not JSON
                         text = r.text;
                     }
                 }
@@ -371,7 +425,7 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
                     status: r.status, 
                     whatsapp_message_id: r.whatsapp_message_id 
                 };
-            });
+            }));
             
             res.json(messages.reverse());
         });
@@ -434,55 +488,6 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
                  await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, 
                     [crypto.randomUUID(), driverId, message, scheduledTime]);
             }
-        });
-        res.json({ success: true });
-    } catch (e) { next(e); }
-});
-
-apiRouter.get('/drivers/:id/scheduled-messages', async (req, res, next) => {
-    try {
-        await withDb(async (client) => {
-            const result = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 ORDER BY scheduled_time ASC`, [req.params.id]);
-            res.json(result.rows.map(r => ({
-                id: r.id,
-                scheduledTime: parseInt(r.scheduled_time),
-                payload: typeof r.payload === 'string' ? JSON.parse(r.payload) : r.payload,
-                status: r.status
-            })));
-        });
-    } catch (e) { 
-        if (e.code === '42P01') res.json([]);
-        else next(e); 
-    }
-});
-
-apiRouter.delete('/scheduled-messages/:id', async (req, res, next) => {
-    try {
-        await withDb(async (client) => {
-            await client.query('DELETE FROM scheduled_messages WHERE id = $1', [req.params.id]);
-        });
-        res.json({ success: true });
-    } catch (e) { next(e); }
-});
-
-apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
-    const { text, scheduledTime } = req.body;
-    try {
-        await withDb(async (client) => {
-            const old = await client.query('SELECT payload FROM scheduled_messages WHERE id = $1', [req.params.id]);
-            if (old.rows.length === 0) return res.status(404).json({ ok: false, error: "Not found" });
-            let oldPayload = old.rows[0].payload;
-            if (typeof oldPayload === 'string') oldPayload = JSON.parse(oldPayload);
-            const newPayload = { ...oldPayload, text: text || oldPayload.text };
-            const updates = [`payload = $1`];
-            const values = [newPayload]; 
-            let idx = 2;
-            if (scheduledTime) {
-                updates.push(`scheduled_time = $${idx++}`);
-                values.push(scheduledTime);
-            }
-            values.push(req.params.id);
-            await client.query(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = $${idx}`, values);
         });
         res.json({ success: true });
     } catch (e) { next(e); }
