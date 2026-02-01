@@ -1,9 +1,8 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Driver, Message, LeadStatus, ScheduledMessage, DriverDocument } from '../types';
+import { Driver, Message, ScheduledMessage, DriverDocument } from '../types';
 import { 
-  X, Send, Image as ImageIcon, Video, CheckCircle, Headset, MicOff, Phone, 
-  FileText, Calendar, Clock, Paperclip, LayoutTemplate, Edit2, Trash2, Zap, Globe, Facebook, AlertTriangle
+  X, Send, Headset, MicOff, Clock, Paperclip, LayoutTemplate, Edit2, Trash2, Zap, AlertTriangle, FileText
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 import { MediaSelectorModal } from './MediaSelectorModal';
@@ -17,7 +16,6 @@ interface ChatDrawerProps {
 
 export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver }) => {
   const [replyText, setReplyText] = useState('');
-  const [localNotes, setLocalNotes] = useState('');
   const [isTemplateMode, setIsTemplateMode] = useState(false);
   const [templateName, setTemplateName] = useState('');
   const [showSchedule, setShowSchedule] = useState(false);
@@ -32,6 +30,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>([]);
+  const [localMessages, setLocalMessages] = useState<Message[]>([]);
   
   const [editingMessage, setEditingMessage] = useState<ScheduledMessage | null>(null);
   const [editTime, setEditTime] = useState('');
@@ -40,24 +39,57 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
-  const messages = driver && Array.isArray(driver.messages) ? driver.messages : [];
+  // --- INITIALIZATION ---
+  useEffect(() => {
+    if (driver) {
+        // Initialize local messages from driver prop
+        setLocalMessages(driver.messages || []);
+        loadDocuments(driver.id);
+        loadScheduledMessages(driver.id);
+    }
+  }, [driver]);
 
+  // --- REAL-TIME POLLING (THE FIX) ---
+  useEffect(() => {
+      if (!driver) return;
+
+      // Poll for new messages every 3 seconds
+      const pollMessages = async () => {
+          try {
+              // Fetch latest 50 messages
+              const latestMessages = await liveApiService.getDriverMessages(driver.id, 50);
+              
+              setLocalMessages(prev => {
+                  // Only update if there are new messages or changes (by comparing IDs of last message)
+                  if (latestMessages.length === 0) return prev;
+                  
+                  const prevLastId = prev.length > 0 ? prev[prev.length - 1].id : '';
+                  const newLastId = latestMessages[latestMessages.length - 1].id;
+                  
+                  // Simple check: if lengths differ or last ID differs, update
+                  // Ideally we merge, but replacing is safer for consistency here
+                  if (latestMessages.length !== prev.length || newLastId !== prevLastId) {
+                      return latestMessages;
+                  }
+                  return prev;
+              });
+          } catch (e) {
+              console.error("Polling error", e);
+          }
+      };
+
+      const interval = setInterval(pollMessages, 3000);
+      return () => clearInterval(interval);
+  }, [driver?.id]);
+
+  // Scroll to bottom on new messages
   useEffect(() => {
     if (messagesEndRef.current && !loadingHistory) {
         messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages.length, driver?.id]);
+  }, [localMessages.length, driver?.id]);
 
-  useEffect(() => {
-    if (driver) {
-        setLocalNotes(driver.notes || '');
-        loadDocuments(driver.id);
-        loadScheduledMessages(driver.id);
-        const interval = setInterval(() => loadScheduledMessages(driver.id), 10000);
-        return () => clearInterval(interval);
-    }
-  }, [driver]);
-
+  // Human Mode Timer
   useEffect(() => {
       if (!driver?.isHumanMode || !driver?.humanModeEndsAt) {
           setTimeLeft('');
@@ -84,22 +116,23 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       try { 
           const docs = await liveApiService.getDriverDocuments(driverId); 
           setDocuments(docs || []); 
-      } catch(e) {
-          // Silent fail to avoid alert spam, but documents will be empty
-          setDocuments([]);
-      }
+      } catch(e) { setDocuments([]); }
   };
+
   const loadScheduledMessages = async (driverId: string) => {
       try { const items = await liveApiService.getScheduledMessages(driverId); setScheduledMessages(items); } catch(e) {}
   };
+
   const handleCancelScheduled = async (msgId: string) => {
       if (!window.confirm("Cancel this scheduled message?")) return;
       try { await liveApiService.cancelScheduledMessage(msgId); setScheduledMessages(prev => prev.filter(m => m.id !== msgId)); } catch (e: any) { alert(`Error: ${e.message}`); }
   };
+
   const handleSendNowScheduled = async (msgId: string) => {
       if (!window.confirm("Send this message immediately?")) return;
       try { await liveApiService.updateScheduledMessage(msgId, { scheduledTime: Date.now() }); setScheduledMessages(prev => prev.filter(m => m.id !== msgId)); alert("Message queued for immediate delivery."); } catch (e: any) { alert(`Error: ${e.message}`); }
   };
+
   const openEditModal = (msg: ScheduledMessage) => {
       setEditingMessage(msg);
       setEditText(msg.payload.text || '');
@@ -107,16 +140,24 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       const isoString = new Date(date.getTime() - (date.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
       setEditTime(isoString);
   };
+
   const saveEditedMessage = async () => {
       if (!editingMessage || !editTime) return;
       if (new Date(editTime).getTime() <= Date.now()) { alert("Time must be in the future."); return; }
       try { await liveApiService.updateScheduledMessage(editingMessage.id, { text: editText, scheduledTime: new Date(editTime).getTime() }); setEditingMessage(null); if (driver) loadScheduledMessages(driver.id); } catch(e: any) { alert(`Update failed: ${e.message}`); }
   };
+
   const handleLoadMore = async () => {
-      if (!driver || messages.length === 0) return;
+      if (!driver || localMessages.length === 0) return;
       setLoadingHistory(true);
-      try { const olderMessages = await liveApiService.getDriverMessages(driver.id, 50, messages[0].timestamp); if (olderMessages.length > 0) onUpdateDriver(driver.id, { messages: [...olderMessages, ...messages] }); } catch(e) {} finally { setLoadingHistory(false); }
+      try { 
+          const olderMessages = await liveApiService.getDriverMessages(driver.id, 50, localMessages[0].timestamp); 
+          if (olderMessages.length > 0) {
+              setLocalMessages(prev => [...olderMessages, ...prev]);
+          } 
+      } catch(e) {} finally { setLoadingHistory(false); }
   };
+
   const filteredDocuments = useMemo(() => {
       if (docFilter === 'all') return documents;
       return documents.filter(d => d.docType === docFilter);
@@ -134,6 +175,20 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
     if (!replyText.trim() && !templateName && !selectedMedia) return;
     
+    // OPTIMISTIC UPDATE: Add message to UI immediately
+    const tempMsg: Message = {
+        id: `temp_${Date.now()}`,
+        sender: 'agent',
+        text: replyText || (selectedMedia ? `[${selectedMedia.type}]` : ''),
+        timestamp: Date.now(),
+        type: selectedMedia ? selectedMedia.type as any : 'text',
+        status: 'sending'
+    };
+    
+    if (!showSchedule) {
+        setLocalMessages(prev => [...prev, tempMsg]);
+    }
+
     if (showSchedule && scheduleTime) {
         if (new Date(scheduleTime).getTime() <= Date.now()) { alert("Select a time in the future."); return; }
         
@@ -182,15 +237,18 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
           <div className="flex-1 flex overflow-hidden">
             <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px] relative">
               <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4">
-                {messages.length >= 50 && <div className="flex justify-center"><button onClick={handleLoadMore} disabled={loadingHistory} className="text-xs bg-white border border-gray-300 rounded-full px-4 py-2">Load Previous</button></div>}
-                {messages.map((msg) => (
+                {localMessages.length >= 50 && <div className="flex justify-center"><button onClick={handleLoadMore} disabled={loadingHistory} className="text-xs bg-white border border-gray-300 rounded-full px-4 py-2">Load Previous</button></div>}
+                {localMessages.map((msg) => (
                     <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
                         <div className={`max-w-[80%] rounded-2xl shadow-sm overflow-hidden ${msg.sender === 'driver' ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' : 'bg-blue-600 text-white rounded-tr-none'}`}>
                             {(msg.headerImageUrl || msg.imageUrl) && (<div className="w-full aspect-video overflow-hidden bg-black/5 relative"><img src={msg.headerImageUrl || msg.imageUrl} className="w-full h-full object-cover" /></div>)}
                             <div className="px-4 py-3">
                                 {msg.templateName && <div className="text-[10px] uppercase font-bold opacity-50 mb-1 flex items-center gap-1"><LayoutTemplate size={10} /> Template: {msg.templateName}</div>}
                                 {msg.text && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
-                                <div className="text-[10px] mt-1 text-right opacity-60">{new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+                                <div className="text-[10px] mt-1 text-right opacity-60 flex justify-end gap-1 items-center">
+                                    {msg.status === 'sending' && <Clock size={10} className="animate-spin" />}
+                                    {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                </div>
                             </div>
                         </div>
                     </div>

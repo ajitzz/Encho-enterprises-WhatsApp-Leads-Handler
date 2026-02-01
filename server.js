@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
@@ -150,10 +151,13 @@ const getBotSettings = async () => {
     });
 };
 
+// --- INBOUND PROCESSING CORE ---
 const processMessageInternal = async (message, contact, phoneId) => {
     if (!message || !phoneId) return;
 
-    const from = message.from; // Phone number
+    // CRITICAL: Normalize phone number (Remove +, spaces, dashes)
+    // WhatsApp 'from' usually comes as '919876543210', but safe to strip anyway
+    const from = message.from.replace(/\D/g, '');
     const name = contact?.profile?.name || "Unknown";
     
     // Extract text content safely
@@ -293,7 +297,7 @@ apiRouter.get('/webhook', (req, res) => {
 });
 
 apiRouter.post('/webhook', async (req, res) => {
-    res.sendStatus(200); // Always ack immediately
+    res.sendStatus(200); // Always ack immediately to prevent Meta retries
     try {
         const body = req.body;
         // Check if it's a WhatsApp status update or message
@@ -308,9 +312,9 @@ apiRouter.post('/webhook', async (req, res) => {
                 
                 for (const message of value.messages) {
                     const contact = contacts.find(c => c.wa_id === message.from) || {};
-                    // Async processing
+                    // Async processing with error logging
                     processMessageInternal(message, contact, phoneId).catch(err => 
-                        logger.error("Msg Process Error", { err: err.message })
+                        logger.error("Msg Process Error", { err: err.message, from: message.from })
                     );
                 }
             }
@@ -369,6 +373,29 @@ apiRouter.get('/drivers', async (req, res, next) => {
             })));
         });
     } catch (e) { next(e); }
+});
+
+apiRouter.get('/drivers/:id/messages', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const limit = parseInt(req.query.limit) || 50;
+            // Fetch messages for a specific driver
+            const resDb = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT $2', [req.params.id, limit]);
+            // Return them reversed (oldest to newest) for UI
+            res.json(resDb.rows.map(r => ({ 
+                id: r.id, 
+                sender: r.direction === 'in' ? 'driver' : 'agent', 
+                text: r.text, 
+                timestamp: new Date(r.created_at).getTime(), 
+                type: r.type || 'text', 
+                status: r.status,
+                whatsapp_message_id: r.whatsapp_message_id 
+            })).reverse());
+        });
+    } catch (e) { 
+        if (e.code === '42P01') res.json([]);
+        else next(e); 
+    }
 });
 
 apiRouter.post('/drivers/:id/messages', async (req, res, next) => {

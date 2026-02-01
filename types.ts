@@ -96,7 +96,7 @@ export interface Message {
   documentUrl?: string;
   timestamp: number;
   type: 'text' | 'image' | 'video' | 'document' | 'audio' | 'location' | 'template' | 'interactive' | 'options' | 'video_link';
-  status?: 'sent' | 'delivered' | 'read' | 'failed' | 'processing';
+  status?: 'sent' | 'delivered' | 'read' | 'failed' | 'processing' | 'sending';
   options?: string[];
   templateName?: string;
   payload?: any;
