@@ -27,14 +27,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>([]);
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
   
-  // EDIT STATE
   const [editingMessage, setEditingMessage] = useState<ScheduledMessage | null>(null);
   const [editTime, setEditTime] = useState('');
   const [editText, setEditText] = useState('');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // --- INITIALIZATION ---
   useEffect(() => {
     if (driver) {
         setLocalMessages(driver.messages || []);
@@ -43,7 +41,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     }
   }, [driver]);
 
-  // --- REAL-TIME POLLING ---
   useEffect(() => {
       if (!driver) return;
       const pollMessages = async () => {
@@ -99,14 +96,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
   const openEditModal = (msg: ScheduledMessage) => {
       setEditingMessage(msg);
-      // Safe parsing of payload
       let txt = '';
       if(msg.payload) {
           if (typeof msg.payload === 'string') txt = msg.payload;
           else if (typeof msg.payload.text === 'string') txt = msg.payload.text;
       }
       setEditText(txt);
-      
       const date = new Date(msg.scheduledTime);
       const isoString = new Date(date.getTime() - (date.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
       setEditTime(isoString);
@@ -126,9 +121,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
   if (!driver) return null;
 
-  // --- SEND HANDLER (Fixes Async Listener Error) ---
   const handleSend = async (e?: React.MouseEvent | React.FormEvent) => {
-    if (e) e.preventDefault(); // STOP FORM SUBMISSION
+    if (e) e.preventDefault(); 
 
     if (!replyText.trim() && !selectedMedia) return;
     setIsSending(true);
@@ -137,7 +131,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
         if (showSchedule && scheduleTime) {
             if (new Date(scheduleTime).getTime() <= Date.now()) { throw new Error("Select a time in the future."); }
             
-            // Correct Payload for Scheduler
             await liveApiService.scheduleMessage(
                 [driver.id], 
                 { 
@@ -166,7 +159,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const renderMessageText = (rawText: any) => {
       if (!rawText) return null;
       if (typeof rawText !== 'string') return null; 
-      
       try {
           if (rawText.trim().startsWith('{')) {
               const parsed = JSON.parse(rawText);
@@ -174,7 +166,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
               return null; 
           }
       } catch (e) {}
-
       return <p className="text-sm leading-relaxed whitespace-pre-wrap">{rawText}</p>;
   };
 
@@ -210,8 +201,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
           <div className="flex-1 flex overflow-hidden">
             <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px] relative">
-              
-              {/* MESSAGES */}
               <div className="flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4">
                 {localMessages.map((msg) => (
                     <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
@@ -228,7 +217,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     </div>
                 ))}
                 
-                {/* SCHEDULED */}
                 {scheduledMessages.length > 0 && (
                     <div className="flex flex-col gap-4 mt-6">
                         <div className="flex items-center gap-2 justify-center opacity-50">
@@ -260,11 +248,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                         ))}
                     </div>
                 )}
-                
                 <div ref={messagesEndRef} />
               </div>
 
-              {/* INPUT AREA */}
               <div className="p-4 bg-white border-t border-gray-200 relative">
                 {selectedMedia && (
                     <div className="absolute bottom-full left-0 right-0 bg-gray-100 p-2 border-t border-gray-200 flex items-center justify-between px-4">
