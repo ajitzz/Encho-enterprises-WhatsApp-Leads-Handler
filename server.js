@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
@@ -5,8 +6,7 @@ const { Redis } = require('@upstash/redis');
 const { Pool } = require('pg');
 const multer = require('multer');
 const { OAuth2Client } = require('google-auth-library');
-const axios = require('axios'); // Integrated for direct API calls
-const https = require('https'); // Moved to top level for optimization
+const { GoogleGenAI } = require('@google/genai');
 require('dotenv').config();
 
 // --- OBSERVABILITY ---
@@ -77,6 +77,8 @@ const redis = new Redis({
 const authClient = new OAuth2Client(process.env.VITE_GOOGLE_CLIENT_ID);
 
 const getMetaClient = () => {
+    const axios = require('axios');
+    const https = require('https');
     return axios.create({
         httpsAgent: new https.Agent({ keepAlive: true }),
         timeout: SYSTEM_CONFIG.META_TIMEOUT,
@@ -126,12 +128,9 @@ const getBotSettings = async (phoneId) => {
 const sendToMeta = async (to, payload) => {
     if (payload.type === 'text' && payload.text && payload.text.body) {
         const body = payload.text.body.trim().toLowerCase();
-        // EXPANDED Forbidden list to catch common placeholder text variants
         const forbiddenPhrases = [
-            'replace this', 'sample message', 'type your message', 'enter text', 
-            'insert text', 'your text here', 'message body', '[message]'
+            'replace this', 'sample message', 'type your message', 'enter text'
         ];
-        
         if (forbiddenPhrases.some(phrase => body.includes(phrase)) || !body) {
             logger.warn("🛑 BLOCKED: Placeholder message detected.", { to, body: payload.text.body });
             throw new Error("Message blocked: Contains placeholder text."); 
@@ -162,7 +161,6 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
         const name = contact?.profile?.name || "Unknown";
         const textBody = message.text?.body || `[${message.type}]`;
         
-        // Use the exact schema columns
         const upsertQuery = `
             INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at) 
             VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
@@ -208,24 +206,27 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
 // --- CRON JOB: SCHEDULED MESSAGES ---
 const processQueueInternal = async () => {
     let processedCount = 0;
-    let jobsToProcess = [];
+    try {
+        let jobsToProcess = [];
 
-    await withDb(async (client) => {
-        // Reset stuck jobs (processing > 10 mins)
-        await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
+        await withDb(async (client) => {
+            // SAFEGUARD: Check if table exists to avoid log spamming on new deploys
+            const check = await client.query(`SELECT to_regclass('public.scheduled_messages')`);
+            if(!check.rows[0].to_regclass) return;
 
-        try {
+            // Reset stuck jobs (processing > 10 mins)
+            await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
+
             await client.query('BEGIN');
             
-            // Lock rows for processing using SKIP LOCKED for concurrency safety.
-            // Using 'FOR UPDATE OF sm' ensures we lock the specific rows in the joined query.
+            // Lock rows for processing
             const result = await client.query(`
                 SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
                 FROM scheduled_messages sm
                 JOIN candidates c ON sm.candidate_id = c.id
                 WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
                 LIMIT 50
-                FOR UPDATE OF sm SKIP LOCKED
+                FOR UPDATE SKIP LOCKED
             `, [Date.now()]);
 
             if (result.rows.length > 0) {
@@ -234,142 +235,65 @@ const processQueueInternal = async () => {
                 jobsToProcess = result.rows;
             }
             
-            await client.query('COMMIT');
-        } catch (e) {
-            await client.query('ROLLBACK');
-            throw e;
+            await client.query('COMMIT'); 
+        });
+
+        if (jobsToProcess.length > 0) {
+            logger.info(`Scheduler: Processing ${jobsToProcess.length} jobs`);
         }
-    });
 
-    if (jobsToProcess.length > 0) {
-        logger.info(`Scheduler: Processing ${jobsToProcess.length} jobs`);
-    }
+        for (const job of jobsToProcess) {
+            try {
+                let payload = job.payload; 
+                if (typeof payload === 'string') {
+                    try { payload = JSON.parse(payload); } catch(e) {}
+                }
 
-    for (const job of jobsToProcess) {
-        try {
-            let payload = job.payload; 
-            if (typeof payload === 'string') {
-                try { payload = JSON.parse(payload); } catch(e) {}
+                let metaPayload = {};
+                
+                if (payload.templateName) {
+                    metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
+                } else if (payload.mediaUrl) {
+                    const type = payload.mediaType || 'image';
+                    const caption = payload.text ? payload.text : undefined;
+                    metaPayload = { type, [type]: { link: payload.mediaUrl, caption } };
+                } else {
+                    const bodyText = payload.text || ' ';
+                    metaPayload = { type: 'text', text: { body: bodyText } };
+                }
+
+                await sendToMeta(job.phone_number, metaPayload);
+
+                await withDb(async (client) => {
+                    await client.query(`
+                        INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
+                        VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
+                    `, [crypto.randomUUID(), job.candidate_id, payload.text || `[${payload.templateName || payload.mediaType}]`, payload.mediaType || 'text']);
+
+                    await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
+                        [payload.text || 'Scheduled Message', Date.now(), job.candidate_id]);
+
+                    await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [job.id]);
+                });
+                processedCount++;
+            } catch (err) {
+                logger.error("Scheduler Job Failed", { id: job.id, error: err.message });
+                await withDb(async (client) => {
+                    await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
+                });
             }
-
-            let metaPayload = {};
-            
-            if (payload.templateName) {
-                metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
-            } else if (payload.mediaUrl) {
-                const type = payload.mediaType || 'image';
-                const caption = payload.text ? payload.text : undefined;
-                metaPayload = { type, [type]: { link: payload.mediaUrl, caption } };
-            } else {
-                const bodyText = payload.text || ' ';
-                metaPayload = { type: 'text', text: { body: bodyText } };
-            }
-
-            await sendToMeta(job.phone_number, metaPayload);
-
-            await withDb(async (client) => {
-                await client.query(`
-                    INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
-                    VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
-                `, [crypto.randomUUID(), job.candidate_id, payload.text || `[${payload.templateName || payload.mediaType}]`, payload.mediaType || 'text']);
-
-                await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
-                    [payload.text || 'Scheduled Message', Date.now(), job.candidate_id]);
-
-                await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [job.id]);
-            });
-            processedCount++;
-        } catch (err) {
-            logger.error("Scheduler Job Failed", { id: job.id, error: err.message });
-            await withDb(async (client) => {
-                await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
-            });
         }
+        return processedCount;
+    } catch (e) {
+        console.error("Queue Processing Error", e);
+        return 0;
     }
-    return processedCount;
 };
 
 apiRouter.get('/cron/process-queue', async (req, res) => {
-    try {
-        const count = await processQueueInternal();
-        res.status(200).json({ success: true, processed: count });
-    } catch (e) {
-        logger.error("Cron Error", { error: e.message });
-        res.status(200).json({ success: false, error: e.message });
-    }
+    const count = await processQueueInternal();
+    res.json({ success: true, processed: count });
 });
-
-// --- AI GENERATION ROUTES (Direct API via Axios) ---
-
-apiRouter.post('/ai/generate', async (req, res) => {
-    const { contents, config, model } = req.body;
-    const geminiModel = model || 'gemini-2.0-flash-exp';
-    const apiKey = process.env.GEMINI_API_KEY;
-    
-    if (!apiKey) return res.status(500).json({error: "Missing GEMINI_API_KEY"});
-
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`;
-    
-    let apiContents = [];
-    if (typeof contents === 'string') {
-        apiContents = [{ role: 'user', parts: [{ text: contents }] }];
-    } else if (Array.isArray(contents)) {
-        apiContents = contents;
-    } else if (typeof contents === 'object') {
-        apiContents = [contents];
-    }
-
-    const payload = {
-        contents: apiContents,
-        generationConfig: {},
-    };
-
-    if (config) {
-        if (config.systemInstruction) {
-            payload.systemInstruction = { parts: [{ text: config.systemInstruction }] };
-        }
-        if (config.responseMimeType) payload.generationConfig.responseMimeType = config.responseMimeType;
-        if (config.responseSchema) payload.generationConfig.responseSchema = config.responseSchema;
-        if (config.temperature) payload.generationConfig.temperature = config.temperature;
-    }
-
-    try {
-        const response = await axios.post(url, payload);
-        const text = response.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-        res.json({ text });
-    } catch (e) {
-        logger.error("AI Generation Error", { error: e.response?.data || e.message });
-        res.status(500).json({ error: e.response?.data || e.message });
-    }
-});
-
-apiRouter.post('/ai/assistant', async (req, res) => {
-    const { input, history } = req.body;
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return res.status(500).json({error: "Missing GEMINI_API_KEY"});
-
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`;
-
-    const apiContents = [...(history || [])];
-    if (input) {
-        apiContents.push({ role: 'user', parts: [{ text: input }] });
-    }
-
-    const payload = {
-        contents: apiContents,
-        systemInstruction: { parts: [{ text: "You are Fleet Commander, a helpful assistant for the Uber Fleet dashboard." }] }
-    };
-
-    try {
-        const response = await axios.post(url, payload);
-        const text = response.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-        res.json({ text });
-    } catch (e) {
-        logger.error("AI Assistant Error", { error: e.response?.data || e.message });
-        res.status(500).json({ error: e.message });
-    }
-});
-
 
 // --- ROUTES ---
 
@@ -417,7 +341,7 @@ apiRouter.post('/system/hard-reset', async (req, res, next) => {
                 DROP TABLE IF EXISTS bot_versions CASCADE;
                 DROP TABLE IF EXISTS candidates CASCADE;
             `);
-            // Init will recreate tables based on the new schema
+            // Init will recreate
             await init(); 
         });
         res.json({ success: true });
@@ -506,7 +430,16 @@ apiRouter.post('/scheduled-messages', async (req, res, next) => {
         if (isNaN(scheduledTime)) return res.status(400).json({ ok: false, error: "Invalid timestamp" });
 
         await withDb(async (client) => {
-            // NOTE: Table creation removed from here as init() handles it now.
+            // Auto-create table if missing
+            await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                payload JSONB,
+                scheduled_time BIGINT,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );`);
+
             for (const driverId of driverIds) {
                  await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, 
                     [crypto.randomUUID(), driverId, message, scheduledTime]);
@@ -669,68 +602,58 @@ const init = async () => {
         await withDb(async (client) => {
             await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
             
-            // Candidates
             await client.query(`CREATE TABLE IF NOT EXISTS candidates (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 phone_number VARCHAR(50) UNIQUE NOT NULL,
                 name VARCHAR(255),
-                stage VARCHAR(50) NOT NULL DEFAULT 'New',
+                stage VARCHAR(50) DEFAULT 'New',
                 last_message_at BIGINT,
                 last_message TEXT,
                 notes TEXT,
-                source VARCHAR(50) NOT NULL DEFAULT 'Organic',
+                source VARCHAR(50) DEFAULT 'Organic',
                 current_node_id VARCHAR(255),
-                is_human_mode BOOLEAN NOT NULL DEFAULT FALSE,
+                is_human_mode BOOLEAN DEFAULT FALSE,
                 human_mode_ends_at BIGINT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );`);
             
-            // Messages
             await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                candidate_id UUID NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
-                direction VARCHAR(10) NOT NULL CHECK (direction IN ('in','out')),
+                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                direction VARCHAR(10),
                 text TEXT,
-                type VARCHAR(50) NOT NULL DEFAULT 'text',
-                status VARCHAR(50) NOT NULL DEFAULT 'sent',
+                type VARCHAR(50),
+                status VARCHAR(50),
                 whatsapp_message_id VARCHAR(255) UNIQUE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );`);
             
-            // Scheduled Messages (Strict Constraints)
             await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                candidate_id UUID NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
-                payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-                scheduled_time BIGINT NOT NULL,
-                status VARCHAR(50) NOT NULL DEFAULT 'pending',
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                payload JSONB,
+                scheduled_time BIGINT,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );`);
             
-            // Bot Versions
             await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 phone_number_id VARCHAR(50),
                 version_number INT,
                 status VARCHAR(20),
                 settings JSONB,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );`);
 
-            // Documents
             await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                candidate_id UUID NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
-                type VARCHAR(50) NOT NULL,
-                url TEXT NOT NULL,
-                status VARCHAR(50) NOT NULL DEFAULT 'pending',
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                type VARCHAR(50),
+                url TEXT,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );`);
-            
-            // Indices (Safe creation)
-            await client.query(`CREATE INDEX IF NOT EXISTS idx_candidates_phone ON candidates(phone_number);`);
-            await client.query(`CREATE INDEX IF NOT EXISTS idx_candidates_last_msg ON candidates(last_message_at DESC);`);
-            await client.query(`CREATE INDEX IF NOT EXISTS idx_scheduled_status ON scheduled_messages(status, scheduled_time);`);
         });
         logger.info("DB Schema Verified (Tables Ready)");
     } catch (e) {

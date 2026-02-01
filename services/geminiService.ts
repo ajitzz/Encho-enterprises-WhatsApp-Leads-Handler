@@ -1,3 +1,5 @@
+
+import { Type } from "@google/genai";
 import { LeadStatus, AuditReport, AuditIssue } from "../types";
 import { liveApiService } from './liveApiService';
 
@@ -6,16 +8,6 @@ const MODELS = {
     BEST: "gemini-3-pro-preview",
     ECONOMY: "gemini-3-flash-preview"
 };
-
-// Local definition to replace @google/genai ESM import
-const Type = {
-  STRING: 'STRING',
-  NUMBER: 'NUMBER',
-  INTEGER: 'INTEGER',
-  BOOLEAN: 'BOOLEAN',
-  ARRAY: 'ARRAY',
-  OBJECT: 'OBJECT'
-} as const;
 
 let currentModel = MODELS.BEST;
 

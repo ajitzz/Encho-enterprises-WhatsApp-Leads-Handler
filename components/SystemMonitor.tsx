@@ -1,5 +1,6 @@
+
 import React, { useEffect, useState, useRef } from 'react';
-import { Database, Server, Shield, X, AlertTriangle, Zap, RefreshCw, AlertCircle, DatabaseZap, Workflow, Trash2, Send } from 'lucide-react';
+import { Database, Server, Shield, X, AlertTriangle, Zap, RefreshCw, AlertCircle, DatabaseZap, Workflow, Trash2 } from 'lucide-react';
 import { SystemStats } from '../types';
 
 interface DiagnosticStats extends SystemStats {
@@ -17,7 +18,6 @@ export const SystemMonitor = () => {
     const [isOpen, setIsOpen] = useState(false);
     const [showControls, setShowControls] = useState(false);
     const [dbActionStatus, setDbActionStatus] = useState('');
-    const [schedulerStatus, setSchedulerStatus] = useState('');
     const timerRef = useRef<any>(null);
 
     useEffect(() => {
@@ -50,6 +50,16 @@ export const SystemMonitor = () => {
         poll();
     };
 
+    const handleInitDB = async () => {
+        setDbActionStatus('Creating Tables...');
+        try {
+            await fetch('/api/system/init-db', { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` } });
+            setDbActionStatus('Tables Ready!');
+            const res = await fetch('/api/debug/status', { headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }});
+            if(res.ok) { const d = await res.json(); setStats(prev => ({...prev!, tables: d.tables, counts: d.counts})); }
+        } catch(e) { setDbActionStatus('Failed'); }
+    };
+
     const handleHardReset = async () => {
         if(!window.confirm("CRITICAL WARNING:\n\nThis will DELETE ALL DATA (Messages, Leads, Settings) and recreate the database tables.\n\nUse this only if you see '500 Internal Server Errors' continuously.\n\nAre you sure?")) return;
         
@@ -68,24 +78,6 @@ export const SystemMonitor = () => {
             setDbActionStatus('Seeded! Reloading...');
             setTimeout(() => window.location.reload(), 1000);
         } catch(e) { setDbActionStatus('Failed'); }
-    };
-
-    const handleForceScheduler = async () => {
-        setSchedulerStatus('Forcing run...');
-        try {
-            const res = await fetch('/api/cron/process-queue', { 
-                headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }
-            });
-            const data = await res.json();
-            if (data.success) {
-                setSchedulerStatus(`Processed: ${data.processed} msgs`);
-            } else {
-                setSchedulerStatus(`Error: ${data.error}`);
-            }
-        } catch(e) {
-            setSchedulerStatus('Failed to connect');
-        }
-        setTimeout(() => setSchedulerStatus(''), 5000);
     };
 
     if (!stats) return null;
@@ -157,17 +149,6 @@ export const SystemMonitor = () => {
                                 <p className="text-xs text-gray-400 mt-2">Add <strong>PUBLIC_BASE_URL</strong> to Vercel Env Variables.</p>
                             </div>
                         )}
-
-                        <div className="bg-blue-900/30 border border-blue-800 p-4 rounded-lg">
-                            <div className="flex items-center justify-between mb-2">
-                                <div className="flex items-center gap-2 text-blue-400 font-bold"><Send size={18} /> Scheduler Trigger</div>
-                                {schedulerStatus && <span className="text-xs text-green-400 font-mono">{schedulerStatus}</span>}
-                            </div>
-                            <p className="text-xs text-gray-400 mb-3">If scheduled messages are pending, click here to force send them immediately.</p>
-                            <button onClick={handleForceScheduler} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2">
-                                <Zap size={14} /> Force Process Queue
-                            </button>
-                        </div>
 
                         <div className="bg-amber-900/30 border border-amber-800 p-4 rounded-lg">
                             <div className="flex items-center justify-between mb-2">
