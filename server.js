@@ -206,94 +206,90 @@ const processMessageInternal = async (message, contact, phoneId, requestId = 'sy
 // --- CRON JOB: SCHEDULED MESSAGES ---
 const processQueueInternal = async () => {
     let processedCount = 0;
-    try {
-        let jobsToProcess = [];
+    // Removed outer try-catch to allow errors to propagate to the route handler for proper 200 { success: false } response
+    let jobsToProcess = [];
 
-        await withDb(async (client) => {
-            // SAFEGUARD: Create table if missing (Prevent Crash) - ensuring NOT NULL constraint on candidate_id matches schema
-            await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                candidate_id UUID NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
-                payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-                scheduled_time BIGINT NOT NULL,
-                status VARCHAR(50) NOT NULL DEFAULT 'pending',
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );`);
+    await withDb(async (client) => {
+        // SAFEGUARD: Create table if missing (Prevent Crash) - ensuring NOT NULL constraint on candidate_id matches schema
+        await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            candidate_id UUID NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+            payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+            scheduled_time BIGINT NOT NULL,
+            status VARCHAR(50) NOT NULL DEFAULT 'pending',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );`);
 
-            // Reset stuck jobs (processing > 10 mins)
-            await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
+        // Reset stuck jobs (processing > 10 mins)
+        await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
 
-            await client.query('BEGIN');
-            
-            // Lock rows for processing
-            const result = await client.query(`
-                SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
-                FROM scheduled_messages sm
-                JOIN candidates c ON sm.candidate_id = c.id
-                WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
-                LIMIT 50
-                FOR UPDATE SKIP LOCKED
-            `, [Date.now()]);
+        await client.query('BEGIN');
+        
+        // Lock rows for processing
+        const result = await client.query(`
+            SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
+            FROM scheduled_messages sm
+            JOIN candidates c ON sm.candidate_id = c.id
+            WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
+            LIMIT 50
+            FOR UPDATE SKIP LOCKED
+        `, [Date.now()]);
 
-            if (result.rows.length > 0) {
-                const jobIds = result.rows.map(r => r.id);
-                await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`, [jobIds]);
-                jobsToProcess = result.rows;
-            }
-            
-            await client.query('COMMIT'); 
-        });
-
-        if (jobsToProcess.length > 0) {
-            logger.info(`Scheduler: Processing ${jobsToProcess.length} jobs`);
+        if (result.rows.length > 0) {
+            const jobIds = result.rows.map(r => r.id);
+            await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`, [jobIds]);
+            jobsToProcess = result.rows;
         }
+        
+        await client.query('COMMIT'); 
+    });
 
-        for (const job of jobsToProcess) {
-            try {
-                let payload = job.payload; 
-                if (typeof payload === 'string') {
-                    try { payload = JSON.parse(payload); } catch(e) {}
-                }
-
-                let metaPayload = {};
-                
-                if (payload.templateName) {
-                    metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
-                } else if (payload.mediaUrl) {
-                    const type = payload.mediaType || 'image';
-                    const caption = payload.text ? payload.text : undefined;
-                    metaPayload = { type, [type]: { link: payload.mediaUrl, caption } };
-                } else {
-                    const bodyText = payload.text || ' ';
-                    metaPayload = { type: 'text', text: { body: bodyText } };
-                }
-
-                await sendToMeta(job.phone_number, metaPayload);
-
-                await withDb(async (client) => {
-                    await client.query(`
-                        INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
-                        VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
-                    `, [crypto.randomUUID(), job.candidate_id, payload.text || `[${payload.templateName || payload.mediaType}]`, payload.mediaType || 'text']);
-
-                    await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
-                        [payload.text || 'Scheduled Message', Date.now(), job.candidate_id]);
-
-                    await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [job.id]);
-                });
-                processedCount++;
-            } catch (err) {
-                logger.error("Scheduler Job Failed", { id: job.id, error: err.message });
-                await withDb(async (client) => {
-                    await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
-                });
-            }
-        }
-        return processedCount;
-    } catch (e) {
-        console.error("Queue Processing Error", e);
-        return 0;
+    if (jobsToProcess.length > 0) {
+        logger.info(`Scheduler: Processing ${jobsToProcess.length} jobs`);
     }
+
+    for (const job of jobsToProcess) {
+        try {
+            let payload = job.payload; 
+            if (typeof payload === 'string') {
+                try { payload = JSON.parse(payload); } catch(e) {}
+            }
+
+            let metaPayload = {};
+            
+            if (payload.templateName) {
+                metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
+            } else if (payload.mediaUrl) {
+                const type = payload.mediaType || 'image';
+                const caption = payload.text ? payload.text : undefined;
+                metaPayload = { type, [type]: { link: payload.mediaUrl, caption } };
+            } else {
+                const bodyText = payload.text || ' ';
+                metaPayload = { type: 'text', text: { body: bodyText } };
+            }
+
+            await sendToMeta(job.phone_number, metaPayload);
+
+            await withDb(async (client) => {
+                await client.query(`
+                    INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
+                    VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
+                `, [crypto.randomUUID(), job.candidate_id, payload.text || `[${payload.templateName || payload.mediaType}]`, payload.mediaType || 'text']);
+
+                await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
+                    [payload.text || 'Scheduled Message', Date.now(), job.candidate_id]);
+
+                await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [job.id]);
+            });
+            processedCount++;
+        } catch (err) {
+            logger.error("Scheduler Job Failed", { id: job.id, error: err.message });
+            await withDb(async (client) => {
+                await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
+            });
+        }
+    }
+    return processedCount;
 };
 
 apiRouter.get('/cron/process-queue', async (req, res) => {
@@ -302,7 +298,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
         res.status(200).json({ success: true, processed: count });
     } catch (e) {
         // Return 200 with error to prevent 500 alerting systems, but log error
-        console.error("Cron Error", e);
+        logger.error("Cron Error", { error: e.message });
         res.status(200).json({ success: false, error: e.message });
     }
 });
