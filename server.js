@@ -5,7 +5,7 @@ const { Redis } = require('@upstash/redis');
 const { Pool } = require('pg');
 const multer = require('multer');
 const { OAuth2Client } = require('google-auth-library');
-const { GoogleGenAI } = require('@google/genai');
+// REMOVED: const { GoogleGenAI } = require('@google/genai'); // This package is ESM-only and crashes CommonJS require()
 require('dotenv').config();
 
 // --- OBSERVABILITY ---
@@ -215,26 +215,31 @@ const processQueueInternal = async () => {
         // Reset stuck jobs (processing > 10 mins)
         await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
 
-        await client.query('BEGIN');
-        
-        // Lock rows for processing using SKIP LOCKED for concurrency safety.
-        // Important: Use 'FOR UPDATE OF sm' to only lock the message rows, NOT the candidate rows.
-        const result = await client.query(`
-            SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
-            FROM scheduled_messages sm
-            JOIN candidates c ON sm.candidate_id = c.id
-            WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
-            LIMIT 50
-            FOR UPDATE OF sm SKIP LOCKED
-        `, [Date.now()]);
+        try {
+            await client.query('BEGIN');
+            
+            // Lock rows for processing using SKIP LOCKED for concurrency safety.
+            // Important: Use 'FOR UPDATE OF sm' to only lock the message rows, NOT the candidate rows.
+            const result = await client.query(`
+                SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
+                FROM scheduled_messages sm
+                JOIN candidates c ON sm.candidate_id = c.id
+                WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
+                LIMIT 50
+                FOR UPDATE OF sm SKIP LOCKED
+            `, [Date.now()]);
 
-        if (result.rows.length > 0) {
-            const jobIds = result.rows.map(r => r.id);
-            await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`, [jobIds]);
-            jobsToProcess = result.rows;
+            if (result.rows.length > 0) {
+                const jobIds = result.rows.map(r => r.id);
+                await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`, [jobIds]);
+                jobsToProcess = result.rows;
+            }
+            
+            await client.query('COMMIT');
+        } catch (e) {
+            await client.query('ROLLBACK');
+            throw e;
         }
-        
-        await client.query('COMMIT'); 
     });
 
     if (jobsToProcess.length > 0) {
