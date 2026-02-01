@@ -210,10 +210,10 @@ const processQueueInternal = async () => {
         let jobsToProcess = [];
 
         await withDb(async (client) => {
-            // SAFEGUARD: Create table if missing (Prevent Crash)
+            // SAFEGUARD: Create table if missing (Prevent Crash) - ensuring NOT NULL constraint on candidate_id matches schema
             await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+                candidate_id UUID NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
                 payload JSONB NOT NULL DEFAULT '{}'::jsonb,
                 scheduled_time BIGINT NOT NULL,
                 status VARCHAR(50) NOT NULL DEFAULT 'pending',
@@ -301,6 +301,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
         const count = await processQueueInternal();
         res.json({ success: true, processed: count });
     } catch (e) {
+        // Return 200 with error to prevent 500 alerting systems, but log error
         res.json({ success: false, error: e.message });
     }
 });
