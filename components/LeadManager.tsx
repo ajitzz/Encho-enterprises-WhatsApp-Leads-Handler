@@ -73,7 +73,21 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
 
     if (!bulkMessage.trim() && !selectedMedia && !templateName) return;
     
-    const timestamp = isScheduled && scheduleTime ? new Date(scheduleTime).getTime() : Date.now();
+    // Time Validation
+    let timestamp = Date.now();
+    if (isScheduled) {
+        if (!scheduleTime) {
+            alert("Please select a date and time for the scheduled message.");
+            return;
+        }
+        const selectedTime = new Date(scheduleTime).getTime();
+        if (selectedTime <= Date.now()) {
+             alert("Scheduled time must be in the future.");
+             return;
+        }
+        timestamp = selectedTime;
+    }
+
     try {
         await liveApiService.scheduleMessage(selectedIds, {
             text: bulkMessage,
@@ -85,8 +99,15 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
         onBulkSend(selectedIds, bulkMessage, selectedMedia?.url, selectedMedia?.type, buttons as any, templateName, timestamp);
     } catch (e: any) { alert(`Failed: ${e.message}`); return; }
 
+    // Reset Form
     setShowBulkCompose(false);
-    setBulkMessage(''); setTemplateName(''); setSelectedMedia(null); setButtons([]); setIsScheduled(false); setScheduleTime(''); setSelectedIds([]);
+    setBulkMessage(''); 
+    setTemplateName(''); 
+    setSelectedMedia(null); 
+    setButtons([]); 
+    setIsScheduled(false); 
+    setScheduleTime(''); 
+    setSelectedIds([]);
   };
 
   return (
@@ -145,14 +166,19 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
                   <div className="p-6 flex-1 flex flex-col overflow-y-auto space-y-4">
                       <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 text-xs text-blue-800">Sending to <strong>{selectedIds.length}</strong> recipients.</div>
                       <div className="p-3 rounded-lg border bg-gray-50">
-                          <label className="text-xs font-bold text-gray-600 flex items-center gap-2"><Clock size={14} /> Schedule</label>
-                          <input type="checkbox" checked={isScheduled} onChange={(e) => setIsScheduled(e.target.checked)} className="ml-2" />
-                          {isScheduled && <input type="datetime-local" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} className="w-full mt-2 p-2 border rounded text-sm" />}
+                          <label className="text-xs font-bold text-gray-600 flex items-center gap-2 mb-2"><Clock size={14} /> Schedule Send</label>
+                          <div className="flex items-center gap-2 mb-2">
+                             <input type="checkbox" id="scheduleCheck" checked={isScheduled} onChange={(e) => setIsScheduled(e.target.checked)} className="cursor-pointer" />
+                             <label htmlFor="scheduleCheck" className="text-sm cursor-pointer select-none">Send later</label>
+                          </div>
+                          {isScheduled && <input type="datetime-local" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} className="w-full p-2 border rounded text-sm bg-white" />}
                       </div>
-                      <textarea value={bulkMessage} onChange={(e) => setBulkMessage(e.target.value)} className="w-full p-4 bg-gray-50 border border-gray-200 rounded-xl resize-none min-h-[120px] text-sm" placeholder="Type message..." />
+                      <textarea value={bulkMessage} onChange={(e) => setBulkMessage(e.target.value)} className="w-full p-4 bg-gray-50 border border-gray-200 rounded-xl resize-none min-h-[120px] text-sm focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Type message..." />
                   </div>
                   <div className="p-6 border-t border-gray-100 bg-gray-50">
-                      <button onClick={executeBulkSend} disabled={(!bulkMessage.trim() && !selectedMedia && !templateName)} className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold hover:bg-blue-700 disabled:opacity-50">Send Broadcast</button>
+                      <button onClick={executeBulkSend} disabled={(!bulkMessage.trim() && !selectedMedia && !templateName)} className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                          {isScheduled ? 'Schedule Broadcast' : 'Send Broadcast Now'}
+                      </button>
                   </div>
               </div>
           </div>

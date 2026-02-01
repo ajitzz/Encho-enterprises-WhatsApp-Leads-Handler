@@ -156,7 +156,6 @@ const processMessageInternal = async (message, contact, phoneId) => {
     if (!message || !phoneId) return;
 
     // CRITICAL: Normalize phone number (Remove +, spaces, dashes)
-    // WhatsApp 'from' usually comes as '919876543210', but safe to strip anyway
     const from = message.from.replace(/\D/g, '');
     const name = contact?.profile?.name || "Unknown";
     
@@ -171,7 +170,6 @@ const processMessageInternal = async (message, contact, phoneId) => {
 
     await withDb(async (client) => {
         // 1. Upsert Candidate (Driver)
-        // We set 'is_human_mode' default to false only on INSERT. If it exists, we keep current state.
         const upsertQuery = `
             INSERT INTO candidates (id, phone_number, name, stage, last_message_at, last_message, created_at) 
             VALUES ($1, $2, $3, 'New', $4, $5, NOW()) 
@@ -182,7 +180,7 @@ const processMessageInternal = async (message, contact, phoneId) => {
         const resDb = await client.query(upsertQuery, [crypto.randomUUID(), from, name, Date.now(), textBody]);
         const candidate = resDb.rows[0];
 
-        // 2. Save Incoming Message (Deduplicate by whatsapp_message_id)
+        // 2. Save Incoming Message
         const insertMsgQuery = `
             INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at) 
             VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW()) 
@@ -191,69 +189,42 @@ const processMessageInternal = async (message, contact, phoneId) => {
         await client.query(insertMsgQuery, [crypto.randomUUID(), candidate.id, textBody, message.type, message.id]);
 
         // 3. BOT LOGIC
-        // IF User is in Human Mode, STOP here.
         if (candidate.is_human_mode) {
-            // Check if human mode expired
             if (candidate.human_mode_ends_at && Date.now() > Number(candidate.human_mode_ends_at)) {
                 await client.query(`UPDATE candidates SET is_human_mode = FALSE WHERE id = $1`, [candidate.id]);
-                // Proceed to bot logic
             } else {
                 logger.info(`Skipping bot for ${from} (Human Mode Active)`);
                 return;
             }
         }
 
-        // Load Bot Settings
         const settings = await getBotSettings();
         if (!settings || !settings.nodes || settings.nodes.length === 0) return;
 
         let nextNode = null;
-
-        // A. Start of conversation (No current node)
         if (!candidate.current_node_id) {
             nextNode = settings.nodes.find(n => n.type === 'start') || settings.nodes[0];
-            // If start node is just a marker, move to its target
             if (nextNode) {
                 const edge = settings.edges?.find(e => e.source === nextNode.id);
                 if (edge) nextNode = settings.nodes.find(n => n.id === edge.target);
             }
-        } 
-        // B. Continue conversation
-        else {
-            // Find edge from current node
-            // Simple logic: Find edge where source == current_node_id
-            // Advanced logic: If button clicked, find specific handle
+        } else {
             const edges = settings.edges?.filter(e => e.source === candidate.current_node_id) || [];
-            
             if (edges.length === 1) {
-                // Direct path
                 nextNode = settings.nodes.find(n => n.id === edges[0].target);
             } else if (edges.length > 1) {
-                // Branching (Buttons/Logic)
-                // If message is interactive button reply, match the button ID/Title
                 if (message.type === 'interactive') {
                     const btnId = message.interactive?.button_reply?.id || message.interactive?.button_reply?.title;
-                    const matchingEdge = edges.find(e => e.sourceHandle === btnId); // We assume edge sourceHandle matches button ID
-                    if (matchingEdge) {
-                        nextNode = settings.nodes.find(n => n.id === matchingEdge.target);
-                    }
+                    const matchingEdge = edges.find(e => e.sourceHandle === btnId);
+                    if (matchingEdge) nextNode = settings.nodes.find(n => n.id === matchingEdge.target);
                 }
-                
-                // Fallback: If no match found, maybe just take the 'default' path if exists, or re-send current question
-                if (!nextNode) {
-                    // Logic to handle invalid input: stay on current node or send error
-                    return; 
-                }
+                if (!nextNode) return;
             }
         }
 
-        // C. Execute Next Node
         if (nextNode && nextNode.data) {
-            // 1. Send Message
             if (nextNode.data.content) {
                 const payload = { type: 'text', text: { body: nextNode.data.content } };
-                
-                // Handle Buttons
                 if (nextNode.data.type === 'buttons' && nextNode.data.buttons) {
                     payload.type = 'interactive';
                     payload.interactive = {
@@ -262,30 +233,112 @@ const processMessageInternal = async (message, contact, phoneId) => {
                         action: {
                             buttons: nextNode.data.buttons.map(b => ({
                                 type: "reply",
-                                reply: { id: b.id || b.title, title: b.title.substring(0, 20) } // WhatsApp limit 20 chars
+                                reply: { id: b.id || b.title, title: b.title.substring(0, 20) } 
                             }))
                         }
                     };
                 }
-
                 await sendToMeta(from, payload);
-                
-                // 2. Log Outbound Message
-                await client.query(
-                    `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
-                    [crypto.randomUUID(), candidate.id, nextNode.data.content]
-                );
-
-                // 3. Update Candidate State
+                await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), candidate.id, nextNode.data.content]);
                 await client.query(`UPDATE candidates SET current_node_id = $1, last_message_at = $2 WHERE id = $3`, [nextNode.id, Date.now(), candidate.id]);
             }
         }
     });
 };
 
+// --- SCHEDULER: PROCESS QUEUE ---
+const processQueueInternal = async () => {
+    let jobsToProcess = [];
+    
+    // 1. Fetch and Lock Pending Jobs
+    await withDb(async (client) => {
+        // Cleanup stuck jobs > 10 mins
+        await client.query(`UPDATE scheduled_messages SET status = 'pending' WHERE status = 'processing' AND scheduled_time < $1`, [Date.now() - 600000]);
 
-// --- WEBHOOK HANDLER ---
+        // Select jobs due for sending
+        const result = await client.query(`
+            SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
+            FROM scheduled_messages sm
+            JOIN candidates c ON sm.candidate_id = c.id
+            WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
+            LIMIT 50
+            FOR UPDATE OF sm SKIP LOCKED
+        `, [Date.now()]);
+
+        if (result.rows.length > 0) {
+            jobsToProcess = result.rows;
+            const ids = jobsToProcess.map(j => j.id);
+            // Mark as processing to release DB lock quickly
+            await client.query(`UPDATE scheduled_messages SET status = 'processing' WHERE id = ANY($1::uuid[])`, [ids]);
+        }
+    });
+
+    if (jobsToProcess.length === 0) return 0;
+    logger.info(`Scheduler: Processing ${jobsToProcess.length} jobs`);
+
+    let processedCount = 0;
+    
+    // 2. Process Jobs (Iterate)
+    for (const job of jobsToProcess) {
+        try {
+            let payload = job.payload;
+            if (typeof payload === 'string') payload = JSON.parse(payload);
+
+            let metaPayload = {};
+            
+            // Construct Meta Payload
+            if (payload.templateName) {
+                metaPayload = { type: 'template', template: { name: payload.templateName, language: { code: 'en' } } };
+            } else if (payload.mediaUrl) {
+                const type = payload.mediaType || 'image';
+                const caption = payload.text ? payload.text : undefined;
+                metaPayload = { type, [type]: { link: payload.mediaUrl, caption } };
+            } else {
+                const bodyText = payload.text || ' ';
+                metaPayload = { type: 'text', text: { body: bodyText } };
+            }
+
+            // Send via WhatsApp
+            await sendToMeta(job.phone_number, metaPayload);
+
+            // Update DB (Success)
+            await withDb(async (client) => {
+                await client.query(`
+                    INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
+                    VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())
+                `, [crypto.randomUUID(), job.candidate_id, payload.text || `[${payload.templateName || payload.mediaType}]`, payload.mediaType || 'text']);
+
+                await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3`, 
+                    [payload.text || 'Scheduled Message', Date.now(), job.candidate_id]);
+
+                await client.query(`UPDATE scheduled_messages SET status = 'sent' WHERE id = $1`, [job.id]);
+            });
+            processedCount++;
+
+        } catch (err) {
+            logger.error("Scheduler Job Failed", { id: job.id, error: err.message });
+            await withDb(async (client) => {
+                await client.query(`UPDATE scheduled_messages SET status = 'failed' WHERE id = $1`, [job.id]);
+            });
+        }
+    }
+    return processedCount;
+};
+
+
+// --- ROUTES ---
 const apiRouter = express.Router();
+
+// CRON Endpoint (Called by App.tsx Heartbeat or External Cron)
+apiRouter.get('/cron/process-queue', async (req, res) => {
+    try {
+        const count = await processQueueInternal();
+        res.status(200).json({ success: true, processed: count });
+    } catch (e) {
+        logger.error("Cron Error", { error: e.message });
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
 
 apiRouter.get('/webhook', (req, res) => {
     const VERIFY_TOKEN = process.env.VERIFY_TOKEN || process.env.META_WEBHOOK_VERIFY_TOKEN;
@@ -297,22 +350,18 @@ apiRouter.get('/webhook', (req, res) => {
 });
 
 apiRouter.post('/webhook', async (req, res) => {
-    res.sendStatus(200); // Always ack immediately to prevent Meta retries
+    res.sendStatus(200); 
     try {
         const body = req.body;
-        // Check if it's a WhatsApp status update or message
         if (body.object === 'whatsapp_business_account') {
             const entry = body.entry?.[0];
             const changes = entry?.changes?.[0];
             const value = changes?.value;
-
             if (value?.messages) {
                 const phoneId = value.metadata?.phone_number_id;
                 const contacts = value.contacts || [];
-                
                 for (const message of value.messages) {
                     const contact = contacts.find(c => c.wa_id === message.from) || {};
-                    // Async processing with error logging
                     processMessageInternal(message, contact, phoneId).catch(err => 
                         logger.error("Msg Process Error", { err: err.message, from: message.from })
                     );
@@ -324,39 +373,30 @@ apiRouter.post('/webhook', async (req, res) => {
     }
 });
 
-// --- AI ROUTE (AXIOS) ---
 apiRouter.post('/ai/generate', async (req, res) => {
     const { contents, config, model } = req.body;
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return res.status(500).json({error: "Missing GEMINI_API_KEY"});
-
-    // Map 'gemini-3-pro' etc to valid API names if needed, or pass through
     const targetModel = model || 'gemini-1.5-flash'; 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey}`;
-
-    // Construct Payload compatible with REST API
     const payload = {
         contents: typeof contents === 'string' ? [{ parts: [{ text: contents }] }] : contents,
         generationConfig: {}
     };
-
     if (config) {
         if (config.systemInstruction) payload.systemInstruction = { parts: [{ text: config.systemInstruction }] };
         if (config.responseMimeType) payload.generationConfig.responseMimeType = config.responseMimeType;
         if (config.responseSchema) payload.generationConfig.responseSchema = config.responseSchema;
     }
-
     try {
         const response = await axios.post(url, payload);
         const text = response.data.candidates?.[0]?.content?.parts?.[0]?.text || "";
         res.json({ text });
     } catch (e) {
-        logger.error("AI Error", { msg: e.message, data: e.response?.data });
         res.status(500).json({ error: e.message });
     }
 });
 
-// --- STANDARD API ROUTES (Drivers, Messages, Etc) ---
 apiRouter.get('/drivers', async (req, res, next) => {
     try {
         await withDb(async (client) => {
@@ -379,18 +419,8 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
     try {
         await withDb(async (client) => {
             const limit = parseInt(req.query.limit) || 50;
-            // Fetch messages for a specific driver
             const resDb = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT $2', [req.params.id, limit]);
-            // Return them reversed (oldest to newest) for UI
-            res.json(resDb.rows.map(r => ({ 
-                id: r.id, 
-                sender: r.direction === 'in' ? 'driver' : 'agent', 
-                text: r.text, 
-                timestamp: new Date(r.created_at).getTime(), 
-                type: r.type || 'text', 
-                status: r.status,
-                whatsapp_message_id: r.whatsapp_message_id 
-            })).reverse());
+            res.json(resDb.rows.map(r => ({ id: r.id, sender: r.direction === 'in' ? 'driver' : 'agent', text: r.text, timestamp: new Date(r.created_at).getTime(), type: r.type || 'text', status: r.status, whatsapp_message_id: r.whatsapp_message_id })).reverse());
         });
     } catch (e) { 
         if (e.code === '42P01') res.json([]);
@@ -402,38 +432,153 @@ apiRouter.post('/drivers/:id/messages', async (req, res, next) => {
     const { text, mediaUrl, mediaType } = req.body;
     try {
         await withDb(async (client) => {
-            // 1. Get Phone
             const dRes = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
             if (dRes.rows.length === 0) return res.status(404).json({error: "Driver not found"});
             const phone = dRes.rows[0].phone_number;
-
-            // 2. Prepare Payload
             const payload = mediaUrl 
                 ? { type: mediaType || 'image', [mediaType || 'image']: { link: mediaUrl, caption: text } }
                 : { type: 'text', text: { body: text } };
-
-            // 3. Send
             await sendToMeta(phone, payload);
-
-            // 4. Save to DB
-            await client.query(
-                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`,
-                [crypto.randomUUID(), req.params.id, text || '[Media]']
-            );
-            
-            // 5. Update Last Message & Enable Human Mode automatically on manual reply
-            await client.query(
-                `UPDATE candidates SET last_message = $1, last_message_at = $2, is_human_mode = TRUE WHERE id = $3`,
-                [text || '[Media]', Date.now(), req.params.id]
-            );
+            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), req.params.id, text || '[Media]']);
+            await client.query(`UPDATE candidates SET last_message = $1, last_message_at = $2, is_human_mode = TRUE WHERE id = $3`, [text || '[Media]', Date.now(), req.params.id]);
         });
         res.json({ success: true });
     } catch (e) { next(e); }
 });
 
-// --- SERVER STARTUP ---
+// Scheduling Endpoints
+apiRouter.post('/scheduled-messages', async (req, res, next) => {
+    const { driverIds, message, timestamp } = req.body;
+    try {
+        const scheduledTime = Number(timestamp);
+        if (isNaN(scheduledTime)) return res.status(400).json({ ok: false, error: "Invalid timestamp" });
+        await withDb(async (client) => {
+            for (const driverId of driverIds) {
+                 await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, 
+                    [crypto.randomUUID(), driverId, message, scheduledTime]);
+            }
+        });
+        res.json({ success: true });
+    } catch (e) { next(e); }
+});
+
+apiRouter.get('/drivers/:id/scheduled-messages', async (req, res, next) => {
+    try {
+        await withDb(async (client) => {
+            const result = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 ORDER BY scheduled_time ASC`, [req.params.id]);
+            res.json(result.rows.map(r => ({
+                id: r.id,
+                scheduledTime: parseInt(r.scheduled_time),
+                payload: typeof r.payload === 'string' ? JSON.parse(r.payload) : r.payload,
+                status: r.status
+            })));
+        });
+    } catch (e) { 
+        if (e.code === '42P01') res.json([]);
+        else next(e); 
+    }
+});
+
+apiRouter.delete('/scheduled-messages/:id', async (req, res, next) => {
+    try {
+        await withDb(async (client) => {
+            await client.query('DELETE FROM scheduled_messages WHERE id = $1', [req.params.id]);
+        });
+        res.json({ success: true });
+    } catch (e) { next(e); }
+});
+
+apiRouter.patch('/scheduled-messages/:id', async (req, res, next) => {
+    const { text, scheduledTime } = req.body;
+    try {
+        await withDb(async (client) => {
+            const old = await client.query('SELECT payload FROM scheduled_messages WHERE id = $1', [req.params.id]);
+            if (old.rows.length === 0) return res.status(404).json({ ok: false, error: "Not found" });
+            let oldPayload = old.rows[0].payload;
+            if (typeof oldPayload === 'string') oldPayload = JSON.parse(oldPayload);
+            const newPayload = { ...oldPayload, text: text || oldPayload.text };
+            const updates = [`payload = $1`];
+            const values = [newPayload]; 
+            let idx = 2;
+            if (scheduledTime) {
+                updates.push(`scheduled_time = $${idx++}`);
+                values.push(scheduledTime);
+            }
+            values.push(req.params.id);
+            await client.query(`UPDATE scheduled_messages SET ${updates.join(', ')} WHERE id = $${idx}`, values);
+        });
+        res.json({ success: true });
+    } catch (e) { next(e); }
+});
+
+// Bot Settings
+apiRouter.get('/bot/settings', async (req, res, next) => { 
+    try {
+        await withDb(async (client) => {
+            const phoneId = process.env.PHONE_NUMBER_ID;
+            let result = await client.query(`SELECT settings FROM bot_versions WHERE phone_number_id = $1 AND status = 'draft' LIMIT 1`, [phoneId]);
+            if (result.rows.length === 0) {
+                result = await client.query(`SELECT settings FROM bot_versions WHERE phone_number_id = $1 AND status = 'published' ORDER BY version_number DESC LIMIT 1`, [phoneId]);
+            }
+            res.json(result.rows[0]?.settings || { nodes: [], edges: [] });
+        });
+    } catch(e) { next(e); }
+});
+
+apiRouter.post('/bot/save', async (req, res, next) => { 
+    try {
+        await withDb(async (client) => {
+            const phoneId = process.env.PHONE_NUMBER_ID;
+            const settings = JSON.stringify(req.body);
+            const checkDraft = await client.query(`SELECT id FROM bot_versions WHERE phone_number_id = $1 AND status = 'draft'`, [phoneId]);
+            if (checkDraft.rows.length > 0) {
+                await client.query(`UPDATE bot_versions SET settings = $1 WHERE id = $2`, [settings, checkDraft.rows[0].id]);
+            } else {
+                await client.query(`INSERT INTO bot_versions (id, phone_number_id, version_number, status, settings) VALUES ($1, $2, 1, 'draft', $3)`, [crypto.randomUUID(), phoneId, settings]);
+            }
+        });
+        res.json({ success: true });
+    } catch(e) { next(e); }
+});
+
+apiRouter.post('/bot/publish', async (req, res, next) => { 
+    try {
+        await withDb(async (client) => {
+            const phoneId = process.env.PHONE_NUMBER_ID;
+            const draftRes = await client.query(`SELECT settings FROM bot_versions WHERE phone_number_id = $1 AND status = 'draft' LIMIT 1`, [phoneId]);
+            if (draftRes.rows.length === 0) return res.status(400).json({ ok: false, error: "No draft to publish." });
+            const settings = draftRes.rows[0].settings;
+            const verRes = await client.query(`SELECT MAX(version_number) as v FROM bot_versions WHERE phone_number_id = $1 AND status = 'published'`, [phoneId]);
+            const nextVer = (verRes.rows[0].v || 0) + 1;
+            await client.query(`INSERT INTO bot_versions (id, phone_number_id, version_number, status, settings) VALUES ($1, $2, $3, 'published', $4)`, [crypto.randomUUID(), phoneId, nextVer, settings]);
+            await redis.del(`bot:settings:${phoneId}`); 
+            res.json({ success: true, version: nextVer }); 
+        });
+    } catch(e) { next(e); }
+});
+
+// System routes
+apiRouter.get('/debug/status', async (req, res) => {
+    try {
+        const status = { postgres: 'unknown', tables: {}, counts: {} };
+        await withDb(async (client) => {
+            await client.query('SELECT 1');
+            status.postgres = 'connected';
+            const tRes = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
+            const tables = tRes.rows.map(r => r.table_name);
+            status.tables.candidates = tables.includes('candidates');
+            status.tables.bot_versions = tables.includes('bot_versions');
+            if (status.tables.candidates) {
+                const cRes = await client.query('SELECT COUNT(*) FROM candidates');
+                status.counts.candidates = parseInt(cRes.rows[0].count);
+            }
+        });
+        res.json(status);
+    } catch (e) { res.json({ postgres: 'error', lastError: e.message }); }
+});
+
 app.use('/api', apiRouter);
-app.use('/', apiRouter); // Handle root requests too
+app.use('/', apiRouter);
 
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;
