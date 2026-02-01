@@ -209,7 +209,7 @@ const processQueueInternal = async () => {
     let jobsToProcess = [];
 
     // Removed the CREATE TABLE safeguard here. It belongs in init().
-    // Also removed outer try-catch to allow critical errors to propagate to the route handler.
+    // Removed outer try-catch to allow critical errors to propagate to the route handler.
 
     await withDb(async (client) => {
         // Reset stuck jobs (processing > 10 mins)
