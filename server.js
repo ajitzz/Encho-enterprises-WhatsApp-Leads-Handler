@@ -1,4 +1,3 @@
-
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
@@ -211,7 +210,7 @@ const processQueueInternal = async () => {
         let jobsToProcess = [];
 
         await withDb(async (client) => {
-            // Ensure table exists to prevent crashes
+            // SAFEGUARD: Create table if missing (Prevent Crash)
             await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
@@ -302,7 +301,6 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
         const count = await processQueueInternal();
         res.json({ success: true, processed: count });
     } catch (e) {
-        // Return 200 with error details to prevent 500 crash in frontend polling
         res.json({ success: false, error: e.message });
     }
 });
@@ -342,7 +340,7 @@ apiRouter.get('/debug/status', async (req, res, next) => {
     }
 });
 
-// SYSTEM RESET ROUTE (Executes the user-provided reset logic)
+// SYSTEM RESET ROUTE
 apiRouter.post('/system/hard-reset', async (req, res, next) => {
     try {
         await withDb(async (client) => {

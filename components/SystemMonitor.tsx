@@ -1,4 +1,3 @@
-
 import React, { useEffect, useState, useRef } from 'react';
 import { Database, Server, Shield, X, AlertTriangle, Zap, RefreshCw, AlertCircle, DatabaseZap, Workflow, Trash2, Send } from 'lucide-react';
 import { SystemStats } from '../types';
