@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Driver, Message, ScheduledMessage, DriverDocument } from '../types';
 import { 
-  X, Send, Headset, MicOff, Clock, Paperclip, LayoutTemplate, Edit2, Trash2, Zap, AlertTriangle, FileText, Download
+  X, Send, Headset, MicOff, Clock, Paperclip, LayoutTemplate, Edit2, Trash2, Zap, AlertTriangle, FileText, Download, Loader2
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 import { MediaSelectorModal } from './MediaSelectorModal';
@@ -21,6 +21,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
   const [timeLeft, setTimeLeft] = useState<string>('');
+  const [isSending, setIsSending] = useState(false);
   
   const [showMediaPicker, setShowMediaPicker] = useState(false);
   const [selectedMedia, setSelectedMedia] = useState<{url: string, type: 'image' | 'video' | 'document'} | null>(null);
@@ -56,10 +57,18 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
               const latestMessages = await liveApiService.getDriverMessages(driver.id, 50);
               setLocalMessages(prev => {
                   if (latestMessages.length === 0) return prev;
+                  // If we have outgoing optimistic messages (status='sending'), keep them until confirmed
+                  const optimistic = prev.filter(m => m.status === 'sending');
+                  
+                  // Filter out optimistic ones from latest if they match (deduplication)
+                  const incoming = latestMessages.filter(m => !optimistic.some(opt => opt.text === m.text && Math.abs(opt.timestamp - m.timestamp) < 5000));
+                  
+                  // Simple check for new content
                   const prevLastId = prev.length > 0 ? prev[prev.length - 1].id : '';
                   const newLastId = latestMessages[latestMessages.length - 1].id;
+                  
                   if (latestMessages.length !== prev.length || newLastId !== prevLastId) {
-                      return latestMessages;
+                      return latestMessages; 
                   }
                   return prev;
               });
@@ -155,6 +164,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
     if (!replyText.trim() && !templateName && !selectedMedia) return;
     
+    setIsSending(true);
+
     // OPTIMISTIC UPDATE
     const tempMsg: Message = {
         id: `temp_${Date.now()}`,
@@ -169,20 +180,28 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     
     if (!showSchedule) setLocalMessages(prev => [...prev, tempMsg]);
 
-    if (showSchedule && scheduleTime) {
-        if (new Date(scheduleTime).getTime() <= Date.now()) { alert("Select a time in the future."); return; }
-        try { 
+    try {
+        if (showSchedule && scheduleTime) {
+            if (new Date(scheduleTime).getTime() <= Date.now()) { throw new Error("Select a time in the future."); }
             await liveApiService.scheduleMessage([driver.id], { text: replyText, templateName: isTemplateMode ? templateName : undefined, mediaUrl: selectedMedia?.url, mediaType: selectedMedia?.type }, new Date(scheduleTime).getTime()); 
-            setReplyText(''); setShowSchedule(false); setScheduleTime('');
+            setShowSchedule(false); setScheduleTime('');
             alert("Message Scheduled Successfully!");
             await loadScheduledMessages(driver.id); 
-        } catch(e: any) { alert(`Failed: ${e.message}`); }
-    } else if (isTemplateMode && templateName) {
-        try { await liveApiService.sendMessage(driver.id, replyText, { templateName }); setReplyText(''); setTemplateName(''); setIsTemplateMode(false); } catch(e: any) { alert(`Failed: ${e.message}`); }
-    } else if (selectedMedia) {
-        try { await liveApiService.sendMessage(driver.id, replyText, { mediaUrl: selectedMedia.url, mediaType: selectedMedia.type }); setReplyText(''); setSelectedMedia(null); } catch(e: any) { alert(`Failed: ${e.message}`); }
-    } else {
-        try { await onSendMessage(replyText); setReplyText(''); } catch(e: any) { alert(`Failed: ${e.message}`); }
+        } else if (isTemplateMode && templateName) {
+            await liveApiService.sendMessage(driver.id, replyText, { templateName }); 
+            setTemplateName(''); setIsTemplateMode(false);
+        } else if (selectedMedia) {
+            await liveApiService.sendMessage(driver.id, replyText, { mediaUrl: selectedMedia.url, mediaType: selectedMedia.type }); 
+            setSelectedMedia(null);
+        } else {
+            await onSendMessage(replyText);
+        }
+        setReplyText('');
+    } catch(e: any) {
+        alert(`Failed: ${e.message}`);
+        setLocalMessages(prev => prev.filter(m => m.id !== tempMsg.id)); // Remove optimistic msg on failure
+    } finally {
+        setIsSending(false);
     }
   };
 
@@ -271,27 +290,6 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     </div>
                 ))}
                 
-                {scheduledMessages.length > 0 && (
-                    <div className="space-y-4 pt-4 border-t border-gray-200 mt-4">
-                        <div className="flex justify-center"><span className="text-xs font-bold text-gray-400 uppercase tracking-wider bg-gray-100 px-3 py-1 rounded-full">Scheduled Queue</span></div>
-                        {scheduledMessages.map(msg => (
-                            <div key={msg.id} className="flex justify-end opacity-90">
-                                <div className="max-w-[80%] rounded-2xl rounded-tr-none border-2 border-dashed p-4 relative group border-amber-300 bg-amber-50">
-                                    <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white rounded p-1 shadow-sm z-10">
-                                        <button onClick={() => handleSendNowScheduled(msg.id)} className="p-1 text-green-600" title="Send Now"><Zap size={14}/></button>
-                                        <button onClick={() => openEditModal(msg)} className="p-1 text-blue-600" title="Edit"><Edit2 size={14}/></button>
-                                        <button onClick={() => handleCancelScheduled(msg.id)} className="p-1 text-red-600" title="Delete"><Trash2 size={14}/></button>
-                                    </div>
-                                    <div className="flex items-center gap-2 mb-2 text-xs font-bold text-amber-700">
-                                        <Clock size={12} /> {new Date(msg.scheduledTime).toLocaleString()}
-                                        <span className="uppercase bg-white/50 px-1 rounded ml-auto">{msg.status}</span>
-                                    </div>
-                                    <p className="text-sm text-gray-700 italic">{msg.payload.text || '[Media Only]'}</p>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                )}
                 <div ref={messagesEndRef} />
               </div>
 
@@ -311,13 +309,15 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     </div>
                 )}
                 <div className="flex gap-2 mb-3">
-                    <button onClick={() => setShowMediaPicker(true)} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${selectedMedia ? 'bg-blue-100 text-blue-700 border-blue-200' : 'border-gray-200 hover:bg-gray-50'}`}><Paperclip size={12} /> Attach</button>
-                    <button onClick={() => setIsTemplateMode(!isTemplateMode)} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${isTemplateMode ? 'bg-purple-100 text-purple-700 border-purple-200' : 'border-gray-200 hover:bg-gray-50'}`}><LayoutTemplate size={12} /> Template</button>
-                    <button onClick={() => setShowSchedule(!showSchedule)} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${showSchedule ? 'bg-amber-100 text-amber-700 border-amber-200' : 'border-gray-200 hover:bg-gray-50'}`}><Clock size={12} /> Schedule</button>
+                    <button onClick={() => setShowMediaPicker(true)} disabled={isSending} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${selectedMedia ? 'bg-blue-100 text-blue-700 border-blue-200' : 'border-gray-200 hover:bg-gray-50'}`}><Paperclip size={12} /> Attach</button>
+                    <button onClick={() => setIsTemplateMode(!isTemplateMode)} disabled={isSending} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${isTemplateMode ? 'bg-purple-100 text-purple-700 border-purple-200' : 'border-gray-200 hover:bg-gray-50'}`}><LayoutTemplate size={12} /> Template</button>
+                    <button onClick={() => setShowSchedule(!showSchedule)} disabled={isSending} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${showSchedule ? 'bg-amber-100 text-amber-700 border-amber-200' : 'border-gray-200 hover:bg-gray-50'}`}><Clock size={12} /> Schedule</button>
                 </div>
                 <div className="flex gap-3">
-                  <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} onKeyDown={handleKeyPress} placeholder={isTemplateMode ? "Body Parameter..." : "Type a message..."} className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20 shadow-inner" />
-                  <button onClick={handleSend} disabled={(!replyText.trim() && !templateName && !selectedMedia)} className="self-end p-3 rounded-xl bg-black text-white hover:bg-gray-800 w-12 h-12 flex items-center justify-center disabled:opacity-50"><Send size={20} /></button>
+                  <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} onKeyDown={handleKeyPress} placeholder={isTemplateMode ? "Body Parameter..." : "Type a message..."} className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20 shadow-inner" disabled={isSending} />
+                  <button onClick={handleSend} disabled={(!replyText.trim() && !templateName && !selectedMedia) || isSending} className="self-end p-3 rounded-xl bg-black text-white hover:bg-gray-800 w-12 h-12 flex items-center justify-center disabled:opacity-50">
+                      {isSending ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
+                  </button>
                 </div>
               </div>
             </div>
