@@ -122,6 +122,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   if (!driver) return null;
 
   const handleSend = async (e?: React.MouseEvent | React.FormEvent) => {
+    // CRITICAL: Prevent form submission refresh
     if (e) e.preventDefault(); 
 
     if (!replyText.trim() && !selectedMedia) return;
