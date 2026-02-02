@@ -133,6 +133,12 @@ const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
     
+    // Validate Phone Number
+    if (!to || to.length < 10) {
+        console.error(`Invalid phone number for Meta: ${phoneNumber}`);
+        return;
+    }
+
     if (payload.type === 'text' && (!payload.text?.body || !payload.text.body.trim())) {
         console.warn("Skipped sending empty message");
         return;
@@ -145,9 +151,10 @@ const sendToMeta = async (phoneNumber, payload) => {
             to,
             ...payload
         });
+        console.log(`Meta API Success: Sent to ${to}`);
     } catch (e) {
         console.error("Meta Send Failed:", e.response?.data || e.message);
-        throw e;
+        throw new Error(JSON.stringify(e.response?.data || e.message));
     }
 };
 
@@ -181,16 +188,24 @@ apiRouter.get('/debug/status', async (req, res) => {
     }
 });
 
-// --- 2. SCHEDULING (CRITICAL FIX FOR 500 ERROR) ---
+// --- 2. SCHEDULING (CRITICAL FIX FOR DATA PARSING) ---
 apiRouter.post('/scheduled-messages', async (req, res) => {
-    const { driverIds, message, timestamp, mediaUrl, mediaType } = req.body;
+    let { driverIds, message, timestamp, mediaUrl, mediaType } = req.body;
     try {
         const time = Number(timestamp);
         if (isNaN(time)) throw new Error("Invalid Timestamp");
 
+        // FIX: Extract data if 'message' is an object (sent by frontend service)
+        let actualText = message;
+        if (typeof message === 'object' && message !== null) {
+            actualText = message.text;
+            mediaUrl = message.mediaUrl || mediaUrl;
+            mediaType = message.mediaType || mediaType;
+        }
+
         // Construct JSON Payload
         const payloadObj = {
-            text: message || '',
+            text: actualText || '',
             mediaUrl: mediaUrl || null,
             mediaType: mediaType || 'text'
         };
@@ -200,7 +215,6 @@ apiRouter.post('/scheduled-messages', async (req, res) => {
                 // FIX: Manually generate UUID to prevent DB null error
                 const msgId = crypto.randomUUID();
                 
-                // Note: using 'candidate_id' which matches the auto-migration logic
                 await client.query(
                     `INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`,
                     [msgId, driverId, payloadObj, time]
@@ -262,15 +276,18 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
     } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- 3. CRON JOB (FIXED S3 EXPIRY) ---
+// --- 3. CRON JOB (ENHANCED LOGGING) ---
 apiRouter.get('/cron/process-queue', async (req, res) => {
     try {
         let processed = 0;
         let errors = 0;
 
         await withDb(async (client) => {
-            // Lock pending jobs
-            // QUERY FIX: Ensure we join on 'candidates' and 'candidate_id' which are ensured by auto-migration
+            const now = Date.now();
+            
+            // Log for debugging
+            console.log(`[Cron] Checking queue at ${new Date().toISOString()} (Timestamp: ${now})`);
+
             const jobs = await client.query(`
                 SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
                 FROM scheduled_messages sm
@@ -278,7 +295,11 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                 WHERE sm.status = 'pending' AND sm.scheduled_time <= $1
                 LIMIT 20
                 FOR UPDATE OF sm SKIP LOCKED
-            `, [Date.now()]);
+            `, [now]);
+
+            if (jobs.rows.length > 0) {
+                console.log(`[Cron] Found ${jobs.rows.length} jobs to process`);
+            }
 
             for (const job of jobs.rows) {
                 try {
@@ -286,26 +307,30 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
 
                     const payload = job.payload || {};
                     const { text, mediaUrl, mediaType } = payload;
+                    
+                    // Validate Text
+                    if (!text && !mediaUrl) {
+                        throw new Error("Empty message content");
+                    }
 
                     let metaPayload;
-                    let dbText = text || '';
+                    let dbText = typeof text === 'string' ? text : JSON.stringify(text);
                     
                     if (mediaUrl) {
-                        // CRITICAL: Refresh URL immediately before sending
                         const freshUrl = await refreshMediaUrl(mediaUrl);
                         metaPayload = {
                             type: mediaType || 'image',
-                            [mediaType || 'image']: { link: freshUrl, caption: text }
+                            [mediaType || 'image']: { link: freshUrl, caption: dbText }
                         };
-                        // Store structure for history
-                        dbText = JSON.stringify({ url: mediaUrl, caption: text, sentAs: mediaType });
+                        dbText = JSON.stringify({ url: mediaUrl, caption: dbText, sentAs: mediaType });
                     } else {
-                        metaPayload = { type: 'text', text: { body: text || ' ' } };
+                        metaPayload = { type: 'text', text: { body: dbText } };
                     }
 
+                    console.log(`[Cron] Sending to ${job.phone_number}:`, JSON.stringify(metaPayload));
+                    
                     await sendToMeta(job.phone_number, metaPayload);
 
-                    // Archive to history
                     const msgId = crypto.randomUUID();
                     await client.query(
                         `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
@@ -316,7 +341,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                     processed++;
 
                 } catch (jobError) {
-                    console.error(`Job ${job.id} failed:`, jobError.message);
+                    console.error(`[Cron] Job ${job.id} failed:`, jobError.message);
                     await client.query("UPDATE scheduled_messages SET status = 'failed', error_log = $2 WHERE id = $1", [job.id, jobError.message]);
                     errors++;
                 }
