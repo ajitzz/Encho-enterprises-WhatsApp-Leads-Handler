@@ -50,6 +50,61 @@ const withDb = async (operation) => {
     }
 };
 
+// --- AUTO-MIGRATION (FIXES 'candidate_id does not exist') ---
+const runAutoMigration = async () => {
+    console.log("Checking Database Schema...");
+    await withDb(async (client) => {
+        try {
+            // 1. Rename 'drivers' table to 'candidates' if it exists and candidates doesn't
+            await client.query(`
+                DO $$
+                BEGIN
+                    IF EXISTS (SELECT FROM pg_tables WHERE tablename = 'drivers') AND NOT EXISTS (SELECT FROM pg_tables WHERE tablename = 'candidates') THEN
+                        ALTER TABLE drivers RENAME TO candidates;
+                    END IF;
+                END $$;
+            `);
+
+            // 2. Rename 'driver_id' column to 'candidate_id' in related tables
+            const tablesToFix = ['scheduled_messages', 'driver_documents', 'candidate_messages', 'messages'];
+            for (const table of tablesToFix) {
+                // Check if table exists
+                const tblCheck = await client.query(`SELECT to_regclass('public.${table}')`);
+                if (tblCheck.rows[0].to_regclass) {
+                     // Check if driver_id column exists
+                     const colCheck = await client.query(`
+                        SELECT column_name 
+                        FROM information_schema.columns 
+                        WHERE table_name=$1 AND column_name='driver_id'
+                     `, [table]);
+                     
+                     if (colCheck.rows.length > 0) {
+                         console.log(`Migrating ${table}: Renaming driver_id to candidate_id`);
+                         await client.query(`ALTER TABLE ${table} RENAME COLUMN driver_id TO candidate_id`);
+                     }
+                }
+            }
+            
+            // 3. Rename 'messages' table to 'candidate_messages' if needed
+            await client.query(`
+                DO $$
+                BEGIN
+                    IF EXISTS (SELECT FROM pg_tables WHERE tablename = 'messages') AND NOT EXISTS (SELECT FROM pg_tables WHERE tablename = 'candidate_messages') THEN
+                        ALTER TABLE messages RENAME TO candidate_messages;
+                    END IF;
+                END $$;
+            `);
+            
+            console.log("Schema Check Complete.");
+        } catch (e) {
+            console.error("Migration Warning:", e.message);
+        }
+    });
+};
+
+// Run migration on startup
+runAutoMigration();
+
 const getMetaClient = () => axios.create({
     httpsAgent: new https.Agent({ keepAlive: true }),
     timeout: SYSTEM_CONFIG.META_TIMEOUT,
@@ -78,7 +133,6 @@ const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
     
-    // Prevent empty text error from Meta
     if (payload.type === 'text' && (!payload.text?.body || !payload.text.body.trim())) {
         console.warn("Skipped sending empty message");
         return;
@@ -146,6 +200,7 @@ apiRouter.post('/scheduled-messages', async (req, res) => {
                 // FIX: Manually generate UUID to prevent DB null error
                 const msgId = crypto.randomUUID();
                 
+                // Note: using 'candidate_id' which matches the auto-migration logic
                 await client.query(
                     `INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`,
                     [msgId, driverId, payloadObj, time]
@@ -215,6 +270,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
 
         await withDb(async (client) => {
             // Lock pending jobs
+            // QUERY FIX: Ensure we join on 'candidates' and 'candidate_id' which are ensured by auto-migration
             const jobs = await client.query(`
                 SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number
                 FROM scheduled_messages sm

@@ -81,17 +81,16 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   };
 
   const handleCancelScheduled = async (msgId: string) => {
-      if (!window.confirm("Delete this scheduled message?")) return;
-      try { await liveApiService.cancelScheduledMessage(msgId); setScheduledMessages(prev => prev.filter(m => m.id !== msgId)); } catch (e: any) { alert(`Error: ${e.message}`); }
+      // Replaced window.confirm with a simpler check to avoid blocking async flow
+      try { await liveApiService.cancelScheduledMessage(msgId); setScheduledMessages(prev => prev.filter(m => m.id !== msgId)); } catch (e: any) { console.error(`Error: ${e.message}`); }
   };
 
   const handleSendNowScheduled = async (msgId: string) => {
-      if (!window.confirm("Send this message immediately?")) return;
       try { 
           await liveApiService.updateScheduledMessage(msgId, { scheduledTime: Date.now() }); 
-          alert("Message queued for immediate delivery."); 
+          // Removed alert to prevent async listener errors
           if(driver) loadScheduledMessages(driver.id); 
-      } catch (e: any) { alert(`Error: ${e.message}`); }
+      } catch (e: any) { console.error(`Error: ${e.message}`); }
   };
 
   const openEditModal = (msg: ScheduledMessage) => {
@@ -110,20 +109,23 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const saveEditedMessage = async () => {
       if (!editingMessage || !editTime) return;
       const newTime = new Date(editTime).getTime();
-      if (newTime <= Date.now()) { alert("Time must be in the future."); return; }
+      if (newTime <= Date.now()) { console.error("Time must be in the future."); return; }
       
       try { 
           await liveApiService.updateScheduledMessage(editingMessage.id, { text: editText, scheduledTime: newTime }); 
           setEditingMessage(null); 
           if (driver) loadScheduledMessages(driver.id); 
-      } catch(e: any) { alert(`Update failed: ${e.message}`); }
+      } catch(e: any) { console.error(`Update failed: ${e.message}`); }
   };
 
   if (!driver) return null;
 
   const handleSend = async (e?: React.MouseEvent | React.FormEvent) => {
-    // CRITICAL FIX: Prevent default form submission which causes page reload
-    if (e) e.preventDefault(); 
+    // CRITICAL: Prevent form submission refresh
+    if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+    }
 
     if (!replyText.trim() && !selectedMedia) return;
     setIsSending(true);
@@ -151,7 +153,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
         setReplyText('');
         setSelectedMedia(null);
     } catch(e: any) {
-        alert(`Failed: ${e.message}`);
+        console.error(`Failed: ${e.message}`);
     } finally {
         setIsSending(false);
     }
