@@ -4,6 +4,7 @@ import {
   addEdge,
   applyNodeChanges,
   applyEdgeChanges,
+  MarkerType
 } from '@xyflow/react';
 import type {
   Connection,
@@ -63,6 +64,7 @@ export const useFlowStore = create<FlowState>((set, get) => ({
           type: 'smoothstep', 
           animated: true,
           style: { stroke: '#64748b', strokeWidth: 2 },
+          markerEnd: { type: MarkerType.ArrowClosed }
       }, get().edges),
     });
   },

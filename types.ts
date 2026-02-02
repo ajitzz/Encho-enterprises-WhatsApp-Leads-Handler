@@ -8,84 +8,114 @@ export enum LeadStatus {
   INTERVIEW_SCHEDULED = 'Interview Scheduled'
 }
 
+export enum OnboardingStep {
+  WELCOME_SENT = 'WELCOME_SENT',
+  DETAILS_REQUESTED = 'DETAILS_REQUESTED',
+  DETAILS_RECEIVED = 'DETAILS_RECEIVED'
+}
+
 export type LeadSource = 'Organic' | 'Meta Ad' | 'Referral' | 'Manual';
 
 export interface MessageButton {
-  type: 'reply' | 'url' | 'phone' | 'copy_code' | 'location';
+  id: string;
   title: string;
+  type: 'reply' | 'url' | 'phone'; // WhatsApp standard
   payload?: string;
-  id?: string; // Unique ID for routing
 }
 
-// --- NEW FLOW TYPES ---
+export interface ListRow {
+  id: string;
+  title: string;
+  description?: string;
+}
+
+export interface ListSection {
+  title: string;
+  rows: ListRow[];
+}
 
 export type NodeType = 
-  | 'message' 
-  | 'question' 
-  | 'buttons' 
-  | 'list' 
-  | 'condition' 
-  | 'document' 
-  | 'status' 
-  | 'handoff' 
   | 'start' 
-  | 'end';
-
-export interface ValidationRule {
-  type: 'text' | 'number' | 'email' | 'phone' | 'regex';
-  regex?: string;
-  min?: number;
-  max?: number;
-  errorMessage?: string;
-}
+  | 'text' 
+  | 'image' 
+  | 'video' 
+  | 'audio' 
+  | 'document' 
+  | 'input' 
+  | 'interactive_button' 
+  | 'interactive_list' 
+  | 'condition' 
+  | 'handoff' 
+  | 'status_update';
 
 export interface ConditionRule {
+  id: string;
   variable: string;
-  operator: 'equals' | 'contains' | 'greater_than' | 'less_than' | 'exists';
-  value?: string | number;
-  nextStepId: string;
+  operator: 'equals' | 'contains' | 'starts_with' | 'is_set';
+  value: string;
 }
 
 export interface FlowNodeData {
   id: string;
-  label: string; // Display name
+  label: string;
   type: NodeType;
-  content?: string; // Text message
-  mediaUrl?: string;
-  mediaType?: 'image' | 'video' | 'document';
   
-  // Question / Input
-  variable?: string; // Name of variable to store result in
-  validation?: ValidationRule;
+  // Content
+  content?: string; // Text body
+  mediaUrl?: string;
+  footerText?: string; // WhatsApp footer
   
   // Interactive
   buttons?: MessageButton[];
-  listSections?: { title: string; rows: { id: string; title: string; description?: string }[] }[];
+  listTitle?: string;
+  listButtonText?: string;
+  sections?: ListSection[];
   
-  // Logic
+  // Logic / Input
+  variable?: string; // Save input to this variable
+  validationType?: 'text' | 'email' | 'phone' | 'number' | 'none';
+  
+  // Branching
   conditions?: ConditionRule[];
-  defaultNextStepId?: string;
   
   // Actions
-  targetStatus?: LeadStatus; // For Status Node
+  targetStatus?: LeadStatus;
   
-  // Metadata
-  isTerminal?: boolean; // Ends flow
-  warning?: string; // UI Validation warning
   [key: string]: any;
+}
+
+export interface BotStep {
+  id: string;
+  title?: string;
+  message: string;
+  inputType?: string;
+  saveToField?: string;
+  nextStepId?: string;
+  options?: string[];
+  routes?: Record<string, string>;
+  mediaUrl?: string;
+  mediaType?: string;
+  linkLabel?: string;
+}
+
+export interface BotSettings {
+  isEnabled: boolean;
+  shouldRepeat: boolean;
+  routingStrategy: string;
+  systemInstruction?: string;
+  nodes: any[];
+  edges: any[];
+  // Legacy / Simulator fields
+  steps?: BotStep[];
+  entryPointId?: string;
 }
 
 export interface BotVersion {
   id: string;
-  phoneNumberId: string;
-  versionNumber: number;
   status: 'draft' | 'published';
-  nodes: any[]; // React Flow Nodes
-  edges: any[]; // React Flow Edges
-  createdAt: string;
+  settings: BotSettings;
+  created_at: string;
 }
-
-// --- CANDIDATE TYPES ---
 
 export interface Message {
   id: string;
@@ -100,7 +130,6 @@ export interface Message {
   options?: string[];
   templateName?: string;
   payload?: any;
-  headerImageUrl?: string;
 }
 
 export interface Candidate {
@@ -113,51 +142,19 @@ export interface Candidate {
   tags: string[];
   lastMessageAt: number;
   assignedAgent?: string;
-  messages?: Message[]; // For UI view
+  messages?: Message[];
+  currentBotStepId?: string; // Tracks where they are in the graph
+  isHumanMode?: boolean;
 }
 
-export enum OnboardingStep {
-  WELCOME_SENT = 'WELCOME_SENT',
-  // Add others if needed
-}
-
-export interface BotStep {
-  id: string;
-  title?: string;
-  message: string;
-  inputType?: 'text' | 'option' | 'image' | 'video' | 'document';
-  options?: string[];
-  saveToField?: string;
-  nextStepId?: string;
-  mediaUrl?: string;
-  mediaType?: 'image' | 'video' | 'document';
-  linkLabel?: string;
-  routes?: Record<string, string>;
-}
-
-export interface BotSettings {
-  isEnabled: boolean;
-  shouldRepeat: boolean;
-  routingStrategy: 'BOT_ONLY' | 'HYBRID' | 'HUMAN_FIRST' | string;
-  systemInstruction?: string;
-  steps: BotStep[];
-  entryPointId?: string;
-  nodes?: any[];
-  edges?: any[];
-}
-
-// Legacy types support
 export interface Driver extends Candidate {
   lastMessage: string;
   lastMessageTime: number;
   source: LeadSource;
   status: LeadStatus;
   isBotActive: boolean;
-  isHumanMode?: boolean;
-  humanModeEndsAt?: number;
-  // Added missing properties
   notes?: string;
-  currentBotStepId?: string;
+  // Simulator specific fields
   onboardingStep?: OnboardingStep;
   qualificationChecks?: {
     hasValidLicense: boolean;
@@ -186,19 +183,6 @@ export interface AppNotification {
   message: string;
 }
 
-export interface AuditIssue {
-  nodeId: string;
-  severity: 'CRITICAL' | 'WARNING';
-  issue: string;
-  suggestion: string;
-  autoFixValue?: string;
-}
-
-export interface AuditReport {
-  isValid: boolean;
-  issues: AuditIssue[];
-}
-
 export interface DriverDocument {
   id: string;
   docType: string;
@@ -216,4 +200,17 @@ export interface ScheduledMessage {
     mediaType?: string;
   };
   status: 'pending' | 'processing' | 'failed' | 'sent';
+}
+
+export interface AuditIssue {
+  nodeId: string;
+  severity: 'CRITICAL' | 'WARNING';
+  issue: string;
+  suggestion: string;
+  autoFixValue?: string;
+}
+
+export interface AuditReport {
+  isValid: boolean;
+  issues: AuditIssue[];
 }
