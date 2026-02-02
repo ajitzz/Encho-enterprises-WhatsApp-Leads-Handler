@@ -6,6 +6,8 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
   shouldRepeat: false,
   routingStrategy: 'BOT_ONLY', // Enforced
   systemInstruction: "",
+  nodes: [],
+  edges: [],
   steps: [
     {
       id: 'step_1',
@@ -142,10 +144,10 @@ class MockBackendService {
     const shouldProcess = settings.isEnabled && (driver.isBotActive || settings.shouldRepeat);
 
     if (shouldProcess) {
-        let currentStep = settings.steps.find(s => s.id === driver.currentBotStepId);
+        let currentStep = settings.steps?.find(s => s.id === driver.currentBotStepId);
         
         // CASE 1: RESTART / WAKE UP / INITIALIZE
-        if (!currentStep && settings.steps.length > 0) {
+        if (!currentStep && settings.steps && settings.steps.length > 0) {
             const entryStep = settings.steps.find(s => s.id === entryPointId) || settings.steps[0];
             if (entryStep) {
                  driver.currentBotStepId = entryStep.id;
@@ -177,7 +179,7 @@ class MockBackendService {
         }
         
         // CASE 2: NORMAL FLOW
-        else if (currentStep) {
+        else if (currentStep && settings.steps) {
             let nextId = currentStep.nextStepId;
 
             if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
