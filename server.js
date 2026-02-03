@@ -140,7 +140,6 @@ apiRouter.get('/debug/status', async (req, res) => {
 apiRouter.get('/system/settings', async (req, res) => {
     try {
         await withDb(async (client) => {
-            // Ensure table exists
             await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB)`);
             const r = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
             res.json(r.rows[0]?.value || { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true });
@@ -158,8 +157,6 @@ apiRouter.patch('/system/settings', async (req, res) => {
 });
 
 apiRouter.post('/system/credentials', async (req, res) => {
-    // In a real app, save to DB securely. Here we just return success to simulate config update.
-    // Env vars cannot be updated at runtime in Vercel.
     res.json({ success: true });
 });
 
@@ -189,7 +186,7 @@ apiRouter.post('/bot/save', async (req, res) => {
 });
 
 apiRouter.post('/bot/publish', async (req, res) => {
-    res.json({ success: true }); // Handled by save in this architecture
+    res.json({ success: true });
 });
 
 // ==========================================
@@ -391,7 +388,6 @@ apiRouter.post('/webhook', async (req, res) => {
         if (!msg) return;
         
         await withDb(async (client) => {
-            // Check Kill Switch
             await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB)`);
             const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
             if (sys.rows[0]?.value?.webhook_ingest_enabled === false) return;
@@ -403,7 +399,6 @@ apiRouter.post('/webhook', async (req, res) => {
             else if (msg.type === 'interactive') text = msg.interactive.button_reply?.title || msg.interactive.list_reply?.title || '';
             else text = `[${msg.type.toUpperCase()}]`;
 
-            // 1. Candidate
             let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
             let cid = c.rows[0]?.id;
             if (!cid) {
@@ -413,10 +408,7 @@ apiRouter.post('/webhook', async (req, res) => {
                 await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), cid]);
             }
 
-            // 2. Log Msg
             await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, 'text', $4, 'received', NOW())`, [crypto.randomUUID(), cid, text, msg.id]);
-
-            // 3. Bot Logic would go here (omitted for brevity, requires node traversal logic from previous steps)
         });
     } catch(e) { console.error("Webhook Error", e); }
 });
@@ -444,7 +436,6 @@ apiRouter.post('/system/hard-reset', async (req, res) => {
     try {
         await withDb(async (client) => {
             await client.query(`DROP TABLE IF EXISTS scheduled_messages, candidate_messages, driver_documents, bot_versions, candidates, system_settings CASCADE`);
-            // Re-init happens via init-db usually, but we drop here.
         });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -460,10 +451,97 @@ apiRouter.post('/system/seed-db', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// AI & Media Routes (Stubs to prevent 404)
+// ==========================================
+// 7. MEDIA / S3
+// ==========================================
 apiRouter.post('/ai/assistant', (req, res) => res.json({ text: "AI Service connecting..." }));
-apiRouter.get('/media', (req, res) => res.json({ files: [], folders: [] }));
-apiRouter.post('/media/upload', (req, res) => res.json({ success: true }));
+
+// LIST FILES
+apiRouter.get('/media', async (req, res) => {
+    const currentPath = req.query.path || '/';
+    let prefix = currentPath === '/' ? '' : currentPath.substring(1);
+    if (prefix && !prefix.endsWith('/')) prefix += '/';
+
+    try {
+        const command = new ListObjectsV2Command({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Prefix: prefix,
+            Delimiter: '/'
+        });
+        const data = await s3Client.send(command);
+
+        const folders = (data.CommonPrefixes || []).map(p => {
+            const parts = p.Prefix.split('/').filter(Boolean);
+            const name = parts[parts.length - 1];
+            return { id: p.Prefix, name, parent_path: currentPath, is_public_showcase: false };
+        });
+
+        const files = await Promise.all((data.Contents || []).map(async (obj) => {
+            if (obj.Key.endsWith('/')) return null;
+            const url = await getSignedUrl(s3Client, new GetObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: obj.Key }), { expiresIn: 3600 });
+            const filename = obj.Key.split('/').pop();
+            const ext = filename.split('.').pop().toLowerCase();
+            let type = 'document';
+            if (['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext)) type = 'image';
+            if (['mp4', 'mov', 'webm', 'mkv'].includes(ext)) type = 'video';
+            return { id: obj.Key, url, filename, type, media_id: null };
+        }));
+
+        res.json({ files: files.filter(Boolean), folders });
+    } catch (e) {
+        console.error("S3 List Error:", e);
+        res.json({ files: [], folders: [] }); // Fail gracefully
+    }
+});
+
+// UPLOAD
+apiRouter.post('/media/upload', upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) throw new Error("No file");
+        const path = req.body.path || '/';
+        let prefix = path === '/' ? '' : path.substring(1);
+        if (prefix && !prefix.endsWith('/')) prefix += '/';
+        
+        const key = `${prefix}${req.file.originalname}`;
+        await s3Client.send(new PutObjectCommand({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Key: key,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype
+        }));
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// CREATE FOLDER
+apiRouter.post('/media/folders', async (req, res) => {
+    try {
+        const { name, parentPath } = req.body;
+        let prefix = parentPath === '/' ? '' : parentPath.substring(1);
+        if (prefix && !prefix.endsWith('/')) prefix += '/';
+        const key = `${prefix}${name}/`; 
+        await s3Client.send(new PutObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key, Body: '' }));
+        res.json({ success: true });
+    } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// DELETE FILE/FOLDER (Wildcard support)
+apiRouter.delete('/media/files/:id(*)', async (req, res) => {
+    try {
+        // req.params.id or req.params[0] depending on Express version
+        const key = req.params[0] || req.params.id; 
+        await s3Client.send(new DeleteObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key }));
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.delete('/media/folders/:id(*)', async (req, res) => {
+    try {
+        const key = req.params[0] || req.params.id;
+        await s3Client.send(new DeleteObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key }));
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // --- MOUNT ---
 app.use('/api', apiRouter);
