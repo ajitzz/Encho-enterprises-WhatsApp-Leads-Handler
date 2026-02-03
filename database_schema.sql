@@ -3,18 +3,23 @@
 
 BEGIN;
 
--- 1. Enable Extensions for UUID generation
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
--- 2. Clean up existing tables
 DROP TABLE IF EXISTS scheduled_messages CASCADE;
 DROP TABLE IF EXISTS candidate_messages CASCADE;
 DROP TABLE IF EXISTS driver_documents CASCADE;
 DROP TABLE IF EXISTS bot_versions CASCADE;
 DROP TABLE IF EXISTS candidates CASCADE;
+DROP TABLE IF EXISTS system_settings CASCADE;
 
--- 3. Candidates (Drivers/Leads)
+-- 1. System Config
+CREATE TABLE system_settings (
+    key VARCHAR(50) PRIMARY KEY,
+    value JSONB
+);
+
+-- 2. Candidates
 CREATE TABLE candidates (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     phone_number VARCHAR(50) UNIQUE NOT NULL,
@@ -29,7 +34,7 @@ CREATE TABLE candidates (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 4. Message History
+-- 3. Messages
 CREATE TABLE candidate_messages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
@@ -41,7 +46,7 @@ CREATE TABLE candidate_messages (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 5. Scheduled Messages (Fixed for 500 Error)
+-- 4. Scheduled
 CREATE TABLE scheduled_messages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
@@ -52,7 +57,7 @@ CREATE TABLE scheduled_messages (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 6. Bot Configurations
+-- 5. Bot
 CREATE TABLE bot_versions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     status VARCHAR(20) DEFAULT 'draft',
@@ -60,7 +65,7 @@ CREATE TABLE bot_versions (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 7. Documents
+-- 6. Documents
 CREATE TABLE driver_documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
@@ -69,9 +74,5 @@ CREATE TABLE driver_documents (
     status VARCHAR(50) DEFAULT 'pending',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
-
--- Indexes
-CREATE INDEX idx_candidates_phone ON candidates(phone_number);
-CREATE INDEX idx_scheduled_lookup ON scheduled_messages(status, scheduled_time);
 
 COMMIT;
