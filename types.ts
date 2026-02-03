@@ -80,6 +80,9 @@ export interface FlowNodeData {
   
   // Branching Logic
   conditions?: ConditionRule[];
+  conditionVariable?: string;
+  conditionOperator?: string;
+  conditionValue?: string;
   
   // Actions
   targetStatus?: LeadStatus;
@@ -87,24 +90,9 @@ export interface FlowNodeData {
   // Template
   templateName?: string;
   templateLanguage?: string;
-  templateVariables?: string[]; // Array of values to fill {{1}}, {{2}}
+  templateVariables?: string[]; 
 
   [key: string]: any;
-}
-
-export interface BotStep {
-  // Legacy support for older simulator logic
-  id: string;
-  title?: string;
-  message: string;
-  inputType?: string;
-  saveToField?: string;
-  nextStepId?: string;
-  options?: string[];
-  routes?: Record<string, string>;
-  mediaUrl?: string;
-  mediaType?: string;
-  linkLabel?: string;
 }
 
 export interface BotSettings {
@@ -114,8 +102,7 @@ export interface BotSettings {
   systemInstruction?: string;
   nodes: any[];
   edges: any[];
-  // Legacy
-  steps?: BotStep[];
+  steps?: any[]; // Legacy
   entryPointId?: string;
 }
 

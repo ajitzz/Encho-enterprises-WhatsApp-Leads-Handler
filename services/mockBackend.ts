@@ -1,5 +1,5 @@
 
-import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, BotStep } from '../types';
+import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings } from '../types';
 
 const DEFAULT_BOT_SETTINGS: BotSettings = {
   isEnabled: true,
@@ -7,7 +7,7 @@ const DEFAULT_BOT_SETTINGS: BotSettings = {
   routingStrategy: 'BOT_ONLY',
   systemInstruction: "",
   nodes: [
-      { id: 'start', type: 'start', position: {x:0,y:0}, data: { type: 'start', label: 'Start', content: 'Welcome to Uber Fleet!' } }
+      { id: 'start', type: 'custom', position: {x:0,y:0}, data: { type: 'start', label: 'Start Flow', content: 'Welcome to Uber Fleet!' } }
   ],
   edges: []
 };
@@ -92,8 +92,6 @@ class MockBackendService {
         lastMessageTime: Date.now(),
         messages: [],
         documents: {},
-        onboardingStep: OnboardingStep.WELCOME_SENT,
-        qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
         isBotActive: settings.isEnabled,
         currentBotStepId: undefined,
         isHumanMode: false,
@@ -117,37 +115,37 @@ class MockBackendService {
 
     if (driver.isHumanMode) return { driver, actionNeeded: 'NONE' };
 
-    // --- ENGINE LOGIC (SIMPLIFIED FOR MOCK) ---
-    // This loops until it hits an Input or End
-    
+    // --- ENGINE LOGIC ---
     let currentNodeId = driver.currentBotStepId;
     let currentNode = nodes.find(n => n.id === currentNodeId);
 
-    // Initial Start
     if (!currentNode) {
         currentNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start') || nodes[0];
     }
 
     let nextNodeId = null;
 
-    // IF CONTINUING (Process Input)
     if (currentNodeId) {
-        const type = currentNode.data.type;
-        // Mock Validation (Assume success for simulator unless 'fail' typed)
-        if (type === 'input' && text.toLowerCase() === 'fail') {
-             this.addMessage(driver.id, {
-                 id: Date.now().toString() + '_err',
-                 sender: 'system',
-                 text: currentNode.data.retryMessage || "Invalid Input (Simulated)",
-                 timestamp: Date.now() + 500,
-                 type: 'text'
-             });
-             return { driver, actionNeeded: 'NONE' };
+        // Mocking Button/List Logic: 
+        // In simulation, we assume if the user types something similar to a button title, they clicked it.
+        // Or if they type 'btn_...' (debug id).
+        
+        let matchedEdge = null;
+        
+        if (currentNode.data.type === 'interactive_button' && currentNode.data.buttons) {
+             const matchedBtn = currentNode.data.buttons.find((b: any) => b.title.toLowerCase() === text.toLowerCase());
+             if (matchedBtn) {
+                 matchedEdge = edges.find(e => e.source === currentNodeId && e.sourceHandle === matchedBtn.id);
+             }
         }
         
-        // Advance
-        const edge = edges.find(e => e.source === currentNodeId);
-        if (edge) nextNodeId = edge.target;
+        if (matchedEdge) {
+            nextNodeId = matchedEdge.target;
+        } else {
+            // Default path
+            const edge = edges.find(e => e.source === currentNodeId && !e.sourceHandle);
+            if (edge) nextNodeId = edge.target;
+        }
     } else {
         nextNodeId = currentNode?.id;
     }
@@ -162,21 +160,26 @@ class MockBackendService {
 
         const data = node.data || {};
         
-        // Execution
-        if (data.content && ['text', 'image', 'interactive_button', 'interactive_list', 'start'].includes(data.type)) {
+        // Execute Node
+        let msgType: any = 'text';
+        if (data.type === 'interactive_button') msgType = 'interactive';
+        if (data.type === 'interactive_list') msgType = 'interactive';
+        
+        if (data.content || data.mediaUrl) {
              this.addMessage(driver.id, {
                  id: Date.now().toString() + '_' + limit,
                  sender: 'system',
                  text: data.content,
-                 timestamp: Date.now() + (10 - limit) * 100, // Staggered timestamps
-                 type: 'text'
+                 imageUrl: data.mediaUrl,
+                 timestamp: Date.now() + (10 - limit) * 100,
+                 type: msgType
              });
         }
 
         // Wait Check
         if (['input', 'interactive_button', 'interactive_list'].includes(data.type)) {
             driver.currentBotStepId = node.id;
-            break; // Stop and wait for user
+            break; 
         }
 
         // Auto Advance
