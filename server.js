@@ -22,33 +22,48 @@ const SYSTEM_CONFIG = {
     GOOGLE_CLIENT_ID: process.env.VITE_GOOGLE_CLIENT_ID
 };
 
-// --- INITIALIZE CLIENTS ---
-const s3Client = new S3Client({
-    region: SYSTEM_CONFIG.AWS_REGION,
-    credentials: {
-        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
-    }
-});
+// --- INITIALIZE CLIENTS (Lazy/Safe) ---
+let s3Client, googleClient, genAI, pgPool;
 
-const googleClient = new OAuth2Client(SYSTEM_CONFIG.GOOGLE_CLIENT_ID);
-const genAI = process.env.GEMINI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null;
+try {
+    s3Client = new S3Client({
+        region: SYSTEM_CONFIG.AWS_REGION,
+        credentials: {
+            accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+        }
+    });
+
+    googleClient = new OAuth2Client(SYSTEM_CONFIG.GOOGLE_CLIENT_ID);
+    
+    if (process.env.GEMINI_API_KEY) {
+        genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    }
+
+    pgPool = new Pool({
+        connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
+        connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
+        ssl: { rejectUnauthorized: false },
+        max: 10
+    });
+    
+    // Test DB connection on startup (optional, logs error but doesn't crash app immediately)
+    pgPool.on('error', (err) => console.error('[DB POOL ERROR]', err));
+
+} catch (initError) {
+    console.error("[INIT CRITICAL ERROR]", initError);
+}
+
 const upload = multer({ storage: multer.memoryStorage() });
 
-const pgPool = new Pool({
-    connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
-    connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-    ssl: { rejectUnauthorized: false },
-    max: 10
-});
-
 const withDb = async (operation) => {
+    if (!pgPool) throw new Error("Database not initialized");
     let client;
     try {
         client = await pgPool.connect();
         return await operation(client);
     } catch (e) {
-        console.error("[DB ERROR]", e);
+        console.error("[DB OPS ERROR]", e);
         throw e;
     } finally {
         if (client) client.release();
@@ -104,11 +119,16 @@ app.use(express.json({ limit: '50mb' }));
 
 // Logging Middleware
 app.use((req, res, next) => {
-    console.log(`[${req.method}] ${req.path}`);
+    console.log(`[${req.method}] ${req.url}`);
     next();
 });
 
 const apiRouter = express.Router();
+
+// ==========================================
+// 0. HEALTH CHECK
+// ==========================================
+apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
 // ==========================================
 // 1. SYSTEM & AUTH
@@ -156,13 +176,8 @@ apiRouter.patch('/system/settings', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.post('/system/credentials', async (req, res) => {
-    res.json({ success: true });
-});
-
-apiRouter.post('/system/webhook', async (req, res) => {
-    res.json({ success: true });
-});
+apiRouter.post('/system/credentials', async (req, res) => { res.json({ success: true }); });
+apiRouter.post('/system/webhook', async (req, res) => { res.json({ success: true }); });
 
 // ==========================================
 // 2. BOT STUDIO
@@ -185,9 +200,7 @@ apiRouter.post('/bot/save', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.post('/bot/publish', async (req, res) => {
-    res.json({ success: true });
-});
+apiRouter.post('/bot/publish', async (req, res) => res.json({ success: true }));
 
 // ==========================================
 // 3. DRIVERS & MESSAGING
@@ -543,9 +556,16 @@ apiRouter.delete('/media/folders/:id(*)', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- MOUNT ---
+// --- MOUNT ROUTER ---
 app.use('/api', apiRouter);
+// Fallback for root mounts if Vercel strips /api prefix
 app.use('/', apiRouter);
+
+// Catch-all for unhandled routes to debug 404s
+app.use((req, res) => {
+    console.log(`[404] Route not found: ${req.method} ${req.originalUrl}`);
+    res.status(404).json({ error: 'Route not found', path: req.originalUrl });
+});
 
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;

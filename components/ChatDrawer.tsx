@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, ScheduledMessage, DriverDocument } from '../types';
 import { 
-  X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock
+  X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 import { MediaSelectorModal } from './MediaSelectorModal';
@@ -27,6 +27,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>([]);
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
   
+  // EDIT STATE
   const [editingMessage, setEditingMessage] = useState<ScheduledMessage | null>(null);
   const [editTime, setEditTime] = useState('');
   const [editText, setEditText] = useState('');
@@ -81,14 +82,13 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   };
 
   const handleCancelScheduled = async (msgId: string) => {
-      // Replaced window.confirm with a simpler check to avoid blocking async flow
+      if(!window.confirm("Delete this scheduled message?")) return;
       try { await liveApiService.cancelScheduledMessage(msgId); setScheduledMessages(prev => prev.filter(m => m.id !== msgId)); } catch (e: any) { console.error(`Error: ${e.message}`); }
   };
 
   const handleSendNowScheduled = async (msgId: string) => {
       try { 
           await liveApiService.updateScheduledMessage(msgId, { scheduledTime: Date.now() }); 
-          // Removed alert to prevent async listener errors
           if(driver) loadScheduledMessages(driver.id); 
       } catch (e: any) { console.error(`Error: ${e.message}`); }
   };
@@ -101,27 +101,35 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
           else if (typeof msg.payload.text === 'string') txt = msg.payload.text;
       }
       setEditText(txt);
+      
+      // Convert timestamp to local datetime-local format
       const date = new Date(msg.scheduledTime);
-      const isoString = new Date(date.getTime() - (date.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
-      setEditTime(isoString);
+      const tzOffset = date.getTimezoneOffset() * 60000;
+      const localISOTime = new Date(date.getTime() - tzOffset).toISOString().slice(0, 16);
+      setEditTime(localISOTime);
   };
 
   const saveEditedMessage = async () => {
       if (!editingMessage || !editTime) return;
       const newTime = new Date(editTime).getTime();
-      if (newTime <= Date.now()) { console.error("Time must be in the future."); return; }
+      
+      if (newTime <= Date.now()) { 
+          alert("Scheduled time must be in the future."); 
+          return; 
+      }
       
       try { 
           await liveApiService.updateScheduledMessage(editingMessage.id, { text: editText, scheduledTime: newTime }); 
           setEditingMessage(null); 
           if (driver) loadScheduledMessages(driver.id); 
-      } catch(e: any) { console.error(`Update failed: ${e.message}`); }
+      } catch(e: any) { 
+          alert(`Update failed: ${e.message}`); 
+      }
   };
 
   if (!driver) return null;
 
   const handleSend = async (e?: React.MouseEvent | React.FormEvent) => {
-    // CRITICAL: Prevent form submission refresh
     if (e) {
         e.preventDefault();
         e.stopPropagation();
@@ -153,7 +161,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
         setReplyText('');
         setSelectedMedia(null);
     } catch(e: any) {
-        console.error(`Failed: ${e.message}`);
+        alert(`Failed: ${e.message}`);
     } finally {
         setIsSending(false);
     }
@@ -229,7 +237,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                         </div>
                         {scheduledMessages.map(msg => (
                             <div key={msg.id} className="flex justify-end animate-in slide-in-from-bottom-2">
-                                <div className="max-w-[85%] bg-amber-50 border-2 border-dashed border-amber-300 rounded-2xl rounded-tr-none p-1 relative group">
+                                <div className="max-w-[85%] bg-amber-50 border-2 border-dashed border-amber-300 rounded-2xl rounded-tr-none p-1 relative group transition-all hover:bg-amber-100/50">
                                     <div className="flex items-center justify-between px-3 py-2 border-b border-amber-200/50 mb-2">
                                         <div className="flex items-center gap-1.5 text-xs font-bold text-amber-700">
                                             <Clock size={12} /> {new Date(msg.scheduledTime).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})}
@@ -310,24 +318,32 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
         </div>
       </div>
       
+      {/* EDIT MODAL */}
       {editingMessage && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
               <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6 space-y-4 animate-in zoom-in-95">
-                  <div className="flex justify-between items-center border-b pb-2">
-                      <h3 className="font-bold text-gray-900">Edit Scheduled Message</h3>
-                      <button type="button" onClick={() => setEditingMessage(null)}><X size={18} /></button>
+                  <div className="flex justify-between items-center border-b border-gray-100 pb-3">
+                      <h3 className="font-bold text-gray-900 flex items-center gap-2"><Edit2 size={16} className="text-blue-600" /> Edit Schedule</h3>
+                      <button type="button" onClick={() => setEditingMessage(null)} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
                   </div>
-                  <div>
-                      <label className="text-xs font-bold text-gray-500 mb-1 block">Date & Time</label>
-                      <input type="datetime-local" value={editTime} onChange={(e) => setEditTime(e.target.value)} className="w-full p-2 border rounded bg-gray-50" />
+                  
+                  <div className="space-y-3">
+                      <div>
+                          <label className="text-xs font-bold text-gray-500 uppercase mb-1 block">Scheduled For</label>
+                          <input type="datetime-local" value={editTime} onChange={(e) => setEditTime(e.target.value)} className="w-full p-2.5 border border-gray-200 rounded-lg text-sm bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none" />
+                      </div>
+                      
+                      <div>
+                          <label className="text-xs font-bold text-gray-500 uppercase mb-1 block">Message Content</label>
+                          <textarea value={editText} onChange={(e) => setEditText(e.target.value)} className="w-full p-3 border border-gray-200 rounded-lg h-32 resize-none bg-gray-50 focus:bg-white focus:ring-2 focus:ring-blue-500 outline-none text-sm" placeholder="Edit message..." />
+                      </div>
                   </div>
-                  <div>
-                      <label className="text-xs font-bold text-gray-500 mb-1 block">Message</label>
-                      <textarea value={editText} onChange={(e) => setEditText(e.target.value)} className="w-full p-2 border rounded h-24 resize-none bg-gray-50 focus:bg-white transition-colors" />
-                  </div>
+
                   <div className="flex gap-2 pt-2">
-                      <button type="button" onClick={() => setEditingMessage(null)} className="flex-1 py-2 border rounded-lg font-bold text-gray-600 hover:bg-gray-50">Cancel</button>
-                      <button type="button" onClick={saveEditedMessage} className="flex-1 py-2 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700">Save Changes</button>
+                      <button type="button" onClick={() => setEditingMessage(null)} className="flex-1 py-2.5 border border-gray-200 rounded-lg font-bold text-gray-600 hover:bg-gray-50 text-sm">Cancel</button>
+                      <button type="button" onClick={saveEditedMessage} className="flex-1 py-2.5 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 text-sm flex items-center justify-center gap-2">
+                          <Save size={16} /> Save Changes
+                      </button>
                   </div>
               </div>
           </div>
