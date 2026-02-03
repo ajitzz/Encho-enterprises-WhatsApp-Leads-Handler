@@ -19,7 +19,7 @@ export type LeadSource = 'Organic' | 'Meta Ad' | 'Referral' | 'Manual';
 export interface MessageButton {
   id: string;
   title: string;
-  type: 'reply' | 'url' | 'phone'; // WhatsApp standard
+  type: 'reply' | 'url' | 'phone'; 
   payload?: string;
 }
 
@@ -46,12 +46,13 @@ export type NodeType =
   | 'interactive_list' 
   | 'condition' 
   | 'handoff' 
-  | 'status_update';
+  | 'status_update'
+  | 'template';
 
 export interface ConditionRule {
   id: string;
   variable: string;
-  operator: 'equals' | 'contains' | 'starts_with' | 'is_set';
+  operator: 'equals' | 'contains' | 'starts_with' | 'is_set' | 'greater_than' | 'less_than';
   value: string;
 }
 
@@ -61,30 +62,38 @@ export interface FlowNodeData {
   type: NodeType;
   
   // Content
-  content?: string; // Text body
+  content?: string; 
   mediaUrl?: string;
-  footerText?: string; // WhatsApp footer
+  footerText?: string; 
   
-  // Interactive
+  // Interactive Elements
   buttons?: MessageButton[];
   listTitle?: string;
   listButtonText?: string;
   sections?: ListSection[];
   
-  // Logic / Input
-  variable?: string; // Save input to this variable
-  validationType?: 'text' | 'email' | 'phone' | 'number' | 'none';
+  // Input & Validation
+  variable?: string; 
+  validationType?: 'text' | 'email' | 'phone' | 'number' | 'regex';
+  validationRegex?: string;
+  retryMessage?: string; // Message to send if validation fails
   
-  // Branching
+  // Branching Logic
   conditions?: ConditionRule[];
   
   // Actions
   targetStatus?: LeadStatus;
   
+  // Template
+  templateName?: string;
+  templateLanguage?: string;
+  templateVariables?: string[]; // Array of values to fill {{1}}, {{2}}
+
   [key: string]: any;
 }
 
 export interface BotStep {
+  // Legacy support for older simulator logic
   id: string;
   title?: string;
   message: string;
@@ -105,7 +114,7 @@ export interface BotSettings {
   systemInstruction?: string;
   nodes: any[];
   edges: any[];
-  // Legacy / Simulator fields
+  // Legacy
   steps?: BotStep[];
   entryPointId?: string;
 }
@@ -143,7 +152,7 @@ export interface Candidate {
   lastMessageAt: number;
   assignedAgent?: string;
   messages?: Message[];
-  currentBotStepId?: string; // Tracks where they are in the graph
+  currentBotStepId?: string; 
   isHumanMode?: boolean;
 }
 
@@ -154,7 +163,6 @@ export interface Driver extends Candidate {
   status: LeadStatus;
   isBotActive: boolean;
   notes?: string;
-  // Simulator specific fields
   onboardingStep?: OnboardingStep;
   qualificationChecks?: {
     hasValidLicense: boolean;

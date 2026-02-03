@@ -4,29 +4,12 @@ import { Driver, LeadStatus, Message, OnboardingStep, LeadSource, BotSettings, B
 const DEFAULT_BOT_SETTINGS: BotSettings = {
   isEnabled: true,
   shouldRepeat: false,
-  routingStrategy: 'BOT_ONLY', // Enforced
+  routingStrategy: 'BOT_ONLY',
   systemInstruction: "",
-  nodes: [],
-  edges: [],
-  steps: [
-    {
-      id: 'step_1',
-      title: 'Welcome',
-      message: 'Welcome to Encho Cabs! Could you please share your full name?',
-      inputType: 'text',
-      saveToField: 'name',
-      nextStepId: 'step_2'
-    },
-    {
-      id: 'step_2',
-      title: 'Role',
-      message: 'Are you looking to Rent a vehicle or Drive your own?',
-      inputType: 'option',
-      options: ['Rent', 'Drive Own Car'],
-      nextStepId: 'AI_HANDOFF'
-    }
+  nodes: [
+      { id: 'start', type: 'start', position: {x:0,y:0}, data: { type: 'start', label: 'Start', content: 'Welcome to Uber Fleet!' } }
   ],
-  entryPointId: 'step_1'
+  edges: []
 };
 
 const MOCK_DRIVERS: Driver[] = [];
@@ -87,35 +70,32 @@ class MockBackendService {
     }
   }
 
-  // --- STRICT BOT ENGINE (SIMULATOR) ---
+  // --- MOCK STATE MACHINE ENGINE ---
   processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Driver, reply?: Message, actionNeeded: 'NONE' } {
     let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
     let settings = this.botSettings;
-    const entryPointId = settings.entryPointId || settings.steps?.[0]?.id;
+    const { nodes, edges } = settings;
 
-    // 1. New Driver Creation
+    // 1. Create/Find Driver
     if (!driver) {
-      const shouldActivateBot = settings.isEnabled;
       driver = {
         id: Date.now().toString(),
         phoneNumber,
         name: 'Unknown Driver',
         source: 'Organic',
         status: LeadStatus.NEW,
-        // Missing properties added below
         stage: LeadStatus.NEW,
         variables: {},
         tags: [],
         lastMessageAt: Date.now(),
-        // End missing properties
         lastMessage: text,
         lastMessageTime: Date.now(),
         messages: [],
-        documents: {}, // Fixed: initialized as empty object instead of array
+        documents: {},
         onboardingStep: OnboardingStep.WELCOME_SENT,
         qualificationChecks: { hasValidLicense: false, hasVehicle: false, isLocallyAvailable: true },
-        isBotActive: shouldActivateBot,
-        currentBotStepId: undefined, // Start with UNDEFINED to trigger wake-up
+        isBotActive: settings.isEnabled,
+        currentBotStepId: undefined,
         isHumanMode: false,
         notes: ''
       };
@@ -125,7 +105,7 @@ class MockBackendService {
         driver.lastMessageTime = Date.now();
     }
 
-    // Add User Message
+    // Log Incoming
     this.addMessage(driver.id, {
         id: Date.now().toString(),
         sender: 'driver',
@@ -137,123 +117,79 @@ class MockBackendService {
 
     if (driver.isHumanMode) return { driver, actionNeeded: 'NONE' };
 
-    // 2. Bot Logic (NO AI)
-    let replyMsg: Message | undefined;
+    // --- ENGINE LOGIC (SIMPLIFIED FOR MOCK) ---
+    // This loops until it hits an Input or End
+    
+    let currentNodeId = driver.currentBotStepId;
+    let currentNode = nodes.find(n => n.id === currentNodeId);
 
-    // Fix: Allow processing if Bot Enabled AND (Driver Active OR Repeat is ON)
-    const shouldProcess = settings.isEnabled && (driver.isBotActive || settings.shouldRepeat);
+    // Initial Start
+    if (!currentNode) {
+        currentNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start') || nodes[0];
+    }
 
-    if (shouldProcess) {
-        let currentStep = settings.steps?.find(s => s.id === driver.currentBotStepId);
-        
-        // CASE 1: RESTART / WAKE UP / INITIALIZE
-        if (!currentStep && settings.steps && settings.steps.length > 0) {
-            const entryStep = settings.steps.find(s => s.id === entryPointId) || settings.steps[0];
-            if (entryStep) {
-                 driver.currentBotStepId = entryStep.id;
-                 driver.isBotActive = true; // Reactivate
-                 
-                 // Determine correct message type for simulator
-                 let msgType: any = entryStep.options ? 'options' : 'text';
-                 if (entryStep.mediaUrl) {
-                    if (entryStep.mediaType === 'video') msgType = 'video_link'; // Use video_link type for videos
-                    else msgType = 'image';
-                 }
+    let nextNodeId = null;
 
-                 replyMsg = {
-                    id: Date.now().toString() + '_bot',
-                    sender: 'system',
-                    text: entryStep.message,
-                    timestamp: Date.now() + 500,
-                    type: msgType,
-                    options: entryStep.options,
-                    imageUrl: entryStep.mediaUrl
-                };
-                if (entryStep.linkLabel && entryStep.message) {
-                    replyMsg.text = `${entryStep.linkLabel}\n${entryStep.message}`;
-                }
-                this.addMessage(driver.id, replyMsg);
-                this.persist();
-                return { driver, reply: replyMsg, actionNeeded: 'NONE' };
-            }
+    // IF CONTINUING (Process Input)
+    if (currentNodeId) {
+        const type = currentNode.data.type;
+        // Mock Validation (Assume success for simulator unless 'fail' typed)
+        if (type === 'input' && text.toLowerCase() === 'fail') {
+             this.addMessage(driver.id, {
+                 id: Date.now().toString() + '_err',
+                 sender: 'system',
+                 text: currentNode.data.retryMessage || "Invalid Input (Simulated)",
+                 timestamp: Date.now() + 500,
+                 type: 'text'
+             });
+             return { driver, actionNeeded: 'NONE' };
         }
         
-        // CASE 2: NORMAL FLOW
-        else if (currentStep && settings.steps) {
-            let nextId = currentStep.nextStepId;
+        // Advance
+        const edge = edges.find(e => e.source === currentNodeId);
+        if (edge) nextNodeId = edge.target;
+    } else {
+        nextNodeId = currentNode?.id;
+    }
 
-            if (currentStep.routes && Object.keys(currentStep.routes).length > 0) {
-                const input = text.toLowerCase();
-                const matched = Object.keys(currentStep.routes).find(k => input.includes(k.toLowerCase()));
-                if (matched) {
-                    nextId = currentStep.routes[matched];
-                } else {
-                    replyMsg = {
-                        id: Date.now().toString() + '_bot',
-                        sender: 'system',
-                        text: "Please select one of the valid options:",
-                        timestamp: Date.now() + 500,
-                        type: 'options',
-                        options: currentStep.options
-                    };
-                    this.addMessage(driver.id, replyMsg);
-                    return { driver, reply: replyMsg, actionNeeded: 'NONE' };
-                }
-            }
-            
-            if (currentStep.saveToField && currentStep.saveToField === 'name') driver.name = text;
+    let activeNodeId = nextNodeId;
+    let limit = 10;
 
-            if (nextId && nextId !== 'END' && nextId !== 'AI_HANDOFF') {
-                driver.currentBotStepId = nextId;
-                const nextStep = settings.steps.find(s => s.id === nextId);
-                if (nextStep) {
-                     // Determine correct message type for simulator
-                     let msgType: any = nextStep.options ? 'options' : 'text';
-                     if (nextStep.mediaUrl) {
-                        if (nextStep.mediaType === 'video') msgType = 'video_link'; // Use video_link type for videos
-                        else msgType = 'image';
-                     }
+    while(activeNodeId && limit > 0) {
+        limit--;
+        const node = nodes.find(n => n.id === activeNodeId);
+        if (!node) break;
 
-                     replyMsg = {
-                        id: Date.now().toString() + '_bot',
-                        sender: 'system',
-                        text: nextStep.message,
-                        timestamp: Date.now() + 500,
-                        type: msgType,
-                        options: nextStep.options,
-                        imageUrl: nextStep.mediaUrl
-                    };
-                    if (nextStep.linkLabel && nextStep.message) {
-                        replyMsg.text = `${nextStep.linkLabel}\n${nextStep.message}`;
-                    }
-                    this.addMessage(driver.id, replyMsg);
-                }
-            } else if (nextId === 'END' || nextId === 'AI_HANDOFF') {
-                // End of Flow - Logic Update for Repeat
-                if (settings.shouldRepeat) {
-                    // Loop enabled: Keep active, reset step to null
-                    driver.isBotActive = true;
-                    driver.currentBotStepId = undefined;
-                } else {
-                    // Default: Deactivate
-                    driver.isBotActive = false;
-                    driver.currentBotStepId = undefined;
-                }
-                
-                replyMsg = {
-                    id: Date.now().toString() + '_end',
-                    sender: 'system',
-                    text: "Thank you! We have received your details. Our team will verify them and contact you shortly.",
-                    timestamp: Date.now() + 500,
-                    type: 'text'
-                };
-                this.addMessage(driver.id, replyMsg);
-            }
+        const data = node.data || {};
+        
+        // Execution
+        if (data.content && ['text', 'image', 'interactive_button', 'interactive_list', 'start'].includes(data.type)) {
+             this.addMessage(driver.id, {
+                 id: Date.now().toString() + '_' + limit,
+                 sender: 'system',
+                 text: data.content,
+                 timestamp: Date.now() + (10 - limit) * 100, // Staggered timestamps
+                 type: 'text'
+             });
         }
-    } 
+
+        // Wait Check
+        if (['input', 'interactive_button', 'interactive_list'].includes(data.type)) {
+            driver.currentBotStepId = node.id;
+            break; // Stop and wait for user
+        }
+
+        // Auto Advance
+        const edge = edges.find(e => e.source === node.id);
+        if (edge) activeNodeId = edge.target;
+        else {
+            driver.currentBotStepId = undefined;
+            activeNodeId = null;
+        }
+    }
 
     this.persist();
-    return { driver, reply: replyMsg, actionNeeded: 'NONE' };
+    return { driver, actionNeeded: 'NONE' };
   }
   
   createAdLead(name: string, phoneNumber: string): Driver { return this.drivers[0]; } // Stub
