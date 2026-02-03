@@ -1,14 +1,8 @@
 
 import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage } from '../types';
 
-const getBaseUrl = () => {
-    if (typeof window === 'undefined') return '';
-    const host = window.location.hostname;
-    // Assuming backend is on port 3001 or proxied via Vite
-    if (host === 'localhost' || host === '127.0.0.1') return ''; 
-    return ''; 
-};
-const API_BASE_URL = getBaseUrl();
+// Use relative path so the Vercel proxy/rewrite handles the domain automatically.
+const API_BASE_URL = ''; 
 
 let authToken: string | null = localStorage.getItem('uber_fleet_auth_token');
 
@@ -29,6 +23,10 @@ const getHeaders = () => {
 
 // Generic fetch wrapper
 const apiRequest = async <T>(endpoint: string, options: RequestInit = {}): Promise<T> => {
+    // Ensure endpoint starts with /api if not provided, but server.js mounts on /api so just be careful
+    // We assume the caller passes '/api/...' or just '/drivers' if rewrite handles it.
+    // Based on previous code, let's strictly use the endpoint passed.
+    
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
         ...options,
         headers: {
@@ -38,10 +36,6 @@ const apiRequest = async <T>(endpoint: string, options: RequestInit = {}): Promi
     });
     
     if (!response.ok) {
-        // Handle 401 unauthorized
-        if (response.status === 401) {
-            // potentially redirect to login or throw specific error
-        }
         const errorBody = await response.text();
         throw new Error(`API Error ${response.status}: ${errorBody}`);
     }
@@ -76,7 +70,6 @@ export const liveApiService = {
   },
 
   subscribeToUpdates: (callback: (drivers: Driver[]) => void) => {
-      // Mock implementation of polling or SSE
       const interval = setInterval(async () => {
           try {
               const drivers = await liveApiService.getDrivers();

@@ -1,3 +1,8 @@
+
 const app = require('../server');
 
-module.exports = app;
+// Serverless function handler
+module.exports = (req, res) => {
+  // Pass the request to the Express app
+  app(req, res);
+};
