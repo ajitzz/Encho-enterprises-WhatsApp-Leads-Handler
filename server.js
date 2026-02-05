@@ -79,12 +79,17 @@ const getMetaClient = () => axios.create({
 });
 
 // --- HELPERS ---
+
 const refreshMediaUrl = async (url) => {
-    if (!url || typeof url !== 'string' || !url.includes(SYSTEM_CONFIG.AWS_BUCKET)) return url;
+    if (!url || typeof url !== 'string') return null;
+    if (!url.includes('amazonaws.com') && !url.includes(SYSTEM_CONFIG.AWS_BUCKET)) return url;
+
     try {
         const urlObj = new URL(url);
         let key = decodeURIComponent(urlObj.pathname.substring(1));
-        if (key.startsWith(SYSTEM_CONFIG.AWS_BUCKET + '/')) key = key.substring(SYSTEM_CONFIG.AWS_BUCKET.length + 1);
+        if (key.startsWith(SYSTEM_CONFIG.AWS_BUCKET + '/')) {
+            key = key.substring(SYSTEM_CONFIG.AWS_BUCKET.length + 1);
+        }
         const command = new GetObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key });
         return await getSignedUrl(s3Client, command, { expiresIn: 3600 });
     } catch (e) {
@@ -96,7 +101,6 @@ const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
     
-    // Safety check for empty text messages
     if (payload.type === 'text' && (!payload.text?.body || !payload.text.body.trim())) {
         console.warn(`[Meta] Skipped sending empty text to ${to}`);
         return;
@@ -113,7 +117,175 @@ const sendToMeta = async (phoneNumber, payload) => {
     } catch (e) {
         const errMsg = e.response?.data?.error?.message || e.message;
         console.error(`[Meta Failed] ${to}: ${errMsg}`);
-        throw new Error(errMsg);
+        // Don't throw here to avoid crashing the bot loop
+    }
+};
+
+// --- BOT ENGINE ---
+const runBotEngine = async (client, candidate, incomingText) => {
+    // 1. Check if Bot is Enabled
+    const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
+    if (sys.rows[0]?.value?.automation_enabled === false) return;
+
+    // 2. Check if Human Mode
+    if (candidate.is_human_mode) return;
+
+    // 3. Get Bot Flow
+    const botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
+    if (botRes.rows.length === 0) return;
+    
+    const { nodes, edges } = botRes.rows[0].settings;
+    if (!nodes || nodes.length === 0) return;
+
+    let currentNodeId = candidate.current_bot_step_id;
+    let nextNodeId = null;
+
+    // --- STEP A: DETERMINE NEXT NODE ---
+    if (!currentNodeId) {
+        // New conversation or reset: Find Start Node
+        const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
+        if (startNode) nextNodeId = startNode.id;
+    } else {
+        // Existing conversation: Find Edge based on input
+        const currentNode = nodes.find(n => n.id === currentNodeId);
+        
+        if (currentNode) {
+            // Logic for Buttons/Lists: Check if input matches a specific handle
+            let matchedEdge = null;
+            
+            // Heuristic: Check if incoming text matches any button label connected to current node
+            if (['interactive_button', 'interactive_list'].includes(currentNode.data?.type)) {
+                // Find all edges leaving this node
+                const outgoingEdges = edges.filter(e => e.source === currentNodeId);
+                
+                // Try to find a match in the button definitions
+                const buttons = currentNode.data.buttons || [];
+                const listRows = currentNode.data.sections?.flatMap(s => s.rows) || [];
+                
+                // Normalize text for comparison
+                const normText = (incomingText || '').trim().toLowerCase();
+
+                // Check Buttons
+                const matchedBtn = buttons.find(b => b.title.toLowerCase() === normText || b.id === normText);
+                if (matchedBtn) {
+                     matchedEdge = outgoingEdges.find(e => e.sourceHandle === matchedBtn.id);
+                }
+
+                // Check Lists
+                if (!matchedEdge) {
+                    const matchedRow = listRows.find(r => r.title.toLowerCase() === normText || r.id === normText);
+                    if (matchedRow) {
+                        matchedEdge = outgoingEdges.find(e => e.sourceHandle === matchedRow.id);
+                    }
+                }
+            }
+            
+            // If no specific match (or it was a text input node), look for default edge
+            if (!matchedEdge) {
+                // Default edge (sourceHandle is null or 'true' for simple logic)
+                matchedEdge = edges.find(e => e.source === currentNodeId && (!e.sourceHandle || e.sourceHandle === 'true'));
+            }
+
+            if (matchedEdge) {
+                nextNodeId = matchedEdge.target;
+            }
+        }
+    }
+
+    // --- STEP B: EXECUTE NODES (CHAINED) ---
+    // We loop because some nodes (like Text) should send immediately and move to the next
+    // without waiting for user input. We stop at Input/Interactive nodes.
+    
+    let activeNodeId = nextNodeId;
+    let loopLimit = 5; // Prevent infinite loops
+
+    while (activeNodeId && loopLimit > 0) {
+        loopLimit--;
+        const node = nodes.find(n => n.id === activeNodeId);
+        if (!node) break;
+
+        const data = node.data || {};
+        
+        // 1. EXECUTE: Send Message
+        let sentType = 'text';
+        let sentBody = data.content || '';
+
+        // Skip "Start" node content, just move through it
+        if (data.type !== 'start') {
+            if (data.type === 'text' || data.type === 'input') {
+                if (data.content) {
+                    await sendToMeta(candidate.phone_number, { type: 'text', text: { body: data.content } });
+                    // Store Log
+                    await client.query(
+                        `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
+                        [crypto.randomUUID(), candidate.id, data.content]
+                    );
+                }
+            } else if (data.type === 'image' && data.mediaUrl) {
+                const url = await refreshMediaUrl(data.mediaUrl);
+                await sendToMeta(candidate.phone_number, { type: 'image', image: { link: url, caption: data.content || '' } });
+                sentType = 'image';
+            } else if (data.type === 'interactive_button' && data.buttons?.length > 0) {
+                 const payload = {
+                    type: "interactive",
+                    interactive: {
+                        type: "button",
+                        body: { text: data.content || "Please select an option" },
+                        action: {
+                            buttons: data.buttons.slice(0, 3).map(b => ({
+                                type: "reply",
+                                reply: { id: b.id, title: b.title.substring(0, 20) } // Meta limit 20 chars
+                            }))
+                        }
+                    }
+                };
+                await sendToMeta(candidate.phone_number, payload);
+                sentType = 'interactive';
+                sentBody = `[Buttons] ${data.content}`;
+            } else if (data.type === 'interactive_list' && data.sections?.length > 0) {
+                 const payload = {
+                    type: "interactive",
+                    interactive: {
+                        type: "list",
+                        body: { text: data.content || "Select an option" },
+                        action: {
+                            button: data.listButtonText || "Menu",
+                            sections: data.sections
+                        }
+                    }
+                };
+                await sendToMeta(candidate.phone_number, payload);
+                sentType = 'interactive';
+                sentBody = `[List] ${data.content}`;
+            }
+            
+            // Log non-text messages if not already logged
+            if (sentType !== 'text') {
+                 await client.query(
+                    `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, 
+                    [crypto.randomUUID(), candidate.id, sentBody, sentType]
+                );
+            }
+        }
+
+        // 2. UPDATE STATE
+        await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
+
+        // 3. DECIDE: Stop or Continue?
+        // If it's an Input node, Button node, or List node, we STOP and wait for user reply.
+        if (['input', 'interactive_button', 'interactive_list', 'handoff'].includes(data.type)) {
+            break; 
+        }
+
+        // If it's a Text/Image/Start node, we automatically move to the next connected node
+        const nextEdge = edges.find(e => e.source === node.id);
+        if (nextEdge) {
+            activeNodeId = nextEdge.target;
+            // Add small delay for natural feeling if chaining texts
+            await new Promise(r => setTimeout(r, 1000));
+        } else {
+            activeNodeId = null; // End of flow
+        }
     }
 };
 
@@ -300,7 +472,7 @@ apiRouter.get('/drivers/:id/documents', async (req, res) => {
 apiRouter.post('/scheduled-messages', async (req, res) => {
     try {
         const { driverIds, message, timestamp } = req.body;
-        // Robust payload construction: Ensure it's always an object
+        // Robust payload construction
         const payload = typeof message === 'string' ? { text: message } : message;
         
         await withDb(async (client) => {
@@ -360,7 +532,7 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
 });
 
 // ==========================================
-// 5. CRON & WEBHOOK (FIXED LOGIC)
+// 5. CRON & WEBHOOK (FIXED FOR MEDIA)
 // ==========================================
 apiRouter.get('/cron/process-queue', async (req, res) => {
     console.log("--- [CRON] Starting Queue Processing ---");
@@ -388,19 +560,31 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                     let dbType = 'text';
 
                     if (p.mediaUrl) {
+                        // 1. REFRESH URL: S3 Signed URLs expire. Cron must regenerate a fresh one.
                         const url = await refreshMediaUrl(p.mediaUrl);
                         const mediaType = p.mediaType || 'image';
                         dbType = mediaType;
                         dbLogText = JSON.stringify({ url: p.mediaUrl, caption: p.text || '' });
                         
+                        // 2. CONSTRUCT PAYLOAD: Correctly structure for Meta API
                         metaP = { 
                             type: mediaType, 
                             [mediaType]: { 
                                 link: url, 
-                                caption: p.text || '' // Ensure string 
+                                caption: p.text || '' 
                             } 
                         };
+
+                        // 3. DOCUMENT FIX: Documents MUST have a filename for Meta to accept them
+                        if (mediaType === 'document') {
+                            const urlObj = new URL(url);
+                            // Extract filename from path, default to 'document.pdf'
+                            const filename = decodeURIComponent(urlObj.pathname.split('/').pop() || 'document.pdf');
+                            metaP[mediaType].filename = filename;
+                        }
+
                     } else {
+                        // Text Message
                         if (!dbLogText.trim()) throw new Error("Empty text in payload");
                         metaP = { type: 'text', text: { body: dbLogText } };
                     }
@@ -409,7 +593,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                     
                     // Archive to history
                     await client.query(
-                        `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, 
+                        `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
                         [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]
                     );
 
@@ -458,16 +642,32 @@ apiRouter.post('/webhook', async (req, res) => {
             else if (msg.type === 'interactive') text = msg.interactive.button_reply?.title || msg.interactive.list_reply?.title || '';
             else text = `[${msg.type.toUpperCase()}]`;
 
+            // 1. Ingest/Update Candidate
             let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
-            let cid = c.rows[0]?.id;
-            if (!cid) {
-                cid = crypto.randomUUID();
-                await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message_at, is_human_mode, variables) VALUES ($1, $2, $3, 'New', $4, FALSE, '{}')`, [cid, from, name, Date.now()]);
+            let candidate;
+            
+            if (c.rows.length === 0) {
+                const id = crypto.randomUUID();
+                await client.query(
+                    `INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at, is_human_mode, variables) VALUES ($1, $2, $3, 'New', $4, $5, FALSE, '{}')`, 
+                    [id, from, name, text, Date.now()]
+                );
+                // Fetch the newly created candidate with proper ID
+                candidate = { id, phone_number: from, is_human_mode: false, current_bot_step_id: null };
             } else {
-                await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), cid]);
+                candidate = c.rows[0];
+                await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
             }
 
-            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, 'text', $4, 'received', NOW())`, [crypto.randomUUID(), cid, text, msg.id]);
+            // 2. Log User Message
+            await client.query(
+                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, 'text', $4, 'received', NOW())`, 
+                [crypto.randomUUID(), candidate.id, text, msg.id]
+            );
+
+            // 3. EXECUTE BOT ENGINE (The Fix)
+            // Immediately process this message against the Bot Flow
+            await runBotEngine(client, candidate, text);
         });
     } catch(e) { console.error("Webhook Error", e); }
 });
