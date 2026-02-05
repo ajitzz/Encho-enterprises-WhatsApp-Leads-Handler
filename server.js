@@ -138,7 +138,7 @@ const processText = (text, candidate) => {
 };
 
 // --- BOT ENGINE (FIXED & ROBUST) ---
-const runBotEngine = async (client, candidate, incomingText) => {
+const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
     console.log(`[Bot Engine] START for ${candidate.phone_number} | Step: ${candidate.current_bot_step_id || 'START'}`);
 
     // 1. Check if Bot is Enabled
@@ -214,21 +214,20 @@ const runBotEngine = async (client, candidate, incomingText) => {
                 // Find all edges leaving this node
                 const outgoingEdges = edges.filter(e => e.source === currentNodeId);
 
-                // Check Buttons
+                // Check Buttons/Lists match
+                // We prioritize ID match (payload) over text match
                 if (data.buttons) {
-                    // Match by exact ID or Fuzzy Title
                     const matchedBtn = data.buttons.find(b => 
-                        b.id === incomingText || // ID Match (Payload)
-                        b.title.toLowerCase() === normText // Text Match
+                        (incomingPayloadId && b.id === incomingPayloadId) || // Priority: Payload Match
+                        b.title.toLowerCase() === normText // Fallback: Text Match
                     );
                     if (matchedBtn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === matchedBtn.id);
                 }
 
-                // Check Lists
                 if (!matchedEdge && data.sections) {
                     const allRows = data.sections.flatMap(s => s.rows);
                     const matchedRow = allRows.find(r => 
-                        r.id === incomingText || 
+                        (incomingPayloadId && r.id === incomingPayloadId) || 
                         r.title.toLowerCase() === normText
                     );
                     if (matchedRow) matchedEdge = outgoingEdges.find(e => e.sourceHandle === matchedRow.id);
@@ -292,7 +291,7 @@ const runBotEngine = async (client, candidate, incomingText) => {
         if (data.type === 'handoff') {
             await client.query("UPDATE candidates SET is_human_mode = TRUE WHERE id = $1", [candidate.id]);
             const msg = processText(data.content, candidate);
-            if (msg) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } });
+            if (msg && msg.trim()) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } });
             break; // Stop execution
         }
 
@@ -325,12 +324,13 @@ const runBotEngine = async (client, candidate, incomingText) => {
         // Skip "Start" node content unless configured otherwise
         if (data.type !== 'start') {
             if (['text', 'input'].includes(data.type)) {
-                if (sentBody) {
+                if (sentBody && sentBody.trim()) {
                     await sendToMeta(candidate.phone_number, { type: 'text', text: { body: sentBody } });
                 }
             } else if (data.type === 'image' && data.mediaUrl) {
                 const url = await refreshMediaUrl(data.mediaUrl);
-                await sendToMeta(candidate.phone_number, { type: 'image', image: { link: url, caption: sentBody } });
+                // Ensure caption is optional but image sends
+                await sendToMeta(candidate.phone_number, { type: 'image', image: { link: url, caption: sentBody || '' } });
                 sentType = 'image';
             } else if (data.type === 'interactive_button' && data.buttons?.length > 0) {
                  const payload = {
@@ -366,8 +366,8 @@ const runBotEngine = async (client, candidate, incomingText) => {
                 sentBody = `[List] ${sentBody}`;
             }
             
-            // Log message
-            if (sentType !== 'text' || (sentType === 'text' && sentBody)) {
+            // Log message (Only if something was sent)
+            if (sentType !== 'text' || (sentType === 'text' && sentBody && sentBody.trim())) {
                  await client.query(
                     `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, 
                     [crypto.randomUUID(), candidate.id, sentBody, sentType]
@@ -745,9 +745,22 @@ apiRouter.post('/webhook', async (req, res) => {
             const from = msg.from;
             const name = body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || 'Unknown';
             let text = '';
-            if (msg.type === 'text') text = msg.text.body;
-            else if (msg.type === 'interactive') text = msg.interactive.button_reply?.title || msg.interactive.list_reply?.title || '';
-            else text = `[${msg.type.toUpperCase()}]`;
+            let payloadId = null;
+
+            // --- PAYLOAD EXTRACTION ---
+            if (msg.type === 'text') {
+                text = msg.text.body;
+            } else if (msg.type === 'interactive') {
+                if (msg.interactive.type === 'button_reply') {
+                    text = msg.interactive.button_reply.title;
+                    payloadId = msg.interactive.button_reply.id;
+                } else if (msg.interactive.type === 'list_reply') {
+                    text = msg.interactive.list_reply.title;
+                    payloadId = msg.interactive.list_reply.id;
+                }
+            } else {
+                text = `[${msg.type.toUpperCase()}]`;
+            }
 
             // 1. Ingest/Update Candidate
             let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
@@ -772,9 +785,8 @@ apiRouter.post('/webhook', async (req, res) => {
                 [crypto.randomUUID(), candidate.id, text, msg.id]
             );
 
-            // 3. EXECUTE BOT ENGINE (The Fix)
-            // Immediately process this message against the Bot Flow
-            await runBotEngine(client, candidate, text);
+            // 3. EXECUTE BOT ENGINE (Updated with payload)
+            await runBotEngine(client, candidate, text, payloadId);
         });
     } catch(e) { console.error("Webhook Error", e); }
 });
