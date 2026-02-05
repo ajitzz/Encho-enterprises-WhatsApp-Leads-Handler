@@ -168,6 +168,16 @@ const runBotEngine = async (client, candidate, incomingText) => {
     let nextNodeId = null;
     let shouldReprompt = false;
 
+    // --- GLOBAL RESET & DEAD END CHECK ---
+    const resetKeywords = ['hi', 'hello', 'start', 'restart', 'menu', 'reset'];
+    const cleanInput = (incomingText || '').toLowerCase().trim();
+    
+    if (resetKeywords.includes(cleanInput)) {
+        console.log(`[Bot Engine] Global reset triggered by keyword: ${cleanInput}`);
+        currentNodeId = null; 
+        await client.query("UPDATE candidates SET current_bot_step_id = NULL WHERE id = $1", [candidate.id]);
+    }
+
     // --- STEP A: DETERMINE NEXT NODE ---
     if (!currentNodeId) {
         // New conversation: Find Start Node
@@ -198,7 +208,7 @@ const runBotEngine = async (client, candidate, incomingText) => {
             // 2. Find Next Edge
             let matchedEdge = null;
             const data = currentNode.data || {};
-            const normText = (incomingText || '').trim().toLowerCase();
+            const normText = cleanInput;
             
             if (['interactive_button', 'interactive_list'].includes(data.type)) {
                 // Find all edges leaving this node
@@ -206,14 +216,21 @@ const runBotEngine = async (client, candidate, incomingText) => {
 
                 // Check Buttons
                 if (data.buttons) {
-                    const matchedBtn = data.buttons.find(b => b.title.toLowerCase() === normText || b.id === normText);
+                    // Match by exact ID or Fuzzy Title
+                    const matchedBtn = data.buttons.find(b => 
+                        b.id === incomingText || // ID Match (Payload)
+                        b.title.toLowerCase() === normText // Text Match
+                    );
                     if (matchedBtn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === matchedBtn.id);
                 }
 
                 // Check Lists
                 if (!matchedEdge && data.sections) {
                     const allRows = data.sections.flatMap(s => s.rows);
-                    const matchedRow = allRows.find(r => r.title.toLowerCase() === normText || r.id === normText);
+                    const matchedRow = allRows.find(r => 
+                        r.id === incomingText || 
+                        r.title.toLowerCase() === normText
+                    );
                     if (matchedRow) matchedEdge = outgoingEdges.find(e => e.sourceHandle === matchedRow.id);
                 }
             }
@@ -228,12 +245,20 @@ const runBotEngine = async (client, candidate, incomingText) => {
                 console.log(`[Bot Engine] Following edge to ${matchedEdge.target}`);
                 nextNodeId = matchedEdge.target;
             } else {
-                console.log(`[Bot Engine] No matching edge found from ${currentNodeId}.`);
-                // RE-PROMPT LOGIC: If we are at an interactive node and user typed something invalid, re-send the node.
-                if (['interactive_button', 'interactive_list'].includes(data.type)) {
-                    console.log("[Bot Engine] Invalid input for interactive node. Re-prompting.");
-                    shouldReprompt = true;
-                    nextNodeId = currentNodeId; // Stay on current node
+                // CHECK FOR DEAD END (Leaf Node)
+                const hasOutgoing = edges.some(e => e.source === currentNodeId);
+                if (!hasOutgoing) {
+                    console.log(`[Bot Engine] User is at a dead-end node (${currentNodeId}). Restarting flow.`);
+                    // Treat as new conversation immediately
+                    const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
+                    if (startNode) nextNodeId = startNode.id;
+                } else {
+                    // Not a dead end, but no match found (Invalid Input for Button/List)
+                    console.log(`[Bot Engine] Invalid input for node ${currentNodeId}. Re-prompting.`);
+                    if (['interactive_button', 'interactive_list'].includes(data.type)) {
+                        shouldReprompt = true;
+                        nextNodeId = currentNodeId; // Stay on current node (Reprompt)
+                    }
                 }
             }
         } else {
@@ -246,10 +271,7 @@ const runBotEngine = async (client, candidate, incomingText) => {
 
     // --- STEP B: EXECUTE NODES (CHAINED) ---
     let activeNodeId = nextNodeId;
-    let loopLimit = 10; 
-
-    // If we are re-prompting, we just run the active node once and stop.
-    // If it's a normal chain, we loop until we hit an input/wait state.
+    let loopLimit = 15; 
 
     while (activeNodeId && loopLimit > 0) {
         loopLimit--;
@@ -262,7 +284,6 @@ const runBotEngine = async (client, candidate, incomingText) => {
         // 1. HANDLERS FOR LOGIC NODES (No Message Sent)
         if (data.type === 'status_update' && data.targetStatus) {
             await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [data.targetStatus, candidate.id]);
-            // Auto-advance
             const nextEdge = edges.find(e => e.source === node.id);
             activeNodeId = nextEdge ? nextEdge.target : null;
             continue;
@@ -287,12 +308,11 @@ const runBotEngine = async (client, candidate, incomingText) => {
                 else if (val !== undefined) {
                     if (op === 'equals') isMatch = val == target;
                     else if (op === 'contains') isMatch = String(val).toLowerCase().includes(String(target).toLowerCase());
-                    // Add more operators as needed
                 }
             }
             
             const handleId = isMatch ? 'true' : 'false';
-            const nextEdge = edges.find(e => e.source === node.id && e.sourceHandle === handleId) || edges.find(e => e.source === node.id); // Fallback to any edge
+            const nextEdge = edges.find(e => e.source === node.id && e.sourceHandle === handleId) || edges.find(e => e.source === node.id);
             
             activeNodeId = nextEdge ? nextEdge.target : null;
             continue;
