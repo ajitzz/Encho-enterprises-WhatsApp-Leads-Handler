@@ -120,6 +120,23 @@ const sendToMeta = async (phoneNumber, payload) => {
     }
 };
 
+// Interpolate variables like {{name}} in text
+const processText = (text, candidate) => {
+    if (!text) return '';
+    let processed = text;
+    const vars = { 
+        name: candidate.name, 
+        phone: candidate.phone_number, 
+        ...candidate.variables 
+    };
+    
+    for (const [key, val] of Object.entries(vars)) {
+        const regex = new RegExp(`{{${key}}}`, 'gi');
+        processed = processed.replace(regex, val || '');
+    }
+    return processed;
+};
+
 // --- BOT ENGINE (FIXED & ROBUST) ---
 const runBotEngine = async (client, candidate, incomingText) => {
     console.log(`[Bot Engine] START for ${candidate.phone_number} | Step: ${candidate.current_bot_step_id || 'START'}`);
@@ -149,6 +166,7 @@ const runBotEngine = async (client, candidate, incomingText) => {
 
     let currentNodeId = candidate.current_bot_step_id;
     let nextNodeId = null;
+    let shouldReprompt = false;
 
     // --- STEP A: DETERMINE NEXT NODE ---
     if (!currentNodeId) {
@@ -167,14 +185,24 @@ const runBotEngine = async (client, candidate, incomingText) => {
         if (currentNode) {
             console.log(`[Bot Engine] Evaluating response to Node ${currentNodeId} (${currentNode.data.type})`);
             
-            // Logic for Buttons/Lists: Check if input matches a specific handle
+            // 1. Capture Input (if applicable)
+            if (currentNode.data.type === 'input' && currentNode.data.variable) {
+                const varName = currentNode.data.variable;
+                // Update variable in DB
+                const newVars = { ...candidate.variables, [varName]: incomingText };
+                await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
+                candidate.variables = newVars; // Update local obj for interpolation later
+                console.log(`[Bot Engine] Captured variable ${varName} = ${incomingText}`);
+            }
+
+            // 2. Find Next Edge
             let matchedEdge = null;
             const data = currentNode.data || {};
+            const normText = (incomingText || '').trim().toLowerCase();
             
             if (['interactive_button', 'interactive_list'].includes(data.type)) {
                 // Find all edges leaving this node
                 const outgoingEdges = edges.filter(e => e.source === currentNodeId);
-                const normText = (incomingText || '').trim().toLowerCase();
 
                 // Check Buttons
                 if (data.buttons) {
@@ -200,10 +228,16 @@ const runBotEngine = async (client, candidate, incomingText) => {
                 console.log(`[Bot Engine] Following edge to ${matchedEdge.target}`);
                 nextNodeId = matchedEdge.target;
             } else {
-                console.log(`[Bot Engine] No matching edge found from ${currentNodeId}. Stopping.`);
+                console.log(`[Bot Engine] No matching edge found from ${currentNodeId}.`);
+                // RE-PROMPT LOGIC: If we are at an interactive node and user typed something invalid, re-send the node.
+                if (['interactive_button', 'interactive_list'].includes(data.type)) {
+                    console.log("[Bot Engine] Invalid input for interactive node. Re-prompting.");
+                    shouldReprompt = true;
+                    nextNodeId = currentNodeId; // Stay on current node
+                }
             }
         } else {
-            // Current node ID exists in DB but not in Flow (maybe flow changed). Restart?
+            // Current node ID exists in DB but not in Flow (maybe flow changed). Restart.
             console.warn(`[Bot Engine] Current node ${currentNodeId} not found in flow. Resetting to Start.`);
             const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
             if (startNode) nextNodeId = startNode.id;
@@ -213,6 +247,9 @@ const runBotEngine = async (client, candidate, incomingText) => {
     // --- STEP B: EXECUTE NODES (CHAINED) ---
     let activeNodeId = nextNodeId;
     let loopLimit = 10; 
+
+    // If we are re-prompting, we just run the active node once and stop.
+    // If it's a normal chain, we loop until we hit an input/wait state.
 
     while (activeNodeId && loopLimit > 0) {
         loopLimit--;
@@ -233,38 +270,54 @@ const runBotEngine = async (client, candidate, incomingText) => {
 
         if (data.type === 'handoff') {
             await client.query("UPDATE candidates SET is_human_mode = TRUE WHERE id = $1", [candidate.id]);
-            if (data.content) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: data.content } });
+            const msg = processText(data.content, candidate);
+            if (msg) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } });
             break; // Stop execution
         }
 
         if (data.type === 'condition') {
-            // Simple logic evaluation could go here. For now, we take 'false' path default or random.
-            // Future improvement: Evaluate candidate.variables against data.variable/operator/value
-            const nextEdge = edges.find(e => e.source === node.id && e.sourceHandle === 'false') || edges.find(e => e.source === node.id);
+            // Logic evaluation
+            let isMatch = false;
+            if (data.variable) {
+                const val = candidate.variables[data.variable];
+                const target = data.value;
+                const op = data.operator || 'equals';
+                
+                if (op === 'is_set') isMatch = !!val;
+                else if (val !== undefined) {
+                    if (op === 'equals') isMatch = val == target;
+                    else if (op === 'contains') isMatch = String(val).toLowerCase().includes(String(target).toLowerCase());
+                    // Add more operators as needed
+                }
+            }
+            
+            const handleId = isMatch ? 'true' : 'false';
+            const nextEdge = edges.find(e => e.source === node.id && e.sourceHandle === handleId) || edges.find(e => e.source === node.id); // Fallback to any edge
+            
             activeNodeId = nextEdge ? nextEdge.target : null;
             continue;
         }
 
         // 2. SEND MESSAGES
         let sentType = 'text';
-        let sentBody = data.content || '';
+        let sentBody = processText(data.content || '', candidate);
 
-        // Skip "Start" node content
+        // Skip "Start" node content unless configured otherwise
         if (data.type !== 'start') {
             if (['text', 'input'].includes(data.type)) {
-                if (data.content) {
-                    await sendToMeta(candidate.phone_number, { type: 'text', text: { body: data.content } });
+                if (sentBody) {
+                    await sendToMeta(candidate.phone_number, { type: 'text', text: { body: sentBody } });
                 }
             } else if (data.type === 'image' && data.mediaUrl) {
                 const url = await refreshMediaUrl(data.mediaUrl);
-                await sendToMeta(candidate.phone_number, { type: 'image', image: { link: url, caption: data.content || '' } });
+                await sendToMeta(candidate.phone_number, { type: 'image', image: { link: url, caption: sentBody } });
                 sentType = 'image';
             } else if (data.type === 'interactive_button' && data.buttons?.length > 0) {
                  const payload = {
                     type: "interactive",
                     interactive: {
                         type: "button",
-                        body: { text: data.content || "Please select an option" },
+                        body: { text: sentBody || "Please select an option" },
                         action: {
                             buttons: data.buttons.slice(0, 3).map(b => ({
                                 type: "reply",
@@ -275,13 +328,13 @@ const runBotEngine = async (client, candidate, incomingText) => {
                 };
                 await sendToMeta(candidate.phone_number, payload);
                 sentType = 'interactive';
-                sentBody = `[Buttons] ${data.content}`;
+                sentBody = `[Buttons] ${sentBody}`;
             } else if (data.type === 'interactive_list' && data.sections?.length > 0) {
                  const payload = {
                     type: "interactive",
                     interactive: {
                         type: "list",
-                        body: { text: data.content || "Select an option" },
+                        body: { text: sentBody || "Select an option" },
                         action: {
                             button: data.listButtonText || "Menu",
                             sections: data.sections
@@ -290,7 +343,7 @@ const runBotEngine = async (client, candidate, incomingText) => {
                 };
                 await sendToMeta(candidate.phone_number, payload);
                 sentType = 'interactive';
-                sentBody = `[List] ${data.content}`;
+                sentBody = `[List] ${sentBody}`;
             }
             
             // Log message
@@ -303,7 +356,6 @@ const runBotEngine = async (client, candidate, incomingText) => {
         }
 
         // 3. UPDATE STATE
-        // We set the current step to the node we just executed.
         await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
 
         // 4. DECIDE: Stop or Continue?
@@ -312,7 +364,7 @@ const runBotEngine = async (client, candidate, incomingText) => {
             break; 
         }
 
-        // Auto-advance for non-blocking nodes (Text, Image, Start)
+        // Auto-advance for non-blocking nodes
         const nextEdge = edges.find(e => e.source === node.id);
         if (nextEdge) {
             activeNodeId = nextEdge.target;
@@ -628,7 +680,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                     
                     // Archive to history
                     await client.query(
-                        `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, 
+                        `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
                         [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]
                     );
 
@@ -688,7 +740,7 @@ apiRouter.post('/webhook', async (req, res) => {
                     [id, from, name, text, Date.now()]
                 );
                 // Fetch the newly created candidate with proper ID
-                candidate = { id, phone_number: from, is_human_mode: false, current_bot_step_id: null };
+                candidate = { id, phone_number: from, is_human_mode: false, current_bot_step_id: null, variables: {} };
             } else {
                 candidate = c.rows[0];
                 await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
