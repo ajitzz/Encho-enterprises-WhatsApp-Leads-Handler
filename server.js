@@ -172,6 +172,30 @@ const isValidContent = (text) => {
     return true;
 };
 
+// --- DEFAULT BOT CONFIG ---
+const getDefaultBotConfig = () => ({
+    isEnabled: true,
+    shouldRepeat: false,
+    routingStrategy: 'BOT_ONLY',
+    nodes: [
+        { 
+            id: 'start', 
+            type: 'custom', 
+            position: { x: 50, y: 50 }, 
+            data: { id: 'start', type: 'start', label: 'Start Flow' } 
+        },
+        { 
+            id: 'welcome_msg', 
+            type: 'custom', 
+            position: { x: 50, y: 200 }, 
+            data: { id: 'welcome_msg', type: 'text', label: 'Welcome Message', content: 'Welcome to Encho Cabs! 👋\n\nHow can we help you today?' } 
+        }
+    ],
+    edges: [
+        { id: 'e1', source: 'start', target: 'welcome_msg', type: 'smoothstep' }
+    ]
+});
+
 // --- DB RECOVERY & INIT ---
 const initDatabase = async (client) => {
     // 1. Extensions
@@ -189,20 +213,11 @@ const initDatabase = async (client) => {
     // 3. Seed Config
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
 
-    // 4. Seed Default Bot (Critical for immediate function)
+    // 4. Seed Default Bot
     const botCheck = await client.query("SELECT id FROM bot_versions WHERE status = 'published' LIMIT 1");
     if (botCheck.rows.length === 0) {
-        const defaultBot = {
-            isEnabled: true,
-            shouldRepeat: false,
-            routingStrategy: 'BOT_ONLY',
-            nodes: [
-                { id: 'start', type: 'custom', position: { x: 100, y: 100 }, data: { id: 'start', type: 'start', label: 'Start Flow', content: 'Welcome to Encho Cabs! 👋\n\nHow can we help you today?' } }
-            ],
-            edges: []
-        };
         // Use crypto.randomUUID() for safety
-        await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), defaultBot]);
+        await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), getDefaultBotConfig()]);
     }
 };
 
@@ -222,15 +237,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             botSettings = botRes.rows[0].settings;
         } else {
             console.log("[Bot Engine] No published bot found. Auto-seeding default flow...");
-            const defaultBot = {
-                isEnabled: true,
-                shouldRepeat: false,
-                routingStrategy: 'BOT_ONLY',
-                nodes: [
-                    { id: 'start', type: 'custom', position: { x: 100, y: 100 }, data: { id: 'start', type: 'start', label: 'Start Flow', content: 'Welcome to Encho Cabs! 👋\n\nHow can we assist you today?' } }
-                ],
-                edges: []
-            };
+            const defaultBot = getDefaultBotConfig();
             
             // Persist the default bot
             try {
@@ -372,11 +379,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
                 if (data.type === 'text') {
                     if (validBody) payload = { type: 'text', text: { body: validBody } };
-                    else {
-                        const nextEdge = edges.find(e => e.source === node.id);
-                        if (nextEdge) { activeNodeId = nextEdge.target; continue; } 
-                        else break; 
-                    }
+                    // If no body, we might skip to next node, logic below handles continue
                 } else if (data.type === 'input') {
                     payload = { type: 'text', text: { body: validBody || "Please enter your response below:" } };
                 } else if (data.type === 'image' && data.mediaUrl) {
@@ -420,6 +423,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     } catch (apiError) {
                         console.error("Meta Send Error:", apiError);
                     }
+                } else {
+                    // If no payload was generated (e.g. empty text), we still advance
                 }
             }
 
@@ -430,6 +435,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             const nextEdge = edges.find(e => e.source === node.id);
             if (nextEdge) {
                 activeNodeId = nextEdge.target;
+                // Add delay for UX
                 await new Promise(r => setTimeout(r, 500));
             } else {
                 activeNodeId = null;
@@ -766,7 +772,27 @@ app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
 if (require.main === module) {
     const PORT = process.env.PORT || 3001;
-    app.listen(PORT, () => console.log(`Server running on ${PORT}`));
+    app.listen(PORT, () => {
+        console.log(`Server running on ${PORT}`);
+        // Auto-Init Check on Start
+        (async () => {
+            try {
+                if (pgPool) {
+                    const client = await pgPool.connect();
+                    try {
+                        const res = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'candidates'`);
+                        if (res.rows.length === 0) {
+                            console.log("[Auto-Init] Database schema missing. Initializing...");
+                            await initDatabase(client);
+                            console.log("[Auto-Init] Database ready.");
+                        }
+                    } finally {
+                        client.release();
+                    }
+                }
+            } catch(e) { console.error("[Auto-Init] Failed:", e.message); }
+        })();
+    });
 }
 
 module.exports = app;
