@@ -201,7 +201,8 @@ const initDatabase = async (client) => {
             ],
             edges: []
         };
-        await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES (gen_random_uuid(), 'published', $1, NOW())", [defaultBot]);
+        // Use crypto.randomUUID() for safety
+        await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), defaultBot]);
     }
 };
 
@@ -213,10 +214,13 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         const config = sys.rows[0]?.value || { automation_enabled: true }; 
         if (config.automation_enabled === false || candidate.is_human_mode) return;
 
+        let botSettings;
         let botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
         
-        // SELF-HEALING: If no bot found, create one on the fly
-        if (botRes.rows.length === 0) {
+        // SELF-HEALING: If no bot found, create one AND use it immediately
+        if (botRes.rows.length > 0) {
+            botSettings = botRes.rows[0].settings;
+        } else {
             console.log("[Bot Engine] No published bot found. Auto-seeding default flow...");
             const defaultBot = {
                 isEnabled: true,
@@ -227,17 +231,19 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 ],
                 edges: []
             };
-            await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), defaultBot]);
-            // Retry fetch
-            botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
+            
+            // Persist the default bot
+            try {
+                await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), defaultBot]);
+            } catch (seedErr) {
+                console.error("Failed to seed bot version DB:", seedErr);
+            }
+            
+            // Use in-memory default bot to ensure we respond regardless of DB success
+            botSettings = defaultBot;
         }
         
-        if (botRes.rows.length === 0) {
-            console.error("Bot Engine Critical Failure: Could not seed default bot.");
-            return;
-        }
-        
-        const { nodes, edges } = botRes.rows[0].settings;
+        const { nodes, edges } = botSettings;
         if (!nodes || nodes.length === 0) return;
 
         let currentNodeId = candidate.current_bot_step_id;
