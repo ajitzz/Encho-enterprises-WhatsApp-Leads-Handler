@@ -103,7 +103,7 @@ const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
     
-    // Strict Payload Validation to prevent 400 Bad Request
+    // Strict Payload Validation
     if (payload.type === 'text') {
         if (!payload.text?.body || !payload.text.body.trim()) {
             console.warn("[Meta] Blocked empty text message");
@@ -127,6 +127,7 @@ const sendToMeta = async (phoneNumber, payload) => {
     } catch (e) {
         const errMsg = e.response?.data?.error?.message || e.message;
         console.error(`[Meta Failed] ${to}: ${errMsg}`);
+        throw new Error(`Meta API Error: ${errMsg}`); // Re-throw to be caught by bot engine
     }
 };
 
@@ -160,281 +161,279 @@ const isValidContent = (text) => {
         'sample text',
         'your message here'
     ];
-    // If text contains a blocker and is reasonably short (likely unmodified default)
     if (clean.length < 50 && blockers.some(b => clean.includes(b))) return false;
     return true;
 };
 
-// --- BOT ENGINE (SELF-HEALING & ROBUST) ---
+// --- BOT ENGINE (SELF-HEALING & DIAGNOSTIC) ---
 const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
     console.log(`[Bot Engine] START for ${candidate.phone_number} | Step: ${candidate.current_bot_step_id || 'START'}`);
 
-    // 1. Check Config
-    const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
-    const config = sys.rows[0]?.value || {};
-    
-    if (config.automation_enabled === false) {
-        console.log("[Bot Engine] Automation disabled.");
-        return;
-    }
-
-    if (candidate.is_human_mode) {
-        console.log("[Bot Engine] Human mode active.");
-        return;
-    }
-
-    // 2. Load Bot
-    const botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
-    if (botRes.rows.length === 0) {
-        console.log("[Bot Engine] No published bot.");
-        return;
-    }
-    
-    const { nodes, edges } = botRes.rows[0].settings;
-    if (!nodes || nodes.length === 0) return;
-
-    let currentNodeId = candidate.current_bot_step_id;
-    let nextNodeId = null;
-
-    // --- RESET TRIGGERS ---
-    const cleanInput = (incomingText || '').trim().toLowerCase();
-    if (['start', 'restart', 'hi', 'hello', 'menu'].includes(cleanInput)) {
-        console.log("[Bot Engine] Reset triggered.");
-        currentNodeId = null;
-        await client.query("UPDATE candidates SET current_bot_step_id = NULL WHERE id = $1", [candidate.id]);
-    }
-
-    // --- STEP A: DETERMINE NEXT NODE ---
-    if (!currentNodeId) {
-        // Find Start Node
-        const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
-        nextNodeId = startNode ? startNode.id : nodes[0]?.id;
-    } else {
-        // Process Transition from Current Node
-        const currentNode = nodes.find(n => n.id === currentNodeId);
+    try {
+        // 1. Check Config
+        const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
+        const config = sys.rows[0]?.value || {};
         
-        if (currentNode) {
-            // A1. Capture Input if needed
-            if (currentNode.data.type === 'input' && currentNode.data.variable) {
-                const varName = currentNode.data.variable;
-                const newVars = { ...candidate.variables, [varName]: incomingText };
-                await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
-                candidate.variables = newVars; 
-            }
+        if (config.automation_enabled === false) {
+            console.log("[Bot Engine] Automation disabled.");
+            return;
+        }
 
-            // A2. FIND MATCHING EDGE
-            const outgoingEdges = edges.filter(e => e.source === currentNodeId);
-            let matchedEdge = null;
+        if (candidate.is_human_mode) {
+            console.log("[Bot Engine] Human mode active.");
+            return;
+        }
 
-            // Strategy 1: Payload ID Match (High Priority for Buttons/Lists)
-            if (incomingPayloadId) {
-                // Check Button IDs
-                if (currentNode.data.buttons) {
-                    const btn = currentNode.data.buttons.find(b => b.id === incomingPayloadId);
-                    if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
-                }
-                // Check List Row IDs
-                if (!matchedEdge && currentNode.data.sections) {
-                    const row = currentNode.data.sections.flatMap(s => s.rows).find(r => r.id === incomingPayloadId);
-                    if (row) matchedEdge = outgoingEdges.find(e => e.sourceHandle === row.id);
-                }
-            }
+        // 2. Load Bot
+        const botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
+        
+        // DIAGNOSTIC: No Bot Found
+        if (botRes.rows.length === 0) {
+            await client.query(
+                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'system_error', 'failed', NOW())`,
+                [crypto.randomUUID(), candidate.id, "CRITICAL: No 'Published' bot flow found. Please go to Bot Studio and click 'Publish'."]
+            );
+            return;
+        }
+        
+        const { nodes, edges } = botRes.rows[0].settings;
+        if (!nodes || nodes.length === 0) return;
 
-            // Strategy 2: Text Fuzzy Match (Fallback if ID failed or user typed manually)
-            if (!matchedEdge && cleanInput) {
-                if (currentNode.data.buttons) {
-                    const btn = currentNode.data.buttons.find(b => b.title.toLowerCase().trim() === cleanInput);
-                    if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
-                }
-                if (!matchedEdge && currentNode.data.sections) {
-                    const row = currentNode.data.sections.flatMap(s => s.rows).find(r => r.title.toLowerCase().trim() === cleanInput);
-                    if (row) matchedEdge = outgoingEdges.find(e => e.sourceHandle === row.id);
-                }
-            }
+        let currentNodeId = candidate.current_bot_step_id;
+        let nextNodeId = null;
 
-            // Strategy 3: Default Edge (Text nodes, Input nodes, or Unmatched conditions)
-            if (!matchedEdge) {
-                // Use the edge with no sourceHandle (default connection) OR handle='default' OR handle='true' (for linear flow)
-                matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
-            }
+        // --- RESET TRIGGERS ---
+        const cleanInput = (incomingText || '').trim().toLowerCase();
+        if (['start', 'restart', 'hi', 'hello', 'menu'].includes(cleanInput)) {
+            console.log("[Bot Engine] Reset triggered.");
+            currentNodeId = null;
+            await client.query("UPDATE candidates SET current_bot_step_id = NULL WHERE id = $1", [candidate.id]);
+        }
 
-            if (matchedEdge) {
-                nextNodeId = matchedEdge.target;
-            } else {
-                // DEAD END LOGIC
-                if (outgoingEdges.length === 0) {
-                    console.log("[Bot Engine] Dead end reached. Restarting.");
-                    const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
-                    nextNodeId = startNode ? startNode.id : null;
-                } else {
-                    // Invalid Input (Loop on same node)
-                    console.log("[Bot Engine] Invalid input or no match. Re-executing current node (Prompting again).");
-                    nextNodeId = currentNodeId;
-                }
-            }
-        } else {
-            // State mismatch (node deleted), restart
+        // --- STEP A: DETERMINE NEXT NODE ---
+        if (!currentNodeId) {
             const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
-            nextNodeId = startNode ? startNode.id : null;
-        }
-    }
-
-    // --- STEP B: EXECUTE FLOW (CHAINING) ---
-    let activeNodeId = nextNodeId;
-    let opsCount = 0;
-    const MAX_OPS = 15; // Prevent infinite loops
-
-    while (activeNodeId && opsCount < MAX_OPS) {
-        opsCount++;
-        const node = nodes.find(n => n.id === activeNodeId);
-        if (!node) break;
-
-        const data = node.data || {};
-        console.log(`[Bot Engine] Processing Node ${node.id} (${data.type})`);
-
-        // -- 1. LOGIC NODES (No Output) --
-        if (data.type === 'status_update') {
-            if (data.targetStatus) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [data.targetStatus, candidate.id]);
-            const nextEdge = edges.find(e => e.source === node.id);
-            activeNodeId = nextEdge ? nextEdge.target : null;
-            continue;
-        }
-
-        if (data.type === 'condition') {
-            let isMatch = false;
-            if (data.variable) {
-                const val = candidate.variables[data.variable];
-                const target = data.value;
-                const op = data.operator || 'equals';
-                if (val !== undefined) {
-                    if (op === 'equals') isMatch = val == target;
-                    else if (op === 'contains') isMatch = String(val).toLowerCase().includes(String(target).toLowerCase());
-                    else if (op === 'is_set') isMatch = !!val;
-                }
-            }
-            const handle = isMatch ? 'true' : 'false';
-            const nextEdge = edges.find(e => e.source === node.id && (e.sourceHandle === handle || !e.sourceHandle));
-            activeNodeId = nextEdge ? nextEdge.target : null;
-            continue;
-        }
-
-        if (data.type === 'handoff') {
-            await client.query("UPDATE candidates SET is_human_mode = TRUE WHERE id = $1", [candidate.id]);
-            const msg = processText(data.content, candidate);
-            if (isValidContent(msg)) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } });
-            break;
-        }
-
-        // -- 2. MESSAGE NODES --
-        // Don't send Start node message unless explicitly needed (usually Start is just a trigger)
-        if (data.type !== 'start') {
-            let rawBody = processText(data.content || '', candidate);
-            let validBody = isValidContent(rawBody) ? rawBody : null;
-            
-            let payload = null;
-            let messageSent = false;
-
-            // TYPE A: Text / Input
-            if (['text', 'input'].includes(data.type)) {
-                if (validBody) {
-                    payload = { type: 'text', text: { body: validBody } };
-                } else if (data.type === 'input') {
-                    // CRITICAL FIX: If Input node has invalid text (e.g. placeholder), FORCE a default prompt.
-                    // We cannot skip Input nodes or the bot stops collecting data.
-                    payload = { type: 'text', text: { body: "Please enter your response below:" } };
-                    validBody = payload.text.body; 
-                }
-                // Note: If 'text' node is invalid/empty, payload remains null, and we handle skipping below.
-            } 
-            
-            // TYPE B: Media
-            else if (data.type === 'image' && data.mediaUrl) {
-                const url = await refreshMediaUrl(data.mediaUrl);
-                payload = { type: 'image', image: { link: url, caption: validBody || '' } };
-            }
-
-            // TYPE C: Buttons
-            else if (data.type === 'interactive_button' && data.buttons?.length > 0) {
-                // Fallback for button body
-                const bodyText = validBody || "Please select an option:";
-                payload = {
-                    type: "interactive",
-                    interactive: {
-                        type: "button",
-                        body: { text: bodyText },
-                        action: {
-                            buttons: data.buttons.slice(0, 3).map(b => ({
-                                type: "reply",
-                                reply: { id: b.id, title: b.title.substring(0, 20) } 
-                            }))
-                        }
-                    }
-                };
-            }
-
-            // TYPE D: Lists
-            else if (data.type === 'interactive_list' && data.sections?.length > 0) {
-                // Fallback for list body
-                const bodyText = validBody || "Please make a selection:";
-                payload = {
-                    type: "interactive",
-                    interactive: {
-                        type: "list",
-                        body: { text: bodyText },
-                        action: {
-                            button: data.listButtonText || "Menu",
-                            sections: data.sections
-                        }
-                    }
-                };
-            }
-
-            // EXECUTE SEND
-            if (payload) {
-                await sendToMeta(candidate.phone_number, payload);
-                messageSent = true;
-                
-                // Log it
-                await client.query(
-                    `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
-                    [crypto.randomUUID(), candidate.id, payload.text?.body || payload.interactive?.body?.text || '[Media]', data.type]
-                );
-            }
-
-            // SELF-HEALING: If Text Node was skipped (invalid content), immediately jump to next node.
-            // Do not break loop. Do not update state yet (effectively merging this node with the next).
-            if (!messageSent && data.type === 'text') {
-                console.log(`[Bot Engine] Skipping empty Text Node ${node.id}`);
-                const nextEdge = edges.find(e => e.source === node.id);
-                if (nextEdge) {
-                    activeNodeId = nextEdge.target;
-                    continue; // Loop again immediately
-                } else {
-                    break; // End of flow
-                }
-            }
-        }
-
-        // 3. SAVE STATE
-        await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
-
-        // 4. STOP OR CONTINUE?
-        // If it's an Input/Interactive node, we MUST stop and wait for user reply.
-        // We only stop if we actually sent a message (or forced a fallback).
-        if (['input', 'interactive_button', 'interactive_list'].includes(data.type)) {
-            console.log(`[Bot Engine] Pausing at Node ${node.id} for input.`);
-            break; 
-        }
-
-        // Auto-advance for simple nodes (Start, Text, Image)
-        const nextEdge = edges.find(e => e.source === node.id);
-        if (nextEdge) {
-            activeNodeId = nextEdge.target;
-            // Add a small natural delay if we actually sent something
-            await new Promise(r => setTimeout(r, 800));
+            nextNodeId = startNode ? startNode.id : nodes[0]?.id;
         } else {
-            activeNodeId = null;
+            const currentNode = nodes.find(n => n.id === currentNodeId);
+            
+            if (currentNode) {
+                // A1. Capture Input
+                if (currentNode.data.type === 'input' && currentNode.data.variable) {
+                    const varName = currentNode.data.variable;
+                    const newVars = { ...candidate.variables, [varName]: incomingText };
+                    await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
+                    candidate.variables = newVars; 
+                }
+
+                // A2. FIND MATCHING EDGE
+                const outgoingEdges = edges.filter(e => e.source === currentNodeId);
+                let matchedEdge = null;
+
+                // Strategy 1: Payload ID Match
+                if (incomingPayloadId) {
+                    if (currentNode.data.buttons) {
+                        const btn = currentNode.data.buttons.find(b => b.id === incomingPayloadId);
+                        if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
+                    }
+                    if (!matchedEdge && currentNode.data.sections) {
+                        const row = currentNode.data.sections.flatMap(s => s.rows).find(r => r.id === incomingPayloadId);
+                        if (row) matchedEdge = outgoingEdges.find(e => e.sourceHandle === row.id);
+                    }
+                }
+
+                // Strategy 2: Text Fuzzy Match
+                if (!matchedEdge && cleanInput) {
+                    if (currentNode.data.buttons) {
+                        const btn = currentNode.data.buttons.find(b => b.title.toLowerCase().trim() === cleanInput);
+                        if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
+                    }
+                    if (!matchedEdge && currentNode.data.sections) {
+                        const row = currentNode.data.sections.flatMap(s => s.rows).find(r => r.title.toLowerCase().trim() === cleanInput);
+                        if (row) matchedEdge = outgoingEdges.find(e => e.sourceHandle === row.id);
+                    }
+                }
+
+                // Strategy 3: Default Edge
+                if (!matchedEdge) {
+                    matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
+                }
+
+                if (matchedEdge) {
+                    nextNodeId = matchedEdge.target;
+                } else {
+                    if (outgoingEdges.length === 0) {
+                        // Dead end reached - restart
+                        const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
+                        nextNodeId = startNode ? startNode.id : null;
+                    } else {
+                        // Invalid Input - loop current node
+                        nextNodeId = currentNodeId;
+                    }
+                }
+            } else {
+                // State mismatch
+                const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
+                nextNodeId = startNode ? startNode.id : null;
+            }
         }
+
+        // --- STEP B: EXECUTE FLOW (CHAINING) ---
+        let activeNodeId = nextNodeId;
+        let opsCount = 0;
+        const MAX_OPS = 15;
+
+        while (activeNodeId && opsCount < MAX_OPS) {
+            opsCount++;
+            const node = nodes.find(n => n.id === activeNodeId);
+            if (!node) break;
+
+            const data = node.data || {};
+            console.log(`[Bot Engine] Processing Node ${node.id} (${data.type})`);
+
+            // -- 1. LOGIC NODES (No Output) --
+            if (data.type === 'status_update') {
+                if (data.targetStatus) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [data.targetStatus, candidate.id]);
+                const nextEdge = edges.find(e => e.source === node.id);
+                activeNodeId = nextEdge ? nextEdge.target : null;
+                continue;
+            }
+
+            if (data.type === 'condition') {
+                let isMatch = false;
+                if (data.variable) {
+                    const val = candidate.variables[data.variable];
+                    const target = data.value;
+                    const op = data.operator || 'equals';
+                    if (val !== undefined) {
+                        if (op === 'equals') isMatch = val == target;
+                        else if (op === 'contains') isMatch = String(val).toLowerCase().includes(String(target).toLowerCase());
+                        else if (op === 'is_set') isMatch = !!val;
+                    }
+                }
+                const handle = isMatch ? 'true' : 'false';
+                const nextEdge = edges.find(e => e.source === node.id && (e.sourceHandle === handle || !e.sourceHandle));
+                activeNodeId = nextEdge ? nextEdge.target : null;
+                continue;
+            }
+
+            if (data.type === 'handoff') {
+                await client.query("UPDATE candidates SET is_human_mode = TRUE WHERE id = $1", [candidate.id]);
+                const msg = processText(data.content, candidate);
+                if (isValidContent(msg)) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } });
+                break;
+            }
+
+            // -- 2. MESSAGE NODES --
+            if (data.type !== 'start') {
+                let rawBody = processText(data.content || '', candidate);
+                let validBody = isValidContent(rawBody) ? rawBody : null;
+                
+                let payload = null;
+                let messageSent = false;
+
+                // TYPE A: Text / Input
+                if (['text', 'input'].includes(data.type)) {
+                    if (validBody) {
+                        payload = { type: 'text', text: { body: validBody } };
+                    } else if (data.type === 'input') {
+                        payload = { type: 'text', text: { body: "Please enter your response below:" } };
+                        validBody = payload.text.body; 
+                    }
+                } 
+                
+                // TYPE B: Media
+                else if (data.type === 'image' && data.mediaUrl) {
+                    const url = await refreshMediaUrl(data.mediaUrl);
+                    payload = { type: 'image', image: { link: url, caption: validBody || '' } };
+                }
+
+                // TYPE C: Buttons
+                else if (data.type === 'interactive_button' && data.buttons?.length > 0) {
+                    const bodyText = validBody || "Please select an option:";
+                    payload = {
+                        type: "interactive",
+                        interactive: {
+                            type: "button",
+                            body: { text: bodyText },
+                            action: {
+                                buttons: data.buttons.slice(0, 3).map(b => ({
+                                    type: "reply",
+                                    reply: { id: b.id, title: b.title.substring(0, 20) } 
+                                }))
+                            }
+                        }
+                    };
+                }
+
+                // TYPE D: Lists
+                else if (data.type === 'interactive_list' && data.sections?.length > 0) {
+                    const bodyText = validBody || "Please make a selection:";
+                    payload = {
+                        type: "interactive",
+                        interactive: {
+                            type: "list",
+                            body: { text: bodyText },
+                            action: {
+                                button: data.listButtonText || "Menu",
+                                sections: data.sections
+                            }
+                        }
+                    };
+                }
+
+                // EXECUTE SEND
+                if (payload) {
+                    try {
+                        await sendToMeta(candidate.phone_number, payload);
+                        messageSent = true;
+                        
+                        await client.query(
+                            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
+                            [crypto.randomUUID(), candidate.id, payload.text?.body || payload.interactive?.body?.text || '[Media]', data.type]
+                        );
+                    } catch (apiError) {
+                        // DIAGNOSTIC: Log API failures to Chat
+                        console.error("Meta Send Error:", apiError);
+                        await client.query(
+                            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'system_error', 'failed', NOW())`,
+                            [crypto.randomUUID(), candidate.id, `Meta API Error: ${apiError.message}. Check Dashboard credentials.`]
+                        );
+                    }
+                }
+
+                // SELF-HEALING: Skip invalid text nodes
+                if (!messageSent && data.type === 'text') {
+                    console.log(`[Bot Engine] Skipping empty Text Node ${node.id}`);
+                    const nextEdge = edges.find(e => e.source === node.id);
+                    if (nextEdge) {
+                        activeNodeId = nextEdge.target;
+                        continue; 
+                    } else {
+                        break; 
+                    }
+                }
+            }
+
+            // 3. SAVE STATE
+            await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
+
+            // 4. STOP OR CONTINUE?
+            if (['input', 'interactive_button', 'interactive_list'].includes(data.type)) {
+                console.log(`[Bot Engine] Pausing at Node ${node.id} for input.`);
+                break; 
+            }
+
+            const nextEdge = edges.find(e => e.source === node.id);
+            if (nextEdge) {
+                activeNodeId = nextEdge.target;
+                await new Promise(r => setTimeout(r, 800));
+            } else {
+                activeNodeId = null;
+            }
+        }
+    } catch (fatalError) {
+        console.error("Bot Engine Fatal Crash:", fatalError);
     }
 };
 
@@ -453,7 +452,7 @@ const apiRouter = express.Router();
 // HEALTH
 apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
-// WEBHOOK
+// WEBHOOK GET
 apiRouter.get('/webhook', (req, res) => {
     if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
         res.status(200).send(req.query['hub.challenge']);
@@ -462,22 +461,27 @@ apiRouter.get('/webhook', (req, res) => {
     }
 });
 
+// WEBHOOK POST (Optimized for Vercel)
 apiRouter.post('/webhook', async (req, res) => {
-    res.sendStatus(200);
     const body = req.body;
-    if (!body.object) return;
+    if (!body.object) {
+        res.sendStatus(404);
+        return;
+    }
     
     try {
         const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-        if (!msg) return;
+        
+        // If not a message (e.g., status update), just ack and return
+        if (!msg) {
+            res.sendStatus(200);
+            return;
+        }
 
         await withDb(async (client) => {
-            // Deduplication Check
+            // Deduplication
             const existing = await client.query("SELECT id FROM candidate_messages WHERE whatsapp_message_id = $1", [msg.id]);
-            if (existing.rows.length > 0) {
-                console.log(`[Webhook] Duplicate ${msg.id} ignored.`);
-                return;
-            }
+            if (existing.rows.length > 0) return;
 
             // Extract Info
             const from = msg.from;
@@ -515,16 +519,23 @@ apiRouter.post('/webhook', async (req, res) => {
                 await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
             }
 
-            // Log Message
+            // Log User Message
             await client.query(
                 `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, 'text', $4, 'received', NOW())`, 
                 [crypto.randomUUID(), candidate.id, text, msg.id]
             );
 
-            // Run Engine
+            // Execute Bot (Wait for completion)
             await runBotEngine(client, candidate, text, payloadId);
         });
-    } catch(e) { console.error("Webhook Error", e); }
+
+        // Send 200 OK only AFTER processing to prevent Vercel execution freeze
+        res.sendStatus(200);
+
+    } catch(e) { 
+        console.error("Webhook Error", e); 
+        res.sendStatus(500);
+    }
 });
 
 // --- STANDARD API ROUTES ---
@@ -737,13 +748,11 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                     let dbType = 'text';
 
                     if (p.mediaUrl) {
-                        // 1. REFRESH URL: S3 Signed URLs expire. Cron must regenerate a fresh one.
                         const url = await refreshMediaUrl(p.mediaUrl);
                         const mediaType = p.mediaType || 'image';
                         dbType = mediaType;
                         dbLogText = JSON.stringify({ url: p.mediaUrl, caption: p.text || '' });
                         
-                        // 2. CONSTRUCT PAYLOAD: Correctly structure for Meta API
                         metaP = { 
                             type: mediaType, 
                             [mediaType]: { 
@@ -752,23 +761,19 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                             } 
                         };
 
-                        // 3. DOCUMENT FIX: Documents MUST have a filename for Meta to accept them
                         if (mediaType === 'document') {
                             const urlObj = new URL(url);
-                            // Extract filename from path, default to 'document.pdf'
                             const filename = decodeURIComponent(urlObj.pathname.split('/').pop() || 'document.pdf');
                             metaP[mediaType].filename = filename;
                         }
 
                     } else {
-                        // Text Message
                         if (!dbLogText.trim()) throw new Error("Empty text in payload");
                         metaP = { type: 'text', text: { body: dbLogText } };
                     }
 
                     await sendToMeta(job.phone_number, metaP);
                     
-                    // Archive to history
                     await client.query(
                         `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, 
                         [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]
@@ -789,76 +794,6 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
         console.error("[CRON FATAL]", e);
         res.status(500).json({ error: e.message }); 
     }
-});
-
-apiRouter.get('/webhook', (req, res) => {
-    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
-        res.status(200).send(req.query['hub.challenge']);
-    } else {
-        res.sendStatus(403);
-    }
-});
-
-apiRouter.post('/webhook', async (req, res) => {
-    res.sendStatus(200);
-    const body = req.body;
-    if (!body.object) return;
-    try {
-        const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-        if (!msg) return;
-        
-        await withDb(async (client) => {
-            await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB)`);
-            const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
-            if (sys.rows[0]?.value?.webhook_ingest_enabled === false) return;
-
-            const from = msg.from;
-            const name = body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || 'Unknown';
-            let text = '';
-            let payloadId = null;
-
-            // --- PAYLOAD EXTRACTION ---
-            if (msg.type === 'text') {
-                text = msg.text.body;
-            } else if (msg.type === 'interactive') {
-                if (msg.interactive.type === 'button_reply') {
-                    text = msg.interactive.button_reply.title;
-                    payloadId = msg.interactive.button_reply.id;
-                } else if (msg.interactive.type === 'list_reply') {
-                    text = msg.interactive.list_reply.title;
-                    payloadId = msg.interactive.list_reply.id;
-                }
-            } else {
-                text = `[${msg.type.toUpperCase()}]`;
-            }
-
-            // 1. Ingest/Update Candidate
-            let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
-            let candidate;
-            
-            if (c.rows.length === 0) {
-                const id = crypto.randomUUID();
-                await client.query(
-                    `INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at, is_human_mode, variables) VALUES ($1, $2, $3, 'New', $4, $5, FALSE, '{}')`, 
-                    [id, from, name, text, Date.now()]
-                );
-                // Fetch the newly created candidate with proper ID
-                candidate = { id, phone_number: from, is_human_mode: false, current_bot_step_id: null, variables: {} };
-            } else {
-                candidate = c.rows[0];
-                await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
-            }
-
-            // 2. Log User Message
-            await client.query(
-                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, 'text', $4, 'received', NOW())`, 
-                [crypto.randomUUID(), candidate.id, text, msg.id]
-            );
-
-            // 3. EXECUTE BOT ENGINE (Updated with payload)
-            await runBotEngine(client, candidate, text, payloadId);
-        });
-    } catch(e) { console.error("Webhook Error", e); }
 });
 
 // ==========================================

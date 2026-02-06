@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, ScheduledMessage, DriverDocument } from '../types';
 import { 
-  X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save
+  X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save, AlertTriangle
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 import { MediaSelectorModal } from './MediaSelectorModal';
@@ -214,18 +214,28 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px] relative">
               <div className="flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4">
                 {localMessages.map((msg) => (
-                    <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
-                        <div className={`max-w-[80%] rounded-2xl shadow-sm overflow-hidden ${msg.sender === 'driver' ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' : 'bg-blue-600 text-white rounded-tr-none'}`}>
-                            {renderMediaPreview(msg.imageUrl || msg.videoUrl, msg.videoUrl ? 'video' : 'image')}
-                            <div className="px-4 py-3">
-                                {renderMessageText(msg.text)}
-                                <div className="text-[10px] mt-1 text-right opacity-60 flex justify-end gap-1 items-center">
-                                    {msg.status === 'sending' && <Clock size={10} className="animate-spin" />}
-                                    {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                    msg.type === 'system_error' ? (
+                        <div key={msg.id} className="flex justify-center my-4 animate-pulse">
+                            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center gap-2 text-sm max-w-[90%] shadow-sm">
+                                <AlertTriangle size={18} />
+                                <span className="font-bold">SYSTEM ERROR:</span>
+                                <span>{msg.text}</span>
+                            </div>
+                        </div>
+                    ) : (
+                        <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
+                            <div className={`max-w-[80%] rounded-2xl shadow-sm overflow-hidden ${msg.sender === 'driver' ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' : 'bg-blue-600 text-white rounded-tr-none'}`}>
+                                {renderMediaPreview(msg.imageUrl || msg.videoUrl, msg.videoUrl ? 'video' : 'image')}
+                                <div className="px-4 py-3">
+                                    {renderMessageText(msg.text)}
+                                    <div className="text-[10px] mt-1 text-right opacity-60 flex justify-end gap-1 items-center">
+                                        {msg.status === 'sending' && <Clock size={10} className="animate-spin" />}
+                                        {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                    </div>
                                 </div>
                             </div>
                         </div>
-                    </div>
+                    )
                 ))}
                 
                 {scheduledMessages.length > 0 && (
@@ -351,4 +361,4 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       <MediaSelectorModal isOpen={showMediaPicker} onClose={() => setShowMediaPicker(false)} onSelect={(url, type) => { setSelectedMedia({ url, type }); setShowMediaPicker(false); }} allowedType="All" />
     </div>
   );
-};
+}
