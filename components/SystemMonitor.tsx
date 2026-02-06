@@ -59,12 +59,14 @@ export const SystemMonitor = () => {
     const handleHardReset = async () => {
         if(!window.confirm("CRITICAL WARNING:\n\nThis will DELETE ALL DATA (Messages, Leads, Settings) and recreate the database tables.\n\nUse this only if you see '500 Internal Server Errors' continuously.\n\nAre you sure?")) return;
         
-        setDbActionStatus('Resetting DB...');
+        setDbActionStatus('Resetting & Rebuilding...');
         try {
-            await fetch('/api/system/hard-reset', { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` } });
-            setDbActionStatus('Database Reset Complete. Reloading...');
+            const res = await fetch('/api/system/hard-reset', { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` } });
+            if (!res.ok) throw new Error("Reset Request Failed");
+            
+            setDbActionStatus('Rebuild Complete. Reloading...');
             setTimeout(() => window.location.reload(), 2000);
-        } catch(e) { setDbActionStatus('Reset Failed'); }
+        } catch(e) { setDbActionStatus('Reset Failed: Check Console'); console.error(e); }
     };
 
     const handleSeedDB = async () => {
@@ -132,12 +134,14 @@ export const SystemMonitor = () => {
                     <div className="p-6 space-y-6">
                         <div className="bg-amber-900/30 border border-amber-800 p-4 rounded-lg">
                             <div className="flex items-center justify-between mb-2">
-                                <div className="flex items-center gap-2 text-amber-400 font-bold"><AlertTriangle size={18} /> Hard Reset Database</div>
+                                <div className="flex items-center gap-2 text-amber-400 font-bold"><AlertTriangle size={18} /> Factory Reset Database</div>
                                 {dbActionStatus && <span className="text-xs text-green-400">{dbActionStatus}</span>}
                             </div>
-                            <p className="text-xs text-gray-400 mb-3">Use this if you see 500 errors. It will delete and recreate all tables with correct columns.</p>
+                            <p className="text-xs text-gray-400 mb-3">
+                                <strong>Warning:</strong> This will drop all tables and recreate them from scratch. Use this if the "MISSING TABLES" error persists.
+                            </p>
                             <button onClick={handleHardReset} className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2">
-                                <Trash2 size={14} /> FIX: DROP & RECREATE TABLES
+                                <Trash2 size={14} /> WIPE & REBUILD TABLES
                             </button>
                         </div>
 

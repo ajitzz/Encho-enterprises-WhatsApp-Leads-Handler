@@ -22,6 +22,16 @@ const SYSTEM_CONFIG = {
     GOOGLE_CLIENT_ID: process.env.VITE_GOOGLE_CLIENT_ID
 };
 
+// --- DATABASE SCHEMA ---
+const SCHEMA_SQL = `
+    CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB);
+    CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', created_at TIMESTAMP DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());
+`;
+
 // --- INITIALIZE CLIENTS (Lazy/Safe) ---
 let s3Client, googleClient, genAI, pgPool;
 
@@ -41,14 +51,18 @@ try {
     }
 
     // High-Performance Connection Pool for Neon/Vercel
-    // Fix for SSL Mode Warning: Explicitly configure SSL object
-    const connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
+    let connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
+    
+    // Clean connection string to avoid SSL conflicts (remove sslmode param if present)
+    if (connectionString && connectionString.includes('sslmode=')) {
+        connectionString = connectionString.replace(/([?&])sslmode=[^&]+(&|$)/, '$1').replace(/[?&]$/, '');
+    }
     
     pgPool = new Pool({
         connectionString,
         connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
         idleTimeoutMillis: 30000,
-        ssl: { rejectUnauthorized: false }, // Required for Neon/Vercel
+        ssl: { rejectUnauthorized: false }, // Explicitly allow self-signed certs for Neon
         max: 10,
         keepAlive: true
     });
@@ -881,14 +895,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
 apiRouter.post('/system/init-db', async (req, res) => {
     try {
         await withDb(async (client) => {
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB);
-                CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', created_at TIMESTAMP DEFAULT NOW());
-                CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());
-                CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());
-                CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());
-                CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());
-            `);
+            await client.query(SCHEMA_SQL);
         });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -897,7 +904,12 @@ apiRouter.post('/system/init-db', async (req, res) => {
 apiRouter.post('/system/hard-reset', async (req, res) => {
     try {
         await withDb(async (client) => {
+            // 1. DROP EVERYTHING
             await client.query(`DROP TABLE IF EXISTS scheduled_messages, candidate_messages, driver_documents, bot_versions, candidates, system_settings CASCADE`);
+            // 2. REBUILD IMMEDIATELY
+            await client.query(SCHEMA_SQL);
+            // 3. SEED BASIC CONFIG
+            await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
         });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
