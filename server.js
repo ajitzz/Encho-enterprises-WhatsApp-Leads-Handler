@@ -41,16 +41,12 @@ try {
     }
 
     // High-Performance Connection Pool for Neon/Vercel
-    // Fix for SSL Mode Warning: Explicitly configure SSL object
-    const connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
-    
     pgPool = new Pool({
-        connectionString,
+        connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
         connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
         idleTimeoutMillis: 30000,
-        ssl: { rejectUnauthorized: false }, // Required for Neon/Vercel
-        max: 10,
-        keepAlive: true
+        ssl: { rejectUnauthorized: false },
+        max: 10 
     });
     
     pgPool.on('error', (err) => console.error('[DB POOL ERROR]', err));
@@ -165,7 +161,6 @@ const isValidContent = (text) => {
         'sample text',
         'your message here'
     ];
-    // If text contains a blocker and is reasonably short (likely unmodified default)
     if (clean.length < 50 && blockers.some(b => clean.includes(b))) return false;
     return true;
 };
@@ -177,7 +172,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
     try {
         // 1. Check Config
         const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
-        const config = sys.rows[0]?.value || { automation_enabled: true }; 
+        const config = sys.rows[0]?.value || {};
         
         if (config.automation_enabled === false) {
             console.log("[Bot Engine] Automation disabled.");
@@ -206,7 +201,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
         let currentNodeId = candidate.current_bot_step_id;
         let nextNodeId = null;
-        let shouldReplyInvalid = false;
 
         // --- RESET TRIGGERS ---
         const cleanInput = (incomingText || '').trim().toLowerCase();
@@ -273,12 +267,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
                         nextNodeId = startNode ? startNode.id : null;
                     } else {
-                        // INVALID INPUT: Loop current node
+                        // Invalid Input - loop current node
                         nextNodeId = currentNodeId;
-                        // Only send retry message if it was an interactive node that expects specific input
-                        if (['interactive_button', 'interactive_list'].includes(currentNode.data.type)) {
-                            shouldReplyInvalid = true;
-                        }
                     }
                 }
             } else {
@@ -286,14 +276,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
                 nextNodeId = startNode ? startNode.id : null;
             }
-        }
-
-        // --- STEP A.1: HANDLE INVALID INPUT RETRY ---
-        if (shouldReplyInvalid) {
-            const invalidMsg = "I didn't catch that. Please select an option from the menu above.";
-            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: invalidMsg } });
-            // Do not advance flow, just exit
-            return;
         }
 
         // --- STEP B: EXECUTE FLOW (CHAINING) ---
@@ -345,43 +327,28 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             // -- 2. MESSAGE NODES --
             if (data.type !== 'start') {
                 let rawBody = processText(data.content || '', candidate);
-                
-                // SELF-HEALING: Check if content is valid. If not, we might SKIP this node or use fallback.
                 let validBody = isValidContent(rawBody) ? rawBody : null;
                 
                 let payload = null;
                 let messageSent = false;
 
-                // TYPE A: Text
-                if (data.type === 'text') {
+                // TYPE A: Text / Input
+                if (['text', 'input'].includes(data.type)) {
                     if (validBody) {
                         payload = { type: 'text', text: { body: validBody } };
-                    } else {
-                        // EMPTY TEXT NODE -> SKIP IT
-                        console.log(`[Bot Engine] Auto-Skipping Empty Text Node ${node.id}`);
-                        const nextEdge = edges.find(e => e.source === node.id);
-                        if (nextEdge) {
-                            activeNodeId = nextEdge.target;
-                            continue; // Jump to next node immediately
-                        } else {
-                            break; // End of flow
-                        }
+                    } else if (data.type === 'input') {
+                        payload = { type: 'text', text: { body: "Please enter your response below:" } };
+                        validBody = payload.text.body; 
                     }
                 } 
                 
-                // TYPE B: Input (Cannot skip, must fallback)
-                else if (data.type === 'input') {
-                    const prompt = validBody || "Please enter your response below:";
-                    payload = { type: 'text', text: { body: prompt } };
-                }
-                
-                // TYPE C: Media
+                // TYPE B: Media
                 else if (data.type === 'image' && data.mediaUrl) {
                     const url = await refreshMediaUrl(data.mediaUrl);
                     payload = { type: 'image', image: { link: url, caption: validBody || '' } };
                 }
 
-                // TYPE D: Buttons (Fallback if empty)
+                // TYPE C: Buttons
                 else if (data.type === 'interactive_button' && data.buttons?.length > 0) {
                     const bodyText = validBody || "Please select an option:";
                     payload = {
@@ -399,7 +366,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     };
                 }
 
-                // TYPE E: Lists (Fallback if empty)
+                // TYPE D: Lists
                 else if (data.type === 'interactive_list' && data.sections?.length > 0) {
                     const bodyText = validBody || "Please make a selection:";
                     payload = {
@@ -434,6 +401,18 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         );
                     }
                 }
+
+                // SELF-HEALING: Skip invalid text nodes
+                if (!messageSent && data.type === 'text') {
+                    console.log(`[Bot Engine] Skipping empty Text Node ${node.id}`);
+                    const nextEdge = edges.find(e => e.source === node.id);
+                    if (nextEdge) {
+                        activeNodeId = nextEdge.target;
+                        continue; 
+                    } else {
+                        break; 
+                    }
+                }
             }
 
             // 3. SAVE STATE
@@ -448,8 +427,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             const nextEdge = edges.find(e => e.source === node.id);
             if (nextEdge) {
                 activeNodeId = nextEdge.target;
-                // Tiny delay to ensure order in WhatsApp
-                await new Promise(r => setTimeout(r, 500));
+                await new Promise(r => setTimeout(r, 800));
             } else {
                 activeNodeId = null;
             }
@@ -542,9 +520,7 @@ apiRouter.post('/webhook', async (req, res) => {
             return;
         }
 
-        // SAFETY: Wrap DB logic in a promise race. 
-        // If DB/Bot takes > 9s, we return 200 OK to Meta to prevent retries, but let the bot keep trying.
-        const processPromise = withDb(async (client) => {
+        await withDb(async (client) => {
             // Deduplication
             const existing = await client.query("SELECT id FROM candidate_messages WHERE whatsapp_message_id = $1", [msg.id]);
             if (existing.rows.length > 0) return;
@@ -595,25 +571,12 @@ apiRouter.post('/webhook', async (req, res) => {
             await runBotEngine(client, candidate, text, payloadId);
         });
 
-        // Vercel Timeout Protection: 
-        // We race the bot logic against a 9s timer. If bot is slow, we return 200 OK anyway so Meta doesn't retry.
-        // The bot logic might continue running depending on Vercel plan, but usually it freezes. 
-        // This prevents the "Bot sends 5 messages because Meta kept retrying" bug.
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Webhook Processing Timeout")), 9000));
-
-        await Promise.race([processPromise, timeoutPromise]).catch(err => {
-            console.error("[Webhook Warning] Logic timed out or failed:", err.message);
-            // We swallow the error here to ensure we still send 200 OK below.
-        });
-
-        // Send 200 OK only AFTER processing (or timeout) to prevent Vercel execution freeze
+        // Send 200 OK only AFTER processing to prevent Vercel execution freeze
         res.sendStatus(200);
 
     } catch(e) { 
-        console.error("Webhook Critical Error", e); 
-        // Even on critical error, sending 500 causes Meta to retry. 
-        // It is often safer to send 200 if we logged the error, unless we specifically want a retry.
-        res.sendStatus(200); 
+        console.error("Webhook Error", e); 
+        res.sendStatus(500);
     }
 });
 

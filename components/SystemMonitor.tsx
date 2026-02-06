@@ -5,10 +5,12 @@ import { SystemStats } from '../types';
 
 interface DiagnosticStats extends SystemStats {
     dbStatus?: 'connected' | 'error' | 'unknown';
+    redisStatus?: 'connected' | 'error' | 'unknown';
     tables?: { candidates: boolean; bot_versions: boolean };
     counts?: { candidates: number };
     lastError?: string;
-    env?: { hasPostgres: boolean; publicUrl: string };
+    workerUrl?: string;
+    env?: { hasPostgres: boolean; hasRedis: boolean; hasQStash: boolean; publicUrl: string };
 }
 
 export const SystemMonitor = () => {
@@ -34,9 +36,11 @@ export const SystemMonitor = () => {
                     setStats({
                         serverLoad: 0, dbLatency: 0, aiCredits: 0, aiModel: 'unknown', s3Status: 'ok', s3Load: 0, whatsappStatus: 'ok', whatsappUploadLoad: 0, activeUploads: 0, uptime: 0,
                         dbStatus: debugStats.postgres,
+                        redisStatus: debugStats.redis,
                         tables: debugStats.tables,
                         counts: debugStats.counts,
                         lastError: debugStats.lastError,
+                        workerUrl: debugStats.workerUrl,
                         env: debugStats.env
                     });
                 }
@@ -82,12 +86,13 @@ export const SystemMonitor = () => {
     const isTablesMissing = stats.dbStatus === 'connected' && (!stats.tables?.candidates || !stats.tables?.bot_versions);
     const isDbEmpty = stats.dbStatus === 'connected' && !isTablesMissing && (stats.counts?.candidates === 0);
     const hasCriticalIssue = isDbError || isTablesMissing || isDbEmpty;
+    const isWorkerLocalhost = stats.workerUrl && stats.workerUrl.includes('localhost') && !window.location.hostname.includes('localhost');
 
     return (
         <>
         <div className={`fixed bottom-0 left-0 right-0 z-40 transition-transform duration-300 ${isOpen ? 'translate-y-0' : 'translate-y-[calc(100%-4px)]'}`}>
             <div 
-                className={`h-1 cursor-pointer hover:h-2 transition-all ${hasCriticalIssue ? 'bg-red-500 animate-pulse' : 'bg-gradient-to-r from-green-500 via-blue-500 to-purple-500'}`}
+                className={`h-1 cursor-pointer hover:h-2 transition-all ${hasCriticalIssue || isWorkerLocalhost ? 'bg-red-500 animate-pulse' : 'bg-gradient-to-r from-green-500 via-blue-500 to-purple-500'}`}
                 onClick={() => setIsOpen(!isOpen)}
                 title="System Monitor"
             />
@@ -105,12 +110,18 @@ export const SystemMonitor = () => {
                             <span className={`font-bold ${!isTablesMissing ? 'text-green-400' : 'text-red-400'}`}>{!isTablesMissing ? 'VALID' : 'MISSING'}</span>
                         </div>
                     )}
+                    {stats.workerUrl && (
+                        <div className="flex items-center gap-1.5 hidden md:flex">
+                             <span className="text-gray-400">WORKER:</span>
+                             <span className={`truncate max-w-[150px] ${isWorkerLocalhost ? 'text-red-400' : 'text-gray-300'}`}>{stats.workerUrl}</span>
+                        </div>
+                    )}
                 </div>
 
-                {hasCriticalIssue && (
+                {(hasCriticalIssue || isWorkerLocalhost) && (
                     <div className="absolute left-1/2 transform -translate-x-1/2 top-1 flex items-center gap-2 bg-red-600/90 px-3 py-1 rounded text-white font-bold animate-pulse cursor-pointer" onClick={() => setShowControls(true)}>
                         <AlertTriangle size={12} />
-                        {isDbError ? 'DB ERROR' : isTablesMissing ? 'MISSING TABLES' : 'DATABASE EMPTY'}
+                        {isDbError ? 'DB ERROR' : isTablesMissing ? 'MISSING TABLES' : isWorkerLocalhost ? 'INVALID WORKER URL' : 'DATABASE EMPTY'}
                         <span className="underline">FIX</span>
                     </div>
                 )}
@@ -130,6 +141,15 @@ export const SystemMonitor = () => {
                     </div>
                     
                     <div className="p-6 space-y-6">
+                        {isWorkerLocalhost && (
+                             <div className="bg-red-900/30 border border-red-800 p-4 rounded-lg">
+                                <div className="flex items-center gap-2 text-red-400 font-bold mb-2"><AlertCircle size={18} /> Critical Config Error</div>
+                                <p className="text-xs text-gray-300 mb-2">QStash is trying to hit <strong>localhost</strong>. This will fail in production.</p>
+                                <div className="text-xs bg-black/50 p-2 rounded text-gray-400 font-mono break-all">{stats.workerUrl}</div>
+                                <p className="text-xs text-gray-400 mt-2">Add <strong>PUBLIC_BASE_URL</strong> to Vercel Env Variables.</p>
+                            </div>
+                        )}
+
                         <div className="bg-amber-900/30 border border-amber-800 p-4 rounded-lg">
                             <div className="flex items-center justify-between mb-2">
                                 <div className="flex items-center gap-2 text-amber-400 font-bold"><AlertTriangle size={18} /> Hard Reset Database</div>
@@ -153,6 +173,8 @@ export const SystemMonitor = () => {
 
                         <div className="grid grid-cols-2 gap-4 text-xs font-mono text-gray-500">
                              <div className="bg-gray-800 p-2 rounded border border-gray-700">PG: {stats.env?.hasPostgres ? 'OK' : 'MISSING'}</div>
+                             <div className="bg-gray-800 p-2 rounded border border-gray-700">Redis: {stats.env?.hasRedis ? 'OK' : 'MISSING'}</div>
+                             <div className="bg-gray-800 p-2 rounded border border-gray-700">QStash: {stats.env?.hasQStash ? 'OK' : 'MISSING'}</div>
                              <div className="bg-gray-800 p-2 rounded border border-gray-700 truncate" title={stats.env?.publicUrl}>Public URL: {stats.env?.publicUrl}</div>
                         </div>
                     </div>
