@@ -452,6 +452,48 @@ const apiRouter = express.Router();
 // HEALTH
 apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
+// DIAGNOSTICS (NEW: Fixes System Monitor 404)
+apiRouter.get('/debug/status', async (req, res) => {
+    const status = {
+        postgres: 'unknown',
+        tables: { candidates: false, bot_versions: false },
+        counts: { candidates: 0 },
+        env: {
+            hasPostgres: !!(process.env.POSTGRES_URL || process.env.DATABASE_URL),
+            publicUrl: process.env.PUBLIC_BASE_URL || 'localhost'
+        },
+        lastError: null
+    };
+
+    try {
+        await withDb(async (client) => {
+            // Check connection
+            await client.query('SELECT 1');
+            status.postgres = 'connected';
+
+            // Check tables
+            const tablesRes = await client.query(`
+                SELECT table_name FROM information_schema.tables 
+                WHERE table_schema = 'public'
+            `);
+            const tables = tablesRes.rows.map(r => r.table_name);
+            status.tables.candidates = tables.includes('candidates');
+            status.tables.bot_versions = tables.includes('bot_versions');
+
+            // Count rows
+            if (status.tables.candidates) {
+                const countRes = await client.query('SELECT COUNT(*) FROM candidates');
+                status.counts.candidates = parseInt(countRes.rows[0].count);
+            }
+        });
+    } catch (e) {
+        status.postgres = 'error';
+        status.lastError = e.message;
+    }
+
+    res.json(status);
+});
+
 // WEBHOOK GET
 apiRouter.get('/webhook', (req, res) => {
     if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
