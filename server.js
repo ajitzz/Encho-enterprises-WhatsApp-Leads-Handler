@@ -40,11 +40,13 @@ try {
         genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     }
 
+    // High-Performance Connection Pool for Neon/Vercel
     pgPool = new Pool({
         connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
         connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
+        idleTimeoutMillis: 30000,
         ssl: { rejectUnauthorized: false },
-        max: 10
+        max: 10 
     });
     
     pgPool.on('error', (err) => console.error('[DB POOL ERROR]', err));
@@ -101,7 +103,7 @@ const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
     
-    // Strict Payload Validation
+    // Strict Payload Validation to prevent 400 Bad Request
     if (payload.type === 'text') {
         if (!payload.text?.body || !payload.text.body.trim()) {
             console.warn("[Meta] Blocked empty text message");
@@ -163,7 +165,7 @@ const isValidContent = (text) => {
     return true;
 };
 
-// --- BOT ENGINE (RE-ENGINEERED) ---
+// --- BOT ENGINE (SELF-HEALING & ROBUST) ---
 const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
     console.log(`[Bot Engine] START for ${candidate.phone_number} | Step: ${candidate.current_bot_step_id || 'START'}`);
 
@@ -202,7 +204,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         await client.query("UPDATE candidates SET current_bot_step_id = NULL WHERE id = $1", [candidate.id]);
     }
 
-    // --- DETERMINE NEXT NODE ---
+    // --- STEP A: DETERMINE NEXT NODE ---
     if (!currentNodeId) {
         // Find Start Node
         const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
@@ -212,7 +214,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         const currentNode = nodes.find(n => n.id === currentNodeId);
         
         if (currentNode) {
-            // A. Capture Input if needed
+            // A1. Capture Input if needed
             if (currentNode.data.type === 'input' && currentNode.data.variable) {
                 const varName = currentNode.data.variable;
                 const newVars = { ...candidate.variables, [varName]: incomingText };
@@ -220,7 +222,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 candidate.variables = newVars; 
             }
 
-            // B. FIND MATCHING EDGE
+            // A2. FIND MATCHING EDGE
             const outgoingEdges = edges.filter(e => e.source === currentNodeId);
             let matchedEdge = null;
 
@@ -277,7 +279,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         }
     }
 
-    // --- EXECUTE FLOW (CHAINING) ---
+    // --- STEP B: EXECUTE FLOW (CHAINING) ---
     let activeNodeId = nextNodeId;
     let opsCount = 0;
     const MAX_OPS = 15; // Prevent infinite loops
