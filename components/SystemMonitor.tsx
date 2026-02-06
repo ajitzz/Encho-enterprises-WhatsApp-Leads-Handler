@@ -1,6 +1,6 @@
 
 import React, { useEffect, useState, useRef } from 'react';
-import { Database, Server, Shield, X, AlertTriangle, Zap, RefreshCw, AlertCircle, DatabaseZap, Workflow, Trash2 } from 'lucide-react';
+import { Database, Server, Shield, X, AlertTriangle, Zap, RefreshCw, AlertCircle, DatabaseZap, Workflow, Trash2, Hammer } from 'lucide-react';
 import { SystemStats } from '../types';
 
 interface DiagnosticStats extends SystemStats {
@@ -50,9 +50,8 @@ export const SystemMonitor = () => {
         setDbActionStatus('Creating Tables...');
         try {
             await fetch('/api/system/init-db', { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` } });
-            setDbActionStatus('Tables Ready!');
-            const res = await fetch('/api/debug/status', { headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }});
-            if(res.ok) { const d = await res.json(); setStats(prev => ({...prev!, tables: d.tables, counts: d.counts})); }
+            setDbActionStatus('Tables Ready! Reloading...');
+            setTimeout(() => window.location.reload(), 2000);
         } catch(e) { setDbActionStatus('Failed'); }
     };
 
@@ -132,6 +131,20 @@ export const SystemMonitor = () => {
                     </div>
                     
                     <div className="p-6 space-y-6">
+                        {/* REPAIR SCHEMA BUTTON FOR MISSING TABLES */}
+                        {isTablesMissing && (
+                            <div className="bg-red-900/30 border border-red-800 p-4 rounded-lg">
+                                <div className="flex items-center justify-between mb-2">
+                                    <div className="flex items-center gap-2 text-red-400 font-bold"><AlertTriangle size={18} /> Tables Missing</div>
+                                    {dbActionStatus && <span className="text-xs text-green-400">{dbActionStatus}</span>}
+                                </div>
+                                <p className="text-xs text-gray-400 mb-3">Database connected but tables not found. Click below to recreate them safely.</p>
+                                <button onClick={handleInitDB} className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2">
+                                    <Hammer size={14} /> REPAIR SCHEMA
+                                </button>
+                            </div>
+                        )}
+
                         <div className="bg-amber-900/30 border border-amber-800 p-4 rounded-lg">
                             <div className="flex items-center justify-between mb-2">
                                 <div className="flex items-center gap-2 text-amber-400 font-bold"><AlertTriangle size={18} /> Factory Reset Database</div>
@@ -145,7 +158,7 @@ export const SystemMonitor = () => {
                             </button>
                         </div>
 
-                        {isDbEmpty && (
+                        {isDbEmpty && !isTablesMissing && (
                             <div className="bg-blue-900/30 border border-blue-800 p-4 rounded-lg">
                                 <div className="flex items-center justify-between mb-2">
                                     <div className="flex items-center gap-2 text-blue-400 font-bold"><Database size={18} /> Database Empty</div>
