@@ -163,7 +163,7 @@ const isValidContent = (text) => {
     return true;
 };
 
-// --- BOT ENGINE (REFACTORED) ---
+// --- BOT ENGINE (RE-ENGINEERED) ---
 const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
     console.log(`[Bot Engine] START for ${candidate.phone_number} | Step: ${candidate.current_bot_step_id || 'START'}`);
 
@@ -208,11 +208,11 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
         nextNodeId = startNode ? startNode.id : nodes[0]?.id;
     } else {
-        // Process Transition
+        // Process Transition from Current Node
         const currentNode = nodes.find(n => n.id === currentNodeId);
         
         if (currentNode) {
-            // Capture Input if needed
+            // A. Capture Input if needed
             if (currentNode.data.type === 'input' && currentNode.data.variable) {
                 const varName = currentNode.data.variable;
                 const newVars = { ...candidate.variables, [varName]: incomingText };
@@ -220,11 +220,11 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 candidate.variables = newVars; 
             }
 
-            // FIND MATCHING EDGE
+            // B. FIND MATCHING EDGE
             const outgoingEdges = edges.filter(e => e.source === currentNodeId);
             let matchedEdge = null;
 
-            // Strategy 1: Payload ID Match (Buttons/Lists)
+            // Strategy 1: Payload ID Match (High Priority for Buttons/Lists)
             if (incomingPayloadId) {
                 // Check Button IDs
                 if (currentNode.data.buttons) {
@@ -238,7 +238,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 }
             }
 
-            // Strategy 2: Text Fuzzy Match (Fallback if ID failed or user typed)
+            // Strategy 2: Text Fuzzy Match (Fallback if ID failed or user typed manually)
             if (!matchedEdge && cleanInput) {
                 if (currentNode.data.buttons) {
                     const btn = currentNode.data.buttons.find(b => b.title.toLowerCase().trim() === cleanInput);
@@ -252,7 +252,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
             // Strategy 3: Default Edge (Text nodes, Input nodes, or Unmatched conditions)
             if (!matchedEdge) {
-                // Use the edge with no sourceHandle (default connection)
+                // Use the edge with no sourceHandle (default connection) OR handle='default' OR handle='true' (for linear flow)
                 matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
             }
 
@@ -266,9 +266,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     nextNodeId = startNode ? startNode.id : null;
                 } else {
                     // Invalid Input (Loop on same node)
-                    console.log("[Bot Engine] Invalid input. Staying on node.");
+                    console.log("[Bot Engine] Invalid input or no match. Re-executing current node (Prompting again).");
                     nextNodeId = currentNodeId;
-                    // Note: We will re-execute the node, which sends the prompt again (Retry behavior)
                 }
             }
         } else {
@@ -281,7 +280,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
     // --- EXECUTE FLOW (CHAINING) ---
     let activeNodeId = nextNodeId;
     let opsCount = 0;
-    const MAX_OPS = 10; // Prevent infinite loops
+    const MAX_OPS = 15; // Prevent infinite loops
 
     while (activeNodeId && opsCount < MAX_OPS) {
         opsCount++;
@@ -291,7 +290,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         const data = node.data || {};
         console.log(`[Bot Engine] Processing Node ${node.id} (${data.type})`);
 
-        // -- LOGIC NODES (No Output) --
+        // -- 1. LOGIC NODES (No Output) --
         if (data.type === 'status_update') {
             if (data.targetStatus) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [data.targetStatus, candidate.id]);
             const nextEdge = edges.find(e => e.source === node.id);
@@ -324,7 +323,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             break;
         }
 
-        // -- MESSAGE NODES --
+        // -- 2. MESSAGE NODES --
         // Don't send Start node message unless explicitly needed (usually Start is just a trigger)
         if (data.type !== 'start') {
             let rawBody = processText(data.content || '', candidate);
@@ -333,26 +332,28 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             let payload = null;
             let messageSent = false;
 
-            // 1. Text / Input
+            // TYPE A: Text / Input
             if (['text', 'input'].includes(data.type)) {
                 if (validBody) {
                     payload = { type: 'text', text: { body: validBody } };
                 } else if (data.type === 'input') {
-                    // Force a prompt for Input nodes
+                    // CRITICAL FIX: If Input node has invalid text (e.g. placeholder), FORCE a default prompt.
+                    // We cannot skip Input nodes or the bot stops collecting data.
                     payload = { type: 'text', text: { body: "Please enter your response below:" } };
-                    validBody = payload.text.body; // Update for log
+                    validBody = payload.text.body; 
                 }
-                // If text node is empty, we skip sending payload, effectively skipping the node
+                // Note: If 'text' node is invalid/empty, payload remains null, and we handle skipping below.
             } 
             
-            // 2. Media
+            // TYPE B: Media
             else if (data.type === 'image' && data.mediaUrl) {
                 const url = await refreshMediaUrl(data.mediaUrl);
                 payload = { type: 'image', image: { link: url, caption: validBody || '' } };
             }
 
-            // 3. Buttons
+            // TYPE C: Buttons
             else if (data.type === 'interactive_button' && data.buttons?.length > 0) {
+                // Fallback for button body
                 const bodyText = validBody || "Please select an option:";
                 payload = {
                     type: "interactive",
@@ -369,8 +370,9 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 };
             }
 
-            // 4. Lists
+            // TYPE D: Lists
             else if (data.type === 'interactive_list' && data.sections?.length > 0) {
+                // Fallback for list body
                 const bodyText = validBody || "Please make a selection:";
                 payload = {
                     type: "interactive",
@@ -385,7 +387,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 };
             }
 
-            // SEND IT
+            // EXECUTE SEND
             if (payload) {
                 await sendToMeta(candidate.phone_number, payload);
                 messageSent = true;
@@ -397,25 +399,26 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 );
             }
 
-            // IF SKIPPED (Empty Text Node) -> Continue loop immediately
+            // SELF-HEALING: If Text Node was skipped (invalid content), immediately jump to next node.
+            // Do not break loop. Do not update state yet (effectively merging this node with the next).
             if (!messageSent && data.type === 'text') {
                 console.log(`[Bot Engine] Skipping empty Text Node ${node.id}`);
-                // Find next edge and continue
                 const nextEdge = edges.find(e => e.source === node.id);
                 if (nextEdge) {
                     activeNodeId = nextEdge.target;
-                    continue; // Loop again
+                    continue; // Loop again immediately
                 } else {
                     break; // End of flow
                 }
             }
         }
 
-        // SAVE STATE
+        // 3. SAVE STATE
         await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
 
-        // STOP OR CONTINUE?
+        // 4. STOP OR CONTINUE?
         // If it's an Input/Interactive node, we MUST stop and wait for user reply.
+        // We only stop if we actually sent a message (or forced a fallback).
         if (['input', 'interactive_button', 'interactive_list'].includes(data.type)) {
             console.log(`[Bot Engine] Pausing at Node ${node.id} for input.`);
             break; 
