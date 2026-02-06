@@ -101,9 +101,14 @@ const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
     
-    if (payload.type === 'text' && (!payload.text?.body || !payload.text.body.trim())) {
-        console.warn(`[Meta] Skipped sending empty text to ${to}`);
-        return;
+    // Strict Validation before sending to Meta
+    if (payload.type === 'text') {
+        if (!payload.text?.body || !payload.text.body.trim()) return;
+    }
+    if (payload.type === 'interactive') {
+        const i = payload.interactive;
+        if (i.type === 'button' && (!i.action.buttons || i.action.buttons.length === 0)) return;
+        if (i.type === 'list' && (!i.action.sections || i.action.sections.length === 0)) return;
     }
 
     try {
@@ -135,6 +140,23 @@ const processText = (text, candidate) => {
         processed = processed.replace(regex, val || '');
     }
     return processed;
+};
+
+// --- VALIDATION HELPER ---
+const isValidContent = (text) => {
+    if (!text || typeof text !== 'string') return false;
+    const clean = text.trim().toLowerCase();
+    if (clean.length === 0) return false;
+    // Block common placeholders
+    const blockers = [
+        'replace this sample message',
+        'replace this text',
+        'type your message',
+        'enter your message',
+        'sample text'
+    ];
+    if (blockers.some(b => clean.includes(b))) return false;
+    return true;
 };
 
 // --- BOT ENGINE (FIXED & ROBUST) ---
@@ -291,7 +313,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         if (data.type === 'handoff') {
             await client.query("UPDATE candidates SET is_human_mode = TRUE WHERE id = $1", [candidate.id]);
             const msg = processText(data.content, candidate);
-            if (msg && msg.trim()) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } });
+            if (isValidContent(msg)) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } });
             break; // Stop execution
         }
 
@@ -320,24 +342,30 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         // 2. SEND MESSAGES
         let sentType = 'text';
         let sentBody = processText(data.content || '', candidate);
+        let messageSent = false;
 
         // Skip "Start" node content unless configured otherwise
         if (data.type !== 'start') {
             if (['text', 'input'].includes(data.type)) {
-                if (sentBody && sentBody.trim()) {
+                if (isValidContent(sentBody)) {
                     await sendToMeta(candidate.phone_number, { type: 'text', text: { body: sentBody } });
+                    messageSent = true;
+                } else {
+                    console.warn(`[Bot Engine] Skipped invalid/empty message at Node ${node.id}`);
                 }
             } else if (data.type === 'image' && data.mediaUrl) {
                 const url = await refreshMediaUrl(data.mediaUrl);
-                // Ensure caption is optional but image sends
+                // Allow empty caption for images
                 await sendToMeta(candidate.phone_number, { type: 'image', image: { link: url, caption: sentBody || '' } });
                 sentType = 'image';
+                messageSent = true;
             } else if (data.type === 'interactive_button' && data.buttons?.length > 0) {
+                 const validBody = isValidContent(sentBody) ? sentBody : "Please select an option";
                  const payload = {
                     type: "interactive",
                     interactive: {
                         type: "button",
-                        body: { text: sentBody || "Please select an option" },
+                        body: { text: validBody },
                         action: {
                             buttons: data.buttons.slice(0, 3).map(b => ({
                                 type: "reply",
@@ -348,13 +376,15 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 };
                 await sendToMeta(candidate.phone_number, payload);
                 sentType = 'interactive';
-                sentBody = `[Buttons] ${sentBody}`;
+                sentBody = `[Buttons] ${validBody}`;
+                messageSent = true;
             } else if (data.type === 'interactive_list' && data.sections?.length > 0) {
+                 const validBody = isValidContent(sentBody) ? sentBody : "Select an option";
                  const payload = {
                     type: "interactive",
                     interactive: {
                         type: "list",
-                        body: { text: sentBody || "Select an option" },
+                        body: { text: validBody },
                         action: {
                             button: data.listButtonText || "Menu",
                             sections: data.sections
@@ -363,11 +393,12 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 };
                 await sendToMeta(candidate.phone_number, payload);
                 sentType = 'interactive';
-                sentBody = `[List] ${sentBody}`;
+                sentBody = `[List] ${validBody}`;
+                messageSent = true;
             }
             
             // Log message (Only if something was sent)
-            if (sentType !== 'text' || (sentType === 'text' && sentBody && sentBody.trim())) {
+            if (messageSent) {
                  await client.query(
                     `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, 
                     [crypto.randomUUID(), candidate.id, sentBody, sentType]
@@ -379,6 +410,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
 
         // 4. DECIDE: Stop or Continue?
+        // If it's an interactive node or input node, we MUST stop and wait for response.
+        // If we skipped sending the message (invalid content), we STILL stop here, effectively entering a wait state.
         if (['input', 'interactive_button', 'interactive_list'].includes(data.type)) {
             console.log(`[Bot Engine] Waiting for input at Node ${node.id}`);
             break; 
@@ -388,7 +421,10 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         const nextEdge = edges.find(e => e.source === node.id);
         if (nextEdge) {
             activeNodeId = nextEdge.target;
-            await new Promise(r => setTimeout(r, 800)); // Natural delay
+            // Only delay if we actually sent a message to avoid rapid-fire spam feel, 
+            // but if we skipped (invalid), we should move fast.
+            const delay = messageSent ? 800 : 50; 
+            await new Promise(r => setTimeout(r, delay)); 
         } else {
             console.log("[Bot Engine] End of flow reached.");
             activeNodeId = null; 
