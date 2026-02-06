@@ -121,7 +121,7 @@ export interface Message {
   videoUrl?: string;
   documentUrl?: string;
   timestamp: number;
-  type: 'text' | 'image' | 'video' | 'document' | 'audio' | 'location' | 'template' | 'interactive' | 'options' | 'video_link';
+  type: 'text' | 'image' | 'video' | 'document' | 'audio' | 'location' | 'template' | 'interactive' | 'options' | 'video_link' | 'system_error';
   status?: 'sent' | 'delivered' | 'read' | 'failed' | 'processing' | 'sending';
   options?: string[];
   templateName?: string;

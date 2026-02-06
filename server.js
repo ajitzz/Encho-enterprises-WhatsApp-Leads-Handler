@@ -46,7 +46,8 @@ try {
         connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
         idleTimeoutMillis: 30000,
         ssl: { rejectUnauthorized: false },
-        max: 10 
+        max: 10,
+        keepAlive: true
     });
     
     pgPool.on('error', (err) => console.error('[DB POOL ERROR]', err));
@@ -161,6 +162,7 @@ const isValidContent = (text) => {
         'sample text',
         'your message here'
     ];
+    // If text contains a blocker and is reasonably short (likely unmodified default)
     if (clean.length < 50 && blockers.some(b => clean.includes(b))) return false;
     return true;
 };
@@ -172,7 +174,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
     try {
         // 1. Check Config
         const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
-        const config = sys.rows[0]?.value || {};
+        const config = sys.rows[0]?.value || { automation_enabled: true }; // Default to true if missing
         
         if (config.automation_enabled === false) {
             console.log("[Bot Engine] Automation disabled.");
@@ -327,28 +329,43 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             // -- 2. MESSAGE NODES --
             if (data.type !== 'start') {
                 let rawBody = processText(data.content || '', candidate);
+                
+                // SELF-HEALING: Check if content is valid. If not, we might SKIP this node or use fallback.
                 let validBody = isValidContent(rawBody) ? rawBody : null;
                 
                 let payload = null;
                 let messageSent = false;
 
-                // TYPE A: Text / Input
-                if (['text', 'input'].includes(data.type)) {
+                // TYPE A: Text
+                if (data.type === 'text') {
                     if (validBody) {
                         payload = { type: 'text', text: { body: validBody } };
-                    } else if (data.type === 'input') {
-                        payload = { type: 'text', text: { body: "Please enter your response below:" } };
-                        validBody = payload.text.body; 
+                    } else {
+                        // EMPTY TEXT NODE -> SKIP IT
+                        console.log(`[Bot Engine] Auto-Skipping Empty Text Node ${node.id}`);
+                        const nextEdge = edges.find(e => e.source === node.id);
+                        if (nextEdge) {
+                            activeNodeId = nextEdge.target;
+                            continue; // Jump to next node immediately
+                        } else {
+                            break; // End of flow
+                        }
                     }
                 } 
                 
-                // TYPE B: Media
+                // TYPE B: Input (Cannot skip, must fallback)
+                else if (data.type === 'input') {
+                    const prompt = validBody || "Please enter your response below:";
+                    payload = { type: 'text', text: { body: prompt } };
+                }
+                
+                // TYPE C: Media
                 else if (data.type === 'image' && data.mediaUrl) {
                     const url = await refreshMediaUrl(data.mediaUrl);
                     payload = { type: 'image', image: { link: url, caption: validBody || '' } };
                 }
 
-                // TYPE C: Buttons
+                // TYPE D: Buttons (Fallback if empty)
                 else if (data.type === 'interactive_button' && data.buttons?.length > 0) {
                     const bodyText = validBody || "Please select an option:";
                     payload = {
@@ -366,7 +383,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     };
                 }
 
-                // TYPE D: Lists
+                // TYPE E: Lists (Fallback if empty)
                 else if (data.type === 'interactive_list' && data.sections?.length > 0) {
                     const bodyText = validBody || "Please make a selection:";
                     payload = {
@@ -401,18 +418,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         );
                     }
                 }
-
-                // SELF-HEALING: Skip invalid text nodes
-                if (!messageSent && data.type === 'text') {
-                    console.log(`[Bot Engine] Skipping empty Text Node ${node.id}`);
-                    const nextEdge = edges.find(e => e.source === node.id);
-                    if (nextEdge) {
-                        activeNodeId = nextEdge.target;
-                        continue; 
-                    } else {
-                        break; 
-                    }
-                }
             }
 
             // 3. SAVE STATE
@@ -427,7 +432,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             const nextEdge = edges.find(e => e.source === node.id);
             if (nextEdge) {
                 activeNodeId = nextEdge.target;
-                await new Promise(r => setTimeout(r, 800));
+                // Tiny delay to ensure order in WhatsApp
+                await new Promise(r => setTimeout(r, 500));
             } else {
                 activeNodeId = null;
             }
