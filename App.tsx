@@ -33,6 +33,8 @@ export default function App() {
   const [showcaseToken, setShowcaseToken] = useState<string | undefined>(undefined);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [userProfile, setUserProfile] = useState<any>(null);
+  
+  const [isEmergencyMode, setIsEmergencyMode] = useState(false); // NEW: Recovery State
 
   useEffect(() => {
       const path = window.location.pathname;
@@ -60,34 +62,27 @@ export default function App() {
   const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
   const [isRepeatToggling, setIsRepeatToggling] = useState(false);
   
-  // Data Source Logic (Persist & Default)
   const [dataSource, setDataSource] = useState<'mock' | 'live'>(() => {
       const saved = localStorage.getItem('uber_fleet_data_source');
       if (saved === 'live' || saved === 'mock') return saved;
       return process.env.NODE_ENV === 'production' ? 'live' : 'mock';
   });
 
-  // --- HEARTBEAT CRON TRIGGER ---
-  // Since we are on Vercel Serverless, we cannot rely on server-side setInterval.
-  // This client-side effect pings the server to process the queue as long as the dashboard is open.
   useEffect(() => {
-      if (dataSource !== 'live' || !isAuthenticated) return;
+      if (dataSource !== 'live' || !isAuthenticated || isEmergencyMode) return;
       
       const triggerCron = async () => {
           try {
-              // We use fetch directly to avoid auth headers if public, but here we add them just in case
               await fetch('/api/cron/process-queue', {
                   headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }
               });
           } catch(e) { console.error("Heartbeat skipped"); }
       };
 
-      // Run every 10 seconds (More aggressive for testing)
       const interval = setInterval(triggerCron, 10000);
-      triggerCron(); // Run immediately on load
-
+      triggerCron();
       return () => clearInterval(interval);
-  }, [dataSource, isAuthenticated]);
+  }, [dataSource, isAuthenticated, isEmergencyMode]);
 
   const changeDataSource = (mode: 'mock' | 'live') => {
       setDataSource(mode);
@@ -95,7 +90,7 @@ export default function App() {
   };
 
   useEffect(() => {
-      if (!isAuthenticated) return;
+      if (!isAuthenticated || isEmergencyMode) return;
       const loadSettings = async () => {
           try {
               const s = dataSource === 'live' ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
@@ -103,10 +98,10 @@ export default function App() {
           } catch(e) {}
       };
       if (activeTab === 'dashboard') loadSettings();
-  }, [activeTab, dataSource, isAuthenticated]);
+  }, [activeTab, dataSource, isAuthenticated, isEmergencyMode]);
 
   useEffect(() => {
-    if (isShowcaseMode || activePublicPage !== 'none' || !isAuthenticated) return; 
+    if (isShowcaseMode || activePublicPage !== 'none' || !isAuthenticated || isEmergencyMode) return; 
     let unsubscribe: () => void = () => {};
     const fetchData = async () => {
       if (dataSource === 'mock') {
@@ -137,7 +132,9 @@ export default function App() {
            });
            addNotification({ type: 'info', title: 'Connected to Live Server', message: 'Delta-Sync Active' });
          } catch (e: any) {
-             if (e.message !== "Unauthorized") {
+             if (e.message.includes('relation') && e.message.includes('does not exist')) {
+                 setIsEmergencyMode(true); // TRIGGER EMERGENCY MODE
+             } else if (e.message !== "Unauthorized") {
                  addNotification({ type: 'warning', title: 'Connection Failed', message: 'Ensure server is running.' });
              }
          }
@@ -145,7 +142,7 @@ export default function App() {
     };
     fetchData();
     return () => unsubscribe();
-  }, [dataSource, activeTab, isShowcaseMode, activePublicPage, isAuthenticated]); 
+  }, [dataSource, activeTab, isShowcaseMode, activePublicPage, isAuthenticated, isEmergencyMode]); 
 
   const handleLoginSuccess = (token: string, user: any) => {
       setAuthToken(token);
@@ -166,6 +163,44 @@ export default function App() {
           </GoogleOAuthProvider>
       );
   }
+
+  // --- EMERGENCY RECOVERY VIEW ---
+  if (isEmergencyMode) {
+      return (
+          <div className="h-screen bg-gray-900 flex flex-col items-center justify-center p-8 relative overflow-hidden">
+              <div className="absolute inset-0 bg-red-900/10 z-0 animate-pulse"></div>
+              <div className="z-10 bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-8 text-center border-t-8 border-red-600">
+                  <div className="mx-auto w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mb-6">
+                      <AlertTriangle size={40} className="text-red-600" />
+                  </div>
+                  <h1 className="text-3xl font-black text-gray-900 mb-2">CRITICAL DATABASE ERROR</h1>
+                  <p className="text-lg text-gray-600 mb-8">
+                      The system connected to the database but could not find the required tables. <br/>
+                      This usually happens after a "Hard Reset" where tables were dropped but not recreated.
+                  </p>
+                  
+                  <div className="bg-gray-50 p-6 rounded-xl border-2 border-dashed border-gray-300 mb-8">
+                      <h3 className="font-bold text-gray-800 flex items-center justify-center gap-2 mb-4">
+                          <Database size={20} /> System Diagnostics Active
+                      </h3>
+                      {/* Embed SystemMonitor Logic Here or just show it */}
+                      <p className="text-sm text-gray-500 mb-4">Please use the tool below to rebuild the schema.</p>
+                  </div>
+
+                  <button 
+                    onClick={() => window.location.reload()} 
+                    className="bg-gray-800 text-white px-6 py-3 rounded-lg font-bold hover:bg-black transition-all shadow-lg"
+                  >
+                    Reload Application
+                  </button>
+              </div>
+              {/* Force SystemMonitor to show */}
+              <SystemMonitor />
+          </div>
+      );
+  }
+  
+  // ... (Rest of App Logic)
   
   const handleSelectDriver = async (driver: Driver) => {
       setSelectedDriver(driver);
@@ -256,8 +291,6 @@ export default function App() {
           });
       }
       
-      // In LIVE mode, the LeadManager calls the API directly to queue messages on backend.
-      // We just show the notification here.
       if (scheduledTime && scheduledTime > Date.now()) {
           addNotification({ type: 'success', title: 'Broadcast Scheduled', message: `Message queued for ${new Date(scheduledTime).toLocaleString()}` });
       } else {
