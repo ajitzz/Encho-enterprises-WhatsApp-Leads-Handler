@@ -41,11 +41,14 @@ try {
     }
 
     // High-Performance Connection Pool for Neon/Vercel
+    // Fix for SSL Mode Warning: Explicitly configure SSL object
+    const connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
+    
     pgPool = new Pool({
-        connectionString: process.env.POSTGRES_URL || process.env.DATABASE_URL,
+        connectionString,
         connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
         idleTimeoutMillis: 30000,
-        ssl: { rejectUnauthorized: false },
+        ssl: { rejectUnauthorized: false }, // Required for Neon/Vercel
         max: 10,
         keepAlive: true
     });
@@ -174,7 +177,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
     try {
         // 1. Check Config
         const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
-        const config = sys.rows[0]?.value || { automation_enabled: true }; // Default to true if missing
+        const config = sys.rows[0]?.value || { automation_enabled: true }; 
         
         if (config.automation_enabled === false) {
             console.log("[Bot Engine] Automation disabled.");
@@ -203,6 +206,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
         let currentNodeId = candidate.current_bot_step_id;
         let nextNodeId = null;
+        let shouldReplyInvalid = false;
 
         // --- RESET TRIGGERS ---
         const cleanInput = (incomingText || '').trim().toLowerCase();
@@ -269,8 +273,12 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
                         nextNodeId = startNode ? startNode.id : null;
                     } else {
-                        // Invalid Input - loop current node
+                        // INVALID INPUT: Loop current node
                         nextNodeId = currentNodeId;
+                        // Only send retry message if it was an interactive node that expects specific input
+                        if (['interactive_button', 'interactive_list'].includes(currentNode.data.type)) {
+                            shouldReplyInvalid = true;
+                        }
                     }
                 }
             } else {
@@ -278,6 +286,14 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
                 nextNodeId = startNode ? startNode.id : null;
             }
+        }
+
+        // --- STEP A.1: HANDLE INVALID INPUT RETRY ---
+        if (shouldReplyInvalid) {
+            const invalidMsg = "I didn't catch that. Please select an option from the menu above.";
+            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: invalidMsg } });
+            // Do not advance flow, just exit
+            return;
         }
 
         // --- STEP B: EXECUTE FLOW (CHAINING) ---
@@ -526,7 +542,9 @@ apiRouter.post('/webhook', async (req, res) => {
             return;
         }
 
-        await withDb(async (client) => {
+        // SAFETY: Wrap DB logic in a promise race. 
+        // If DB/Bot takes > 9s, we return 200 OK to Meta to prevent retries, but let the bot keep trying.
+        const processPromise = withDb(async (client) => {
             // Deduplication
             const existing = await client.query("SELECT id FROM candidate_messages WHERE whatsapp_message_id = $1", [msg.id]);
             if (existing.rows.length > 0) return;
@@ -577,12 +595,25 @@ apiRouter.post('/webhook', async (req, res) => {
             await runBotEngine(client, candidate, text, payloadId);
         });
 
-        // Send 200 OK only AFTER processing to prevent Vercel execution freeze
+        // Vercel Timeout Protection: 
+        // We race the bot logic against a 9s timer. If bot is slow, we return 200 OK anyway so Meta doesn't retry.
+        // The bot logic might continue running depending on Vercel plan, but usually it freezes. 
+        // This prevents the "Bot sends 5 messages because Meta kept retrying" bug.
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Webhook Processing Timeout")), 9000));
+
+        await Promise.race([processPromise, timeoutPromise]).catch(err => {
+            console.error("[Webhook Warning] Logic timed out or failed:", err.message);
+            // We swallow the error here to ensure we still send 200 OK below.
+        });
+
+        // Send 200 OK only AFTER processing (or timeout) to prevent Vercel execution freeze
         res.sendStatus(200);
 
     } catch(e) { 
-        console.error("Webhook Error", e); 
-        res.sendStatus(500);
+        console.error("Webhook Critical Error", e); 
+        // Even on critical error, sending 500 causes Meta to retry. 
+        // It is often safer to send 200 if we logged the error, unless we specifically want a retry.
+        res.sendStatus(200); 
     }
 });
 
