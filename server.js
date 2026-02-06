@@ -347,8 +347,19 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         // Skip "Start" node content unless configured otherwise
         if (data.type !== 'start') {
             if (['text', 'input'].includes(data.type)) {
-                if (isValidContent(sentBody)) {
+                // FIXED: If INPUT, we MUST send a prompt. If text is invalid, use fallback.
+                // If TEXT, we can skip if invalid.
+                const isInput = data.type === 'input';
+                const isValid = isValidContent(sentBody);
+
+                if (isValid) {
                     await sendToMeta(candidate.phone_number, { type: 'text', text: { body: sentBody } });
+                    messageSent = true;
+                } else if (isInput) {
+                    // Fallback for Input nodes to prevent silent hang
+                    const fallback = "Please enter your response below:";
+                    await sendToMeta(candidate.phone_number, { type: 'text', text: { body: fallback } });
+                    sentBody = fallback; // Update for log
                     messageSent = true;
                 } else {
                     console.warn(`[Bot Engine] Skipped invalid/empty message at Node ${node.id}`);
@@ -411,7 +422,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
         // 4. DECIDE: Stop or Continue?
         // If it's an interactive node or input node, we MUST stop and wait for response.
-        // If we skipped sending the message (invalid content), we STILL stop here, effectively entering a wait state.
+        // If we skipped sending the message (invalid content text node), we continue.
+        // If we sent a message for Input/Interactive, we stop.
         if (['input', 'interactive_button', 'interactive_list'].includes(data.type)) {
             console.log(`[Bot Engine] Waiting for input at Node ${node.id}`);
             break; 
