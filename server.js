@@ -188,6 +188,21 @@ const initDatabase = async (client) => {
     
     // 3. Seed Config
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
+
+    // 4. Seed Default Bot (Critical for immediate function)
+    const botCheck = await client.query("SELECT id FROM bot_versions WHERE status = 'published' LIMIT 1");
+    if (botCheck.rows.length === 0) {
+        const defaultBot = {
+            isEnabled: true,
+            shouldRepeat: false,
+            routingStrategy: 'BOT_ONLY',
+            nodes: [
+                { id: 'start', type: 'custom', position: { x: 100, y: 100 }, data: { id: 'start', type: 'start', label: 'Start Flow', content: 'Welcome to Encho Cabs! 👋\n\nHow can we help you today?' } }
+            ],
+            edges: []
+        };
+        await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES (gen_random_uuid(), 'published', $1, NOW())", [defaultBot]);
+    }
 };
 
 // --- BOT ENGINE (SELF-HEALING & DIAGNOSTIC) ---
@@ -198,12 +213,27 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         const config = sys.rows[0]?.value || { automation_enabled: true }; 
         if (config.automation_enabled === false || candidate.is_human_mode) return;
 
-        const botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
+        let botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
+        
+        // SELF-HEALING: If no bot found, create one on the fly
         if (botRes.rows.length === 0) {
-            await client.query(
-                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'system_error', 'failed', NOW())`,
-                [crypto.randomUUID(), candidate.id, "CRITICAL: No 'Published' bot flow found."]
-            );
+            console.log("[Bot Engine] No published bot found. Auto-seeding default flow...");
+            const defaultBot = {
+                isEnabled: true,
+                shouldRepeat: false,
+                routingStrategy: 'BOT_ONLY',
+                nodes: [
+                    { id: 'start', type: 'custom', position: { x: 100, y: 100 }, data: { id: 'start', type: 'start', label: 'Start Flow', content: 'Welcome to Encho Cabs! 👋\n\nHow can we assist you today?' } }
+                ],
+                edges: []
+            };
+            await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), defaultBot]);
+            // Retry fetch
+            botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
+        }
+        
+        if (botRes.rows.length === 0) {
+            console.error("Bot Engine Critical Failure: Could not seed default bot.");
             return;
         }
         
