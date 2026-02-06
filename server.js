@@ -101,9 +101,12 @@ const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
     
-    // Strict Validation before sending to Meta
+    // Strict Payload Validation
     if (payload.type === 'text') {
-        if (!payload.text?.body || !payload.text.body.trim()) return;
+        if (!payload.text?.body || !payload.text.body.trim()) {
+            console.warn("[Meta] Blocked empty text message");
+            return;
+        }
     }
     if (payload.type === 'interactive') {
         const i = payload.interactive;
@@ -125,7 +128,6 @@ const sendToMeta = async (phoneNumber, payload) => {
     }
 };
 
-// Interpolate variables like {{name}} in text
 const processText = (text, candidate) => {
     if (!text) return '';
     let processed = text;
@@ -142,44 +144,47 @@ const processText = (text, candidate) => {
     return processed;
 };
 
-// --- VALIDATION HELPER ---
+// Check for invalid placeholders or empty text
 const isValidContent = (text) => {
     if (!text || typeof text !== 'string') return false;
     const clean = text.trim().toLowerCase();
     if (clean.length === 0) return false;
-    // Block common placeholders
+    
     const blockers = [
         'replace this sample message',
         'replace this text',
         'type your message',
         'enter your message',
-        'sample text'
+        'sample text',
+        'your message here'
     ];
-    if (blockers.some(b => clean.includes(b))) return false;
+    // If text contains a blocker and is reasonably short (likely unmodified default)
+    if (clean.length < 50 && blockers.some(b => clean.includes(b))) return false;
     return true;
 };
 
-// --- BOT ENGINE (FIXED & ROBUST) ---
+// --- BOT ENGINE (REFACTORED) ---
 const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
     console.log(`[Bot Engine] START for ${candidate.phone_number} | Step: ${candidate.current_bot_step_id || 'START'}`);
 
-    // 1. Check if Bot is Enabled
+    // 1. Check Config
     const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
-    if (sys.rows[0]?.value?.automation_enabled === false) {
-        console.log("[Bot Engine] Automation disabled globally.");
+    const config = sys.rows[0]?.value || {};
+    
+    if (config.automation_enabled === false) {
+        console.log("[Bot Engine] Automation disabled.");
         return;
     }
 
-    // 2. Check if Human Mode
     if (candidate.is_human_mode) {
-        console.log("[Bot Engine] User is in Human Mode. Skipping.");
+        console.log("[Bot Engine] Human mode active.");
         return;
     }
 
-    // 3. Get Bot Flow
+    // 2. Load Bot
     const botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
     if (botRes.rows.length === 0) {
-        console.log("[Bot Engine] No published bot found.");
+        console.log("[Bot Engine] No published bot.");
         return;
     }
     
@@ -188,124 +193,126 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
     let currentNodeId = candidate.current_bot_step_id;
     let nextNodeId = null;
-    let shouldReprompt = false;
 
-    // --- GLOBAL RESET & DEAD END CHECK ---
-    const resetKeywords = ['hi', 'hello', 'start', 'restart', 'menu', 'reset'];
-    const cleanInput = (incomingText || '').toLowerCase().trim();
-    
-    if (resetKeywords.includes(cleanInput)) {
-        console.log(`[Bot Engine] Global reset triggered by keyword: ${cleanInput}`);
-        currentNodeId = null; 
+    // --- RESET TRIGGERS ---
+    const cleanInput = (incomingText || '').trim().toLowerCase();
+    if (['start', 'restart', 'hi', 'hello', 'menu'].includes(cleanInput)) {
+        console.log("[Bot Engine] Reset triggered.");
+        currentNodeId = null;
         await client.query("UPDATE candidates SET current_bot_step_id = NULL WHERE id = $1", [candidate.id]);
     }
 
-    // --- STEP A: DETERMINE NEXT NODE ---
+    // --- DETERMINE NEXT NODE ---
     if (!currentNodeId) {
-        // New conversation: Find Start Node
+        // Find Start Node
         const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
-        if (startNode) {
-            console.log(`[Bot Engine] Found Start Node: ${startNode.id}`);
-            nextNodeId = startNode.id;
-        } else {
-            console.warn("[Bot Engine] No Start Node found in flow.");
-        }
+        nextNodeId = startNode ? startNode.id : nodes[0]?.id;
     } else {
-        // Existing conversation: Find Edge based on input
+        // Process Transition
         const currentNode = nodes.find(n => n.id === currentNodeId);
         
         if (currentNode) {
-            console.log(`[Bot Engine] Evaluating response to Node ${currentNodeId} (${currentNode.data.type})`);
-            
-            // 1. Capture Input (if applicable)
+            // Capture Input if needed
             if (currentNode.data.type === 'input' && currentNode.data.variable) {
                 const varName = currentNode.data.variable;
-                // Update variable in DB
                 const newVars = { ...candidate.variables, [varName]: incomingText };
                 await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
-                candidate.variables = newVars; // Update local obj for interpolation later
-                console.log(`[Bot Engine] Captured variable ${varName} = ${incomingText}`);
+                candidate.variables = newVars; 
             }
 
-            // 2. Find Next Edge
+            // FIND MATCHING EDGE
+            const outgoingEdges = edges.filter(e => e.source === currentNodeId);
             let matchedEdge = null;
-            const data = currentNode.data || {};
-            const normText = cleanInput;
-            
-            if (['interactive_button', 'interactive_list'].includes(data.type)) {
-                // Find all edges leaving this node
-                const outgoingEdges = edges.filter(e => e.source === currentNodeId);
 
-                // Check Buttons/Lists match
-                // We prioritize ID match (payload) over text match
-                if (data.buttons) {
-                    const matchedBtn = data.buttons.find(b => 
-                        (incomingPayloadId && b.id === incomingPayloadId) || // Priority: Payload Match
-                        b.title.toLowerCase() === normText // Fallback: Text Match
-                    );
-                    if (matchedBtn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === matchedBtn.id);
+            // Strategy 1: Payload ID Match (Buttons/Lists)
+            if (incomingPayloadId) {
+                // Check Button IDs
+                if (currentNode.data.buttons) {
+                    const btn = currentNode.data.buttons.find(b => b.id === incomingPayloadId);
+                    if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
                 }
-
-                if (!matchedEdge && data.sections) {
-                    const allRows = data.sections.flatMap(s => s.rows);
-                    const matchedRow = allRows.find(r => 
-                        (incomingPayloadId && r.id === incomingPayloadId) || 
-                        r.title.toLowerCase() === normText
-                    );
-                    if (matchedRow) matchedEdge = outgoingEdges.find(e => e.sourceHandle === matchedRow.id);
+                // Check List Row IDs
+                if (!matchedEdge && currentNode.data.sections) {
+                    const row = currentNode.data.sections.flatMap(s => s.rows).find(r => r.id === incomingPayloadId);
+                    if (row) matchedEdge = outgoingEdges.find(e => e.sourceHandle === row.id);
                 }
             }
-            
-            // Fallback / Text Input Edge
+
+            // Strategy 2: Text Fuzzy Match (Fallback if ID failed or user typed)
+            if (!matchedEdge && cleanInput) {
+                if (currentNode.data.buttons) {
+                    const btn = currentNode.data.buttons.find(b => b.title.toLowerCase().trim() === cleanInput);
+                    if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
+                }
+                if (!matchedEdge && currentNode.data.sections) {
+                    const row = currentNode.data.sections.flatMap(s => s.rows).find(r => r.title.toLowerCase().trim() === cleanInput);
+                    if (row) matchedEdge = outgoingEdges.find(e => e.sourceHandle === row.id);
+                }
+            }
+
+            // Strategy 3: Default Edge (Text nodes, Input nodes, or Unmatched conditions)
             if (!matchedEdge) {
-                // Default edge (sourceHandle is null or 'true' for simple logic)
-                matchedEdge = edges.find(e => e.source === currentNodeId && (!e.sourceHandle || e.sourceHandle === 'true'));
+                // Use the edge with no sourceHandle (default connection)
+                matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
             }
 
             if (matchedEdge) {
-                console.log(`[Bot Engine] Following edge to ${matchedEdge.target}`);
                 nextNodeId = matchedEdge.target;
             } else {
-                // CHECK FOR DEAD END (Leaf Node)
-                const hasOutgoing = edges.some(e => e.source === currentNodeId);
-                if (!hasOutgoing) {
-                    console.log(`[Bot Engine] User is at a dead-end node (${currentNodeId}). Restarting flow.`);
-                    // Treat as new conversation immediately
+                // DEAD END LOGIC
+                if (outgoingEdges.length === 0) {
+                    console.log("[Bot Engine] Dead end reached. Restarting.");
                     const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
-                    if (startNode) nextNodeId = startNode.id;
+                    nextNodeId = startNode ? startNode.id : null;
                 } else {
-                    // Not a dead end, but no match found (Invalid Input for Button/List)
-                    console.log(`[Bot Engine] Invalid input for node ${currentNodeId}. Re-prompting.`);
-                    if (['interactive_button', 'interactive_list'].includes(data.type)) {
-                        shouldReprompt = true;
-                        nextNodeId = currentNodeId; // Stay on current node (Reprompt)
-                    }
+                    // Invalid Input (Loop on same node)
+                    console.log("[Bot Engine] Invalid input. Staying on node.");
+                    nextNodeId = currentNodeId;
+                    // Note: We will re-execute the node, which sends the prompt again (Retry behavior)
                 }
             }
         } else {
-            // Current node ID exists in DB but not in Flow (maybe flow changed). Restart.
-            console.warn(`[Bot Engine] Current node ${currentNodeId} not found in flow. Resetting to Start.`);
+            // State mismatch (node deleted), restart
             const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
-            if (startNode) nextNodeId = startNode.id;
+            nextNodeId = startNode ? startNode.id : null;
         }
     }
 
-    // --- STEP B: EXECUTE NODES (CHAINED) ---
+    // --- EXECUTE FLOW (CHAINING) ---
     let activeNodeId = nextNodeId;
-    let loopLimit = 15; 
+    let opsCount = 0;
+    const MAX_OPS = 10; // Prevent infinite loops
 
-    while (activeNodeId && loopLimit > 0) {
-        loopLimit--;
+    while (activeNodeId && opsCount < MAX_OPS) {
+        opsCount++;
         const node = nodes.find(n => n.id === activeNodeId);
         if (!node) break;
 
         const data = node.data || {};
-        console.log(`[Bot Engine] Executing Node ${node.id} [${data.type}]`);
+        console.log(`[Bot Engine] Processing Node ${node.id} (${data.type})`);
 
-        // 1. HANDLERS FOR LOGIC NODES (No Message Sent)
-        if (data.type === 'status_update' && data.targetStatus) {
-            await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [data.targetStatus, candidate.id]);
+        // -- LOGIC NODES (No Output) --
+        if (data.type === 'status_update') {
+            if (data.targetStatus) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [data.targetStatus, candidate.id]);
             const nextEdge = edges.find(e => e.source === node.id);
+            activeNodeId = nextEdge ? nextEdge.target : null;
+            continue;
+        }
+
+        if (data.type === 'condition') {
+            let isMatch = false;
+            if (data.variable) {
+                const val = candidate.variables[data.variable];
+                const target = data.value;
+                const op = data.operator || 'equals';
+                if (val !== undefined) {
+                    if (op === 'equals') isMatch = val == target;
+                    else if (op === 'contains') isMatch = String(val).toLowerCase().includes(String(target).toLowerCase());
+                    else if (op === 'is_set') isMatch = !!val;
+                }
+            }
+            const handle = isMatch ? 'true' : 'false';
+            const nextEdge = edges.find(e => e.source === node.id && (e.sourceHandle === handle || !e.sourceHandle));
             activeNodeId = nextEdge ? nextEdge.target : null;
             continue;
         }
@@ -314,69 +321,44 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             await client.query("UPDATE candidates SET is_human_mode = TRUE WHERE id = $1", [candidate.id]);
             const msg = processText(data.content, candidate);
             if (isValidContent(msg)) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } });
-            break; // Stop execution
+            break;
         }
 
-        if (data.type === 'condition') {
-            // Logic evaluation
-            let isMatch = false;
-            if (data.variable) {
-                const val = candidate.variables[data.variable];
-                const target = data.value;
-                const op = data.operator || 'equals';
-                
-                if (op === 'is_set') isMatch = !!val;
-                else if (val !== undefined) {
-                    if (op === 'equals') isMatch = val == target;
-                    else if (op === 'contains') isMatch = String(val).toLowerCase().includes(String(target).toLowerCase());
-                }
-            }
-            
-            const handleId = isMatch ? 'true' : 'false';
-            const nextEdge = edges.find(e => e.source === node.id && e.sourceHandle === handleId) || edges.find(e => e.source === node.id);
-            
-            activeNodeId = nextEdge ? nextEdge.target : null;
-            continue;
-        }
-
-        // 2. SEND MESSAGES
-        let sentType = 'text';
-        let sentBody = processText(data.content || '', candidate);
-        let messageSent = false;
-
-        // Skip "Start" node content unless configured otherwise
+        // -- MESSAGE NODES --
+        // Don't send Start node message unless explicitly needed (usually Start is just a trigger)
         if (data.type !== 'start') {
-            if (['text', 'input'].includes(data.type)) {
-                // FIXED: If INPUT, we MUST send a prompt. If text is invalid, use fallback.
-                // If TEXT, we can skip if invalid.
-                const isInput = data.type === 'input';
-                const isValid = isValidContent(sentBody);
+            let rawBody = processText(data.content || '', candidate);
+            let validBody = isValidContent(rawBody) ? rawBody : null;
+            
+            let payload = null;
+            let messageSent = false;
 
-                if (isValid) {
-                    await sendToMeta(candidate.phone_number, { type: 'text', text: { body: sentBody } });
-                    messageSent = true;
-                } else if (isInput) {
-                    // Fallback for Input nodes to prevent silent hang
-                    const fallback = "Please enter your response below:";
-                    await sendToMeta(candidate.phone_number, { type: 'text', text: { body: fallback } });
-                    sentBody = fallback; // Update for log
-                    messageSent = true;
-                } else {
-                    console.warn(`[Bot Engine] Skipped invalid/empty message at Node ${node.id}`);
+            // 1. Text / Input
+            if (['text', 'input'].includes(data.type)) {
+                if (validBody) {
+                    payload = { type: 'text', text: { body: validBody } };
+                } else if (data.type === 'input') {
+                    // Force a prompt for Input nodes
+                    payload = { type: 'text', text: { body: "Please enter your response below:" } };
+                    validBody = payload.text.body; // Update for log
                 }
-            } else if (data.type === 'image' && data.mediaUrl) {
+                // If text node is empty, we skip sending payload, effectively skipping the node
+            } 
+            
+            // 2. Media
+            else if (data.type === 'image' && data.mediaUrl) {
                 const url = await refreshMediaUrl(data.mediaUrl);
-                // Allow empty caption for images
-                await sendToMeta(candidate.phone_number, { type: 'image', image: { link: url, caption: sentBody || '' } });
-                sentType = 'image';
-                messageSent = true;
-            } else if (data.type === 'interactive_button' && data.buttons?.length > 0) {
-                 const validBody = isValidContent(sentBody) ? sentBody : "Please select an option";
-                 const payload = {
+                payload = { type: 'image', image: { link: url, caption: validBody || '' } };
+            }
+
+            // 3. Buttons
+            else if (data.type === 'interactive_button' && data.buttons?.length > 0) {
+                const bodyText = validBody || "Please select an option:";
+                payload = {
                     type: "interactive",
                     interactive: {
                         type: "button",
-                        body: { text: validBody },
+                        body: { text: bodyText },
                         action: {
                             buttons: data.buttons.slice(0, 3).map(b => ({
                                 type: "reply",
@@ -385,61 +367,68 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         }
                     }
                 };
-                await sendToMeta(candidate.phone_number, payload);
-                sentType = 'interactive';
-                sentBody = `[Buttons] ${validBody}`;
-                messageSent = true;
-            } else if (data.type === 'interactive_list' && data.sections?.length > 0) {
-                 const validBody = isValidContent(sentBody) ? sentBody : "Select an option";
-                 const payload = {
+            }
+
+            // 4. Lists
+            else if (data.type === 'interactive_list' && data.sections?.length > 0) {
+                const bodyText = validBody || "Please make a selection:";
+                payload = {
                     type: "interactive",
                     interactive: {
                         type: "list",
-                        body: { text: validBody },
+                        body: { text: bodyText },
                         action: {
                             button: data.listButtonText || "Menu",
                             sections: data.sections
                         }
                     }
                 };
-                await sendToMeta(candidate.phone_number, payload);
-                sentType = 'interactive';
-                sentBody = `[List] ${validBody}`;
-                messageSent = true;
             }
-            
-            // Log message (Only if something was sent)
-            if (messageSent) {
-                 await client.query(
-                    `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, 
-                    [crypto.randomUUID(), candidate.id, sentBody, sentType]
+
+            // SEND IT
+            if (payload) {
+                await sendToMeta(candidate.phone_number, payload);
+                messageSent = true;
+                
+                // Log it
+                await client.query(
+                    `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
+                    [crypto.randomUUID(), candidate.id, payload.text?.body || payload.interactive?.body?.text || '[Media]', data.type]
                 );
+            }
+
+            // IF SKIPPED (Empty Text Node) -> Continue loop immediately
+            if (!messageSent && data.type === 'text') {
+                console.log(`[Bot Engine] Skipping empty Text Node ${node.id}`);
+                // Find next edge and continue
+                const nextEdge = edges.find(e => e.source === node.id);
+                if (nextEdge) {
+                    activeNodeId = nextEdge.target;
+                    continue; // Loop again
+                } else {
+                    break; // End of flow
+                }
             }
         }
 
-        // 3. UPDATE STATE
+        // SAVE STATE
         await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
 
-        // 4. DECIDE: Stop or Continue?
-        // If it's an interactive node or input node, we MUST stop and wait for response.
-        // If we skipped sending the message (invalid content text node), we continue.
-        // If we sent a message for Input/Interactive, we stop.
+        // STOP OR CONTINUE?
+        // If it's an Input/Interactive node, we MUST stop and wait for user reply.
         if (['input', 'interactive_button', 'interactive_list'].includes(data.type)) {
-            console.log(`[Bot Engine] Waiting for input at Node ${node.id}`);
+            console.log(`[Bot Engine] Pausing at Node ${node.id} for input.`);
             break; 
         }
 
-        // Auto-advance for non-blocking nodes
+        // Auto-advance for simple nodes (Start, Text, Image)
         const nextEdge = edges.find(e => e.source === node.id);
         if (nextEdge) {
             activeNodeId = nextEdge.target;
-            // Only delay if we actually sent a message to avoid rapid-fire spam feel, 
-            // but if we skipped (invalid), we should move fast.
-            const delay = messageSent ? 800 : 50; 
-            await new Promise(r => setTimeout(r, delay)); 
+            // Add a small natural delay if we actually sent something
+            await new Promise(r => setTimeout(r, 800));
         } else {
-            console.log("[Bot Engine] End of flow reached.");
-            activeNodeId = null; 
+            activeNodeId = null;
         }
     }
 };
@@ -449,7 +438,6 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Logging Middleware
 app.use((req, res, next) => {
     console.log(`[${req.method}] ${req.url}`);
     next();
@@ -457,14 +445,85 @@ app.use((req, res, next) => {
 
 const apiRouter = express.Router();
 
-// ==========================================
-// 0. HEALTH CHECK
-// ==========================================
+// HEALTH
 apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
-// ==========================================
-// 1. SYSTEM & AUTH
-// ==========================================
+// WEBHOOK
+apiRouter.get('/webhook', (req, res) => {
+    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
+        res.status(200).send(req.query['hub.challenge']);
+    } else {
+        res.sendStatus(403);
+    }
+});
+
+apiRouter.post('/webhook', async (req, res) => {
+    res.sendStatus(200);
+    const body = req.body;
+    if (!body.object) return;
+    
+    try {
+        const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+        if (!msg) return;
+
+        await withDb(async (client) => {
+            // Deduplication Check
+            const existing = await client.query("SELECT id FROM candidate_messages WHERE whatsapp_message_id = $1", [msg.id]);
+            if (existing.rows.length > 0) {
+                console.log(`[Webhook] Duplicate ${msg.id} ignored.`);
+                return;
+            }
+
+            // Extract Info
+            const from = msg.from;
+            const name = body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || 'Unknown';
+            let text = '';
+            let payloadId = null;
+
+            if (msg.type === 'text') {
+                text = msg.text.body;
+            } else if (msg.type === 'interactive') {
+                if (msg.interactive.type === 'button_reply') {
+                    text = msg.interactive.button_reply.title;
+                    payloadId = msg.interactive.button_reply.id;
+                } else if (msg.interactive.type === 'list_reply') {
+                    text = msg.interactive.list_reply.title;
+                    payloadId = msg.interactive.list_reply.id;
+                }
+            } else {
+                text = `[${msg.type.toUpperCase()}]`;
+            }
+
+            // Upsert Candidate
+            let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
+            let candidate;
+            
+            if (c.rows.length === 0) {
+                const id = crypto.randomUUID();
+                await client.query(
+                    `INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at, is_human_mode, variables) VALUES ($1, $2, $3, 'New', $4, $5, FALSE, '{}')`, 
+                    [id, from, name, text, Date.now()]
+                );
+                candidate = { id, phone_number: from, is_human_mode: false, current_bot_step_id: null, variables: {}, name };
+            } else {
+                candidate = c.rows[0];
+                await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
+            }
+
+            // Log Message
+            await client.query(
+                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, 'text', $4, 'received', NOW())`, 
+                [crypto.randomUUID(), candidate.id, text, msg.id]
+            );
+
+            // Run Engine
+            await runBotEngine(client, candidate, text, payloadId);
+        });
+    } catch(e) { console.error("Webhook Error", e); }
+});
+
+// --- STANDARD API ROUTES ---
+// Auth
 apiRouter.post('/auth/google', async (req, res) => {
     try {
         const { credential } = req.body;
@@ -473,47 +532,7 @@ apiRouter.post('/auth/google', async (req, res) => {
     } catch (e) { res.status(401).json({ success: false, error: e.message }); }
 });
 
-apiRouter.get('/debug/status', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const tablesRes = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
-            const tables = tablesRes.rows.map(r => r.table_name);
-            const countRes = await client.query('SELECT COUNT(*) as c FROM candidates');
-            res.json({
-                postgres: 'connected',
-                tables: { candidates: tables.includes('candidates'), bot_versions: tables.includes('bot_versions') },
-                counts: { candidates: parseInt(countRes.rows[0].c) },
-                env: { publicUrl: process.env.PUBLIC_BASE_URL || 'Not Set' }
-            });
-        });
-    } catch (e) { res.status(500).json({ postgres: 'error', lastError: e.message }); }
-});
-
-apiRouter.get('/system/settings', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB)`);
-            const r = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
-            res.json(r.rows[0]?.value || { webhook_ingest_enabled: true, automation_enabled: true, sending_enabled: true });
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.patch('/system/settings', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            await client.query(`INSERT INTO system_settings (key, value) VALUES ('config', $1) ON CONFLICT (key) DO UPDATE SET value = $1`, [req.body]);
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/system/credentials', async (req, res) => { res.json({ success: true }); });
-apiRouter.post('/system/webhook', async (req, res) => { res.json({ success: true }); });
-
-// ==========================================
-// 2. BOT STUDIO
-// ==========================================
+// Bot Settings
 apiRouter.get('/bot/settings', async (req, res) => {
     try {
         await withDb(async (client) => {
@@ -534,9 +553,7 @@ apiRouter.post('/bot/save', async (req, res) => {
 
 apiRouter.post('/bot/publish', async (req, res) => res.json({ success: true }));
 
-// ==========================================
-// 3. DRIVERS & MESSAGING
-// ==========================================
+// Drivers
 apiRouter.get('/drivers', async (req, res) => {
     try {
         await withDb(async (client) => {
