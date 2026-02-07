@@ -16,10 +16,18 @@ require('dotenv').config();
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
     META_TIMEOUT: 15000,
-    DB_CONNECTION_TIMEOUT: 10000,
+    DB_CONNECTION_TIMEOUT: 20000,
     AWS_REGION: process.env.AWS_REGION || 'us-east-1',
     AWS_BUCKET: process.env.AWS_BUCKET_NAME || 'uber-fleet-assets',
-    GOOGLE_CLIENT_ID: process.env.VITE_GOOGLE_CLIENT_ID
+    GOOGLE_CLIENT_ID: process.env.VITE_GOOGLE_CLIENT_ID,
+    CACHE_TTL: 60 * 1000 // 60 Seconds Cache for Bot Settings
+};
+
+// --- IN-MEMORY CACHE (Performance Boost) ---
+// Prevents hitting DB for bot settings on every single message
+const memoryCache = {
+    botSettings: null,
+    lastUpdated: 0
 };
 
 // --- INITIALIZE CLIENTS (Lazy/Safe) ---
@@ -40,10 +48,7 @@ try {
         genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     }
 
-    // High-Performance Connection Pool for Neon/Vercel
     let connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
-    
-    // Clean connection string to avoid SSL conflicts (remove sslmode param if present)
     if (connectionString && connectionString.includes('sslmode=')) {
         connectionString = connectionString.replace(/([?&])sslmode=[^&]+(&|$)/, '$1').replace(/[?&]$/, '');
     }
@@ -52,7 +57,7 @@ try {
         connectionString,
         connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
         idleTimeoutMillis: 30000,
-        ssl: { rejectUnauthorized: false }, // Explicitly allow self-signed certs for Neon
+        ssl: { rejectUnauthorized: false }, 
         max: 10,
         keepAlive: true
     });
@@ -111,7 +116,6 @@ const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
     
-    // Strict Payload Validation
     if (payload.type === 'text') {
         if (!payload.text?.body || !payload.text.body.trim()) {
             console.warn("[Meta] Blocked empty text message");
@@ -135,7 +139,7 @@ const sendToMeta = async (phoneNumber, payload) => {
     } catch (e) {
         const errMsg = e.response?.data?.error?.message || e.message;
         console.error(`[Meta Failed] ${to}: ${errMsg}`);
-        throw new Error(`Meta API Error: ${errMsg}`); // Re-throw to be caught by bot engine
+        throw new Error(`Meta API Error: ${errMsg}`);
     }
 };
 
@@ -198,11 +202,9 @@ const getDefaultBotConfig = () => ({
 
 // --- DB RECOVERY & INIT ---
 const initDatabase = async (client) => {
-    // 1. Extensions
     await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
     await client.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";');
 
-    // 2. Tables
     await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB);`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
@@ -210,18 +212,28 @@ const initDatabase = async (client) => {
     await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
     
-    // 3. Seed Config
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
 
-    // 4. Seed Default Bot
     const botCheck = await client.query("SELECT id FROM bot_versions WHERE status = 'published' LIMIT 1");
     if (botCheck.rows.length === 0) {
-        // Use crypto.randomUUID() for safety
         await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), getDefaultBotConfig()]);
     }
 };
 
-// --- BOT ENGINE (SELF-HEALING & DIAGNOSTIC) ---
+const executeWithRetry = async (client, operation) => {
+    try {
+        return await operation();
+    } catch (err) {
+        if (err.code === '42P01') {
+            console.warn("[Auto-Heal] Tables missing. Re-initializing database...");
+            await initDatabase(client);
+            return await operation(); 
+        }
+        throw err;
+    }
+};
+
+// --- BOT ENGINE ---
 const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
     console.log(`[Bot Engine] START for ${candidate.phone_number}`);
     try {
@@ -230,24 +242,28 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         if (config.automation_enabled === false || candidate.is_human_mode) return;
 
         let botSettings;
-        let botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
-        
-        // SELF-HEALING: If no bot found, create one AND use it immediately
-        if (botRes.rows.length > 0) {
-            botSettings = botRes.rows[0].settings;
+
+        // 1. TRY CACHE (Efficiency Boost)
+        const now = Date.now();
+        if (memoryCache.botSettings && (now - memoryCache.lastUpdated < SYSTEM_CONFIG.CACHE_TTL)) {
+            botSettings = memoryCache.botSettings;
         } else {
-            console.log("[Bot Engine] No published bot found. Auto-seeding default flow...");
-            const defaultBot = getDefaultBotConfig();
+            // 2. FALLBACK TO DB
+            let botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
             
-            // Persist the default bot
-            try {
-                await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), defaultBot]);
-            } catch (seedErr) {
-                console.error("Failed to seed bot version DB:", seedErr);
+            if (botRes.rows.length > 0) {
+                botSettings = botRes.rows[0].settings;
+                // Update Cache
+                memoryCache.botSettings = botSettings;
+                memoryCache.lastUpdated = now;
+            } else {
+                console.log("[Bot Engine] No published bot found. Auto-seeding default flow...");
+                const defaultBot = getDefaultBotConfig();
+                try {
+                    await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), defaultBot]);
+                } catch (seedErr) {}
+                botSettings = defaultBot;
             }
-            
-            // Use in-memory default bot to ensure we respond regardless of DB success
-            botSettings = defaultBot;
         }
         
         const { nodes, edges } = botSettings;
@@ -379,7 +395,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
                 if (data.type === 'text') {
                     if (validBody) payload = { type: 'text', text: { body: validBody } };
-                    // If no body, we might skip to next node, logic below handles continue
                 } else if (data.type === 'input') {
                     payload = { type: 'text', text: { body: validBody || "Please enter your response below:" } };
                 } else if (data.type === 'image' && data.mediaUrl) {
@@ -423,8 +438,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     } catch (apiError) {
                         console.error("Meta Send Error:", apiError);
                     }
-                } else {
-                    // If no payload was generated (e.g. empty text), we still advance
                 }
             }
 
@@ -435,7 +448,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             const nextEdge = edges.find(e => e.source === node.id);
             if (nextEdge) {
                 activeNodeId = nextEdge.target;
-                // Add delay for UX
                 await new Promise(r => setTimeout(r, 500));
             } else {
                 activeNodeId = null;
@@ -459,6 +471,23 @@ app.use((req, res, next) => {
 const apiRouter = express.Router();
 
 apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
+
+// --- DEEP WAKE PING ---
+// Critical for preventing Database Sleep
+apiRouter.get('/ping', async (req, res) => {
+    try {
+        if (pgPool) {
+             // Wakes up Neon Postgres
+             await pgPool.query('SELECT 1');
+             res.status(200).send('pong - db active');
+        } else {
+            res.status(200).send('pong - no db pool');
+        }
+    } catch (e) {
+        console.error("Ping DB Wake Failed", e.message);
+        res.status(200).send('pong - db waking...');
+    }
+});
 
 apiRouter.get('/debug/status', async (req, res) => {
     const status = {
@@ -504,40 +533,44 @@ apiRouter.post('/webhook', async (req, res) => {
         if (!msg) { res.sendStatus(200); return; }
 
         const processPromise = withDb(async (client) => {
-            const existing = await client.query("SELECT id FROM candidate_messages WHERE whatsapp_message_id = $1", [msg.id]);
-            if (existing.rows.length > 0) return;
+            // WRAPPER: Retry logic for cold starts / missing tables
+            await executeWithRetry(client, async () => {
+                const existing = await client.query("SELECT id FROM candidate_messages WHERE whatsapp_message_id = $1", [msg.id]);
+                if (existing.rows.length > 0) return;
 
-            const from = msg.from;
-            const name = body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || 'Unknown';
-            let text = '';
-            let payloadId = null;
+                const from = msg.from;
+                const name = body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || 'Unknown';
+                let text = '';
+                let payloadId = null;
 
-            if (msg.type === 'text') text = msg.text.body;
-            else if (msg.type === 'interactive') {
-                if (msg.interactive.type === 'button_reply') {
-                    text = msg.interactive.button_reply.title;
-                    payloadId = msg.interactive.button_reply.id;
-                } else if (msg.interactive.type === 'list_reply') {
-                    text = msg.interactive.list_reply.title;
-                    payloadId = msg.interactive.list_reply.id;
+                if (msg.type === 'text') text = msg.text.body;
+                else if (msg.type === 'interactive') {
+                    if (msg.interactive.type === 'button_reply') {
+                        text = msg.interactive.button_reply.title;
+                        payloadId = msg.interactive.button_reply.id;
+                    } else if (msg.interactive.type === 'list_reply') {
+                        text = msg.interactive.list_reply.title;
+                        payloadId = msg.interactive.list_reply.id;
+                    }
+                } else text = `[${msg.type.toUpperCase()}]`;
+
+                let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
+                let candidate;
+                if (c.rows.length === 0) {
+                    const id = crypto.randomUUID();
+                    await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at, is_human_mode, variables) VALUES ($1, $2, $3, 'New', $4, $5, FALSE, '{}')`, [id, from, name, text, Date.now()]);
+                    candidate = { id, phone_number: from, is_human_mode: false, current_bot_step_id: null, variables: {}, name };
+                } else {
+                    candidate = c.rows[0];
+                    await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
                 }
-            } else text = `[${msg.type.toUpperCase()}]`;
 
-            let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
-            let candidate;
-            if (c.rows.length === 0) {
-                const id = crypto.randomUUID();
-                await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at, is_human_mode, variables) VALUES ($1, $2, $3, 'New', $4, $5, FALSE, '{}')`, [id, from, name, text, Date.now()]);
-                candidate = { id, phone_number: from, is_human_mode: false, current_bot_step_id: null, variables: {}, name };
-            } else {
-                candidate = c.rows[0];
-                await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
-            }
-
-            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, 'text', $4, 'received', NOW())`, [crypto.randomUUID(), candidate.id, text, msg.id]);
-            await runBotEngine(client, candidate, text, payloadId);
+                await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, 'text', $4, 'received', NOW())`, [crypto.randomUUID(), candidate.id, text, msg.id]);
+                await runBotEngine(client, candidate, text, payloadId);
+            });
         });
 
+        // 9s Timeout to acknowledge Meta properly (prevent retries if lambda is slightly slow)
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Webhook Processing Timeout")), 9000));
         await Promise.race([processPromise, timeoutPromise]).catch(err => console.error("[Webhook Warning]", err.message));
         res.sendStatus(200);
@@ -566,6 +599,11 @@ apiRouter.post('/bot/save', async (req, res) => {
         await withDb(async (client) => {
             await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), req.body]);
         });
+        
+        // INVALIDATE CACHE
+        memoryCache.botSettings = null;
+        memoryCache.lastUpdated = 0;
+        
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -700,31 +738,34 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
     let processed = 0, errors = 0;
     try {
         await withDb(async (client) => {
-            const now = Date.now();
-            const jobs = await client.query(`SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number FROM scheduled_messages sm JOIN candidates c ON sm.candidate_id = c.id WHERE sm.status = 'pending' AND sm.scheduled_time <= $1 LIMIT 10 FOR UPDATE OF sm SKIP LOCKED`, [now]);
-            for (const job of jobs.rows) {
-                try {
-                    await client.query("UPDATE scheduled_messages SET status = 'processing' WHERE id = $1", [job.id]);
-                    const p = job.payload || {};
-                    let metaP, dbLogText = p.text || '', dbType = 'text';
-                    if (p.mediaUrl) {
-                        const url = await refreshMediaUrl(p.mediaUrl);
-                        const mediaType = p.mediaType || 'image';
-                        dbType = mediaType;
-                        dbLogText = JSON.stringify({ url: p.mediaUrl, caption: p.text || '' });
-                        metaP = { type: mediaType, [mediaType]: { link: url, caption: p.text || '' } };
-                        if (mediaType === 'document') metaP[mediaType].filename = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'doc.pdf');
-                    } else metaP = { type: 'text', text: { body: dbLogText } };
-                    
-                    await sendToMeta(job.phone_number, metaP);
-                    await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]);
-                    await client.query("UPDATE scheduled_messages SET status = 'sent' WHERE id = $1", [job.id]);
-                    processed++;
-                } catch (e) {
-                    errors++;
-                    await client.query("UPDATE scheduled_messages SET status = 'failed', error_log = $2 WHERE id = $1", [job.id, e.message]);
+            // Check & Auto-Heal table existence during cron too
+            await executeWithRetry(client, async () => {
+                const now = Date.now();
+                const jobs = await client.query(`SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number FROM scheduled_messages sm JOIN candidates c ON sm.candidate_id = c.id WHERE sm.status = 'pending' AND sm.scheduled_time <= $1 LIMIT 10 FOR UPDATE OF sm SKIP LOCKED`, [now]);
+                for (const job of jobs.rows) {
+                    try {
+                        await client.query("UPDATE scheduled_messages SET status = 'processing' WHERE id = $1", [job.id]);
+                        const p = job.payload || {};
+                        let metaP, dbLogText = p.text || '', dbType = 'text';
+                        if (p.mediaUrl) {
+                            const url = await refreshMediaUrl(p.mediaUrl);
+                            const mediaType = p.mediaType || 'image';
+                            dbType = mediaType;
+                            dbLogText = JSON.stringify({ url: p.mediaUrl, caption: p.text || '' });
+                            metaP = { type: mediaType, [mediaType]: { link: url, caption: p.text || '' } };
+                            if (mediaType === 'document') metaP[mediaType].filename = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'doc.pdf');
+                        } else metaP = { type: 'text', text: { body: dbLogText } };
+                        
+                        await sendToMeta(job.phone_number, metaP);
+                        await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]);
+                        await client.query("UPDATE scheduled_messages SET status = 'sent' WHERE id = $1", [job.id]);
+                        processed++;
+                    } catch (e) {
+                        errors++;
+                        await client.query("UPDATE scheduled_messages SET status = 'failed', error_log = $2 WHERE id = $1", [job.id, e.message]);
+                    }
                 }
-            }
+            });
         });
         res.json({ status: 'ok', processed, errors });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -774,7 +815,7 @@ if (require.main === module) {
     const PORT = process.env.PORT || 3001;
     app.listen(PORT, () => {
         console.log(`Server running on ${PORT}`);
-        // Auto-Init Check on Start
+        // Auto-Init Check on Start (For Local/VPS, NOT Vercel)
         (async () => {
             try {
                 if (pgPool) {
