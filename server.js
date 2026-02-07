@@ -58,7 +58,7 @@ try {
         connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
         idleTimeoutMillis: 30000,
         ssl: { rejectUnauthorized: false }, 
-        max: 10,
+        max: 20, // Increased for parallel cron processing
         keepAlive: true
     });
     
@@ -526,7 +526,6 @@ const apiRouter = express.Router();
 apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
 // --- DEEP WAKE PING ---
-// Critical for preventing Database Sleep
 apiRouter.get('/ping', async (req, res) => {
     try {
         if (pgPool) {
@@ -623,7 +622,6 @@ apiRouter.post('/webhook', async (req, res) => {
             });
         });
 
-        // 9s Timeout to acknowledge Meta properly (prevent retries if lambda is slightly slow)
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Webhook Processing Timeout")), 9000));
         await Promise.race([processPromise, timeoutPromise]).catch(err => console.error("[Webhook Warning]", err.message));
         res.sendStatus(200);
@@ -652,11 +650,8 @@ apiRouter.post('/bot/save', async (req, res) => {
         await withDb(async (client) => {
             await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), req.body]);
         });
-        
-        // INVALIDATE CACHE
         memoryCache.botSettings = null;
         memoryCache.lastUpdated = 0;
-        
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -719,10 +714,11 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
                 const freshUrl = await refreshMediaUrl(mediaUrl);
                 const type = mediaType || 'image';
                 payload = { type, [type]: { link: freshUrl, caption: text } };
+                if (type === 'document') payload[type].filename = decodeURIComponent(new URL(freshUrl).pathname.split('/').pop() || 'file.pdf');
                 dbText = JSON.stringify({ url: mediaUrl, caption: text });
             }
             await sendToMeta(c.rows[0].phone_number, payload);
-            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text']);
+            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text']);
         });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -738,15 +734,29 @@ apiRouter.get('/drivers/:id/documents', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- OPTIMIZED BULK SCHEDULER ---
 apiRouter.post('/scheduled-messages', async (req, res) => {
     try {
         const { driverIds, message, timestamp } = req.body;
+        if (!driverIds || driverIds.length === 0) return res.status(400).json({error: "No recipients"});
+        
         const payload = typeof message === 'string' ? { text: message } : message;
+        
         await withDb(async (client) => {
-            for (const id of driverIds) await client.query(`INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status) VALUES ($1, $2, $3, $4, 'pending')`, [crypto.randomUUID(), id, payload, timestamp]);
+            // Bulk Insert using UNNEST for performance
+            // $1 = ids array, $2 = payload, $3 = timestamp
+            const query = `
+                INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status)
+                SELECT gen_random_uuid(), unnest($1::uuid[]), $2, $3, 'pending'
+            `;
+            await client.query(query, [driverIds, payload, timestamp]);
         });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+        
+        res.json({ success: true, count: driverIds.length });
+    } catch (e) { 
+        console.error("Bulk Schedule Error:", e);
+        res.status(500).json({ error: e.message }); 
+    }
 });
 
 apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => {
@@ -787,40 +797,77 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- ADVANCED PARALLEL CRON PROCESSOR ---
 apiRouter.get('/cron/process-queue', async (req, res) => {
     let processed = 0, errors = 0;
     try {
         await withDb(async (client) => {
-            // Check & Auto-Heal table existence during cron too
             await executeWithRetry(client, async () => {
                 const now = Date.now();
-                const jobs = await client.query(`SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number FROM scheduled_messages sm JOIN candidates c ON sm.candidate_id = c.id WHERE sm.status = 'pending' AND sm.scheduled_time <= $1 LIMIT 10 FOR UPDATE OF sm SKIP LOCKED`, [now]);
-                for (const job of jobs.rows) {
+                
+                // Fetch larger batch (50) for efficiency
+                const jobs = await client.query(`
+                    SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number 
+                    FROM scheduled_messages sm 
+                    JOIN candidates c ON sm.candidate_id = c.id 
+                    WHERE sm.status = 'pending' AND sm.scheduled_time <= $1 
+                    LIMIT 50 
+                    FOR UPDATE OF sm SKIP LOCKED
+                `, [now]);
+
+                if (jobs.rows.length === 0) return;
+
+                // Helper for processing a single job
+                const processJob = async (job) => {
                     try {
+                        // Optimistic update to processing
                         await client.query("UPDATE scheduled_messages SET status = 'processing' WHERE id = $1", [job.id]);
+                        
                         const p = job.payload || {};
                         let metaP, dbLogText = p.text || '', dbType = 'text';
+                        
+                        // Smart Media Handling
                         if (p.mediaUrl) {
                             const url = await refreshMediaUrl(p.mediaUrl);
                             const mediaType = p.mediaType || 'image';
                             dbType = mediaType;
+                            
+                            // Construct caption/filename
                             dbLogText = JSON.stringify({ url: p.mediaUrl, caption: p.text || '' });
+                            
                             metaP = { type: mediaType, [mediaType]: { link: url, caption: p.text || '' } };
-                            if (mediaType === 'document') metaP[mediaType].filename = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'doc.pdf');
-                        } else metaP = { type: 'text', text: { body: dbLogText } };
+                            
+                            // Specific fix for Documents: Needs 'filename'
+                            if (mediaType === 'document') {
+                                metaP[mediaType].filename = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'document.pdf');
+                                // Documents don't support 'caption' in some API versions, but we leave it as valid property
+                            }
+                        } else {
+                            metaP = { type: 'text', text: { body: dbLogText } };
+                        }
                         
                         await sendToMeta(job.phone_number, metaP);
-                        await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]);
+                        
+                        // Log success
+                        await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]);
                         await client.query("UPDATE scheduled_messages SET status = 'sent' WHERE id = $1", [job.id]);
                         processed++;
                     } catch (e) {
                         errors++;
+                        console.error(`Job ${job.id} failed:`, e.message);
                         await client.query("UPDATE scheduled_messages SET status = 'failed', error_log = $2 WHERE id = $1", [job.id, e.message]);
                     }
+                };
+
+                // PARALLEL EXECUTION (Batch of 5 concurrently)
+                const BATCH_SIZE = 5;
+                for (let i = 0; i < jobs.rows.length; i += BATCH_SIZE) {
+                    const chunk = jobs.rows.slice(i, i + BATCH_SIZE);
+                    await Promise.all(chunk.map(job => processJob(job)));
                 }
             });
         });
-        res.json({ status: 'ok', processed, errors });
+        res.json({ status: 'ok', processed, errors, queueSize: processed + errors });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
