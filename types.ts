@@ -1,5 +1,4 @@
 
-
 export enum LeadStatus {
   NEW = 'New',
   QUALIFIED = 'Qualified',
@@ -45,7 +44,11 @@ export type NodeType =
   | 'input' 
   | 'interactive_button' 
   | 'interactive_list' 
+  | 'rich_card'          // NEW: Header Media + Body + Footer + Buttons
+  | 'location_request'   // NEW: Request GPS
   | 'condition' 
+  | 'set_variable'       // NEW: Silent Logic
+  | 'delay'              // NEW: Human pause
   | 'handoff' 
   | 'status_update'
   | 'template';
@@ -65,7 +68,8 @@ export interface FlowNodeData {
   // Content
   content?: string; 
   mediaUrl?: string;
-  footerText?: string; 
+  headerType?: 'none' | 'image' | 'video' | 'document'; // NEW
+  footerText?: string; // NEW
   
   // Interactive Elements
   buttons?: MessageButton[];
@@ -75,9 +79,13 @@ export interface FlowNodeData {
   
   // Input & Validation
   variable?: string; 
-  validationType?: 'text' | 'email' | 'phone' | 'number' | 'regex';
+  validationType?: 'text' | 'email' | 'phone' | 'number' | 'regex' | 'location';
   validationRegex?: string;
   retryMessage?: string; // Message to send if validation fails
+  
+  // Logic & Operations
+  delayTime?: number; // In milliseconds
+  operationValue?: string; // For set_variable
   
   // Branching Logic
   conditions?: ConditionRule[];

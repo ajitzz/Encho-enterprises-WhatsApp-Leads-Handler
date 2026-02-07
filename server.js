@@ -243,26 +243,19 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
         let botSettings;
 
-        // 1. TRY CACHE (Efficiency Boost)
+        // 1. TRY CACHE
         const now = Date.now();
         if (memoryCache.botSettings && (now - memoryCache.lastUpdated < SYSTEM_CONFIG.CACHE_TTL)) {
             botSettings = memoryCache.botSettings;
         } else {
             // 2. FALLBACK TO DB
             let botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
-            
             if (botRes.rows.length > 0) {
                 botSettings = botRes.rows[0].settings;
-                // Update Cache
                 memoryCache.botSettings = botSettings;
                 memoryCache.lastUpdated = now;
             } else {
-                console.log("[Bot Engine] No published bot found. Auto-seeding default flow...");
-                const defaultBot = getDefaultBotConfig();
-                try {
-                    await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), defaultBot]);
-                } catch (seedErr) {}
-                botSettings = defaultBot;
+                botSettings = getDefaultBotConfig();
             }
         }
         
@@ -274,17 +267,20 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         let shouldReplyInvalid = false;
         const cleanInput = (incomingText || '').trim().toLowerCase();
 
+        // 1. Global Resets
         if (['start', 'restart', 'hi', 'hello', 'menu'].includes(cleanInput)) {
             currentNodeId = null;
             await client.query("UPDATE candidates SET current_bot_step_id = NULL WHERE id = $1", [candidate.id]);
         }
 
+        // 2. Determine Current State
         if (!currentNodeId) {
             const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
             nextNodeId = startNode ? startNode.id : nodes[0]?.id;
         } else {
             const currentNode = nodes.find(n => n.id === currentNodeId);
             if (currentNode) {
+                // A. Handle Variable Capture (Input Node)
                 if (currentNode.data.type === 'input' && currentNode.data.variable) {
                     const varName = currentNode.data.variable;
                     const newVars = { ...candidate.variables, [varName]: incomingText };
@@ -292,9 +288,11 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     candidate.variables = newVars; 
                 }
 
+                // B. Find Next Path
                 const outgoingEdges = edges.filter(e => e.source === currentNodeId);
                 let matchedEdge = null;
 
+                // Match Buttons / List Rows via Payload ID
                 if (incomingPayloadId) {
                     if (currentNode.data.buttons) {
                         const btn = currentNode.data.buttons.find(b => b.id === incomingPayloadId);
@@ -306,17 +304,15 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     }
                 }
 
+                // Match Text for Buttons (Fallback)
                 if (!matchedEdge && cleanInput) {
                     if (currentNode.data.buttons) {
                         const btn = currentNode.data.buttons.find(b => b.title.toLowerCase().trim() === cleanInput);
                         if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
                     }
-                    if (!matchedEdge && currentNode.data.sections) {
-                        const row = currentNode.data.sections.flatMap(s => s.rows).find(r => r.title.toLowerCase().trim() === cleanInput);
-                        if (row) matchedEdge = outgoingEdges.find(e => e.sourceHandle === row.id);
-                    }
                 }
 
+                // Default Path
                 if (!matchedEdge) {
                     matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
                 }
@@ -324,17 +320,20 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 if (matchedEdge) {
                     nextNodeId = matchedEdge.target;
                 } else {
+                    // Dead End logic
                     if (outgoingEdges.length === 0) {
                         const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
                         nextNodeId = startNode ? startNode.id : null;
                     } else {
+                        // User ignored the buttons/menu -> Stay on node & Mark Invalid
                         nextNodeId = currentNodeId;
-                        if (['interactive_button', 'interactive_list'].includes(currentNode.data.type)) {
+                        if (['interactive_button', 'interactive_list', 'rich_card'].includes(currentNode.data.type)) {
                             shouldReplyInvalid = true;
                         }
                     }
                 }
             } else {
+                // Lost state -> Restart
                 const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
                 nextNodeId = startNode ? startNode.id : null;
             }
@@ -345,9 +344,10 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             return;
         }
 
+        // 3. Execute Node Chain (Synchronous Loop)
         let activeNodeId = nextNodeId;
         let opsCount = 0;
-        const MAX_OPS = 15;
+        const MAX_OPS = 15; // Loop protection
 
         while (activeNodeId && opsCount < MAX_OPS) {
             opsCount++;
@@ -355,15 +355,29 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             if (!node) break;
 
             const data = node.data || {};
+            let autoAdvance = true; // Default behavior
             
+            // --- LOGIC NODES (No Message Sent) ---
+
             if (data.type === 'status_update') {
                 if (data.targetStatus) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [data.targetStatus, candidate.id]);
-                const nextEdge = edges.find(e => e.source === node.id);
-                activeNodeId = nextEdge ? nextEdge.target : null;
-                continue;
             }
 
-            if (data.type === 'condition') {
+            else if (data.type === 'set_variable') {
+                if (data.variable && data.operationValue) {
+                    const newVars = { ...candidate.variables, [data.variable]: data.operationValue };
+                    await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
+                    candidate.variables = newVars;
+                }
+            }
+            
+            else if (data.type === 'delay') {
+                // Max delay 5s to prevent timeouts
+                const ms = Math.min(data.delayTime || 2000, 5000);
+                await new Promise(r => setTimeout(r, ms));
+            }
+
+            else if (data.type === 'condition') {
                 let isMatch = false;
                 if (data.variable) {
                     const val = candidate.variables[data.variable];
@@ -378,34 +392,67 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 const handle = isMatch ? 'true' : 'false';
                 const nextEdge = edges.find(e => e.source === node.id && (e.sourceHandle === handle || !e.sourceHandle));
                 activeNodeId = nextEdge ? nextEdge.target : null;
-                continue;
+                continue; // Skip standard edge finding
             }
 
-            if (data.type === 'handoff') {
+            else if (data.type === 'handoff') {
                 await client.query("UPDATE candidates SET is_human_mode = TRUE WHERE id = $1", [candidate.id]);
                 const msg = processText(data.content, candidate);
                 if (isValidContent(msg)) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } });
-                break;
+                break; // Stop execution
             }
 
-            if (data.type !== 'start') {
+            // --- MESSAGE NODES (Send to WhatsApp) ---
+            
+            else if (data.type !== 'start') {
                 let rawBody = processText(data.content || '', candidate);
                 let validBody = isValidContent(rawBody) ? rawBody : null;
                 let payload = null;
 
                 if (data.type === 'text') {
-                    if (validBody) payload = { type: 'text', text: { body: validBody } };
-                } else if (data.type === 'input') {
+                    if (validBody) {
+                        payload = { type: 'text', text: { body: validBody } };
+                        // Footer fallback support via text is not standard in Cloud API without template, 
+                        // so we usually just append it to body if it exists
+                        if (data.footerText) payload.text.body += `\n\n_${data.footerText}_`;
+                    }
+                } 
+                else if (data.type === 'input') {
                     payload = { type: 'text', text: { body: validBody || "Please enter your response below:" } };
-                } else if (data.type === 'image' && data.mediaUrl) {
+                    autoAdvance = false; // Stop and wait for user
+                } 
+                else if (data.type === 'location_request') {
+                     payload = {
+                        type: "interactive",
+                        interactive: {
+                            type: "location_request_message",
+                            body: { text: validBody || "Please share your current location:" },
+                            action: { name: "send_location" }
+                        }
+                    };
+                    autoAdvance = false;
+                }
+                else if (data.type === 'image' && data.mediaUrl) {
                     const url = await refreshMediaUrl(data.mediaUrl);
                     payload = { type: 'image', image: { link: url, caption: validBody || '' } };
-                } else if (data.type === 'interactive_button' && data.buttons?.length > 0) {
+                } 
+                
+                // RICH BUTTONS / RICH CARD
+                else if ((data.type === 'interactive_button' || data.type === 'rich_card') && data.buttons?.length > 0) {
+                    // Construct Header
+                    let header = undefined;
+                    if (data.mediaUrl && (data.headerType === 'image' || data.headerType === 'video')) {
+                        const url = await refreshMediaUrl(data.mediaUrl);
+                        header = { type: data.headerType, [data.headerType]: { link: url } };
+                    }
+                    
                     payload = {
                         type: "interactive",
                         interactive: {
                             type: "button",
+                            header: header,
                             body: { text: validBody || "Please select an option:" },
+                            footer: data.footerText ? { text: data.footerText } : undefined,
                             action: {
                                 buttons: data.buttons.slice(0, 3).map(b => ({
                                     type: "reply",
@@ -414,7 +461,10 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             }
                         }
                     };
-                } else if (data.type === 'interactive_list' && data.sections?.length > 0) {
+                    autoAdvance = false;
+                } 
+                
+                else if (data.type === 'interactive_list' && data.sections?.length > 0) {
                     payload = {
                         type: "interactive",
                         interactive: {
@@ -426,6 +476,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             }
                         }
                     };
+                    autoAdvance = false;
                 }
 
                 if (payload) {
@@ -441,14 +492,16 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 }
             }
 
+            // 4. Update State & Move On
             await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
 
-            if (['input', 'interactive_button', 'interactive_list'].includes(data.type)) break;
+            if (!autoAdvance) break; // Stop loop if waiting for input/button
 
             const nextEdge = edges.find(e => e.source === node.id);
             if (nextEdge) {
                 activeNodeId = nextEdge.target;
-                await new Promise(r => setTimeout(r, 500));
+                // Tiny throttle to prevent rapid-fire API spam if no delays are used
+                await new Promise(r => setTimeout(r, 200));
             } else {
                 activeNodeId = null;
             }
