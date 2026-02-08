@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   ReactFlow, 
@@ -24,11 +23,9 @@ import {
   Image as ImageIcon, MousePointer, Settings, GripVertical, Plus, 
   ListPlus, LayoutTemplate, RefreshCw, User, Check, Clock, MapPin, 
   CreditCard, FileText, Type, Variable, CornerRightDown, Navigation,
-  LocateFixed
+  LocateFixed, AlertTriangle, Bot
 } from 'lucide-react';
 import { FlowNodeData, NodeType, ListSection, LocationPreset } from '../types';
-
-// --- 1. ADVANCED NODE COMPONENT (VISUALIZER) ---
 
 const NodeHeader = ({ color, icon, label, selected, subtitle }: any) => (
     <div className={`px-4 py-2.5 flex items-center gap-3 border-b border-gray-100 rounded-t-xl transition-colors ${selected ? 'bg-blue-50/80' : 'bg-white'}`}>
@@ -130,8 +127,11 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                         {/* Presets Preview */}
                         {data.presets && data.presets.length > 0 && (
                             <div className="space-y-1">
-                                <div className="text-[9px] font-bold text-gray-400 uppercase tracking-wider pl-1">Smart Presets</div>
-                                {data.presets.map((preset) => (
+                                <div className="flex justify-between items-center text-[9px] font-bold text-gray-400 uppercase tracking-wider pl-1">
+                                    <span>Smart Presets</span>
+                                    <span>{data.presets.length}</span>
+                                </div>
+                                {data.presets.slice(0, 3).map((preset) => (
                                     <div key={preset.id} className="flex items-center gap-2 bg-gray-50 px-2 py-1.5 rounded border border-gray-100">
                                         {preset.type === 'manual' ? (
                                             <LocateFixed size={10} className="text-blue-500" />
@@ -144,6 +144,9 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                                         )}
                                     </div>
                                 ))}
+                                {data.presets.length > 3 && (
+                                    <div className="text-[9px] text-center text-gray-400 italic">+{data.presets.length - 3} more...</div>
+                                )}
                             </div>
                         )}
                     </div>
@@ -224,8 +227,6 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
         </div>
     );
 };
-
-// --- 2. PROPERTIES PANEL (THE EDITOR) ---
 
 const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>, onChange: (id: string, d: any) => void, onClose: () => void }) => {
     const [local, setLocal] = useState(node.data);
@@ -335,6 +336,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                                     update('presets', n);
                                                 }}
                                                 placeholder="Label (e.g. Airport)"
+                                                maxLength={24}
                                             />
                                             <button onClick={() => {
                                                 const n = local.presets.filter((_:any, idx:number) => idx !== i);
@@ -344,7 +346,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                         
                                         <div className="flex items-center gap-2">
                                             <select 
-                                                className="text-[10px] p-1 rounded border border-gray-200 bg-white"
+                                                className={`text-[10px] p-1 rounded border border-gray-200 ${preset.type === 'manual' ? 'bg-blue-50 text-blue-700' : 'bg-white'}`}
                                                 value={preset.type}
                                                 onChange={e => {
                                                     const n = [...(local.presets || [])];
@@ -384,18 +386,30 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                                     />
                                                 </div>
                                             ) : (
-                                                <span className="text-[9px] text-blue-500 italic flex-1 pl-2">Opens Map Pin Request</span>
+                                                <div className="flex-1 flex items-center gap-1 text-[9px] text-blue-500 italic pl-1">
+                                                    <LocateFixed size={10} /> 
+                                                    <span>Opens Map Request</span>
+                                                </div>
                                             )}
                                         </div>
                                     </div>
                                 ))}
                                 
-                                <button 
-                                    onClick={() => update('presets', [...(local.presets||[]), { id: `pre_${Date.now()}`, title: 'New Option', type: 'static' }])} 
-                                    className="w-full py-2 border border-dashed border-gray-300 rounded-lg text-xs font-bold text-gray-500 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200 flex items-center justify-center gap-2 transition-all"
-                                >
-                                    <Plus size={12} /> Add Location Option
-                                </button>
+                                {(local.presets || []).length >= 10 && (
+                                    <div className="flex items-center gap-2 text-[10px] text-amber-700 bg-amber-50 p-2 rounded border border-amber-200">
+                                        <AlertTriangle size={12} />
+                                        <span>Max 10 options allowed by WhatsApp</span>
+                                    </div>
+                                )}
+
+                                {(local.presets || []).length < 10 && (
+                                    <button 
+                                        onClick={() => update('presets', [...(local.presets||[]), { id: `pre_${Date.now()}`, title: 'New Option', type: 'static' }])} 
+                                        className="w-full py-2 border border-dashed border-gray-300 rounded-lg text-xs font-bold text-gray-500 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200 flex items-center justify-center gap-2 transition-all"
+                                    >
+                                        <Plus size={12} /> Add Location Option
+                                    </button>
+                                )}
                             </div>
                         </div>
                     )}
@@ -610,155 +624,203 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
     );
 };
 
-// --- 3. BOT BUILDER COMPONENT ---
-
 const nodeTypes = {
   custom: UniversalNode
 };
 
 export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
-    const { nodes, edges, onNodesChange, onEdgesChange, onConnect, setNodes, setEdges, addNode, updateNodeData } = useFlowStore();
-    const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-    const [activeView, setActiveView] = useState<'flow' | 'ai'>('flow');
-    const [isSaving, setIsSaving] = useState(false);
+  const { 
+    nodes, edges, onNodesChange, onEdgesChange, onConnect, 
+    addNode, setNodes, setEdges, updateNodeData, resetFlow 
+  } = useFlowStore();
 
-    useEffect(() => {
-        const load = async () => {
-             let settings;
-             if (isLiveMode) {
-                 try { settings = await liveApiService.getBotSettings(); } catch(e) { console.error(e); }
-             } else {
-                 settings = mockBackend.getBotSettings();
-             }
-             
-             if (settings) {
-                 if (settings.nodes) setNodes(settings.nodes);
-                 if (settings.edges) setEdges(settings.edges);
-             }
-        };
-        load();
-    }, [isLiveMode, setNodes, setEdges]);
+  const [selectedNode, setSelectedNode] = useState<Node<FlowNodeData> | null>(null);
+  const [activeView, setActiveView] = useState<'flow' | 'ai'>('flow');
+  const [isSaving, setIsSaving] = useState(false);
 
-    const handleSave = async () => {
-        setIsSaving(true);
-        const settings = {
-            nodes,
-            edges,
-            isEnabled: true, // simplified
-            shouldRepeat: false,
-            routingStrategy: 'BOT_ONLY'
-        };
-
-        try {
-            if (isLiveMode) {
-                 const current = await liveApiService.getBotSettings();
-                 await liveApiService.saveBotSettings({ ...current, nodes, edges });
-            } else {
-                 const current = mockBackend.getBotSettings();
-                 mockBackend.updateBotSettings({ ...current, nodes, edges });
-            }
-            alert("Flow Saved!");
-        } catch(e) {
-            alert("Save Failed");
-        } finally {
-            setIsSaving(false);
-        }
+  // Load Initial Data
+  useEffect(() => {
+    const load = async () => {
+      let settings;
+      if (isLiveMode) {
+         try { settings = await liveApiService.getBotSettings(); } catch(e) {}
+      } else {
+         settings = mockBackend.getBotSettings();
+      }
+      
+      if (settings && settings.nodes) {
+          // Hydrate store
+          setNodes(settings.nodes);
+          setEdges(settings.edges);
+      }
     };
-    
-    const onNodeClick = (_: React.MouseEvent, node: Node) => {
-        setSelectedNodeId(node.id);
-    };
+    load();
+  }, [isLiveMode]);
 
-    const handleAddNode = (type: NodeType, label: string) => {
-        const id = `${type}_${Date.now()}`;
-        const newNode: Node<FlowNodeData> = {
-            id,
-            type: 'custom',
-            position: { x: 250, y: 250 }, // centered roughly
-            data: {
-                id,
-                type,
-                label,
-                content: ''
-            }
-        };
-        addNode(newNode);
-    };
+  const handleSave = async () => {
+      setIsSaving(true);
+      const settings = {
+          isEnabled: true,
+          shouldRepeat: false, // Default or from previous state if stored
+          routingStrategy: 'BOT_ONLY',
+          nodes,
+          edges
+      };
 
-    if (activeView === 'ai') {
-        return (
-            <div className="h-full flex flex-col">
-                 <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center gap-4">
-                      <button onClick={() => setActiveView('flow')} className="text-gray-500 hover:text-gray-900 font-bold text-sm">Flow Builder</button>
-                      <div className="h-4 w-px bg-gray-300"></div>
-                      <button className="text-blue-600 font-bold text-sm bg-blue-50 px-3 py-1 rounded-lg">AI Persona</button>
-                 </div>
-                 <div className="flex-1 overflow-hidden">
-                     <AITraining isLiveMode={isLiveMode} />
-                 </div>
-            </div>
-        );
-    }
+      try {
+          if (isLiveMode) {
+              await liveApiService.saveBotSettings(settings);
+              alert("Live Bot Updated!");
+          } else {
+              mockBackend.updateBotSettings(settings as any);
+              alert("Simulator Bot Updated!");
+          }
+      } catch(e) {
+          alert("Save Failed");
+      } finally {
+          setIsSaving(false);
+      }
+  };
 
-    return (
-        <div className="h-full flex flex-col relative bg-gray-50">
-            {/* Toolbar */}
-            <div className="h-14 bg-white border-b border-gray-200 flex items-center justify-between px-4 z-10 shrink-0">
-                <div className="flex items-center gap-4">
-                     <div className="flex bg-gray-100 p-1 rounded-lg">
-                          <button className="px-3 py-1.5 bg-white shadow-sm rounded-md text-xs font-bold text-gray-900">Flow Builder</button>
-                          <button onClick={() => setActiveView('ai')} className="px-3 py-1.5 text-xs font-medium text-gray-500 hover:text-gray-900">AI Persona</button>
-                     </div>
-                </div>
-                <div className="flex items-center gap-2">
-                     <button onClick={handleSave} disabled={isSaving} className="bg-black text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 hover:bg-gray-800 transition-colors">
-                         {isSaving ? 'Saving...' : <><Save size={14} /> Save Flow</>}
+  const onNodeClick = (_: any, node: Node) => {
+      setSelectedNode(node as Node<FlowNodeData>);
+  };
+
+  const handleAddNode = (type: NodeType) => {
+      const id = `node_${Date.now()}`;
+      const newNode: Node<FlowNodeData> = {
+          id,
+          type: 'custom',
+          position: { x: 250, y: 100 + (nodes.length * 50) },
+          data: { 
+              id, 
+              type, 
+              label: type.replace(/_/g, ' '), 
+              content: '' 
+          }
+      };
+      addNode(newNode);
+  };
+
+  if (activeView === 'ai') {
+      return (
+          <div className="h-full flex flex-col">
+              <div className="bg-white border-b border-gray-200 p-4 flex items-center gap-4">
+                  <button onClick={() => setActiveView('flow')} className="flex items-center gap-2 text-gray-500 hover:text-gray-900 font-bold text-sm">
+                      <LayoutTemplate size={18} /> Back to Flow
+                  </button>
+              </div>
+              <AITraining isLiveMode={isLiveMode} />
+          </div>
+      );
+  }
+
+  return (
+    <div className="flex h-full relative font-sans text-gray-900">
+      {/* Sidebar / Toolbar */}
+      <div className="w-64 bg-white border-r border-gray-200 flex flex-col shrink-0 z-10 shadow-sm">
+         <div className="p-5 border-b border-gray-200">
+             <h2 className="font-extrabold text-gray-900 text-lg flex items-center gap-2">
+                 <Bot size={20} className="text-blue-600" /> Bot Studio
+             </h2>
+             <div className="flex gap-2 mt-4">
+                 <button onClick={() => setActiveView('flow')} className={`flex-1 py-1.5 text-xs font-bold rounded-lg border ${activeView === 'flow' ? 'bg-blue-50 border-blue-200 text-blue-700' : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`}>Flow</button>
+                 <button onClick={() => setActiveView('ai')} className={`flex-1 py-1.5 text-xs font-bold rounded-lg border ${activeView === 'ai' ? 'bg-purple-50 border-purple-200 text-purple-700' : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`}>AI Persona</button>
+             </div>
+         </div>
+         
+         <div className="flex-1 overflow-y-auto p-4 space-y-6">
+             {/* Node Palette */}
+             <div>
+                 <h3 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-3">Add Elements</h3>
+                 <div className="grid grid-cols-2 gap-2">
+                     <button onClick={() => handleAddNode('text')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-blue-400 hover:shadow-sm transition-all text-gray-600 hover:text-blue-600">
+                         <Type size={20} className="mb-1" />
+                         <span className="text-[10px] font-bold">Text</span>
                      </button>
-                </div>
-            </div>
-
-            <div className="flex-1 flex overflow-hidden">
-                 {/* Sidebar / Node Palette */}
-                 <div className="w-16 bg-white border-r border-gray-200 flex flex-col items-center py-4 gap-4 z-10">
-                      <button onClick={() => handleAddNode('text', 'Text Message')} className="p-2 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors" title="Text Message"><MessageSquare size={20} /></button>
-                      <button onClick={() => handleAddNode('image', 'Image/Media')} className="p-2 rounded-lg bg-purple-50 text-purple-600 hover:bg-purple-100 transition-colors" title="Image / Video"><ImageIcon size={20} /></button>
-                      <button onClick={() => handleAddNode('interactive_button', 'Buttons')} className="p-2 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100 transition-colors" title="Buttons"><MousePointer size={20} /></button>
-                      <button onClick={() => handleAddNode('interactive_list', 'List Menu')} className="p-2 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors" title="List Menu"><List size={20} /></button>
-                      <button onClick={() => handleAddNode('input', 'Collect Input')} className="p-2 rounded-lg bg-orange-50 text-orange-600 hover:bg-orange-100 transition-colors" title="Collect Input"><CornerRightDown size={20} /></button>
-                      <button onClick={() => handleAddNode('condition', 'Condition')} className="p-2 rounded-lg bg-amber-50 text-amber-600 hover:bg-amber-100 transition-colors" title="Logic Condition"><GitBranch size={20} /></button>
-                      <button onClick={() => handleAddNode('location_request', 'Location Request')} className="p-2 rounded-lg bg-teal-50 text-teal-600 hover:bg-teal-100 transition-colors" title="Request Location"><MapPin size={20} /></button>
-                 </div>
-
-                 <div className="flex-1 h-full relative">
-                      <ReactFlow
-                        nodes={nodes}
-                        edges={edges}
-                        onNodesChange={onNodesChange}
-                        onEdgesChange={onEdgesChange}
-                        onConnect={onConnect}
-                        nodeTypes={nodeTypes}
-                        onNodeClick={onNodeClick}
-                        fitView
-                        attributionPosition="bottom-right"
-                      >
-                         <Background color="#f1f5f9" gap={16} variant={BackgroundVariant.Dots} />
-                         <Controls />
-                         <MiniMap style={{ height: 100 }} zoomable pannable />
-                      </ReactFlow>
+                     <button onClick={() => handleAddNode('image')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-purple-400 hover:shadow-sm transition-all text-gray-600 hover:text-purple-600">
+                         <ImageIcon size={20} className="mb-1" />
+                         <span className="text-[10px] font-bold">Media</span>
+                     </button>
+                     <button onClick={() => handleAddNode('interactive_button')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-rose-400 hover:shadow-sm transition-all text-gray-600 hover:text-rose-600">
+                         <MousePointer size={20} className="mb-1" />
+                         <span className="text-[10px] font-bold">Buttons</span>
+                     </button>
+                     <button onClick={() => handleAddNode('interactive_list')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-indigo-400 hover:shadow-sm transition-all text-gray-600 hover:text-indigo-600">
+                         <List size={20} className="mb-1" />
+                         <span className="text-[10px] font-bold">List Menu</span>
+                     </button>
                  </div>
                  
-                 {selectedNodeId && (
-                     <div className="w-[420px] shrink-0 h-full relative z-20">
-                         {nodes.find(n => n.id === selectedNodeId) && (
-                             <PropertiesPanel 
-                                 node={nodes.find(n => n.id === selectedNodeId)!} 
-                                 onChange={updateNodeData} 
-                                 onClose={() => setSelectedNodeId(null)} 
-                             />
-                         )}
-                     </div>
-                 )}
-            </div>
-        </div>
-    );
+                 <h3 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-3 mt-6">Logic & Data</h3>
+                 <div className="grid grid-cols-2 gap-2">
+                     <button onClick={() => handleAddNode('condition')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-amber-400 hover:shadow-sm transition-all text-gray-600 hover:text-amber-600">
+                         <GitBranch size={20} className="mb-1" />
+                         <span className="text-[10px] font-bold">Condition</span>
+                     </button>
+                     <button onClick={() => handleAddNode('input')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-orange-400 hover:shadow-sm transition-all text-gray-600 hover:text-orange-600">
+                         <CornerRightDown size={20} className="mb-1" />
+                         <span className="text-[10px] font-bold">Get Input</span>
+                     </button>
+                     <button onClick={() => handleAddNode('pickup_location')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-lime-400 hover:shadow-sm transition-all text-gray-600 hover:text-lime-600">
+                         <MapPin size={20} className="mb-1" />
+                         <span className="text-[10px] font-bold">Pickup Loc</span>
+                     </button>
+                     <button onClick={() => handleAddNode('set_variable')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-cyan-400 hover:shadow-sm transition-all text-gray-600 hover:text-cyan-600">
+                         <Variable size={20} className="mb-1" />
+                         <span className="text-[10px] font-bold">Set Var</span>
+                     </button>
+                 </div>
+
+                 <h3 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-3 mt-6">Advanced</h3>
+                 <div className="grid grid-cols-2 gap-2">
+                     <button onClick={() => handleAddNode('rich_card')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-pink-400 hover:shadow-sm transition-all text-gray-600 hover:text-pink-600">
+                         <CreditCard size={20} className="mb-1" />
+                         <span className="text-[10px] font-bold">Rich Card</span>
+                     </button>
+                     <button onClick={() => handleAddNode('delay')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-gray-400 hover:shadow-sm transition-all text-gray-600 hover:text-gray-800">
+                         <Clock size={20} className="mb-1" />
+                         <span className="text-[10px] font-bold">Delay</span>
+                     </button>
+                 </div>
+             </div>
+         </div>
+         
+         <div className="p-4 border-t border-gray-200 bg-gray-50">
+             <button onClick={handleSave} disabled={isSaving} className="w-full bg-black text-white py-3 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-gray-800 transition-all disabled:opacity-50">
+                 {isSaving ? <RefreshCw size={18} className="animate-spin" /> : <Save size={18} />}
+                 {isSaving ? 'Saving...' : 'Save Flow'}
+             </button>
+         </div>
+      </div>
+
+      {/* Canvas */}
+      <div className="flex-1 h-full bg-slate-50 relative">
+          <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onConnect={onConnect}
+              nodeTypes={nodeTypes}
+              onNodeClick={onNodeClick}
+              fitView
+              attributionPosition="bottom-right"
+          >
+              <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#cbd5e1" />
+              <Controls className="!bg-white !shadow-lg !border-none !rounded-lg !m-4" />
+              <MiniMap className="!bg-white !border-2 !border-gray-100 !rounded-lg !shadow-lg !bottom-4 !right-4 !w-48 !h-32" zoomable pannable />
+          </ReactFlow>
+      </div>
+
+      {/* Properties Sidebar (Overlay) */}
+      {selectedNode && (
+          <PropertiesPanel 
+              node={selectedNode} 
+              onChange={updateNodeData} 
+              onClose={() => setSelectedNode(null)} 
+          />
+      )}
+    </div>
+  );
 };
