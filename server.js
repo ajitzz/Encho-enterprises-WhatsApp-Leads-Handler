@@ -175,6 +175,45 @@ const isValidContent = (text) => {
     return true;
 };
 
+// --- SMART TIME RESOLVER (AM/PM GUESSER) ---
+const resolveTimeAmbiguity = (inputTimeStr) => {
+    // Expected format: HH:MM (e.g., 11:25) without AM/PM
+    const [hStr, mStr] = inputTimeStr.split(/[:.]/);
+    let h = parseInt(hStr);
+    const m = parseInt(mStr);
+
+    // If user types 24h format (e.g., 14:00), assume they know what they are doing.
+    if (h > 12) return `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}`;
+
+    const now = new Date();
+    // Candidate 1: Treat as AM
+    const dateAM = new Date();
+    dateAM.setHours(h === 12 ? 0 : h, m, 0, 0);
+    
+    // Candidate 2: Treat as PM
+    const datePM = new Date();
+    datePM.setHours(h === 12 ? 12 : h + 12, m, 0, 0);
+
+    // Logic: 
+    // If one is in the past and one is in future, pick future.
+    // If both in future, pick nearest.
+    // If both in past, pick nearest future (tomorrow AM vs tomorrow PM implied) - simplified to: Pick today's nearest even if past, but let's do "Next Occurrence".
+    
+    let diffAM = dateAM - now;
+    let diffPM = datePM - now;
+
+    // If time passed today, assume it means tomorrow
+    if (diffAM < -1000 * 60 * 30) diffAM += 24 * 60 * 60 * 1000; // Add 24h
+    if (diffPM < -1000 * 60 * 30) diffPM += 24 * 60 * 60 * 1000; // Add 24h
+
+    // Return the one with smaller positive difference
+    const isPM = diffPM < diffAM;
+    
+    const displayH = h;
+    const ampm = isPM ? 'PM' : 'AM';
+    return `${displayH}:${m.toString().padStart(2,'0')} ${ampm}`;
+};
+
 // --- DYNAMIC OPTION GENERATORS ---
 const generateDateOptions = (config) => {
     const options = [];
@@ -199,31 +238,45 @@ const generateDateOptions = (config) => {
     return options;
 };
 
+// 30-Minute Interval Rolling Window Generator
 const generateTimeOptions = (config) => {
     const options = [];
-    const startHour = config?.startHour ?? 9;
-    const endHour = config?.endHour ?? 18;
     
-    for (let h = startHour; h <= endHour; h++) {
-        const ampm = h >= 12 ? 'PM' : 'AM';
-        const displayH = h % 12 || 12;
-        const timeStr = `${displayH}:00 ${ampm}`;
-        const id = `${h.toString().padStart(2, '0')}:00`;
+    // Use current server time as baseline
+    const now = new Date();
+    
+    // Round minutes to next 30
+    let startMinutes = Math.ceil(now.getMinutes() / 30) * 30;
+    let startHour = now.getHours();
+    
+    if (startMinutes === 60) {
+        startMinutes = 0;
+        startHour += 1;
+    }
+    
+    const baseTime = new Date();
+    baseTime.setHours(startHour, startMinutes, 0, 0);
+
+    // Generate next 9 slots (covering ~4.5 hours) to fit within WhatsApp 10-item limit
+    for (let i = 0; i < 9; i++) {
+        const slot = new Date(baseTime.getTime() + (i * 30 * 60000));
+        
+        let hours = slot.getHours();
+        const mins = slot.getMinutes();
+        const ampm = hours >= 12 ? 'PM' : 'AM';
+        
+        hours = hours % 12;
+        hours = hours ? hours : 12; // the hour '0' should be '12'
+        
+        const timeStr = `${hours}:${mins.toString().padStart(2, '0')} ${ampm}`;
+        const id = slot.toTimeString().substring(0, 5); // 24h format for ID
+        
         options.push({ id, title: timeStr });
     }
     
-    if (options.length === 0) {
-        return [
-            { id: 'morning', title: 'Morning (9AM - 12PM)' },
-            { id: 'afternoon', title: 'Afternoon (12PM - 4PM)' },
-            { id: 'evening', title: 'Evening (4PM - 8PM)' }
-        ];
-    }
+    options.push({ id: 'custom_time', title: 'Type Specific Time', description: 'e.g. 11:25' });
     
-    const limited = options.slice(0, 9);
-    limited.push({ id: 'custom_time', title: 'Type Specific Time', description: 'Enter manually (e.g. 11:15 PM)' });
-    
-    return limited;
+    return options;
 };
 
 // --- HELPER: DETECT MANUAL PRESET ---
@@ -371,9 +424,20 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         } else if (incomingPayloadId) {
                             valueToSave = incomingPayloadId;
                         } else if (cleanInput) {
+                            // Enhanced Time Regex to catch "11:25", "11.25", "11:25pm"
                             const timeRegex = /([0-9]{1,2})[:.]([0-9]{2})\s*(am|pm)?/i;
-                            if (timeRegex.test(cleanInput) || cleanInput.length > 3) {
-                                valueToSave = incomingText;
+                            const match = cleanInput.match(timeRegex);
+                            
+                            if (match) {
+                                // If AM/PM is present
+                                if (match[3]) {
+                                    valueToSave = match[0].toUpperCase();
+                                } else {
+                                    // Missing AM/PM: Use Smart Resolver
+                                    valueToSave = resolveTimeAmbiguity(match[0]);
+                                }
+                            } else if (cleanInput.length > 3) {
+                                valueToSave = incomingText; // Fallback
                             }
                         }
                     }
@@ -392,7 +456,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
                         candidate.variables = newVars;
                     } else if (isManualTrigger && currentNode.data.type === 'datetime_picker') {
-                        await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "Sure, please type your preferred time below (e.g., 11:15 PM):" } });
+                        await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "Sure, please type your preferred time below (e.g., 11:25):" } });
                         return; 
                     }
                     // --- SMART LOGIC END ---
@@ -570,7 +634,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         type: "interactive",
                         interactive: {
                             type: "list",
-                            body: { text: validBody || (mode === 'date' ? "Please select a date:" : "Please select a time:") },
+                            body: { text: validBody || (mode === 'date' ? "Please select a date:" : "Select upcoming time:") },
                             action: {
                                 button: mode === 'date' ? "Select Date" : "Select Time",
                                 sections: [{ title: "Options", rows: listRows }]

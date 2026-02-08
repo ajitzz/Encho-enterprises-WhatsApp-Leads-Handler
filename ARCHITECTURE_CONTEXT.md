@@ -54,3 +54,16 @@ The `PublicShowcase` component allows customers to view vehicle/hotel media via 
 *   **Polling:** The dashboard polls `/api/debug/status` every 5 seconds.
 *   **Checks:** Verifies PostgreSQL connection, table existence (`candidates`, `bot_versions`), and row counts.
 *   **UI:** Displays a "System Monitor" bar at the bottom. If tables are missing, it offers a "Repair Schema" button.
+
+## 8. Bot Interaction Enhancements (Recent Updates)
+### A. Hybrid Date & Time Picker
+*   **Logic:** Combines structured List Messages with NLP-lite text recognition.
+*   **Behavior:** Users can select a slot from a list OR type a specific time (e.g., "11:15 PM"). The engine detects time formats via Regex and accepts the input immediately, bypassing the need for a specific "Custom" button click if the intent is clear.
+*   **Manual Trigger:** Includes a "Type Specific Time" list option that explicitly pauses automation to wait for user input.
+
+### B. Smart Location Triggers
+*   **Heuristic:** If a Location Preset is configured in the Bot Builder but lacks coordinates (Lat/Long), the engine automatically treats it as a "Manual Pin Trigger".
+*   **Benefit:** Prevents bot loops if an admin forgets to change the preset type from 'Static' to 'Manual' while leaving coordinates empty.
+
+### C. API Payload Strictness
+*   **Fix:** `location_request_message` payloads are strictly formatted. The `body` object contains *only* the `text` field. Adding `type: "text"` (common in other message types) causes the "Send Location" button to vanish on WhatsApp iOS/Android clients.
