@@ -609,7 +609,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             type: "interactive",
                             interactive: {
                                 type: "location_request_message",
-                                body: { type: "text", text: (validBody || `Please share your *${label}*:`) },
+                                body: { text: (validBody || `Please share your *${label}*:`) },
                                 action: { name: "send_location" }
                             }
                         };
@@ -621,7 +621,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         type: "interactive",
                         interactive: {
                             type: "location_request_message",
-                            body: { type: "text", text: validBody || "Please share your current location:" },
+                            body: { text: validBody || "Please share your current location:" },
                             action: { name: "send_location" }
                         }
                     };
