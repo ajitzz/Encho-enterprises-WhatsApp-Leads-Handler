@@ -175,6 +175,54 @@ const isValidContent = (text) => {
     return true;
 };
 
+// --- DYNAMIC OPTION GENERATORS ---
+const generateDateOptions = (config) => {
+    const options = [];
+    const today = new Date();
+    const daysToShow = config?.daysToShow || 7;
+    const includeToday = config?.includeToday !== false;
+    
+    let startIndex = includeToday ? 0 : 1;
+    
+    for (let i = startIndex; i < (startIndex + daysToShow); i++) {
+        const d = new Date(today);
+        d.setDate(today.getDate() + i);
+        
+        let title = '';
+        if (i === 0) title = 'Today';
+        else if (i === 1) title = 'Tomorrow';
+        else title = d.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short' });
+        
+        const id = d.toISOString().split('T')[0]; // YYYY-MM-DD
+        options.push({ id, title: title.substring(0, 24) });
+    }
+    return options;
+};
+
+const generateTimeOptions = (config) => {
+    const options = [];
+    const startHour = config?.startHour ?? 9;
+    const endHour = config?.endHour ?? 18;
+    
+    for (let h = startHour; h <= endHour; h++) {
+        const ampm = h >= 12 ? 'PM' : 'AM';
+        const displayH = h % 12 || 12;
+        const timeStr = `${displayH}:00 ${ampm}`;
+        const id = `${h.toString().padStart(2, '0')}:00`;
+        options.push({ id, title: timeStr });
+    }
+    
+    // Fallback if empty range
+    if (options.length === 0) {
+        return [
+            { id: 'morning', title: 'Morning (9AM - 12PM)' },
+            { id: 'afternoon', title: 'Afternoon (12PM - 4PM)' },
+            { id: 'evening', title: 'Evening (4PM - 8PM)' }
+        ];
+    }
+    return options.slice(0, 10); // Max 10 limit
+};
+
 // --- DEFAULT BOT CONFIG ---
 const getDefaultBotConfig = () => ({
     isEnabled: true,
@@ -280,7 +328,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             const currentNode = nodes.find(n => n.id === currentNodeId);
             if (currentNode) {
                 // A. Handle Variable Capture
-                const captureTypes = ['input', 'location_request', 'pickup_location', 'destination_location'];
+                const captureTypes = ['input', 'location_request', 'pickup_location', 'destination_location', 'datetime_picker'];
                 
                 if (captureTypes.includes(currentNode.data.type)) {
                     let varName = currentNode.data.variable;
@@ -289,38 +337,33 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         if (currentNode.data.type === 'pickup_location') varName = 'pickup_coords';
                         else if (currentNode.data.type === 'destination_location') varName = 'dest_coords';
                         else if (currentNode.data.type === 'location_request') varName = 'location_data';
+                        else if (currentNode.data.type === 'datetime_picker') varName = currentNode.data.dateConfig?.mode === 'time' ? 'time_slot' : 'pickup_date';
                     }
 
-                    // --- SMART LOCATION LOGIC START ---
+                    // --- SMART LOGIC START ---
                     let valueToSave = null;
                     let isManualTrigger = false;
 
-                    // Check for Preset List Selection
+                    // Check for Preset/List Selection
                     if (currentNode.data.presets) {
-                        // Priority 1: ID Match
                         let matchedPreset = currentNode.data.presets.find(p => p.id === incomingPayloadId);
-                        
-                        // Priority 2: Text Match Fallback (User typed "Select on Map" or ID lost)
-                        if (!matchedPreset && cleanInput) {
-                            matchedPreset = currentNode.data.presets.find(p => p.title.toLowerCase().trim() === cleanInput);
-                        }
+                        if (!matchedPreset && cleanInput) matchedPreset = currentNode.data.presets.find(p => p.title.toLowerCase().trim() === cleanInput);
 
                         if (matchedPreset) {
-                            if (matchedPreset.type === 'manual') {
-                                isManualTrigger = true;
-                            } else {
-                                valueToSave = JSON.stringify({ 
-                                    lat: matchedPreset.latitude, 
-                                    long: matchedPreset.longitude, 
-                                    label: matchedPreset.title 
-                                });
-                            }
+                            if (matchedPreset.type === 'manual') isManualTrigger = true;
+                            else valueToSave = JSON.stringify({ lat: matchedPreset.latitude, long: matchedPreset.longitude, label: matchedPreset.title });
                         }
                     }
                     
+                    // --- DYNAMIC DATETIME CAPTURE ---
+                    // If this was a datetime picker node, capture the list selection ID or Text
+                    if (currentNode.data.type === 'datetime_picker') {
+                        if (incomingPayloadId) valueToSave = incomingPayloadId;
+                        else if (cleanInput) valueToSave = cleanInput;
+                    }
+
                     // Check for Real Location Message
-                    if (!isManualTrigger && incomingText && incomingText.startsWith('{') && incomingText.includes('"latitude"')) {
-                        // It's a raw location JSON string
+                    else if (!isManualTrigger && incomingText && incomingText.startsWith('{') && incomingText.includes('"latitude"')) {
                         valueToSave = incomingText;
                     } 
                     // Fallback for simple text input
@@ -333,9 +376,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
                         candidate.variables = newVars;
                     } 
-                    // Note: If isManualTrigger is true, we purposely do nothing here. 
-                    // We rely on the matchedEdge logic below to detect we should STAY on this node.
-                    // --- SMART LOCATION LOGIC END ---
+                    // --- SMART LOGIC END ---
                 }
 
                 // B. Find Next Path
@@ -344,32 +385,34 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
                 // Match Buttons / List Rows via Payload ID
                 if (incomingPayloadId) {
-                    // Check standard buttons
                     if (currentNode.data.buttons) {
                         const btn = currentNode.data.buttons.find(b => b.id === incomingPayloadId);
                         if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
                     }
-                    // Check List Sections
                     if (!matchedEdge && currentNode.data.sections) {
                         const row = currentNode.data.sections.flatMap(s => s.rows).find(r => r.id === incomingPayloadId);
                         if (row) matchedEdge = outgoingEdges.find(e => e.sourceHandle === row.id);
                     }
-                    
-                    // Check Smart Presets - If it's a Static preset, we advance. If Manual, we stay.
+                    // Presets
                     if (!matchedEdge && currentNode.data.presets) {
                         const preset = currentNode.data.presets.find(p => p.id === incomingPayloadId);
-                        if (preset && preset.type === 'static') {
-                             // Use default edge for successful preset selection
-                             matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
-                        }
+                        if (preset && preset.type === 'static') matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
+                    }
+                    // DateTime Picker - Always auto advance on selection
+                    if (!matchedEdge && currentNode.data.type === 'datetime_picker') {
+                        matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
                     }
                 }
 
-                // Match Text for Buttons (Fallback)
+                // Match Text Fallback
                 if (!matchedEdge && cleanInput) {
                     if (currentNode.data.buttons) {
                         const btn = currentNode.data.buttons.find(b => b.title.toLowerCase().trim() === cleanInput);
                         if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
+                    }
+                    if (currentNode.data.type === 'datetime_picker') {
+                        // If they typed something reasonable, advance
+                        matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
                     }
                 }
                 
@@ -383,22 +426,15 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     const isSmartNode = ['input', 'location_request', 'pickup_location', 'destination_location'].includes(currentNode.data.type);
                     
                     if (isSmartNode) {
-                         // Check manual trigger again using both ID and Text match logic
                          let isManualClick = false;
                          if (currentNode.data.presets) {
-                             const preset = currentNode.data.presets.find(p => 
-                                 (incomingPayloadId && p.id === incomingPayloadId) || 
-                                 (cleanInput && p.title.toLowerCase().trim() === cleanInput)
-                             );
+                             const preset = currentNode.data.presets.find(p => (incomingPayloadId && p.id === incomingPayloadId) || (cleanInput && p.title.toLowerCase().trim() === cleanInput));
                              if (preset && preset.type === 'manual') isManualClick = true;
                          }
-                         
-                         if (!isManualClick) {
-                             // Try to advance if it wasn't a manual trigger click
-                             matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
-                         }
-                    } else {
-                        // Standard node (text, image, etc) that just auto-advances
+                         if (!isManualClick) matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
+                    } 
+                    // Standard node that auto-advances
+                    else if (currentNode.data.type !== 'datetime_picker') {
                         matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
                     }
                 }
@@ -406,21 +442,15 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 if (matchedEdge) {
                     nextNodeId = matchedEdge.target;
                 } else {
-                    // Dead End logic or Stay on Node
                     if (outgoingEdges.length === 0) {
                         const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
                         nextNodeId = startNode ? startNode.id : null;
                     } else {
                         // Stay on node
                         nextNodeId = currentNodeId;
-                        
-                        // Check Manual Click again to avoid "Invalid Option" reply
                         let isManualClick = false;
                         if (currentNode.data.presets) {
-                             const preset = currentNode.data.presets.find(p => 
-                                 (incomingPayloadId && p.id === incomingPayloadId) || 
-                                 (cleanInput && p.title.toLowerCase().trim() === cleanInput)
-                             );
+                             const preset = currentNode.data.presets.find(p => (incomingPayloadId && p.id === incomingPayloadId) || (cleanInput && p.title.toLowerCase().trim() === cleanInput));
                              if (preset && preset.type === 'manual') isManualClick = true;
                         }
                         
@@ -430,7 +460,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     }
                 }
             } else {
-                // Lost state -> Restart
                 const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
                 nextNodeId = startNode ? startNode.id : null;
             }
@@ -444,7 +473,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         // 3. Execute Node Chain (Synchronous Loop)
         let activeNodeId = nextNodeId;
         let opsCount = 0;
-        const MAX_OPS = 15; // Loop protection
+        const MAX_OPS = 15; 
 
         while (activeNodeId && opsCount < MAX_OPS) {
             opsCount++;
@@ -452,10 +481,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             if (!node) break;
 
             const data = node.data || {};
-            let autoAdvance = true; // Default behavior
+            let autoAdvance = true; 
             
-            // --- LOGIC NODES (No Message Sent) ---
-
             if (data.type === 'status_update') {
                 if (data.targetStatus) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [data.targetStatus, candidate.id]);
             }
@@ -469,7 +496,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             }
             
             else if (data.type === 'delay') {
-                // Max delay 5s to prevent timeouts
                 const ms = Math.min(data.delayTime || 2000, 5000);
                 await new Promise(r => setTimeout(r, ms));
             }
@@ -489,17 +515,17 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 const handle = isMatch ? 'true' : 'false';
                 const nextEdge = edges.find(e => e.source === node.id && (e.sourceHandle === handle || !e.sourceHandle));
                 activeNodeId = nextEdge ? nextEdge.target : null;
-                continue; // Skip standard edge finding
+                continue; 
             }
 
             else if (data.type === 'handoff') {
                 await client.query("UPDATE candidates SET is_human_mode = TRUE WHERE id = $1", [candidate.id]);
                 const msg = processText(data.content, candidate);
                 if (isValidContent(msg)) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } });
-                break; // Stop execution
+                break; 
             }
 
-            // --- MESSAGE NODES (Send to WhatsApp) ---
+            // --- MESSAGE NODES ---
             
             else if (data.type !== 'start') {
                 let rawBody = processText(data.content || '', candidate);
@@ -514,54 +540,58 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 } 
                 else if (data.type === 'input') {
                     payload = { type: 'text', text: { body: validBody || "Please enter your response below:" } };
-                    autoAdvance = false; // Stop and wait for user
+                    autoAdvance = false; 
                 } 
-                // --- SPECIALIZED LOCATION REQUESTS (UPDATED LOGIC) ---
+                
+                // --- SMART DATE TIME PICKER ---
+                else if (data.type === 'datetime_picker') {
+                    const mode = data.dateConfig?.mode || 'date';
+                    const listRows = mode === 'date' ? generateDateOptions(data.dateConfig) : generateTimeOptions(data.dateConfig);
+                    
+                    payload = {
+                        type: "interactive",
+                        interactive: {
+                            type: "list",
+                            body: { text: validBody || (mode === 'date' ? "Please select a date:" : "Please select a time:") },
+                            action: {
+                                button: mode === 'date' ? "Select Date" : "Select Time",
+                                sections: [{ title: "Options", rows: listRows }]
+                            }
+                        }
+                    };
+                    if (data.footerText) payload.interactive.footer = { text: data.footerText };
+                    autoAdvance = false;
+                }
+
                 else if (data.type === 'pickup_location' || data.type === 'destination_location') {
-                     // Check if this execution is triggered by "Manual Pin" preset click
-                     // We must use strict checking logic here that mirrors the state logic above
                      let isManualTrigger = false;
                      if (data.presets) {
-                         const preset = data.presets.find(p => 
-                             (incomingPayloadId && p.id === incomingPayloadId) || 
-                             (cleanInput && p.title.toLowerCase().trim() === cleanInput)
-                         );
+                         const preset = data.presets.find(p => (incomingPayloadId && p.id === incomingPayloadId) || (cleanInput && p.title.toLowerCase().trim() === cleanInput));
                          if (preset && preset.type === 'manual') isManualTrigger = true;
                      }
-
                      const hasPresets = data.presets && data.presets.length > 0;
                      
-                     // SCENARIO 1: Show List (Default if presets exist and NOT manual trigger)
                      if (hasPresets && !isManualTrigger) {
                          const rows = data.presets.slice(0, 10).map(p => {
-                             const row = {
-                                 id: p.id,
-                                 title: p.title.substring(0, 24)
-                             };
+                             const row = { id: p.id, title: p.title.substring(0, 24) };
                              if (p.description) row.description = p.description.substring(0, 72);
                              return row;
                          });
-                         
                          payload = {
                             type: "interactive",
                             interactive: {
                                 type: "list",
                                 body: { text: validBody || (data.type === 'pickup_location' ? "Select Pickup Location:" : "Select Destination:") },
-                                action: {
-                                    button: "Locations",
-                                    sections: [{ title: "Options", rows }]
-                                }
+                                action: { button: "Locations", sections: [{ title: "Options", rows }] }
                             }
                         };
-                     } 
-                     // SCENARIO 2: Ask for Pin (If no presets OR Manual Trigger clicked)
-                     else {
+                     } else {
                          const label = data.type === 'pickup_location' ? "Pickup Location" : "Destination";
                          payload = {
                             type: "interactive",
                             interactive: {
                                 type: "location_request_message",
-                                body: { type: "text", text: (validBody || `Please share your *${label}*:`) }, // NOTE: Corrected structure for Body
+                                body: { type: "text", text: (validBody || `Please share your *${label}*:`) },
                                 action: { name: "send_location" }
                             }
                         };
@@ -579,21 +609,16 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     };
                     autoAdvance = false;
                 }
-                
                 else if (data.type === 'image' && data.mediaUrl) {
                     const url = await refreshMediaUrl(data.mediaUrl);
                     payload = { type: 'image', image: { link: url, caption: validBody || '' } };
                 } 
-                
-                // RICH BUTTONS / RICH CARD
                 else if ((data.type === 'interactive_button' || data.type === 'rich_card') && data.buttons?.length > 0) {
-                    // Construct Header
                     let header = undefined;
                     if (data.mediaUrl && (data.headerType === 'image' || data.headerType === 'video')) {
                         const url = await refreshMediaUrl(data.mediaUrl);
                         header = { type: data.headerType, [data.headerType]: { link: url } };
                     }
-                    
                     payload = {
                         type: "interactive",
                         interactive: {
@@ -611,7 +636,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     };
                     autoAdvance = false;
                 } 
-                
                 else if (data.type === 'interactive_list' && data.sections?.length > 0) {
                     payload = {
                         type: "interactive",
@@ -643,12 +667,11 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             // 4. Update State & Move On
             await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
 
-            if (!autoAdvance) break; // Stop loop if waiting for input/button
+            if (!autoAdvance) break; 
 
             const nextEdge = edges.find(e => e.source === node.id);
             if (nextEdge) {
                 activeNodeId = nextEdge.target;
-                // Tiny throttle to prevent rapid-fire API spam if no delays are used
                 await new Promise(r => setTimeout(r, 200));
             } else {
                 activeNodeId = null;

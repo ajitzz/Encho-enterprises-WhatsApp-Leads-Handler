@@ -57,6 +57,7 @@ export type NodeType =
   | 'location_request'   
   | 'pickup_location'    
   | 'destination_location' 
+  | 'datetime_picker'    
   | 'condition' 
   | 'set_variable'       
   | 'delay'              
@@ -90,6 +91,16 @@ export interface FlowNodeData {
   
   // Smart Location Presets
   presets?: LocationPreset[];
+
+  // Date & Time Logic
+  dateConfig?: {
+      mode: 'date' | 'time';
+      includeToday?: boolean;
+      daysToShow?: number; // For Date Mode
+      startHour?: number;  // For Time Mode (0-23)
+      endHour?: number;    // For Time Mode (0-23)
+      interval?: number;   // Minutes (30, 60)
+  };
 
   // Input & Validation
   variable?: string; 
