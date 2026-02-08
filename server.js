@@ -123,7 +123,7 @@ const sendToMeta = async (phoneNumber, payload) => {
     }
     if (payload.type === 'interactive') {
         const i = payload.interactive;
-        if (i.type === 'button' && (!i.action.buttons || i.action.buttons.length === 0)) return;
+        if (i.type === 'button' && (!i.action.buttons || i.action.buttons.length === 0) && !['location_request_message', 'product_list'].includes(i.type)) return;
         if (i.type === 'list' && (!i.action.sections || i.action.sections.length === 0)) return;
     }
 
@@ -296,8 +296,15 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     let isManualTrigger = false;
 
                     // Check for Preset List Selection
-                    if (incomingPayloadId && currentNode.data.presets) {
-                        const matchedPreset = currentNode.data.presets.find(p => p.id === incomingPayloadId);
+                    if (currentNode.data.presets) {
+                        // Priority 1: ID Match
+                        let matchedPreset = currentNode.data.presets.find(p => p.id === incomingPayloadId);
+                        
+                        // Priority 2: Text Match Fallback (User typed "Select on Map" or ID lost)
+                        if (!matchedPreset && cleanInput) {
+                            matchedPreset = currentNode.data.presets.find(p => p.title.toLowerCase().trim() === cleanInput);
+                        }
+
                         if (matchedPreset) {
                             if (matchedPreset.type === 'manual') {
                                 isManualTrigger = true;
@@ -310,13 +317,14 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             }
                         }
                     }
+                    
                     // Check for Real Location Message
-                    else if (incomingText && incomingText.startsWith('{') && incomingText.includes('"latitude"')) {
+                    if (!isManualTrigger && incomingText && incomingText.startsWith('{') && incomingText.includes('"latitude"')) {
                         // It's a raw location JSON string
                         valueToSave = incomingText;
                     } 
                     // Fallback for simple text input
-                    else if (currentNode.data.type === 'input') {
+                    else if (!isManualTrigger && currentNode.data.type === 'input') {
                         valueToSave = incomingText;
                     }
 
@@ -324,12 +332,9 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         const newVars = { ...candidate.variables, [varName]: valueToSave };
                         await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
                         candidate.variables = newVars;
-                    } else if (isManualTrigger) {
-                        // User clicked "Manual Pin" button. 
-                        // Do NOT advance node. Stay here. 
-                        // The engine loop will re-execute the node logic.
-                        // We must let the execution phase know to send the Location Request now.
-                    }
+                    } 
+                    // Note: If isManualTrigger is true, we purposely do nothing here. 
+                    // We rely on the matchedEdge logic below to detect we should STAY on this node.
                     // --- SMART LOCATION LOGIC END ---
                 }
 
@@ -375,24 +380,18 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
                 // Default Path
                 if (!matchedEdge) {
-                    // Only use default if NOT waiting for input/location
-                    // BUT for input/location nodes, if we HAVE captured value (valueToSave was set above), we SHOULD advance.
-                    // The logic above saved to DB. Now we just need to confirm we can move.
                     const isSmartNode = ['input', 'location_request', 'pickup_location', 'destination_location'].includes(currentNode.data.type);
                     
-                    // If it's a smart node, we only advance if we have valid input
                     if (isSmartNode) {
-                         // We rely on valueToSave logic. 
-                         // If valueToSave was set (location or preset), we advance.
-                         // But we need to know if we saved it. 
-                         // Check variables? 
-                         // Better: check if input looks like what we expect.
-                         const varName = currentNode.data.variable || (currentNode.data.type === 'pickup_location' ? 'pickup_coords' : 'dest_coords');
-                         const hasVar = candidate.variables[varName]; 
-                         // However, if we just updated it in DB, the 'candidate' object in memory was updated too in line 192.
-                         
-                         // Detection for "Manual" preset click:
-                         const isManualClick = currentNode.data.presets?.some(p => p.id === incomingPayloadId && p.type === 'manual');
+                         // Check manual trigger again using both ID and Text match logic
+                         let isManualClick = false;
+                         if (currentNode.data.presets) {
+                             const preset = currentNode.data.presets.find(p => 
+                                 (incomingPayloadId && p.id === incomingPayloadId) || 
+                                 (cleanInput && p.title.toLowerCase().trim() === cleanInput)
+                             );
+                             if (preset && preset.type === 'manual') isManualClick = true;
+                         }
                          
                          if (!isManualClick) {
                              // Try to advance if it wasn't a manual trigger click
@@ -414,9 +413,16 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     } else {
                         // Stay on node
                         nextNodeId = currentNodeId;
-                        // Determine if we should reply "Invalid Option"
-                        // Don't reply invalid if it was a "Manual" preset click (that's a valid action, just doesn't advance)
-                        const isManualClick = currentNode.data.presets?.some(p => p.id === incomingPayloadId && p.type === 'manual');
+                        
+                        // Check Manual Click again to avoid "Invalid Option" reply
+                        let isManualClick = false;
+                        if (currentNode.data.presets) {
+                             const preset = currentNode.data.presets.find(p => 
+                                 (incomingPayloadId && p.id === incomingPayloadId) || 
+                                 (cleanInput && p.title.toLowerCase().trim() === cleanInput)
+                             );
+                             if (preset && preset.type === 'manual') isManualClick = true;
+                        }
                         
                         if (['interactive_button', 'interactive_list', 'rich_card'].includes(currentNode.data.type) && !isManualClick) {
                             shouldReplyInvalid = true;
@@ -513,7 +519,16 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 // --- SPECIALIZED LOCATION REQUESTS (UPDATED LOGIC) ---
                 else if (data.type === 'pickup_location' || data.type === 'destination_location') {
                      // Check if this execution is triggered by "Manual Pin" preset click
-                     const isManualTrigger = data.presets?.some(p => p.id === incomingPayloadId && p.type === 'manual');
+                     // We must use strict checking logic here that mirrors the state logic above
+                     let isManualTrigger = false;
+                     if (data.presets) {
+                         const preset = data.presets.find(p => 
+                             (incomingPayloadId && p.id === incomingPayloadId) || 
+                             (cleanInput && p.title.toLowerCase().trim() === cleanInput)
+                         );
+                         if (preset && preset.type === 'manual') isManualTrigger = true;
+                     }
+
                      const hasPresets = data.presets && data.presets.length > 0;
                      
                      // SCENARIO 1: Show List (Default if presets exist and NOT manual trigger)
@@ -546,7 +561,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             type: "interactive",
                             interactive: {
                                 type: "location_request_message",
-                                body: { text: isManualTrigger ? `Please send your *${label}* using the map:` : (validBody || `Please share your *${label}*:`) },
+                                body: { type: "text", text: (validBody || `Please share your *${label}*:`) }, // NOTE: Corrected structure for Body
                                 action: { name: "send_location" }
                             }
                         };
@@ -558,7 +573,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         type: "interactive",
                         interactive: {
                             type: "location_request_message",
-                            body: { text: validBody || "Please share your current location:" },
+                            body: { type: "text", text: validBody || "Please share your current location:" },
                             action: { name: "send_location" }
                         }
                     };
