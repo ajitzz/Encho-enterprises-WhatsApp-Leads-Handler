@@ -1,3 +1,5 @@
+
+
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   ReactFlow, 
@@ -26,6 +28,8 @@ import {
   LocateFixed, AlertTriangle, Bot
 } from 'lucide-react';
 import { FlowNodeData, NodeType, ListSection, LocationPreset } from '../types';
+
+// --- 1. ADVANCED NODE COMPONENT (VISUALIZER) ---
 
 const NodeHeader = ({ color, icon, label, selected, subtitle }: any) => (
     <div className={`px-4 py-2.5 flex items-center gap-3 border-b border-gray-100 rounded-t-xl transition-colors ${selected ? 'bg-blue-50/80' : 'bg-white'}`}>
@@ -227,6 +231,8 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
         </div>
     );
 };
+
+// --- 2. PROPERTIES PANEL (THE EDITOR) ---
 
 const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>, onChange: (id: string, d: any) => void, onClose: () => void }) => {
     const [local, setLocal] = useState(node.data);
@@ -634,7 +640,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
     addNode, setNodes, setEdges, updateNodeData, resetFlow 
   } = useFlowStore();
 
-  const [selectedNode, setSelectedNode] = useState<Node<FlowNodeData> | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<'flow' | 'ai'>('flow');
   const [isSaving, setIsSaving] = useState(false);
 
@@ -661,7 +667,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
       setIsSaving(true);
       const settings = {
           isEnabled: true,
-          shouldRepeat: false, // Default or from previous state if stored
+          shouldRepeat: false, 
           routingStrategy: 'BOT_ONLY',
           nodes,
           edges
@@ -683,7 +689,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
   };
 
   const onNodeClick = (_: any, node: Node) => {
-      setSelectedNode(node as Node<FlowNodeData>);
+      setSelectedNodeId(node.id);
   };
 
   const handleAddNode = (type: NodeType) => {
@@ -696,7 +702,8 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
               id, 
               type, 
               label: type.replace(/_/g, ' '), 
-              content: '' 
+              content: type === 'pickup_location' ? 'Select Pickup Location:' : type === 'destination_location' ? 'Select Destination:' : '',
+              presets: (type === 'pickup_location' || type === 'destination_location') ? [{ id: 'pre_1', title: 'Select on Map', type: 'manual' }] : undefined 
           }
       };
       addNode(newNode);
@@ -725,7 +732,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
              </h2>
              <div className="flex gap-2 mt-4">
                  <button onClick={() => setActiveView('flow')} className={`flex-1 py-1.5 text-xs font-bold rounded-lg border ${activeView === 'flow' ? 'bg-blue-50 border-blue-200 text-blue-700' : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`}>Flow</button>
-                 <button onClick={() => setActiveView('ai')} className={`flex-1 py-1.5 text-xs font-bold rounded-lg border ${activeView === 'ai' ? 'bg-purple-50 border-purple-200 text-purple-700' : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`}>AI Persona</button>
+                 <button onClick={() => setActiveView('ai')} className={`flex-1 py-1.5 text-xs font-bold rounded-lg border ${(activeView as string) === 'ai' ? 'bg-purple-50 border-purple-200 text-purple-700' : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`}>AI Persona</button>
              </div>
          </div>
          
@@ -766,6 +773,10 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
                          <MapPin size={20} className="mb-1" />
                          <span className="text-[10px] font-bold">Pickup Loc</span>
                      </button>
+                     <button onClick={() => handleAddNode('destination_location')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-red-400 hover:shadow-sm transition-all text-gray-600 hover:text-red-600">
+                         <Navigation size={20} className="mb-1" />
+                         <span className="text-[10px] font-bold">Dest Loc</span>
+                     </button>
                      <button onClick={() => handleAddNode('set_variable')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-cyan-400 hover:shadow-sm transition-all text-gray-600 hover:text-cyan-600">
                          <Variable size={20} className="mb-1" />
                          <span className="text-[10px] font-bold">Set Var</span>
@@ -804,6 +815,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
               onConnect={onConnect}
               nodeTypes={nodeTypes}
               onNodeClick={onNodeClick}
+              onPaneClick={() => setSelectedNodeId(null)}
               fitView
               attributionPosition="bottom-right"
           >
@@ -814,11 +826,11 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
       </div>
 
       {/* Properties Sidebar (Overlay) */}
-      {selectedNode && (
+      {selectedNodeId && nodes.find(n => n.id === selectedNodeId) && (
           <PropertiesPanel 
-              node={selectedNode} 
+              node={nodes.find(n => n.id === selectedNodeId)!} 
               onChange={updateNodeData} 
-              onClose={() => setSelectedNode(null)} 
+              onClose={() => setSelectedNodeId(null)} 
           />
       )}
     </div>

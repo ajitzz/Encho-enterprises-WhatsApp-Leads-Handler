@@ -388,12 +388,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                          // Check variables? 
                          // Better: check if input looks like what we expect.
                          const varName = currentNode.data.variable || (currentNode.data.type === 'pickup_location' ? 'pickup_coords' : 'dest_coords');
-                         const hasVar = candidate.variables[varName]; // This might be stale if we just updated it.
+                         const hasVar = candidate.variables[varName]; 
                          // However, if we just updated it in DB, the 'candidate' object in memory was updated too in line 192.
-                         
-                         // Re-check:
-                         // 1. If user sent "Manual" preset -> Stay (matchedEdge remains null, logic below handles stay)
-                         // 2. If user sent valid data -> Advance (matchedEdge = default)
                          
                          // Detection for "Manual" preset click:
                          const isManualClick = currentNode.data.presets?.some(p => p.id === incomingPayloadId && p.type === 'manual');
