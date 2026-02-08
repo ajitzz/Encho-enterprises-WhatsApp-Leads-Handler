@@ -44,11 +44,13 @@ export type NodeType =
   | 'input' 
   | 'interactive_button' 
   | 'interactive_list' 
-  | 'rich_card'          // NEW: Header Media + Body + Footer + Buttons
-  | 'location_request'   // NEW: Request GPS
+  | 'rich_card'          
+  | 'location_request'   
+  | 'pickup_location'    // NEW: Specialized Pickup Node
+  | 'destination_location' // NEW: Specialized Destination Node
   | 'condition' 
-  | 'set_variable'       // NEW: Silent Logic
-  | 'delay'              // NEW: Human pause
+  | 'set_variable'       
+  | 'delay'              
   | 'handoff' 
   | 'status_update'
   | 'template';
@@ -68,8 +70,8 @@ export interface FlowNodeData {
   // Content
   content?: string; 
   mediaUrl?: string;
-  headerType?: 'none' | 'image' | 'video' | 'document'; // NEW
-  footerText?: string; // NEW
+  headerType?: 'none' | 'image' | 'video' | 'document'; 
+  footerText?: string; 
   
   // Interactive Elements
   buttons?: MessageButton[];
@@ -81,11 +83,11 @@ export interface FlowNodeData {
   variable?: string; 
   validationType?: 'text' | 'email' | 'phone' | 'number' | 'regex' | 'location';
   validationRegex?: string;
-  retryMessage?: string; // Message to send if validation fails
+  retryMessage?: string; 
   
   // Logic & Operations
-  delayTime?: number; // In milliseconds
-  operationValue?: string; // For set_variable
+  delayTime?: number; 
+  operationValue?: string; 
   
   // Branching Logic
   conditions?: ConditionRule[];
@@ -111,7 +113,7 @@ export interface BotSettings {
   systemInstruction?: string;
   nodes: any[];
   edges: any[];
-  steps?: any[]; // Legacy
+  steps?: any[]; 
   entryPointId?: string;
 }
 

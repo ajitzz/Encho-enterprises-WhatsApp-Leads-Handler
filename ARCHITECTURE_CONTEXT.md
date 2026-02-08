@@ -2,9 +2,9 @@
 # ENCHO WHATSAPP HANDLER - SYSTEM ARCHITECTURE & MEMORY
 
 ## 1. Project Overview
-*   **App:** Encho Cabs Recruitment Dashboard (Uber Fleet).
+*   **App:** Encho Cabs Premium Travel Platform.
 *   **Stack:** React (Vite/Tailwind), Node.js (Express), PostgreSQL (Neon Serverless), Vercel (Hosting), AWS S3 (Media), Meta WhatsApp Cloud API.
-*   **Hosting Strategy:** Serverless (Vercel) with "Always-On" optimizations.
+*   **Core Value:** "Complete Travel Partner" - We are not a taxi service; we are a holiday orchestrator anchored by Premium Vehicles.
 
 ## 2. Critical Stability Features (DO NOT REMOVE)
 The following mechanisms prevent "Cold Starts" and "Database Sleep" issues inherent to the Vercel/Neon stack:
@@ -32,12 +32,25 @@ The following mechanisms prevent "Cold Starts" and "Database Sleep" issues inher
 *   **Content Safety:** The `isValidContent()` function strictly blocks placeholder text (e.g., "Replace this sample message") to prevent embarrassing auto-replies.
 *   **Flow Traversal:** Uses a Node/Edge graph. If a user's state (`current_bot_step_id`) is invalid or missing, it defaults to the 'Start' node.
 
-## 4. Frontend Emergency Mode
+## 4. High-Performance Bulk Scheduler (Implemented)
+To support mass marketing of Travel Packages, the backend includes specific optimizations:
+*   **Batch Insert:** Uses `UNNEST` in SQL to insert 1,000+ scheduled messages in a single database transaction (O(1) complexity instead of O(N) loop).
+*   **Parallel Cron:** The `/cron/process-queue` endpoint processes messages in concurrent batches (default: 5) to maximize throughput while respecting Meta API rate limits.
+*   **Queue Locking:** Uses `FOR UPDATE SKIP LOCKED` to ensure multiple server instances do not process the same message twice.
+
+## 5. Public Showcase & Offline Resilience
+The `PublicShowcase` component allows customers to view vehicle/hotel media via a public link.
+*   **3-Tier Loading Strategy:**
+    1.  **Local Cache:** Loads instantly from `localStorage` if visited previously.
+    2.  **Live API:** Fetches fresh data from `/api/showcase`.
+    3.  **S3 Manifest Fallback:** If the API fails (server down/cold start), it fetches a static `manifest.json` directly from the S3 bucket (`FALLBACK_BUCKET_URL`), ensuring the catalog is **always viewable** even if the backend is offline.
+
+## 6. Frontend Emergency Mode
 *   **Trigger:** If the API returns a "relation does not exist" error during the initial dashboard load.
 *   **UI:** The App switches to `isEmergencyMode`, rendering a Red "Critical Database Error" screen with a "Hard Reset" tool.
 *   **Action:** Allows the admin to hit `/api/system/hard-reset` to drop and recreate all tables from the UI.
 
-## 5. Maintenance Commands
-*   **Sync S3:** `/api/media/sync-s3` (Scans AWS Bucket and populates DB).
-*   **Hard Reset:** `/api/system/hard-reset` (Nukes DB and rebuilds schema).
-*   **Webhook Config:** `/api/system/webhook` (Updates Meta Callback URL programmatically).
+## 7. System Diagnostics
+*   **Polling:** The dashboard polls `/api/debug/status` every 5 seconds.
+*   **Checks:** Verifies PostgreSQL connection, table existence (`candidates`, `bot_versions`), and row counts.
+*   **UI:** Displays a "System Monitor" bar at the bottom. If tables are missing, it offers a "Repair Schema" button.

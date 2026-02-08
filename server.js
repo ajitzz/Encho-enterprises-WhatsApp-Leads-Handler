@@ -6,7 +6,7 @@ const { Pool } = require('pg');
 const multer = require('multer');
 const axios = require('axios');
 const https = require('https');
-const { S3Client, PutObjectCommand, ListObjectsV2Command, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { OAuth2Client } = require('google-auth-library');
 const { GoogleGenAI } = require("@google/genai");
@@ -24,13 +24,12 @@ const SYSTEM_CONFIG = {
 };
 
 // --- IN-MEMORY CACHE (Performance Boost) ---
-// Prevents hitting DB for bot settings on every single message
 const memoryCache = {
     botSettings: null,
     lastUpdated: 0
 };
 
-// --- INITIALIZE CLIENTS (Lazy/Safe) ---
+// --- INITIALIZE CLIENTS ---
 let s3Client, googleClient, genAI, pgPool;
 
 try {
@@ -58,7 +57,7 @@ try {
         connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
         idleTimeoutMillis: 30000,
         ssl: { rejectUnauthorized: false }, 
-        max: 20, // Increased for parallel cron processing
+        max: 20, 
         keepAlive: true
     });
     
@@ -280,12 +279,25 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         } else {
             const currentNode = nodes.find(n => n.id === currentNodeId);
             if (currentNode) {
-                // A. Handle Variable Capture (Input Node)
-                if (currentNode.data.type === 'input' && currentNode.data.variable) {
-                    const varName = currentNode.data.variable;
-                    const newVars = { ...candidate.variables, [varName]: incomingText };
-                    await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
-                    candidate.variables = newVars; 
+                // A. Handle Variable Capture (Input / Location Node)
+                const captureTypes = ['input', 'location_request', 'pickup_location', 'destination_location'];
+                
+                if (captureTypes.includes(currentNode.data.type)) {
+                    let varName = currentNode.data.variable;
+                    
+                    // Default Variables if not set
+                    if (!varName) {
+                        if (currentNode.data.type === 'pickup_location') varName = 'pickup_coords';
+                        else if (currentNode.data.type === 'destination_location') varName = 'dest_coords';
+                        else if (currentNode.data.type === 'location_request') varName = 'location_data';
+                    }
+
+                    if (varName) {
+                        // incomingText is raw text OR JSON string of location
+                        const newVars = { ...candidate.variables, [varName]: incomingText };
+                        await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
+                        candidate.variables = newVars;
+                    }
                 }
 
                 // B. Find Next Path
@@ -326,6 +338,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         nextNodeId = startNode ? startNode.id : null;
                     } else {
                         // User ignored the buttons/menu -> Stay on node & Mark Invalid
+                        // For inputs/location request, we assume next message IS the input, so we naturally advance if there is a default edge.
+                        // If there is NO default edge, we reset.
                         nextNodeId = currentNodeId;
                         if (['interactive_button', 'interactive_list', 'rich_card'].includes(currentNode.data.type)) {
                             shouldReplyInvalid = true;
@@ -412,8 +426,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 if (data.type === 'text') {
                     if (validBody) {
                         payload = { type: 'text', text: { body: validBody } };
-                        // Footer fallback support via text is not standard in Cloud API without template, 
-                        // so we usually just append it to body if it exists
                         if (data.footerText) payload.text.body += `\n\n_${data.footerText}_`;
                     }
                 } 
@@ -421,6 +433,29 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     payload = { type: 'text', text: { body: validBody || "Please enter your response below:" } };
                     autoAdvance = false; // Stop and wait for user
                 } 
+                // --- SPECIALIZED LOCATION REQUESTS ---
+                else if (data.type === 'pickup_location') {
+                     payload = {
+                        type: "interactive",
+                        interactive: {
+                            type: "location_request_message",
+                            body: { text: validBody || "📍 Please share your *Pickup Location*:" },
+                            action: { name: "send_location" }
+                        }
+                    };
+                    autoAdvance = false;
+                }
+                else if (data.type === 'destination_location') {
+                     payload = {
+                        type: "interactive",
+                        interactive: {
+                            type: "location_request_message",
+                            body: { text: validBody || "🏁 Please share your *Destination Location*:" },
+                            action: { name: "send_location" }
+                        }
+                    };
+                    autoAdvance = false;
+                }
                 else if (data.type === 'location_request') {
                      payload = {
                         type: "interactive",
@@ -432,6 +467,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     };
                     autoAdvance = false;
                 }
+                
                 else if (data.type === 'image' && data.mediaUrl) {
                     const url = await refreshMediaUrl(data.mediaUrl);
                     payload = { type: 'image', image: { link: url, caption: validBody || '' } };
@@ -604,7 +640,12 @@ apiRouter.post('/webhook', async (req, res) => {
                         text = msg.interactive.list_reply.title;
                         payloadId = msg.interactive.list_reply.id;
                     }
-                } else text = `[${msg.type.toUpperCase()}]`;
+                } 
+                else if (msg.type === 'location') {
+                    // Extract structured location data
+                    text = JSON.stringify(msg.location);
+                }
+                else text = `[${msg.type.toUpperCase()}]`;
 
                 let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
                 let candidate;
