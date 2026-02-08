@@ -518,11 +518,14 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                      
                      // SCENARIO 1: Show List (Default if presets exist and NOT manual trigger)
                      if (hasPresets && !isManualTrigger) {
-                         const rows = data.presets.slice(0, 10).map(p => ({
-                             id: p.id,
-                             title: p.title.substring(0, 24),
-                             description: p.type === 'manual' ? 'Select on Map' : 'Quick Select'
-                         }));
+                         const rows = data.presets.slice(0, 10).map(p => {
+                             const row = {
+                                 id: p.id,
+                                 title: p.title.substring(0, 24)
+                             };
+                             if (p.description) row.description = p.description.substring(0, 72);
+                             return row;
+                         });
                          
                          payload = {
                             type: "interactive",

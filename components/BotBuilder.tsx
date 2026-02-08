@@ -1,5 +1,4 @@
 
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   ReactFlow, 
@@ -349,6 +348,18 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                                 update('presets', n);
                                             }} className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded"><Trash2 size={14}/></button>
                                         </div>
+                                        
+                                        <input 
+                                            className="w-full p-1.5 text-[10px] bg-white border border-gray-200 rounded outline-none placeholder:text-gray-400"
+                                            value={preset.description || ''}
+                                            onChange={e => {
+                                                const n = [...(local.presets || [])];
+                                                n[i].description = e.target.value;
+                                                update('presets', n);
+                                            }}
+                                            placeholder="Description (Optional)"
+                                            maxLength={72} 
+                                        />
                                         
                                         <div className="flex items-center gap-2">
                                             <select 
