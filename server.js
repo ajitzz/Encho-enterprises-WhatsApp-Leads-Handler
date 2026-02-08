@@ -203,7 +203,7 @@ const resolveTimeAmbiguity = (inputTimeStr) => {
 
 const PERIODS = {
     MORNING: { label: '🌅 Morning (5 AM - 12 PM)', start: 5, end: 11 },
-    AFTERNOON: { label: '☀️ Afternoon (12 PM - 5 PM)', start: 12, end: 16 },
+    AFTERNOON: { label: '☀️ Afternoon (12 PM - 5 PM)', start: 12, end: 16 }, // 12:00 to 16:59
     EVENING: { label: '🌆 Evening (5 PM - 9 PM)', start: 17, end: 20 },
     NIGHT: { label: '🌙 Night (9 PM - 5 AM)', start: 21, end: 28 } // 28 = 4AM next day
 };
@@ -250,9 +250,12 @@ const generatePeriodOptions = (candidate) => {
         if (!isToday) return true;
         // If today, filter out passed periods
         const p = PERIODS[pKey];
-        // Special case for Night which goes to next day
+        // Special case for Night which goes to next day (starts at 21, goes to 28)
+        // If current hour is 22 (10PM), Morning/Afternoon/Evening are invalid. Night is valid.
         if (pKey === 'NIGHT') return true; 
-        return p.end > currentHour; 
+        
+        // Example: Afternoon ends at 16 (4PM). If current is 17 (5PM), Afternoon is invalid.
+        return p.end >= currentHour; 
     };
 
     if (isValidPeriod('MORNING')) options.push({ id: 'PERIOD_MORNING', title: PERIODS.MORNING.label });
@@ -276,7 +279,7 @@ const generateTimeOptions = (candidate) => {
 
     const range = PERIODS[periodKey];
     const startHour = range.start;
-    const endHour = range.end; // Exclusive for loop usually, but here we treat as valid hour
+    const endHour = range.end; 
 
     let isToday = false;
     if (candidate?.variables?.pickup_date === now.toISOString().split('T')[0]) {
@@ -292,8 +295,9 @@ const generateTimeOptions = (candidate) => {
 
             // For "Today", don't show past times
             if (isToday) {
-                // If it's 3:15 PM (15:15), don't show 3:00 PM (15:00)
+                // If current hour is 14 (2PM), don't show 13:00 (1PM)
                 if (realH < now.getHours()) continue;
+                // If current is 14:45, don't show 14:00 or 14:30
                 if (realH === now.getHours() && m < now.getMinutes()) continue;
             }
 
@@ -468,6 +472,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             // Reset period/time if they went back to change date
                             await client.query("UPDATE candidates SET variables = variables - 'time_period' - 'time_slot' WHERE id = $1", [candidate.id]);
                             delete candidate.variables.time_period;
+                            delete candidate.variables.time_slot;
                             // Stay on same node to ask Period next
                             valueToSave = null;
                         }
@@ -559,6 +564,10 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     } 
                     else if (currentNode.data.type === 'datetime_picker') {
                         // CRITICAL CHANGE: Only advance if the FINAL time slot is captured
+                        // The loop logic:
+                        // 1. Date captured -> Loop
+                        // 2. Period captured -> Loop
+                        // 3. Time captured -> ADVANCE
                         let timeVar = currentNode.data.variable || 'time_slot';
                         if (candidate.variables[timeVar]) {
                             matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
@@ -691,13 +700,14 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     } else if (!hasPeriod) {
                         // Step 2: Show Periods (Morning, Afternoon, etc.)
                         listRows = generatePeriodOptions(candidate);
-                        buttonText = "Select Time of Day";
-                        listBody = `Date selected: ${candidate.variables.pickup_date}\n\nWhat time of day works best?`;
+                        buttonText = "Select Period";
+                        listBody = `Booking Date: *${candidate.variables.pickup_date}*\n\nWhich part of the day works best?`;
                     } else {
                         // Step 3: Show Specific Times
                         listRows = generateTimeOptions(candidate);
                         buttonText = "Select Time";
-                        listBody = `Date: ${candidate.variables.pickup_date}\nPeriod: ${candidate.variables.time_period.replace('PERIOD_', '')}\n\nSelect exact time:`;
+                        const prettyPeriod = candidate.variables.time_period.replace('PERIOD_', '');
+                        listBody = `Date: *${candidate.variables.pickup_date}*\nPeriod: *${prettyPeriod}*\n\nPlease select an available slot:`;
                     }
                     
                     payload = {
@@ -707,7 +717,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             body: { text: listBody },
                             action: {
                                 button: buttonText,
-                                sections: [{ title: "Options", rows: listRows }]
+                                sections: [{ title: "Available Options", rows: listRows }]
                             }
                         }
                     };

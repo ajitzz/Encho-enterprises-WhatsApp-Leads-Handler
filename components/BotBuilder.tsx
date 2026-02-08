@@ -60,7 +60,7 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
         case 'location_request': config = { color: 'bg-teal-600', icon: <MapPin size={14} />, label: 'Location', subtitle: 'Request GPS' }; break;
         case 'pickup_location': config = { color: 'bg-lime-600', icon: <MapPin size={14} />, label: 'Pickup Location', subtitle: 'Get Start Point' }; break;
         case 'destination_location': config = { color: 'bg-red-500', icon: <Navigation size={14} />, label: 'Destination', subtitle: 'Get End Point' }; break;
-        case 'datetime_picker': config = { color: 'bg-cyan-500', icon: <CalendarClock size={14} />, label: 'Date/Time', subtitle: 'Smart Picker' }; break;
+        case 'datetime_picker': config = { color: 'bg-cyan-500', icon: <CalendarClock size={14} />, label: 'Smart Booking', subtitle: '3-Step Flow' }; break;
         case 'handoff': config = { color: 'bg-red-500', icon: <User size={14} />, label: 'Agent Handoff', subtitle: 'Stop Bot' }; break;
         case 'status_update': config = { color: 'bg-green-600', icon: <Check size={14} />, label: 'Set Status', subtitle: 'CRM Update' }; break;
     }
@@ -125,17 +125,14 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                         <div className="flex items-center gap-2 p-2 bg-cyan-50 border border-cyan-100 rounded-lg text-xs">
                             <Calendar size={14} className="text-cyan-600" />
                             <div className="flex flex-col">
-                                <span className="font-bold text-cyan-800 uppercase text-[10px]">{data.dateConfig?.mode === 'time' ? 'Time Selection' : 'Date Selection'}</span>
+                                <span className="font-bold text-cyan-800 uppercase text-[10px]">3-Step Booking</span>
                                 <span className="text-[10px] text-cyan-600 truncate">
-                                    {data.dateConfig?.mode === 'time' 
-                                        ? `${data.dateConfig.startHour || 9}:00 - ${data.dateConfig.endHour || 18}:00` 
-                                        : `Next ${data.dateConfig?.daysToShow || 7} Days`
-                                    }
+                                    Date &rarr; Period &rarr; Time
                                 </span>
                             </div>
                         </div>
                         <div className="text-[10px] text-gray-400 font-mono text-right">
-                            Var: {data.variable || (data.dateConfig?.mode === 'time' ? 'time_slot' : 'date_slot')}
+                            Final Var: {data.variable || 'time_slot'}
                         </div>
                     </div>
                 )}
@@ -330,7 +327,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                 placeholder={
                                     local.type === 'pickup_location' ? "Select your pickup location below:" :
                                     local.type === 'destination_location' ? "Select your destination below:" :
-                                    local.type === 'datetime_picker' ? "Select a preferred time:" :
+                                    local.type === 'datetime_picker' ? "When would you like to book?" :
                                     "Type your message here..."
                                 }
                             />
@@ -347,74 +344,37 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm space-y-4">
                             <div className="flex justify-between items-center">
                                 <label className="block text-xs font-bold text-gray-800 uppercase">Picker Configuration</label>
-                                <span className="text-[10px] text-blue-600 font-bold bg-blue-50 px-2 py-0.5 rounded-full">Auto-Generated</span>
+                                <span className="text-[10px] text-blue-600 font-bold bg-blue-50 px-2 py-0.5 rounded-full">3-Stage Flow</span>
                             </div>
                             
                             <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 space-y-3">
-                                <div>
-                                    <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Mode</label>
-                                    <div className="flex gap-2">
-                                        <button 
-                                            onClick={() => update('dateConfig', { ...local.dateConfig, mode: 'date' })}
-                                            className={`flex-1 py-2 text-xs font-bold rounded border transition-all ${local.dateConfig?.mode === 'date' || !local.dateConfig?.mode ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200'}`}
-                                        >
-                                            Date Picker
-                                        </button>
-                                        <button 
-                                            onClick={() => update('dateConfig', { ...local.dateConfig, mode: 'time' })}
-                                            className={`flex-1 py-2 text-xs font-bold rounded border transition-all ${local.dateConfig?.mode === 'time' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200'}`}
-                                        >
-                                            Time Picker
-                                        </button>
-                                    </div>
+                                <p className="text-[10px] text-gray-500">
+                                    This node will ask 3 questions in sequence:
+                                    <br/>1. Select Date (Today/Tomorrow)
+                                    <br/>2. Select Period (Morning/Afternoon)
+                                    <br/>3. Select 30-min Slot
+                                </p>
+                                <div className="space-y-2">
+                                    <label className="flex items-center justify-between text-xs text-gray-700 font-medium cursor-pointer">
+                                        <span>Show Days</span>
+                                        <input 
+                                            type="number" 
+                                            min={1} 
+                                            max={10} 
+                                            className="w-16 p-1 border rounded text-center"
+                                            value={local.dateConfig?.daysToShow || 7}
+                                            onChange={e => update('dateConfig', { ...local.dateConfig, daysToShow: parseInt(e.target.value) })}
+                                        />
+                                    </label>
+                                    <label className="flex items-center gap-2 text-xs text-gray-700 font-medium cursor-pointer">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={local.dateConfig?.includeToday !== false}
+                                            onChange={e => update('dateConfig', { ...local.dateConfig, includeToday: e.target.checked })}
+                                        />
+                                        Include Today
+                                    </label>
                                 </div>
-
-                                {(local.dateConfig?.mode === 'date' || !local.dateConfig?.mode) && (
-                                    <div className="space-y-2">
-                                        <label className="flex items-center justify-between text-xs text-gray-700 font-medium cursor-pointer">
-                                            <span>Show Days</span>
-                                            <input 
-                                                type="number" 
-                                                min={1} 
-                                                max={10} 
-                                                className="w-16 p-1 border rounded text-center"
-                                                value={local.dateConfig?.daysToShow || 7}
-                                                onChange={e => update('dateConfig', { ...local.dateConfig, daysToShow: parseInt(e.target.value) })}
-                                            />
-                                        </label>
-                                        <label className="flex items-center gap-2 text-xs text-gray-700 font-medium cursor-pointer">
-                                            <input 
-                                                type="checkbox" 
-                                                checked={local.dateConfig?.includeToday !== false}
-                                                onChange={e => update('dateConfig', { ...local.dateConfig, includeToday: e.target.checked })}
-                                            />
-                                            Include Today
-                                        </label>
-                                    </div>
-                                )}
-
-                                {local.dateConfig?.mode === 'time' && (
-                                    <div className="grid grid-cols-2 gap-2">
-                                        <div>
-                                            <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Start Hour</label>
-                                            <input 
-                                                type="number" min={0} max={23} placeholder="0-23"
-                                                className="w-full p-2 border rounded text-xs"
-                                                value={local.dateConfig?.startHour ?? 9}
-                                                onChange={e => update('dateConfig', { ...local.dateConfig, startHour: parseInt(e.target.value) })}
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">End Hour</label>
-                                            <input 
-                                                type="number" min={0} max={23} placeholder="0-23"
-                                                className="w-full p-2 border rounded text-xs"
-                                                value={local.dateConfig?.endHour ?? 18}
-                                                onChange={e => update('dateConfig', { ...local.dateConfig, endHour: parseInt(e.target.value) })}
-                                            />
-                                        </div>
-                                    </div>
-                                )}
                             </div>
                         </div>
                     )}
@@ -679,7 +639,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         <div className="bg-cyan-50 p-4 rounded-xl border border-cyan-100 space-y-4">
                             <div>
                                 <label className="block text-[10px] font-bold text-cyan-800 uppercase mb-1">Save Result To Variable</label>
-                                <input className="w-full border border-cyan-200 p-2 rounded text-sm bg-white" value={local.variable || ''} onChange={e => update('variable', e.target.value)} placeholder={local.dateConfig?.mode === 'time' ? 'time_slot' : 'pickup_date'} />
+                                <input className="w-full border border-cyan-200 p-2 rounded text-sm bg-white" value={local.variable || ''} onChange={e => update('variable', e.target.value)} placeholder="time_slot" />
                             </div>
                         </div>
                     )}
@@ -904,7 +864,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
                      </button>
                      <button onClick={() => handleAddNode('datetime_picker')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-cyan-400 hover:shadow-sm transition-all text-gray-600 hover:text-cyan-600">
                          <CalendarClock size={20} className="mb-1" />
-                         <span className="text-[10px] font-bold">Date/Time</span>
+                         <span className="text-[10px] font-bold">Smart Booking</span>
                      </button>
                      <button onClick={() => handleAddNode('set_variable')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-cyan-400 hover:shadow-sm transition-all text-gray-600 hover:text-cyan-600">
                          <Variable size={20} className="mb-1" />
