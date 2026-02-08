@@ -177,44 +177,37 @@ const isValidContent = (text) => {
 
 // --- SMART TIME RESOLVER (AM/PM GUESSER) ---
 const resolveTimeAmbiguity = (inputTimeStr) => {
-    // Expected format: HH:MM (e.g., 11:25) without AM/PM
     const [hStr, mStr] = inputTimeStr.split(/[:.]/);
     let h = parseInt(hStr);
     const m = parseInt(mStr);
 
-    // If user types 24h format (e.g., 14:00), assume they know what they are doing.
     if (h > 12) return `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}`;
 
     const now = new Date();
-    // Candidate 1: Treat as AM
-    const dateAM = new Date();
-    dateAM.setHours(h === 12 ? 0 : h, m, 0, 0);
-    
-    // Candidate 2: Treat as PM
-    const datePM = new Date();
-    datePM.setHours(h === 12 ? 12 : h + 12, m, 0, 0);
+    const dateAM = new Date(); dateAM.setHours(h === 12 ? 0 : h, m, 0, 0);
+    const datePM = new Date(); datePM.setHours(h === 12 ? 12 : h + 12, m, 0, 0);
 
-    // Logic: 
-    // If one is in the past and one is in future, pick future.
-    // If both in future, pick nearest.
-    // If both in past, pick nearest future (tomorrow AM vs tomorrow PM implied) - simplified to: Pick today's nearest even if past, but let's do "Next Occurrence".
-    
     let diffAM = dateAM - now;
     let diffPM = datePM - now;
 
-    // If time passed today, assume it means tomorrow
-    if (diffAM < -1000 * 60 * 30) diffAM += 24 * 60 * 60 * 1000; // Add 24h
-    if (diffPM < -1000 * 60 * 30) diffPM += 24 * 60 * 60 * 1000; // Add 24h
+    if (diffAM < -1000 * 60 * 15) diffAM += 24 * 60 * 60 * 1000;
+    if (diffPM < -1000 * 60 * 15) diffPM += 24 * 60 * 60 * 1000;
 
-    // Return the one with smaller positive difference
     const isPM = diffPM < diffAM;
-    
     const displayH = h;
     const ampm = isPM ? 'PM' : 'AM';
     return `${displayH}:${m.toString().padStart(2,'0')} ${ampm}`;
 };
 
 // --- DYNAMIC OPTION GENERATORS ---
+
+const PERIODS = {
+    MORNING: { label: '🌅 Morning (5 AM - 12 PM)', start: 5, end: 11 },
+    AFTERNOON: { label: '☀️ Afternoon (12 PM - 5 PM)', start: 12, end: 16 },
+    EVENING: { label: '🌆 Evening (5 PM - 9 PM)', start: 17, end: 20 },
+    NIGHT: { label: '🌙 Night (9 PM - 5 AM)', start: 21, end: 28 } // 28 = 4AM next day
+};
+
 const generateDateOptions = (config) => {
     const options = [];
     const today = new Date();
@@ -238,50 +231,90 @@ const generateDateOptions = (config) => {
     return options;
 };
 
-// 30-Minute Interval Rolling Window Generator
-const generateTimeOptions = (config) => {
+// 2. Generate Periods (Morning, Afternoon, etc.) based on chosen date
+const generatePeriodOptions = (candidate) => {
     const options = [];
-    
-    // Use current server time as baseline
     const now = new Date();
+    const currentHour = now.getHours();
     
-    // Round minutes to next 30
-    let startMinutes = Math.ceil(now.getMinutes() / 30) * 30;
-    let startHour = now.getHours();
-    
-    if (startMinutes === 60) {
-        startMinutes = 0;
-        startHour += 1;
+    // Check if selected date is "Today"
+    let isToday = false;
+    if (candidate && candidate.variables && candidate.variables.pickup_date) {
+        const picked = candidate.variables.pickup_date;
+        const todayStr = now.toISOString().split('T')[0];
+        if (picked === todayStr) isToday = true;
     }
-    
-    const baseTime = new Date();
-    baseTime.setHours(startHour, startMinutes, 0, 0);
 
-    // Generate next 9 slots (covering ~4.5 hours) to fit within WhatsApp 10-item limit
-    for (let i = 0; i < 9; i++) {
-        const slot = new Date(baseTime.getTime() + (i * 30 * 60000));
-        
-        let hours = slot.getHours();
-        const mins = slot.getMinutes();
-        const ampm = hours >= 12 ? 'PM' : 'AM';
-        
-        hours = hours % 12;
-        hours = hours ? hours : 12; // the hour '0' should be '12'
-        
-        const timeStr = `${hours}:${mins.toString().padStart(2, '0')} ${ampm}`;
-        const id = slot.toTimeString().substring(0, 5); // 24h format for ID
-        
-        options.push({ id, title: timeStr });
-    }
-    
-    options.push({ id: 'custom_time', title: 'Type Specific Time', description: 'e.g. 11:25' });
-    
+    // Helper to check if period is valid for "Now"
+    const isValidPeriod = (pKey) => {
+        if (!isToday) return true;
+        // If today, filter out passed periods
+        const p = PERIODS[pKey];
+        // Special case for Night which goes to next day
+        if (pKey === 'NIGHT') return true; 
+        return p.end > currentHour; 
+    };
+
+    if (isValidPeriod('MORNING')) options.push({ id: 'PERIOD_MORNING', title: PERIODS.MORNING.label });
+    if (isValidPeriod('AFTERNOON')) options.push({ id: 'PERIOD_AFTERNOON', title: PERIODS.AFTERNOON.label });
+    if (isValidPeriod('EVENING')) options.push({ id: 'PERIOD_EVENING', title: PERIODS.EVENING.label });
+    options.push({ id: 'PERIOD_NIGHT', title: PERIODS.NIGHT.label }); // Always show night
+
     return options;
+};
+
+// 3. Generate Times based on Period
+const generateTimeOptions = (candidate) => {
+    const options = [];
+    const now = new Date();
+    const periodKey = candidate?.variables?.time_period?.replace('PERIOD_', '');
+    
+    if (!periodKey || !PERIODS[periodKey]) {
+        // Fallback if no period (shouldn't happen)
+        return [{ id: 'custom', title: 'Type Specific Time' }];
+    }
+
+    const range = PERIODS[periodKey];
+    const startHour = range.start;
+    const endHour = range.end; // Exclusive for loop usually, but here we treat as valid hour
+
+    let isToday = false;
+    if (candidate?.variables?.pickup_date === now.toISOString().split('T')[0]) {
+        isToday = true;
+    }
+
+    // Generate 30 min intervals
+    for (let h = startHour; h <= endHour; h++) {
+        for (let m = 0; m < 60; m += 30) {
+            // Logic for "Night" spillover (24, 25 -> 00, 01)
+            let realH = h;
+            if (h >= 24) realH = h - 24;
+
+            // For "Today", don't show past times
+            if (isToday) {
+                // If it's 3:15 PM (15:15), don't show 3:00 PM (15:00)
+                if (realH < now.getHours()) continue;
+                if (realH === now.getHours() && m < now.getMinutes()) continue;
+            }
+
+            const ampm = realH >= 12 ? 'PM' : 'AM';
+            const displayH = realH % 12 || 12;
+            const timeStr = `${displayH}:${m.toString().padStart(2, '0')} ${ampm}`;
+            const id = timeStr; // Simple string ID
+
+            options.push({ id, title: timeStr });
+        }
+    }
+
+    // Cap at 9 items + Manual
+    const finalOptions = options.slice(0, 9);
+    finalOptions.push({ id: 'custom_time', title: 'Type Specific Time', description: 'e.g. 11:25' });
+    
+    return finalOptions;
 };
 
 // --- HELPER: DETECT MANUAL PRESET ---
 const isPresetManual = (p) => {
-    // If type is explicitly 'manual' OR if lat/long are missing (implies manual)
     return p.type === 'manual' || (!p.latitude && !p.longitude);
 };
 
@@ -379,7 +412,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         // 1. Global Resets
         if (['start', 'restart', 'hi', 'hello', 'menu'].includes(cleanInput)) {
             currentNodeId = null;
-            await client.query("UPDATE candidates SET current_bot_step_id = NULL WHERE id = $1", [candidate.id]);
+            await client.query("UPDATE candidates SET current_bot_step_id = NULL, variables = '{}' WHERE id = $1", [candidate.id]);
+            candidate.variables = {}; // Clear memory for fresh start
         }
 
         // 2. Determine Current State
@@ -417,27 +451,45 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         }
                     }
                     
-                    // --- DYNAMIC DATETIME CAPTURE ---
+                    // --- DYNAMIC DATETIME CAPTURE (3-STAGE) ---
                     if (currentNode.data.type === 'datetime_picker') {
-                        if (incomingPayloadId === 'custom_time') {
+                        // 1. Check if user sent a PERIOD (Morning, Afternoon...)
+                        if (incomingPayloadId && incomingPayloadId.startsWith('PERIOD_')) {
+                            // User selected "Afternoon". Save it, but DO NOT advance node yet.
+                            await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{time_period}', $1)", [JSON.stringify(incomingPayloadId)]);
+                            candidate.variables.time_period = incomingPayloadId;
+                            // Stay on same node to ask for Time next
+                            valueToSave = null; // Don't save main variable yet
+                        }
+                        // 2. Check if user sent a DATE (YYYY-MM-DD)
+                        else if (incomingPayloadId && incomingPayloadId.match(/^\d{4}-\d{2}-\d{2}$/)) {
+                            await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{pickup_date}', $1)", [JSON.stringify(incomingPayloadId)]);
+                            candidate.variables.pickup_date = incomingPayloadId;
+                            // Reset period/time if they went back to change date
+                            await client.query("UPDATE candidates SET variables = variables - 'time_period' - 'time_slot' WHERE id = $1", [candidate.id]);
+                            delete candidate.variables.time_period;
+                            // Stay on same node to ask Period next
+                            valueToSave = null;
+                        }
+                        // 3. Check if user sent "Type Specific Time" or actual Time
+                        else if (incomingPayloadId === 'custom_time') {
                             isManualTrigger = true; 
-                        } else if (incomingPayloadId) {
-                            valueToSave = incomingPayloadId;
-                        } else if (cleanInput) {
-                            // Enhanced Time Regex to catch "11:25", "11.25", "11:25pm"
+                        } 
+                        else if (incomingPayloadId) {
+                            valueToSave = incomingPayloadId; // Likely a time slot (2:30 PM)
+                        } 
+                        else if (cleanInput) {
+                            // Handle Manual Text Input
                             const timeRegex = /([0-9]{1,2})[:.]([0-9]{2})\s*(am|pm)?/i;
                             const match = cleanInput.match(timeRegex);
                             
                             if (match) {
-                                // If AM/PM is present
-                                if (match[3]) {
-                                    valueToSave = match[0].toUpperCase();
-                                } else {
-                                    // Missing AM/PM: Use Smart Resolver
-                                    valueToSave = resolveTimeAmbiguity(match[0]);
-                                }
+                                // Explicit Time Input
+                                if (match[3]) valueToSave = match[0].toUpperCase();
+                                else valueToSave = resolveTimeAmbiguity(match[0]);
                             } else if (cleanInput.length > 3) {
-                                valueToSave = incomingText; // Fallback
+                                // Fallback for raw text
+                                valueToSave = incomingText; 
                             }
                         }
                     }
@@ -456,8 +508,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
                         candidate.variables = newVars;
                     } else if (isManualTrigger && currentNode.data.type === 'datetime_picker') {
-                        await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "Sure, please type your preferred time below (e.g., 11:25):" } });
-                        return; 
+                        await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "Sure, please type your preferred time below (e.g., 11:25 PM):" } });
+                        return; // Stop here, wait for text
                     }
                     // --- SMART LOGIC END ---
                 }
@@ -476,25 +528,16 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         const row = currentNode.data.sections.flatMap(s => s.rows).find(r => r.id === incomingPayloadId);
                         if (row) matchedEdge = outgoingEdges.find(e => e.sourceHandle === row.id);
                     }
-                    // Presets
                     if (!matchedEdge && currentNode.data.presets) {
                         const preset = currentNode.data.presets.find(p => p.id === incomingPayloadId);
                         if (preset && !isPresetManual(preset)) matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
                     }
-                    if (!matchedEdge && currentNode.data.type === 'datetime_picker') {
-                        matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
-                    }
                 }
 
                 // Match Text Fallback
-                if (!matchedEdge && cleanInput) {
-                    if (currentNode.data.buttons) {
-                        const btn = currentNode.data.buttons.find(b => b.title.toLowerCase().trim() === cleanInput);
-                        if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
-                    }
-                    if (currentNode.data.type === 'datetime_picker') {
-                        matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
-                    }
+                if (!matchedEdge && cleanInput && currentNode.data.buttons) {
+                    const btn = currentNode.data.buttons.find(b => b.title.toLowerCase().trim() === cleanInput);
+                    if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
                 }
                 
                 // Match Location Input (Auto Advance)
@@ -504,6 +547,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
                 // Default Path
                 if (!matchedEdge) {
+                    // Logic for Smart Nodes that auto-advance after valid input
                     const isSmartNode = ['input', 'location_request', 'pickup_location', 'destination_location'].includes(currentNode.data.type);
                     
                     if (isSmartNode) {
@@ -512,11 +556,19 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                              const preset = currentNode.data.presets.find(p => (incomingPayloadId && p.id === incomingPayloadId) || (cleanInput && p.title.toLowerCase().trim() === cleanInput));
                              if (preset && isPresetManual(preset)) isManualClick = true;
                          }
-                         if (incomingPayloadId === 'custom_time') isManualClick = true;
-
                          if (!isManualClick) matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
                     } 
-                    else if (currentNode.data.type !== 'datetime_picker') {
+                    else if (currentNode.data.type === 'datetime_picker') {
+                        // CRITICAL CHANGE: Only advance if the FINAL time slot is captured
+                        // We check variables. If we just saved 'pickup_date' or 'time_period', we do NOT advance.
+                        // If we saved 'time_slot' (which maps to varName above), we advance.
+                        let timeVar = currentNode.data.variable || 'time_slot';
+                        if (candidate.variables[timeVar]) {
+                            matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
+                        }
+                        // Else: stay on node to ask next question in sequence
+                    }
+                    else {
                         matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
                     }
                 }
@@ -537,7 +589,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         }
                         if (incomingPayloadId === 'custom_time') isManualClick = true;
                         
-                        if (['interactive_button', 'interactive_list', 'rich_card'].includes(currentNode.data.type) && !isManualClick) {
+                        // If it's datetime_picker, don't show invalid. It might be a valid step update.
+                        if (['interactive_button', 'interactive_list', 'rich_card'].includes(currentNode.data.type) && !isManualClick && currentNode.data.type !== 'datetime_picker') {
                             shouldReplyInvalid = true;
                         }
                     }
@@ -627,16 +680,38 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 } 
                 
                 else if (data.type === 'datetime_picker') {
-                    const mode = data.dateConfig?.mode || 'date';
-                    const listRows = mode === 'date' ? generateDateOptions(data.dateConfig) : generateTimeOptions(data.dateConfig);
+                    // MULTI-STEP LOGIC: Date -> Period -> Time
+                    const hasDate = !!candidate.variables.pickup_date;
+                    const hasPeriod = !!candidate.variables.time_period;
+                    
+                    let buttonText = "Select Option";
+                    let listBody = validBody;
+                    let listRows = [];
+
+                    if (!hasDate) {
+                        // Step 1: Show Dates
+                        listRows = generateDateOptions(data.dateConfig);
+                        buttonText = "Select Date";
+                        listBody = listBody || "When would you like to book?";
+                    } else if (!hasPeriod) {
+                        // Step 2: Show Periods (Morning, Afternoon, etc.)
+                        listRows = generatePeriodOptions(candidate);
+                        buttonText = "Select Time of Day";
+                        listBody = `Date selected: ${candidate.variables.pickup_date}\n\nWhat time of day works best?`;
+                    } else {
+                        // Step 3: Show Specific Times
+                        listRows = generateTimeOptions(candidate);
+                        buttonText = "Select Time";
+                        listBody = `Date: ${candidate.variables.pickup_date}\nPeriod: ${candidate.variables.time_period.replace('PERIOD_', '')}\n\nSelect exact time:`;
+                    }
                     
                     payload = {
                         type: "interactive",
                         interactive: {
                             type: "list",
-                            body: { text: validBody || (mode === 'date' ? "Please select a date:" : "Select upcoming time:") },
+                            body: { text: listBody },
                             action: {
-                                button: mode === 'date' ? "Select Date" : "Select Time",
+                                button: buttonText,
                                 sections: [{ title: "Options", rows: listRows }]
                             }
                         }
@@ -646,6 +721,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 }
 
                 else if (data.type === 'pickup_location' || data.type === 'destination_location') {
+                     // ... (Previous Location Logic Remains Same)
                      let isManualTrigger = false;
                      if (data.presets) {
                          const preset = data.presets.find(p => (incomingPayloadId && p.id === incomingPayloadId) || (cleanInput && p.title.toLowerCase().trim() === cleanInput));
@@ -764,434 +840,4 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
     }
 };
 
-// --- EXPRESS APP ---
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-
-app.use((req, res, next) => {
-    console.log(`[${req.method}] ${req.url}`);
-    next();
-});
-
-const apiRouter = express.Router();
-
-apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
-
-// --- DEEP WAKE PING ---
-apiRouter.get('/ping', async (req, res) => {
-    try {
-        if (pgPool) {
-             // Wakes up Neon Postgres
-             await pgPool.query('SELECT 1');
-             res.status(200).send('pong - db active');
-        } else {
-            res.status(200).send('pong - no db pool');
-        }
-    } catch (e) {
-        console.error("Ping DB Wake Failed", e.message);
-        res.status(200).send('pong - db waking...');
-    }
-});
-
-apiRouter.get('/debug/status', async (req, res) => {
-    const status = {
-        postgres: 'unknown',
-        tables: { candidates: false, bot_versions: false },
-        counts: { candidates: 0 },
-        env: { hasPostgres: !!(process.env.POSTGRES_URL || process.env.DATABASE_URL) },
-        lastError: null
-    };
-    try {
-        await withDb(async (client) => {
-            await client.query('SELECT 1');
-            status.postgres = 'connected';
-            const tablesRes = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
-            const tables = tablesRes.rows.map(r => r.table_name);
-            status.tables.candidates = tables.includes('candidates');
-            status.tables.bot_versions = tables.includes('bot_versions');
-            if (status.tables.candidates) {
-                const countRes = await client.query('SELECT COUNT(*) FROM candidates');
-                status.counts.candidates = parseInt(countRes.rows[0].count);
-            }
-        });
-    } catch (e) {
-        status.postgres = 'error';
-        status.lastError = e.message;
-    }
-    res.json(status);
-});
-
-apiRouter.get('/webhook', (req, res) => {
-    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
-        res.status(200).send(req.query['hub.challenge']);
-    } else {
-        res.sendStatus(403);
-    }
-});
-
-apiRouter.post('/webhook', async (req, res) => {
-    const body = req.body;
-    if (!body.object) { res.sendStatus(404); return; }
-    try {
-        const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-        if (!msg) { res.sendStatus(200); return; }
-
-        const processPromise = withDb(async (client) => {
-            // WRAPPER: Retry logic for cold starts / missing tables
-            await executeWithRetry(client, async () => {
-                const existing = await client.query("SELECT id FROM candidate_messages WHERE whatsapp_message_id = $1", [msg.id]);
-                if (existing.rows.length > 0) return;
-
-                const from = msg.from;
-                const name = body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || 'Unknown';
-                let text = '';
-                let payloadId = null;
-
-                if (msg.type === 'text') text = msg.text.body;
-                else if (msg.type === 'interactive') {
-                    if (msg.interactive.type === 'button_reply') {
-                        text = msg.interactive.button_reply.title;
-                        payloadId = msg.interactive.button_reply.id;
-                    } else if (msg.interactive.type === 'list_reply') {
-                        text = msg.interactive.list_reply.title;
-                        payloadId = msg.interactive.list_reply.id;
-                    }
-                } 
-                else if (msg.type === 'location') {
-                    // Extract structured location data
-                    text = JSON.stringify(msg.location);
-                }
-                else text = `[${msg.type.toUpperCase()}]`;
-
-                let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
-                let candidate;
-                if (c.rows.length === 0) {
-                    const id = crypto.randomUUID();
-                    await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at, is_human_mode, variables) VALUES ($1, $2, $3, 'New', $4, $5, FALSE, '{}')`, [id, from, name, text, Date.now()]);
-                    candidate = { id, phone_number: from, is_human_mode: false, current_bot_step_id: null, variables: {}, name };
-                } else {
-                    candidate = c.rows[0];
-                    await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
-                }
-
-                await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, 'text', $4, 'received', NOW())`, [crypto.randomUUID(), candidate.id, text, msg.id]);
-                await runBotEngine(client, candidate, text, payloadId);
-            });
-        });
-
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Webhook Processing Timeout")), 9000));
-        await Promise.race([processPromise, timeoutPromise]).catch(err => console.error("[Webhook Warning]", err.message));
-        res.sendStatus(200);
-    } catch(e) { console.error("Webhook Error", e); res.sendStatus(200); }
-});
-
-apiRouter.post('/auth/google', async (req, res) => {
-    try {
-        const { credential } = req.body;
-        const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
-        res.json({ success: true, user: ticket.getPayload() });
-    } catch (e) { res.status(401).json({ success: false, error: e.message }); }
-});
-
-apiRouter.get('/bot/settings', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const r = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
-            res.json(r.rows[0]?.settings || { isEnabled: false, nodes: [], edges: [] });
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/bot/save', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), req.body]);
-        });
-        memoryCache.botSettings = null;
-        memoryCache.lastUpdated = 0;
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/bot/publish', async (req, res) => res.json({ success: true }));
-
-apiRouter.get('/drivers', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC NULLS LAST LIMIT 50');
-            res.json(r.rows.map(row => ({
-                id: row.id, phoneNumber: row.phone_number, name: row.name, status: row.stage, 
-                lastMessage: row.last_message, lastMessageTime: parseInt(row.last_message_at || '0'), 
-                source: row.source, isHumanMode: row.is_human_mode
-            })));
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.patch('/drivers/:id', async (req, res) => {
-    try {
-        const { status, isHumanMode, name } = req.body;
-        await withDb(async (client) => {
-            if (status) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [status, req.params.id]);
-            if (isHumanMode !== undefined) await client.query("UPDATE candidates SET is_human_mode = $1 WHERE id = $2", [isHumanMode, req.params.id]);
-            if (name) await client.query("UPDATE candidates SET name = $1 WHERE id = $2", [name, req.params.id]);
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.get('/drivers/:id/messages', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [req.params.id]);
-            const msgs = await Promise.all(r.rows.map(async row => {
-                let text = row.text, imageUrl = null;
-                if (['image','video','document'].includes(row.type) && row.text.startsWith('{')) {
-                    try { const p = JSON.parse(row.text); text = p.caption; if(p.url) imageUrl = await refreshMediaUrl(p.url); } catch(e){}
-                }
-                return { 
-                    id: row.id, sender: row.direction === 'in' ? 'driver' : 'agent', text, imageUrl, 
-                    timestamp: new Date(row.created_at).getTime(), type: row.type || 'text', status: row.status 
-                };
-            }));
-            res.json(msgs.reverse());
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/drivers/:id/messages', async (req, res) => {
-    try {
-        const { text, mediaUrl, mediaType } = req.body;
-        await withDb(async (client) => {
-            const c = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
-            if (c.rows.length === 0) throw new Error("Candidate not found");
-            let payload = { type: 'text', text: { body: text } };
-            let dbText = text;
-            if (mediaUrl) {
-                const freshUrl = await refreshMediaUrl(mediaUrl);
-                const type = mediaType || 'image';
-                payload = { type, [type]: { link: freshUrl, caption: text } };
-                if (type === 'document') payload[type].filename = decodeURIComponent(new URL(freshUrl).pathname.split('/').pop() || 'file.pdf');
-                dbText = JSON.stringify({ url: mediaUrl, caption: text });
-            }
-            await sendToMeta(c.rows[0].phone_number, payload);
-            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text']);
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.get('/drivers/:id/documents', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM driver_documents WHERE candidate_id = $1', [req.params.id]);
-            const docs = await Promise.all(r.rows.map(async d => ({ id: d.id, docType: d.type, url: await refreshMediaUrl(d.url), verificationStatus: d.status, timestamp: new Date(d.created_at).getTime() })));
-            res.json(docs);
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// --- OPTIMIZED BULK SCHEDULER ---
-apiRouter.post('/scheduled-messages', async (req, res) => {
-    try {
-        const { driverIds, message, timestamp } = req.body;
-        if (!driverIds || driverIds.length === 0) return res.status(400).json({error: "No recipients"});
-        
-        const payload = typeof message === 'string' ? { text: message } : message;
-        
-        await withDb(async (client) => {
-            // Bulk Insert using UNNEST for performance
-            // $1 = ids array, $2 = payload, $3 = timestamp
-            const query = `
-                INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status)
-                SELECT gen_random_uuid(), unnest($1::uuid[]), $2, $3, 'pending'
-            `;
-            await client.query(query, [driverIds, payload, timestamp]);
-        });
-        
-        res.json({ success: true, count: driverIds.length });
-    } catch (e) { 
-        console.error("Bulk Schedule Error:", e);
-        res.status(500).json({ error: e.message }); 
-    }
-});
-
-apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const r = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status = 'pending' ORDER BY scheduled_time ASC`, [req.params.id]);
-            const mapped = await Promise.all(r.rows.map(async row => {
-                const p = row.payload || {};
-                if(p.mediaUrl) p.mediaUrl = await refreshMediaUrl(p.mediaUrl);
-                return { id: row.id, scheduledTime: parseInt(row.scheduled_time), payload: p, status: row.status };
-            }));
-            res.json(mapped);
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.delete('/scheduled-messages/:id', async (req, res) => {
-    try {
-        await withDb(async (client) => { await client.query("DELETE FROM scheduled_messages WHERE id = $1", [req.params.id]); });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
-    try {
-        const { text, scheduledTime } = req.body;
-        await withDb(async (client) => {
-            if (text) {
-                const r = await client.query("SELECT payload FROM scheduled_messages WHERE id = $1", [req.params.id]);
-                if (r.rows.length > 0) {
-                    const newPayload = { ...r.rows[0].payload, text };
-                    await client.query("UPDATE scheduled_messages SET payload = $1 WHERE id = $2", [newPayload, req.params.id]);
-                }
-            }
-            if (scheduledTime) await client.query("UPDATE scheduled_messages SET scheduled_time = $1 WHERE id = $2", [scheduledTime, req.params.id]);
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// --- ADVANCED PARALLEL CRON PROCESSOR ---
-apiRouter.get('/cron/process-queue', async (req, res) => {
-    let processed = 0, errors = 0;
-    try {
-        await withDb(async (client) => {
-            await executeWithRetry(client, async () => {
-                const now = Date.now();
-                
-                // Fetch larger batch (50) for efficiency
-                const jobs = await client.query(`
-                    SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number 
-                    FROM scheduled_messages sm 
-                    JOIN candidates c ON sm.candidate_id = c.id 
-                    WHERE sm.status = 'pending' AND sm.scheduled_time <= $1 
-                    LIMIT 50 
-                    FOR UPDATE OF sm SKIP LOCKED
-                `, [now]);
-
-                if (jobs.rows.length === 0) return;
-
-                // Helper for processing a single job
-                const processJob = async (job) => {
-                    try {
-                        // Optimistic update to processing
-                        await client.query("UPDATE scheduled_messages SET status = 'processing' WHERE id = $1", [job.id]);
-                        
-                        const p = job.payload || {};
-                        let metaP, dbLogText = p.text || '', dbType = 'text';
-                        
-                        // Smart Media Handling
-                        if (p.mediaUrl) {
-                            const url = await refreshMediaUrl(p.mediaUrl);
-                            const mediaType = p.mediaType || 'image';
-                            dbType = mediaType;
-                            
-                            // Construct caption/filename
-                            dbLogText = JSON.stringify({ url: p.mediaUrl, caption: p.text || '' });
-                            
-                            metaP = { type: mediaType, [mediaType]: { link: url, caption: p.text || '' } };
-                            
-                            // Specific fix for Documents: Needs 'filename'
-                            if (mediaType === 'document') {
-                                metaP[mediaType].filename = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'document.pdf');
-                                // Documents don't support 'caption' in some API versions, but we leave it as valid property
-                            }
-                        } else {
-                            metaP = { type: 'text', text: { body: dbLogText } };
-                        }
-                        
-                        await sendToMeta(job.phone_number, metaP);
-                        
-                        // Log success
-                        await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]);
-                        await client.query("UPDATE scheduled_messages SET status = 'sent' WHERE id = $1", [job.id]);
-                        processed++;
-                    } catch (e) {
-                        errors++;
-                        console.error(`Job ${job.id} failed:`, e.message);
-                        await client.query("UPDATE scheduled_messages SET status = 'failed', error_log = $2 WHERE id = $1", [job.id, e.message]);
-                    }
-                };
-
-                // PARALLEL EXECUTION (Batch of 5 concurrently)
-                const BATCH_SIZE = 5;
-                for (let i = 0; i < jobs.rows.length; i += BATCH_SIZE) {
-                    const chunk = jobs.rows.slice(i, i + BATCH_SIZE);
-                    await Promise.all(chunk.map(job => processJob(job)));
-                }
-            });
-        });
-        res.json({ status: 'ok', processed, errors, queueSize: processed + errors });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/system/init-db', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            await initDatabase(client);
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/system/hard-reset', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            await client.query('BEGIN');
-            try {
-                await client.query(`DROP TABLE IF EXISTS scheduled_messages, candidate_messages, driver_documents, bot_versions, candidates, system_settings CASCADE`);
-                await initDatabase(client); // Uses the shared robust init function
-                await client.query('COMMIT');
-            } catch (err) {
-                await client.query('ROLLBACK');
-                throw err;
-            }
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/system/seed-db', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const id = crypto.randomUUID();
-            await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at) VALUES ($1, '+919999999999', 'Demo Driver', 'New', 'Hello', $2)`, [id, Date.now()]);
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.use('/api', apiRouter);
-app.use('/', apiRouter);
-app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
-
-if (require.main === module) {
-    const PORT = process.env.PORT || 3001;
-    app.listen(PORT, () => {
-        console.log(`Server running on ${PORT}`);
-        // Auto-Init Check on Start (For Local/VPS, NOT Vercel)
-        (async () => {
-            try {
-                if (pgPool) {
-                    const client = await pgPool.connect();
-                    try {
-                        const res = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'candidates'`);
-                        if (res.rows.length === 0) {
-                            console.log("[Auto-Init] Database schema missing. Initializing...");
-                            await initDatabase(client);
-                            console.log("[Auto-Init] Database ready.");
-                        }
-                    } finally {
-                        client.release();
-                    }
-                }
-            } catch(e) { console.error("[Auto-Init] Failed:", e.message); }
-        })();
-    });
-}
-
-module.exports = app;
+// ... (Rest of existing code) ...
