@@ -14,16 +14,19 @@ import {
   useEdgesState,
   MarkerType,
 } from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
 import { useFlowStore } from '../services/flowStore';
 import { liveApiService } from '../services/liveApiService';
 import { mockBackend } from '../services/mockBackend';
+import { AITraining } from './AITraining';
 import { 
   MessageSquare, List, GitBranch, Save, Play, Trash2, X, Zap, 
   Image as ImageIcon, MousePointer, Settings, GripVertical, Plus, 
   ListPlus, LayoutTemplate, RefreshCw, User, Check, Clock, MapPin, 
-  CreditCard, FileText, Type, Variable, CornerRightDown, Navigation
+  CreditCard, FileText, Type, Variable, CornerRightDown, Navigation,
+  LocateFixed
 } from 'lucide-react';
-import { FlowNodeData, NodeType, ListSection } from '../types';
+import { FlowNodeData, NodeType, ListSection, LocationPreset } from '../types';
 
 // --- 1. ADVANCED NODE COMPONENT (VISUALIZER) ---
 
@@ -117,9 +120,32 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                 )}
                 
                 {(data.type === 'pickup_location' || data.type === 'destination_location') && (
-                    <div className={`flex items-center justify-center gap-2 py-2 rounded-lg border text-xs font-bold font-mono uppercase tracking-wide ${data.type === 'pickup_location' ? 'bg-lime-50 text-lime-700 border-lime-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
-                        {data.type === 'pickup_location' ? <MapPin size={12}/> : <Navigation size={12}/>}
-                        {data.type === 'pickup_location' ? 'Saves to: pickup_coords' : 'Saves to: dest_coords'}
+                    <div className="flex flex-col gap-2">
+                        {/* Status Banner */}
+                        <div className={`flex items-center justify-center gap-2 py-2 rounded-lg border text-xs font-bold font-mono uppercase tracking-wide ${data.type === 'pickup_location' ? 'bg-lime-50 text-lime-700 border-lime-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
+                            {data.type === 'pickup_location' ? <MapPin size={12}/> : <Navigation size={12}/>}
+                            {data.type === 'pickup_location' ? 'Saves to: pickup_coords' : 'Saves to: dest_coords'}
+                        </div>
+                        
+                        {/* Presets Preview */}
+                        {data.presets && data.presets.length > 0 && (
+                            <div className="space-y-1">
+                                <div className="text-[9px] font-bold text-gray-400 uppercase tracking-wider pl-1">Smart Presets</div>
+                                {data.presets.map((preset) => (
+                                    <div key={preset.id} className="flex items-center gap-2 bg-gray-50 px-2 py-1.5 rounded border border-gray-100">
+                                        {preset.type === 'manual' ? (
+                                            <LocateFixed size={10} className="text-blue-500" />
+                                        ) : (
+                                            <div className="w-2.5 h-2.5 rounded-full bg-green-400"></div>
+                                        )}
+                                        <span className="text-[10px] font-medium text-gray-700 truncate flex-1">{preset.title}</span>
+                                        {preset.type === 'static' && (
+                                            <span className="text-[8px] font-mono text-gray-400">{preset.latitude?.toFixed(2)}, {preset.longitude?.toFixed(2)}</span>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                     </div>
                 )}
 
@@ -275,8 +301,8 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                 value={local.content || ''} 
                                 onChange={e => update('content', e.target.value)} 
                                 placeholder={
-                                    local.type === 'pickup_location' ? "e.g. Please share your Pickup Location:" :
-                                    local.type === 'destination_location' ? "e.g. Please share your Destination:" :
+                                    local.type === 'pickup_location' ? "Select your pickup location below:" :
+                                    local.type === 'destination_location' ? "Select your destination below:" :
                                     "Type your message here..."
                                 }
                             />
@@ -284,6 +310,92 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                 {['{{name}}', '{{phone}}', '{{email}}'].map(tag => (
                                     <button key={tag} onClick={() => update('content', (local.content || '') + ' ' + tag)} className="text-[10px] bg-gray-100 px-2 py-1 rounded border border-gray-200 hover:bg-gray-200 transition-colors">{tag}</button>
                                 ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* --- SMART PRESETS FOR LOCATIONS --- */}
+                    {['pickup_location', 'destination_location'].includes(local.type) && (
+                        <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm space-y-4">
+                            <div className="flex justify-between items-center">
+                                <label className="block text-xs font-bold text-gray-800 uppercase">Smart Presets</label>
+                                <span className="text-[10px] text-blue-600 font-bold bg-blue-50 px-2 py-0.5 rounded-full">One-Click Options</span>
+                            </div>
+                            
+                            <div className="space-y-2">
+                                {(local.presets || []).map((preset: LocationPreset, i: number) => (
+                                    <div key={i} className="flex flex-col gap-2 bg-gray-50 p-2.5 rounded-lg border border-gray-100">
+                                        <div className="flex gap-2">
+                                            <input 
+                                                className="flex-1 p-1.5 text-xs bg-white border border-gray-200 rounded outline-none font-bold"
+                                                value={preset.title}
+                                                onChange={e => {
+                                                    const n = [...(local.presets || [])];
+                                                    n[i].title = e.target.value;
+                                                    update('presets', n);
+                                                }}
+                                                placeholder="Label (e.g. Airport)"
+                                            />
+                                            <button onClick={() => {
+                                                const n = local.presets.filter((_:any, idx:number) => idx !== i);
+                                                update('presets', n);
+                                            }} className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded"><Trash2 size={14}/></button>
+                                        </div>
+                                        
+                                        <div className="flex items-center gap-2">
+                                            <select 
+                                                className="text-[10px] p-1 rounded border border-gray-200 bg-white"
+                                                value={preset.type}
+                                                onChange={e => {
+                                                    const n = [...(local.presets || [])];
+                                                    n[i].type = e.target.value as 'static' | 'manual';
+                                                    update('presets', n);
+                                                }}
+                                            >
+                                                <option value="static">Fixed Coords</option>
+                                                <option value="manual">Manual Pin Trigger</option>
+                                            </select>
+                                            
+                                            {preset.type === 'static' ? (
+                                                <div className="flex gap-1 flex-1">
+                                                    <input 
+                                                        className="w-1/2 p-1 text-[10px] bg-white border border-gray-200 rounded outline-none"
+                                                        placeholder="Lat"
+                                                        type="number"
+                                                        step="0.000001"
+                                                        value={preset.latitude || ''}
+                                                        onChange={e => {
+                                                            const n = [...local.presets];
+                                                            n[i].latitude = parseFloat(e.target.value);
+                                                            update('presets', n);
+                                                        }}
+                                                    />
+                                                    <input 
+                                                        className="w-1/2 p-1 text-[10px] bg-white border border-gray-200 rounded outline-none"
+                                                        placeholder="Long"
+                                                        type="number"
+                                                        step="0.000001"
+                                                        value={preset.longitude || ''}
+                                                        onChange={e => {
+                                                            const n = [...local.presets];
+                                                            n[i].longitude = parseFloat(e.target.value);
+                                                            update('presets', n);
+                                                        }}
+                                                    />
+                                                </div>
+                                            ) : (
+                                                <span className="text-[9px] text-blue-500 italic flex-1 pl-2">Opens Map Pin Request</span>
+                                            )}
+                                        </div>
+                                    </div>
+                                ))}
+                                
+                                <button 
+                                    onClick={() => update('presets', [...(local.presets||[]), { id: `pre_${Date.now()}`, title: 'New Option', type: 'static' }])} 
+                                    className="w-full py-2 border border-dashed border-gray-300 rounded-lg text-xs font-bold text-gray-500 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200 flex items-center justify-center gap-2 transition-all"
+                                >
+                                    <Plus size={12} /> Add Location Option
+                                </button>
                             </div>
                         </div>
                     )}
@@ -498,185 +610,155 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
     );
 };
 
-// --- 3. MAIN BUILDER CANVAS ---
+// --- 3. BOT BUILDER COMPONENT ---
 
-const initialNodes: Node<FlowNodeData>[] = [
-    { id: 'start', type: 'custom', position: { x: 100, y: 100 }, data: { id: 'start', type: 'start', label: 'Start Flow', content: 'Entry Point' }, deletable: false }
-];
+const nodeTypes = {
+  custom: UniversalNode
+};
 
 export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
-    const { nodes, edges, onNodesChange, onEdgesChange, onConnect, addNode, updateNodeData, setNodes, setEdges } = useFlowStore();
+    const { nodes, edges, onNodesChange, onEdgesChange, onConnect, setNodes, setEdges, addNode, updateNodeData } = useFlowStore();
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+    const [activeView, setActiveView] = useState<'flow' | 'ai'>('flow');
     const [isSaving, setIsSaving] = useState(false);
 
     useEffect(() => {
         const load = async () => {
-             try {
-                const data = isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
-                if (data?.nodes && data.nodes.length > 0) {
-                    setNodes(data.nodes);
-                    setEdges(data.edges);
-                } else {
-                    setNodes(initialNodes);
-                    setEdges([]);
-                }
-             } catch(e) { 
-                 console.error("Failed to load settings");
-                 setNodes(initialNodes);
+             let settings;
+             if (isLiveMode) {
+                 try { settings = await liveApiService.getBotSettings(); } catch(e) { console.error(e); }
+             } else {
+                 settings = mockBackend.getBotSettings();
+             }
+             
+             if (settings) {
+                 if (settings.nodes) setNodes(settings.nodes);
+                 if (settings.edges) setEdges(settings.edges);
              }
         };
         load();
     }, [isLiveMode, setNodes, setEdges]);
 
-    const onDragStart = (event: React.DragEvent, nodeType: NodeType, label: string) => {
-        event.dataTransfer.setData('application/reactflow/type', nodeType);
-        event.dataTransfer.setData('application/reactflow/label', label);
-        event.dataTransfer.effectAllowed = 'move';
+    const handleSave = async () => {
+        setIsSaving(true);
+        const settings = {
+            nodes,
+            edges,
+            isEnabled: true, // simplified
+            shouldRepeat: false,
+            routingStrategy: 'BOT_ONLY'
+        };
+
+        try {
+            if (isLiveMode) {
+                 const current = await liveApiService.getBotSettings();
+                 await liveApiService.saveBotSettings({ ...current, nodes, edges });
+            } else {
+                 const current = mockBackend.getBotSettings();
+                 mockBackend.updateBotSettings({ ...current, nodes, edges });
+            }
+            alert("Flow Saved!");
+        } catch(e) {
+            alert("Save Failed");
+        } finally {
+            setIsSaving(false);
+        }
+    };
+    
+    const onNodeClick = (_: React.MouseEvent, node: Node) => {
+        setSelectedNodeId(node.id);
     };
 
-    const onDrop = (event: React.DragEvent) => {
-        event.preventDefault();
-        const type = event.dataTransfer.getData('application/reactflow/type') as NodeType;
-        const label = event.dataTransfer.getData('application/reactflow/label');
-        
-        const reactFlowBounds = document.querySelector('.react-flow')?.getBoundingClientRect();
-        if (!reactFlowBounds) return;
-
-        const position = { 
-            x: event.clientX - reactFlowBounds.left - 100, 
-            y: event.clientY - reactFlowBounds.top 
-        };
-        
+    const handleAddNode = (type: NodeType, label: string) => {
+        const id = `${type}_${Date.now()}`;
         const newNode: Node<FlowNodeData> = {
-            id: `node_${Date.now()}`,
+            id,
             type: 'custom',
-            position,
-            data: { 
-                id: `node_${Date.now()}`, 
-                type, 
-                label, 
-                content: type === 'pickup_location' ? 'Please share your Pickup Location:' : type === 'destination_location' ? 'Please share your Destination:' : '',
-                buttons: (type === 'interactive_button' || type === 'rich_card') ? [{ id: `btn_${Date.now()}_1`, title: 'Yes', type: 'reply'}, { id: `btn_${Date.now()}_2`, title: 'No', type: 'reply'}] : undefined,
-                sections: type === 'interactive_list' ? [{ title: 'Main Menu', rows: [{id: `row_${Date.now()}_1`, title: 'Option 1'}] }] : undefined
+            position: { x: 250, y: 250 }, // centered roughly
+            data: {
+                id,
+                type,
+                label,
+                content: ''
             }
         };
         addNode(newNode);
-        setSelectedNodeId(newNode.id);
     };
 
-    const handleSave = async (publish = false) => {
-        setIsSaving(true);
-        // Validations
-        if (!nodes.find(n => n.type === 'start' || n.data.type === 'start')) {
-            alert("Error: Flow must have a Start Node.");
-            setIsSaving(false); return;
-        }
-        
-        const payload = { nodes, edges };
-        try {
-            let currentSettings = isLiveMode ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
-            const newSettings = { ...currentSettings, ...payload };
-
-            if (isLiveMode) {
-                await liveApiService.saveBotSettings(newSettings);
-                if (publish) await liveApiService.publishBot();
-            } else {
-                mockBackend.updateBotSettings(newSettings);
-            }
-            alert(publish ? "Bot Published Successfully!" : "Draft Saved.");
-        } catch(e) { alert("Error saving flow."); }
-        finally { setIsSaving(false); }
-    };
-
-    const selectedNode = useMemo(() => nodes.find(n => n.id === selectedNodeId), [selectedNodeId, nodes]);
-
-    // Enhanced Palette
-    const tools = [
-        { category: "Sending", items: [
-            { type: 'text', label: 'Text', icon: <Type size={16} />, color: 'text-blue-600 bg-blue-50' },
-            { type: 'image', label: 'Media', icon: <ImageIcon size={16} />, color: 'text-purple-600 bg-purple-50' },
-            { type: 'rich_card', label: 'Rich Card', icon: <CreditCard size={16} />, color: 'text-pink-600 bg-pink-50' },
-        ]},
-        { category: "Interactive", items: [
-            { type: 'interactive_button', label: 'Buttons', icon: <MousePointer size={16} />, color: 'text-rose-600 bg-rose-50' },
-            { type: 'interactive_list', label: 'List Menu', icon: <List size={16} />, color: 'text-indigo-600 bg-indigo-50' },
-            { type: 'pickup_location', label: 'Pickup', icon: <MapPin size={16} />, color: 'text-lime-600 bg-lime-50' },
-            { type: 'destination_location', label: 'Destination', icon: <Navigation size={16} />, color: 'text-red-600 bg-red-50' },
-        ]},
-        { category: "Logic & Flow", items: [
-            { type: 'input', label: 'Collect Input', icon: <CornerRightDown size={16} />, color: 'text-orange-600 bg-orange-50' },
-            { type: 'condition', label: 'Branching', icon: <GitBranch size={16} />, color: 'text-amber-600 bg-amber-50' },
-            { type: 'set_variable', label: 'Set Variable', icon: <Variable size={16} />, color: 'text-cyan-600 bg-cyan-50' },
-            { type: 'delay', label: 'Smart Delay', icon: <Clock size={16} />, color: 'text-gray-600 bg-gray-100' },
-            { type: 'handoff', label: 'Agent Handoff', icon: <User size={16} />, color: 'text-red-600 bg-red-50' },
-        ]}
-    ];
+    if (activeView === 'ai') {
+        return (
+            <div className="h-full flex flex-col">
+                 <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center gap-4">
+                      <button onClick={() => setActiveView('flow')} className="text-gray-500 hover:text-gray-900 font-bold text-sm">Flow Builder</button>
+                      <div className="h-4 w-px bg-gray-300"></div>
+                      <button className="text-blue-600 font-bold text-sm bg-blue-50 px-3 py-1 rounded-lg">AI Persona</button>
+                 </div>
+                 <div className="flex-1 overflow-hidden">
+                     <AITraining isLiveMode={isLiveMode} />
+                 </div>
+            </div>
+        );
+    }
 
     return (
-        <div className="flex h-screen w-full bg-slate-100 overflow-hidden font-sans">
-            {/* 1. Sidebar Palette */}
-            <div className="w-64 bg-white border-r border-gray-200 flex flex-col shrink-0 z-10 shadow-sm">
-                <div className="p-5 border-b border-gray-100 bg-white">
-                    <h2 className="font-extrabold text-gray-900 flex items-center gap-2"><LayoutTemplate size={20} className="text-blue-600" /> Bot Studio</h2>
-                    <p className="text-[10px] text-gray-400 mt-1 uppercase tracking-wider font-bold">Pro Flow Builder</p>
+        <div className="h-full flex flex-col relative bg-gray-50">
+            {/* Toolbar */}
+            <div className="h-14 bg-white border-b border-gray-200 flex items-center justify-between px-4 z-10 shrink-0">
+                <div className="flex items-center gap-4">
+                     <div className="flex bg-gray-100 p-1 rounded-lg">
+                          <button className="px-3 py-1.5 bg-white shadow-sm rounded-md text-xs font-bold text-gray-900">Flow Builder</button>
+                          <button onClick={() => setActiveView('ai')} className="px-3 py-1.5 text-xs font-medium text-gray-500 hover:text-gray-900">AI Persona</button>
+                     </div>
                 </div>
-                <div className="p-4 space-y-8 overflow-y-auto flex-1 bg-white scrollbar-hide">
-                    {tools.map((cat, i) => (
-                        <div key={i}>
-                            <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-3 px-1">{cat.category}</div>
-                            <div className="grid grid-cols-2 gap-2">
-                                {cat.items.map((t) => (
-                                    <div 
-                                        key={t.type}
-                                        draggable 
-                                        onDragStart={(e) => onDragStart(e, t.type as NodeType, t.label)} 
-                                        className="group p-3 bg-white border border-gray-100 rounded-xl shadow-sm cursor-grab hover:border-blue-400 hover:shadow-md transition-all flex flex-col items-center gap-2 active:scale-95"
-                                    >
-                                        <div className={`p-2 rounded-lg transition-colors ${t.color}`}>{t.icon}</div>
-                                        <span className="text-[10px] font-bold text-gray-600 group-hover:text-blue-700 text-center leading-tight">{t.label}</span>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    ))}
+                <div className="flex items-center gap-2">
+                     <button onClick={handleSave} disabled={isSaving} className="bg-black text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 hover:bg-gray-800 transition-colors">
+                         {isSaving ? 'Saving...' : <><Save size={14} /> Save Flow</>}
+                     </button>
                 </div>
             </div>
 
-            {/* 2. Main Canvas */}
-            <div className="flex-1 relative h-full flex flex-col">
-                <div className="absolute top-5 right-5 z-20 flex gap-3">
-                    <button onClick={() => handleSave(false)} className="px-5 py-2.5 bg-white text-gray-700 rounded-xl font-bold shadow-lg border border-gray-100 hover:bg-gray-50 flex items-center gap-2 transition-transform active:scale-95">
-                        <Save size={18} /> Save Draft
-                    </button>
-                    <button onClick={() => handleSave(true)} disabled={isSaving} className="px-5 py-2.5 bg-black text-white rounded-xl font-bold shadow-xl hover:bg-gray-800 flex items-center gap-2 transition-transform active:scale-95">
-                        {isSaving ? <RefreshCw size={18} className="animate-spin" /> : <Zap size={18} />} Publish Live
-                    </button>
-                </div>
+            <div className="flex-1 flex overflow-hidden">
+                 {/* Sidebar / Node Palette */}
+                 <div className="w-16 bg-white border-r border-gray-200 flex flex-col items-center py-4 gap-4 z-10">
+                      <button onClick={() => handleAddNode('text', 'Text Message')} className="p-2 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors" title="Text Message"><MessageSquare size={20} /></button>
+                      <button onClick={() => handleAddNode('image', 'Image/Media')} className="p-2 rounded-lg bg-purple-50 text-purple-600 hover:bg-purple-100 transition-colors" title="Image / Video"><ImageIcon size={20} /></button>
+                      <button onClick={() => handleAddNode('interactive_button', 'Buttons')} className="p-2 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100 transition-colors" title="Buttons"><MousePointer size={20} /></button>
+                      <button onClick={() => handleAddNode('interactive_list', 'List Menu')} className="p-2 rounded-lg bg-indigo-50 text-indigo-600 hover:bg-indigo-100 transition-colors" title="List Menu"><List size={20} /></button>
+                      <button onClick={() => handleAddNode('input', 'Collect Input')} className="p-2 rounded-lg bg-orange-50 text-orange-600 hover:bg-orange-100 transition-colors" title="Collect Input"><CornerRightDown size={20} /></button>
+                      <button onClick={() => handleAddNode('condition', 'Condition')} className="p-2 rounded-lg bg-amber-50 text-amber-600 hover:bg-amber-100 transition-colors" title="Logic Condition"><GitBranch size={20} /></button>
+                      <button onClick={() => handleAddNode('location_request', 'Location Request')} className="p-2 rounded-lg bg-teal-50 text-teal-600 hover:bg-teal-100 transition-colors" title="Request Location"><MapPin size={20} /></button>
+                 </div>
 
-                <div className="flex-1 w-full h-full" onDrop={onDrop} onDragOver={e => e.preventDefault()}>
-                    <ReactFlow
+                 <div className="flex-1 h-full relative">
+                      <ReactFlow
                         nodes={nodes}
                         edges={edges}
                         onNodesChange={onNodesChange}
                         onEdgesChange={onEdgesChange}
                         onConnect={onConnect}
-                        nodeTypes={{ custom: UniversalNode }}
-                        onNodeClick={(_, n) => setSelectedNodeId(n.id)}
-                        onPaneClick={() => setSelectedNodeId(null)}
+                        nodeTypes={nodeTypes}
+                        onNodeClick={onNodeClick}
                         fitView
-                        snapToGrid={true}
-                        snapGrid={[20, 20]}
-                        proOptions={{ hideAttribution: true }}
-                    >
-                        <Background color="#cbd5e1" gap={24} variant={BackgroundVariant.Dots} size={1.5} />
-                        <Controls className="bg-white shadow-xl border border-gray-100 rounded-lg p-1" />
-                        <MiniMap className="border border-gray-200 shadow-lg rounded-lg" nodeColor="#94a3b8" />
-                    </ReactFlow>
-                </div>
+                        attributionPosition="bottom-right"
+                      >
+                         <Background color="#f1f5f9" gap={16} variant={BackgroundVariant.Dots} />
+                         <Controls />
+                         <MiniMap style={{ height: 100 }} zoomable pannable />
+                      </ReactFlow>
+                 </div>
+                 
+                 {selectedNodeId && (
+                     <div className="w-[420px] shrink-0 h-full relative z-20">
+                         {nodes.find(n => n.id === selectedNodeId) && (
+                             <PropertiesPanel 
+                                 node={nodes.find(n => n.id === selectedNodeId)!} 
+                                 onChange={updateNodeData} 
+                                 onClose={() => setSelectedNodeId(null)} 
+                             />
+                         )}
+                     </div>
+                 )}
             </div>
-
-            {/* 3. Properties Panel */}
-            {selectedNode && <PropertiesPanel node={selectedNode} onChange={updateNodeData} onClose={() => setSelectedNodeId(null)} />}
         </div>
     );
 };

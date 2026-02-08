@@ -34,6 +34,15 @@ export interface ListSection {
   rows: ListRow[];
 }
 
+export interface LocationPreset {
+  id: string;
+  title: string;
+  type: 'static' | 'manual'; // 'static' = fixed coords, 'manual' = ask user
+  latitude?: number;
+  longitude?: number;
+  description?: string;
+}
+
 export type NodeType = 
   | 'start' 
   | 'text' 
@@ -46,8 +55,8 @@ export type NodeType =
   | 'interactive_list' 
   | 'rich_card'          
   | 'location_request'   
-  | 'pickup_location'    // NEW: Specialized Pickup Node
-  | 'destination_location' // NEW: Specialized Destination Node
+  | 'pickup_location'    
+  | 'destination_location' 
   | 'condition' 
   | 'set_variable'       
   | 'delay'              
@@ -79,6 +88,9 @@ export interface FlowNodeData {
   listButtonText?: string;
   sections?: ListSection[];
   
+  // Smart Location Presets
+  presets?: LocationPreset[];
+
   // Input & Validation
   variable?: string; 
   validationType?: 'text' | 'email' | 'phone' | 'number' | 'regex' | 'location';

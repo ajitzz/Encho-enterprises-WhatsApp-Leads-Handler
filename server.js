@@ -279,25 +279,58 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         } else {
             const currentNode = nodes.find(n => n.id === currentNodeId);
             if (currentNode) {
-                // A. Handle Variable Capture (Input / Location Node)
+                // A. Handle Variable Capture
                 const captureTypes = ['input', 'location_request', 'pickup_location', 'destination_location'];
                 
                 if (captureTypes.includes(currentNode.data.type)) {
                     let varName = currentNode.data.variable;
                     
-                    // Default Variables if not set
                     if (!varName) {
                         if (currentNode.data.type === 'pickup_location') varName = 'pickup_coords';
                         else if (currentNode.data.type === 'destination_location') varName = 'dest_coords';
                         else if (currentNode.data.type === 'location_request') varName = 'location_data';
                     }
 
-                    if (varName) {
-                        // incomingText is raw text OR JSON string of location
-                        const newVars = { ...candidate.variables, [varName]: incomingText };
+                    // --- SMART LOCATION LOGIC START ---
+                    let valueToSave = null;
+                    let isManualTrigger = false;
+
+                    // Check for Preset List Selection
+                    if (incomingPayloadId && currentNode.data.presets) {
+                        const matchedPreset = currentNode.data.presets.find(p => p.id === incomingPayloadId);
+                        if (matchedPreset) {
+                            if (matchedPreset.type === 'manual') {
+                                isManualTrigger = true;
+                            } else {
+                                valueToSave = JSON.stringify({ 
+                                    lat: matchedPreset.latitude, 
+                                    long: matchedPreset.longitude, 
+                                    label: matchedPreset.title 
+                                });
+                            }
+                        }
+                    }
+                    // Check for Real Location Message
+                    else if (incomingText && incomingText.startsWith('{') && incomingText.includes('"latitude"')) {
+                        // It's a raw location JSON string
+                        valueToSave = incomingText;
+                    } 
+                    // Fallback for simple text input
+                    else if (currentNode.data.type === 'input') {
+                        valueToSave = incomingText;
+                    }
+
+                    if (valueToSave) {
+                        const newVars = { ...candidate.variables, [varName]: valueToSave };
                         await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
                         candidate.variables = newVars;
+                    } else if (isManualTrigger) {
+                        // User clicked "Manual Pin" button. 
+                        // Do NOT advance node. Stay here. 
+                        // The engine loop will re-execute the node logic.
+                        // We must let the execution phase know to send the Location Request now.
                     }
+                    // --- SMART LOCATION LOGIC END ---
                 }
 
                 // B. Find Next Path
@@ -306,13 +339,24 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
                 // Match Buttons / List Rows via Payload ID
                 if (incomingPayloadId) {
+                    // Check standard buttons
                     if (currentNode.data.buttons) {
                         const btn = currentNode.data.buttons.find(b => b.id === incomingPayloadId);
                         if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
                     }
+                    // Check List Sections
                     if (!matchedEdge && currentNode.data.sections) {
                         const row = currentNode.data.sections.flatMap(s => s.rows).find(r => r.id === incomingPayloadId);
                         if (row) matchedEdge = outgoingEdges.find(e => e.sourceHandle === row.id);
+                    }
+                    
+                    // Check Smart Presets - If it's a Static preset, we advance. If Manual, we stay.
+                    if (!matchedEdge && currentNode.data.presets) {
+                        const preset = currentNode.data.presets.find(p => p.id === incomingPayloadId);
+                        if (preset && preset.type === 'static') {
+                             // Use default edge for successful preset selection
+                             matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
+                        }
                     }
                 }
 
@@ -323,25 +367,62 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
                     }
                 }
+                
+                // Match Location Input (Auto Advance)
+                if (!matchedEdge && incomingText && incomingText.startsWith('{') && incomingText.includes('"latitude"')) {
+                     matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
+                }
 
                 // Default Path
                 if (!matchedEdge) {
-                    matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
+                    // Only use default if NOT waiting for input/location
+                    // BUT for input/location nodes, if we HAVE captured value (valueToSave was set above), we SHOULD advance.
+                    // The logic above saved to DB. Now we just need to confirm we can move.
+                    const isSmartNode = ['input', 'location_request', 'pickup_location', 'destination_location'].includes(currentNode.data.type);
+                    
+                    // If it's a smart node, we only advance if we have valid input
+                    if (isSmartNode) {
+                         // We rely on valueToSave logic. 
+                         // If valueToSave was set (location or preset), we advance.
+                         // But we need to know if we saved it. 
+                         // Check variables? 
+                         // Better: check if input looks like what we expect.
+                         const varName = currentNode.data.variable || (currentNode.data.type === 'pickup_location' ? 'pickup_coords' : 'dest_coords');
+                         const hasVar = candidate.variables[varName]; // This might be stale if we just updated it.
+                         // However, if we just updated it in DB, the 'candidate' object in memory was updated too in line 192.
+                         
+                         // Re-check:
+                         // 1. If user sent "Manual" preset -> Stay (matchedEdge remains null, logic below handles stay)
+                         // 2. If user sent valid data -> Advance (matchedEdge = default)
+                         
+                         // Detection for "Manual" preset click:
+                         const isManualClick = currentNode.data.presets?.some(p => p.id === incomingPayloadId && p.type === 'manual');
+                         
+                         if (!isManualClick) {
+                             // Try to advance if it wasn't a manual trigger click
+                             matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
+                         }
+                    } else {
+                        // Standard node (text, image, etc) that just auto-advances
+                        matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
+                    }
                 }
 
                 if (matchedEdge) {
                     nextNodeId = matchedEdge.target;
                 } else {
-                    // Dead End logic
+                    // Dead End logic or Stay on Node
                     if (outgoingEdges.length === 0) {
                         const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
                         nextNodeId = startNode ? startNode.id : null;
                     } else {
-                        // User ignored the buttons/menu -> Stay on node & Mark Invalid
-                        // For inputs/location request, we assume next message IS the input, so we naturally advance if there is a default edge.
-                        // If there is NO default edge, we reset.
+                        // Stay on node
                         nextNodeId = currentNodeId;
-                        if (['interactive_button', 'interactive_list', 'rich_card'].includes(currentNode.data.type)) {
+                        // Determine if we should reply "Invalid Option"
+                        // Don't reply invalid if it was a "Manual" preset click (that's a valid action, just doesn't advance)
+                        const isManualClick = currentNode.data.presets?.some(p => p.id === incomingPayloadId && p.type === 'manual');
+                        
+                        if (['interactive_button', 'interactive_list', 'rich_card'].includes(currentNode.data.type) && !isManualClick) {
                             shouldReplyInvalid = true;
                         }
                     }
@@ -433,28 +514,45 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     payload = { type: 'text', text: { body: validBody || "Please enter your response below:" } };
                     autoAdvance = false; // Stop and wait for user
                 } 
-                // --- SPECIALIZED LOCATION REQUESTS ---
-                else if (data.type === 'pickup_location') {
-                     payload = {
-                        type: "interactive",
-                        interactive: {
-                            type: "location_request_message",
-                            body: { text: validBody || "📍 Please share your *Pickup Location*:" },
-                            action: { name: "send_location" }
-                        }
-                    };
-                    autoAdvance = false;
-                }
-                else if (data.type === 'destination_location') {
-                     payload = {
-                        type: "interactive",
-                        interactive: {
-                            type: "location_request_message",
-                            body: { text: validBody || "🏁 Please share your *Destination Location*:" },
-                            action: { name: "send_location" }
-                        }
-                    };
-                    autoAdvance = false;
+                // --- SPECIALIZED LOCATION REQUESTS (UPDATED LOGIC) ---
+                else if (data.type === 'pickup_location' || data.type === 'destination_location') {
+                     // Check if this execution is triggered by "Manual Pin" preset click
+                     const isManualTrigger = data.presets?.some(p => p.id === incomingPayloadId && p.type === 'manual');
+                     const hasPresets = data.presets && data.presets.length > 0;
+                     
+                     // SCENARIO 1: Show List (Default if presets exist and NOT manual trigger)
+                     if (hasPresets && !isManualTrigger) {
+                         const rows = data.presets.map(p => ({
+                             id: p.id,
+                             title: p.title.substring(0, 24),
+                             description: p.type === 'manual' ? 'Select on Map' : 'Quick Select'
+                         }));
+                         
+                         payload = {
+                            type: "interactive",
+                            interactive: {
+                                type: "list",
+                                body: { text: validBody || (data.type === 'pickup_location' ? "Select Pickup Location:" : "Select Destination:") },
+                                action: {
+                                    button: "Locations",
+                                    sections: [{ title: "Options", rows }]
+                                }
+                            }
+                        };
+                     } 
+                     // SCENARIO 2: Ask for Pin (If no presets OR Manual Trigger clicked)
+                     else {
+                         const label = data.type === 'pickup_location' ? "Pickup Location" : "Destination";
+                         payload = {
+                            type: "interactive",
+                            interactive: {
+                                type: "location_request_message",
+                                body: { text: isManualTrigger ? `Please send your *${label}* using the map:` : (validBody || `Please share your *${label}*:`) },
+                                action: { name: "send_location" }
+                            }
+                        };
+                     }
+                     autoAdvance = false;
                 }
                 else if (data.type === 'location_request') {
                      payload = {
