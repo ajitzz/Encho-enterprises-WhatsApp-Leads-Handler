@@ -212,7 +212,6 @@ const generateTimeOptions = (config) => {
         options.push({ id, title: timeStr });
     }
     
-    // Fallback if empty range
     if (options.length === 0) {
         return [
             { id: 'morning', title: 'Morning (9AM - 12PM)' },
@@ -220,7 +219,17 @@ const generateTimeOptions = (config) => {
             { id: 'evening', title: 'Evening (4PM - 8PM)' }
         ];
     }
-    return options.slice(0, 10); // Max 10 limit
+    
+    const limited = options.slice(0, 9);
+    limited.push({ id: 'custom_time', title: 'Type Specific Time', description: 'Enter manually (e.g. 11:15 PM)' });
+    
+    return limited;
+};
+
+// --- HELPER: DETECT MANUAL PRESET ---
+const isPresetManual = (p) => {
+    // If type is explicitly 'manual' OR if lat/long are missing (implies manual)
+    return p.type === 'manual' || (!p.latitude && !p.longitude);
 };
 
 // --- DEFAULT BOT CONFIG ---
@@ -350,16 +359,23 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         if (!matchedPreset && cleanInput) matchedPreset = currentNode.data.presets.find(p => p.title.toLowerCase().trim() === cleanInput);
 
                         if (matchedPreset) {
-                            if (matchedPreset.type === 'manual') isManualTrigger = true;
+                            if (isPresetManual(matchedPreset)) isManualTrigger = true;
                             else valueToSave = JSON.stringify({ lat: matchedPreset.latitude, long: matchedPreset.longitude, label: matchedPreset.title });
                         }
                     }
                     
                     // --- DYNAMIC DATETIME CAPTURE ---
-                    // If this was a datetime picker node, capture the list selection ID or Text
                     if (currentNode.data.type === 'datetime_picker') {
-                        if (incomingPayloadId) valueToSave = incomingPayloadId;
-                        else if (cleanInput) valueToSave = cleanInput;
+                        if (incomingPayloadId === 'custom_time') {
+                            isManualTrigger = true; 
+                        } else if (incomingPayloadId) {
+                            valueToSave = incomingPayloadId;
+                        } else if (cleanInput) {
+                            const timeRegex = /([0-9]{1,2})[:.]([0-9]{2})\s*(am|pm)?/i;
+                            if (timeRegex.test(cleanInput) || cleanInput.length > 3) {
+                                valueToSave = incomingText;
+                            }
+                        }
                     }
 
                     // Check for Real Location Message
@@ -375,7 +391,10 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         const newVars = { ...candidate.variables, [varName]: valueToSave };
                         await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
                         candidate.variables = newVars;
-                    } 
+                    } else if (isManualTrigger && currentNode.data.type === 'datetime_picker') {
+                        await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "Sure, please type your preferred time below (e.g., 11:15 PM):" } });
+                        return; 
+                    }
                     // --- SMART LOGIC END ---
                 }
 
@@ -396,9 +415,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     // Presets
                     if (!matchedEdge && currentNode.data.presets) {
                         const preset = currentNode.data.presets.find(p => p.id === incomingPayloadId);
-                        if (preset && preset.type === 'static') matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
+                        if (preset && !isPresetManual(preset)) matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
                     }
-                    // DateTime Picker - Always auto advance on selection
                     if (!matchedEdge && currentNode.data.type === 'datetime_picker') {
                         matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
                     }
@@ -411,7 +429,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
                     }
                     if (currentNode.data.type === 'datetime_picker') {
-                        // If they typed something reasonable, advance
                         matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
                     }
                 }
@@ -429,11 +446,12 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                          let isManualClick = false;
                          if (currentNode.data.presets) {
                              const preset = currentNode.data.presets.find(p => (incomingPayloadId && p.id === incomingPayloadId) || (cleanInput && p.title.toLowerCase().trim() === cleanInput));
-                             if (preset && preset.type === 'manual') isManualClick = true;
+                             if (preset && isPresetManual(preset)) isManualClick = true;
                          }
+                         if (incomingPayloadId === 'custom_time') isManualClick = true;
+
                          if (!isManualClick) matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
                     } 
-                    // Standard node that auto-advances
                     else if (currentNode.data.type !== 'datetime_picker') {
                         matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
                     }
@@ -451,8 +469,9 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         let isManualClick = false;
                         if (currentNode.data.presets) {
                              const preset = currentNode.data.presets.find(p => (incomingPayloadId && p.id === incomingPayloadId) || (cleanInput && p.title.toLowerCase().trim() === cleanInput));
-                             if (preset && preset.type === 'manual') isManualClick = true;
+                             if (preset && isPresetManual(preset)) isManualClick = true;
                         }
+                        if (incomingPayloadId === 'custom_time') isManualClick = true;
                         
                         if (['interactive_button', 'interactive_list', 'rich_card'].includes(currentNode.data.type) && !isManualClick) {
                             shouldReplyInvalid = true;
@@ -543,7 +562,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     autoAdvance = false; 
                 } 
                 
-                // --- SMART DATE TIME PICKER ---
                 else if (data.type === 'datetime_picker') {
                     const mode = data.dateConfig?.mode || 'date';
                     const listRows = mode === 'date' ? generateDateOptions(data.dateConfig) : generateTimeOptions(data.dateConfig);
@@ -567,7 +585,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                      let isManualTrigger = false;
                      if (data.presets) {
                          const preset = data.presets.find(p => (incomingPayloadId && p.id === incomingPayloadId) || (cleanInput && p.title.toLowerCase().trim() === cleanInput));
-                         if (preset && preset.type === 'manual') isManualTrigger = true;
+                         if (preset && isPresetManual(preset)) isManualTrigger = true;
                      }
                      const hasPresets = data.presets && data.presets.length > 0;
                      
