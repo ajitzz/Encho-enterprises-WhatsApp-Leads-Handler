@@ -1,6 +1,6 @@
 
 import React, { useEffect, useState, useRef } from 'react';
-import { Database, Server, Shield, X, AlertTriangle, Zap, RefreshCw, AlertCircle, DatabaseZap, Workflow, Trash2, Hammer } from 'lucide-react';
+import { Database, Server, Shield, X, AlertTriangle, Zap, RefreshCw, AlertCircle, DatabaseZap, Workflow, Trash2, Hammer, WifiOff } from 'lucide-react';
 import { SystemStats } from '../types';
 
 interface DiagnosticStats extends SystemStats {
@@ -9,6 +9,7 @@ interface DiagnosticStats extends SystemStats {
     counts?: { candidates: number };
     lastError?: string;
     env?: { hasPostgres: boolean; publicUrl: string };
+    isServerOffline?: boolean;
 }
 
 export const SystemMonitor = () => {
@@ -37,10 +38,32 @@ export const SystemMonitor = () => {
                         tables: debugStats.tables,
                         counts: debugStats.counts,
                         lastError: debugStats.lastError,
-                        env: debugStats.env
+                        env: debugStats.env,
+                        isServerOffline: false
                     });
+                } else {
+                    // Server returned 500 or similar
+                    setStats(prev => ({
+                        ...(prev || {}),
+                        serverLoad: 0, dbLatency: 0, aiCredits: 0, aiModel: 'unknown', s3Status: 'error', s3Load: 0, whatsappStatus: 'error', whatsappUploadLoad: 0, activeUploads: 0, uptime: 0,
+                        dbStatus: 'error',
+                        tables: { candidates: false, bot_versions: false },
+                        counts: { candidates: 0 },
+                        isServerOffline: false,
+                        lastError: `API Error: ${response.status}`
+                    }));
                 }
-            } catch(e) {}
+            } catch(e) {
+                // Network Error (Server Offline)
+                setStats({
+                     serverLoad: 0, dbLatency: 0, aiCredits: 0, aiModel: 'unknown', s3Status: 'error', s3Load: 0, whatsappStatus: 'error', whatsappUploadLoad: 0, activeUploads: 0, uptime: 0,
+                     dbStatus: 'unknown',
+                     tables: { candidates: false, bot_versions: false },
+                     counts: { candidates: 0 },
+                     lastError: 'Server Unreachable',
+                     isServerOffline: true
+                });
+            }
             timerRef.current = setTimeout(poll, 5000); 
         };
         poll();
@@ -79,10 +102,11 @@ export const SystemMonitor = () => {
 
     if (!stats) return null;
 
+    const isServerOffline = stats.isServerOffline;
     const isDbError = stats.dbStatus === 'error';
     const isTablesMissing = stats.dbStatus === 'connected' && (!stats.tables?.candidates || !stats.tables?.bot_versions);
     const isDbEmpty = stats.dbStatus === 'connected' && !isTablesMissing && (stats.counts?.candidates === 0);
-    const hasCriticalIssue = isDbError || isTablesMissing || isDbEmpty;
+    const hasCriticalIssue = isServerOffline || isDbError || isTablesMissing || isDbEmpty;
 
     return (
         <>
@@ -95,12 +119,28 @@ export const SystemMonitor = () => {
             
             <div className="bg-black/90 backdrop-blur-md text-white border-t border-gray-800 p-2 flex items-center justify-between text-[10px] font-mono shadow-2xl">
                 <div className="flex items-center gap-4 px-2">
-                    <div className="flex items-center gap-1.5">
-                        <Database size={12} className={stats.dbStatus === 'connected' ? 'text-blue-400' : 'text-red-500 animate-pulse'} />
-                        <span className="text-gray-400">DB:</span>
-                        <span className={`font-bold ${stats.dbStatus === 'connected' ? 'text-white' : 'text-red-400'}`}>{stats.dbStatus === 'connected' ? 'OK' : 'ERR'}</span>
-                    </div>
-                    {stats.dbStatus === 'connected' && (
+                    {isServerOffline ? (
+                        <div className="flex items-center gap-1.5 text-red-500 font-bold animate-pulse">
+                            <WifiOff size={12} />
+                            <span>SERVER OFFLINE</span>
+                        </div>
+                    ) : (
+                        <div className="flex items-center gap-1.5">
+                            <Server size={12} className="text-green-400" />
+                            <span className="text-gray-400">SERVER:</span>
+                            <span className="text-white font-bold">ONLINE</span>
+                        </div>
+                    )}
+
+                    {!isServerOffline && (
+                        <div className="flex items-center gap-1.5">
+                            <Database size={12} className={stats.dbStatus === 'connected' ? 'text-blue-400' : 'text-red-500 animate-pulse'} />
+                            <span className="text-gray-400">DB:</span>
+                            <span className={`font-bold ${stats.dbStatus === 'connected' ? 'text-white' : 'text-red-400'}`}>{stats.dbStatus === 'connected' ? 'OK' : 'ERR'}</span>
+                        </div>
+                    )}
+                    
+                    {!isServerOffline && stats.dbStatus === 'connected' && (
                         <div className="flex items-center gap-1.5">
                             <span className="text-gray-400">SCHEMA:</span>
                             <span className={`font-bold ${!isTablesMissing ? 'text-green-400' : 'text-red-400'}`}>{!isTablesMissing ? 'VALID' : 'MISSING'}</span>
@@ -111,8 +151,8 @@ export const SystemMonitor = () => {
                 {hasCriticalIssue && (
                     <div className="absolute left-1/2 transform -translate-x-1/2 top-1 flex items-center gap-2 bg-red-600/90 px-3 py-1 rounded text-white font-bold animate-pulse cursor-pointer" onClick={() => setShowControls(true)}>
                         <AlertTriangle size={12} />
-                        {isDbError ? 'DB ERROR' : isTablesMissing ? 'MISSING TABLES' : 'DATABASE EMPTY'}
-                        <span className="underline">FIX</span>
+                        {isServerOffline ? 'SERVER DOWN' : isDbError ? 'DB ERROR' : isTablesMissing ? 'MISSING TABLES' : 'DATABASE EMPTY'}
+                        {!isServerOffline && <span className="underline">FIX</span>}
                     </div>
                 )}
 
@@ -131,47 +171,67 @@ export const SystemMonitor = () => {
                     </div>
                     
                     <div className="p-6 space-y-6">
-                        {/* REPAIR SCHEMA BUTTON FOR MISSING TABLES */}
-                        {isTablesMissing && (
+                        {isServerOffline ? (
                             <div className="bg-red-900/30 border border-red-800 p-4 rounded-lg">
-                                <div className="flex items-center justify-between mb-2">
-                                    <div className="flex items-center gap-2 text-red-400 font-bold"><AlertTriangle size={18} /> Tables Missing</div>
-                                    {dbActionStatus && <span className="text-xs text-green-400">{dbActionStatus}</span>}
+                                <div className="flex items-center gap-2 text-red-400 font-bold mb-2"><WifiOff size={18} /> Backend Unreachable</div>
+                                <p className="text-xs text-gray-400">
+                                    The frontend cannot connect to the backend server. 
+                                    <br/><br/>
+                                    <strong>Possible Causes:</strong>
+                                    <ul className="list-disc pl-4 mt-2 space-y-1">
+                                        <li>Server crashed or is not running.</li>
+                                        <li>Port 3001 is blocked.</li>
+                                        <li>Network connection issue.</li>
+                                    </ul>
+                                    <br/>
+                                    Check your terminal for errors.
+                                </p>
+                            </div>
+                        ) : (
+                            <>
+                                {/* REPAIR SCHEMA BUTTON FOR MISSING TABLES */}
+                                {isTablesMissing && (
+                                    <div className="bg-red-900/30 border border-red-800 p-4 rounded-lg">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <div className="flex items-center gap-2 text-red-400 font-bold"><AlertTriangle size={18} /> Tables Missing</div>
+                                            {dbActionStatus && <span className="text-xs text-green-400">{dbActionStatus}</span>}
+                                        </div>
+                                        <p className="text-xs text-gray-400 mb-3">Database connected but tables not found. Click below to recreate them safely.</p>
+                                        <button onClick={handleInitDB} className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2">
+                                            <Hammer size={14} /> REPAIR SCHEMA
+                                        </button>
+                                    </div>
+                                )}
+
+                                <div className="bg-amber-900/30 border border-amber-800 p-4 rounded-lg">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <div className="flex items-center gap-2 text-amber-400 font-bold"><AlertTriangle size={18} /> Factory Reset Database</div>
+                                        {dbActionStatus && <span className="text-xs text-green-400">{dbActionStatus}</span>}
+                                    </div>
+                                    <p className="text-xs text-gray-400 mb-3">
+                                        <strong>Warning:</strong> This will drop all tables and recreate them from scratch. Use this if the "MISSING TABLES" error persists.
+                                    </p>
+                                    <button onClick={handleHardReset} className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2">
+                                        <Trash2 size={14} /> WIPE & REBUILD TABLES
+                                    </button>
                                 </div>
-                                <p className="text-xs text-gray-400 mb-3">Database connected but tables not found. Click below to recreate them safely.</p>
-                                <button onClick={handleInitDB} className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2">
-                                    <Hammer size={14} /> REPAIR SCHEMA
-                                </button>
-                            </div>
-                        )}
 
-                        <div className="bg-amber-900/30 border border-amber-800 p-4 rounded-lg">
-                            <div className="flex items-center justify-between mb-2">
-                                <div className="flex items-center gap-2 text-amber-400 font-bold"><AlertTriangle size={18} /> Factory Reset Database</div>
-                                {dbActionStatus && <span className="text-xs text-green-400">{dbActionStatus}</span>}
-                            </div>
-                            <p className="text-xs text-gray-400 mb-3">
-                                <strong>Warning:</strong> This will drop all tables and recreate them from scratch. Use this if the "MISSING TABLES" error persists.
-                            </p>
-                            <button onClick={handleHardReset} className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2">
-                                <Trash2 size={14} /> WIPE & REBUILD TABLES
-                            </button>
-                        </div>
+                                {isDbEmpty && !isTablesMissing && (
+                                    <div className="bg-blue-900/30 border border-blue-800 p-4 rounded-lg">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <div className="flex items-center gap-2 text-blue-400 font-bold"><Database size={18} /> Database Empty</div>
+                                            {dbActionStatus && <span className="text-xs text-green-400">{dbActionStatus}</span>}
+                                        </div>
+                                        <button onClick={handleSeedDB} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2"><RefreshCw size={14} /> Seed Dummy Data</button>
+                                    </div>
+                                )}
 
-                        {isDbEmpty && !isTablesMissing && (
-                            <div className="bg-blue-900/30 border border-blue-800 p-4 rounded-lg">
-                                <div className="flex items-center justify-between mb-2">
-                                    <div className="flex items-center gap-2 text-blue-400 font-bold"><Database size={18} /> Database Empty</div>
-                                    {dbActionStatus && <span className="text-xs text-green-400">{dbActionStatus}</span>}
+                                <div className="grid grid-cols-2 gap-4 text-xs font-mono text-gray-500">
+                                     <div className="bg-gray-800 p-2 rounded border border-gray-700">PG: {stats.env?.hasPostgres ? 'OK' : 'MISSING'}</div>
+                                     <div className="bg-gray-800 p-2 rounded border border-gray-700 truncate" title={stats.env?.publicUrl}>Public URL: {stats.env?.publicUrl || 'N/A'}</div>
                                 </div>
-                                <button onClick={handleSeedDB} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded text-xs flex items-center justify-center gap-2"><RefreshCw size={14} /> Seed Dummy Data</button>
-                            </div>
+                            </>
                         )}
-
-                        <div className="grid grid-cols-2 gap-4 text-xs font-mono text-gray-500">
-                             <div className="bg-gray-800 p-2 rounded border border-gray-700">PG: {stats.env?.hasPostgres ? 'OK' : 'MISSING'}</div>
-                             <div className="bg-gray-800 p-2 rounded border border-gray-700 truncate" title={stats.env?.publicUrl}>Public URL: {stats.env?.publicUrl}</div>
-                        </div>
                     </div>
                 </div>
             </div>
