@@ -6,12 +6,16 @@ const { Pool } = require('pg');
 const multer = require('multer');
 const axios = require('axios');
 const https = require('https');
-const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { OAuth2Client } = require('google-auth-library');
 const { GoogleGenAI } = require("@google/genai");
 
 require('dotenv').config();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
 
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
@@ -20,10 +24,10 @@ const SYSTEM_CONFIG = {
     AWS_REGION: process.env.AWS_REGION || 'us-east-1',
     AWS_BUCKET: process.env.AWS_BUCKET_NAME || 'uber-fleet-assets',
     GOOGLE_CLIENT_ID: process.env.VITE_GOOGLE_CLIENT_ID,
-    CACHE_TTL: 60 * 1000 // 60 Seconds Cache for Bot Settings
+    CACHE_TTL: 60 * 1000
 };
 
-// --- IN-MEMORY CACHE (Performance Boost) ---
+// --- IN-MEMORY CACHE ---
 const memoryCache = {
     botSettings: null,
     lastUpdated: 0
@@ -33,13 +37,15 @@ const memoryCache = {
 let s3Client, googleClient, genAI, pgPool;
 
 try {
-    s3Client = new S3Client({
-        region: SYSTEM_CONFIG.AWS_REGION,
-        credentials: {
-            accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
-        }
-    });
+    if (process.env.AWS_ACCESS_KEY_ID) {
+        s3Client = new S3Client({
+            region: SYSTEM_CONFIG.AWS_REGION,
+            credentials: {
+                accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+                secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+            }
+        });
+    }
 
     googleClient = new OAuth2Client(SYSTEM_CONFIG.GOOGLE_CLIENT_ID);
     
@@ -52,16 +58,19 @@ try {
         connectionString = connectionString.replace(/([?&])sslmode=[^&]+(&|$)/, '$1').replace(/[?&]$/, '');
     }
     
-    pgPool = new Pool({
-        connectionString,
-        connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-        idleTimeoutMillis: 30000,
-        ssl: { rejectUnauthorized: false }, 
-        max: 20, 
-        keepAlive: true
-    });
-    
-    pgPool.on('error', (err) => console.error('[DB POOL ERROR]', err));
+    if (connectionString) {
+        pgPool = new Pool({
+            connectionString,
+            connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
+            idleTimeoutMillis: 30000,
+            ssl: { rejectUnauthorized: false }, 
+            max: 20, 
+            keepAlive: true
+        });
+        pgPool.on('error', (err) => console.error('[DB POOL ERROR]', err));
+    } else {
+        console.error("[CRITICAL] POSTGRES_URL is missing. Database will not work.");
+    }
 
 } catch (initError) {
     console.error("[INIT CRITICAL ERROR]", initError);
@@ -69,6 +78,7 @@ try {
 
 const upload = multer({ storage: multer.memoryStorage() });
 
+// --- HELPERS ---
 const withDb = async (operation) => {
     if (!pgPool) throw new Error("Database not initialized");
     let client;
@@ -92,11 +102,9 @@ const getMetaClient = () => axios.create({
     }
 });
 
-// --- HELPERS ---
-
 const refreshMediaUrl = async (url) => {
     if (!url || typeof url !== 'string') return null;
-    if (!url.includes('amazonaws.com') && !url.includes(SYSTEM_CONFIG.AWS_BUCKET)) return url;
+    if (!s3Client || (!url.includes('amazonaws.com') && !url.includes(SYSTEM_CONFIG.AWS_BUCKET))) return url;
 
     try {
         const urlObj = new URL(url);
@@ -115,20 +123,10 @@ const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
     
-    if (payload.type === 'text') {
-        if (!payload.text?.body || !payload.text.body.trim()) {
-            console.warn("[Meta] Blocked empty text message");
-            return;
-        }
-    }
-    if (payload.type === 'interactive') {
-        const i = payload.interactive;
-        if (i.type === 'button' && (!i.action.buttons || i.action.buttons.length === 0) && !['location_request_message', 'product_list'].includes(i.type)) return;
-        if (i.type === 'list' && (!i.action.sections || i.action.sections.length === 0)) return;
-    }
-
+    // Safety Checks
+    if (payload.type === 'text' && (!payload.text?.body || !payload.text.body.trim())) return;
+    
     try {
-        console.log(`[Meta] Sending to ${to} | Type: ${payload.type}`);
         await getMetaClient().post(`https://graph.facebook.com/v18.0/${phoneId}/messages`, {
             messaging_product: "whatsapp",
             recipient_type: "individual",
@@ -136,24 +134,16 @@ const sendToMeta = async (phoneNumber, payload) => {
             ...payload
         });
     } catch (e) {
-        const errMsg = e.response?.data?.error?.message || e.message;
-        console.error(`[Meta Failed] ${to}: ${errMsg}`);
-        throw new Error(`Meta API Error: ${errMsg}`);
+        console.error(`[Meta Failed] ${to}: ${e.response?.data?.error?.message || e.message}`);
     }
 };
 
 const processText = (text, candidate) => {
     if (!text) return '';
     let processed = text;
-    const vars = { 
-        name: candidate.name, 
-        phone: candidate.phone_number, 
-        ...candidate.variables 
-    };
-    
+    const vars = { name: candidate.name, phone: candidate.phone_number, ...candidate.variables };
     for (const [key, val] of Object.entries(vars)) {
-        const regex = new RegExp(`{{${key}}}`, 'gi');
-        processed = processed.replace(regex, val || '');
+        processed = processed.replace(new RegExp(`{{${key}}}`, 'gi'), val || '');
     }
     return processed;
 };
@@ -162,158 +152,398 @@ const isValidContent = (text) => {
     if (!text || typeof text !== 'string') return false;
     const clean = text.trim().toLowerCase();
     if (clean.length === 0) return false;
-    
-    const blockers = [
-        'replace this sample message',
-        'replace this text',
-        'type your message',
-        'enter your message',
-        'sample text',
-        'your message here'
-    ];
+    const blockers = ['replace this sample', 'type your message', 'enter your message', 'replace this text'];
     if (clean.length < 50 && blockers.some(b => clean.includes(b))) return false;
     return true;
 };
 
-// --- SMART TIME RESOLVER (AM/PM GUESSER) ---
+// --- DATE/TIME LOGIC ---
+const PERIODS = {
+    MORNING: { label: '🌅 Morning (5 AM - 12 PM)', start: 5, end: 11 },
+    AFTERNOON: { label: '☀️ Afternoon (12 PM - 5 PM)', start: 12, end: 16 },
+    EVENING: { label: '🌆 Evening (5 PM - 9 PM)', start: 17, end: 20 },
+    NIGHT: { label: '🌙 Night (9 PM - 5 AM)', start: 21, end: 28 } 
+};
+
 const resolveTimeAmbiguity = (inputTimeStr) => {
-    // Expected format: HH:MM (e.g., 11:25) without AM/PM
     const [hStr, mStr] = inputTimeStr.split(/[:.]/);
     let h = parseInt(hStr);
     const m = parseInt(mStr);
-
-    // If user types 24h format (e.g., 14:00), assume they know what they are doing.
-    if (h > 12) return `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}`;
-
+    if (h > 12) return `${h}:${m.toString().padStart(2,'0')}`; 
     const now = new Date();
-    // Candidate 1: Treat as AM
-    const dateAM = new Date();
-    dateAM.setHours(h === 12 ? 0 : h, m, 0, 0);
-    
-    // Candidate 2: Treat as PM
-    const datePM = new Date();
-    datePM.setHours(h === 12 ? 12 : h + 12, m, 0, 0);
-
-    // Logic: 
-    // If one is in the past and one is in future, pick future.
-    // If both in future, pick nearest.
-    // If both in past, pick nearest future (tomorrow AM vs tomorrow PM implied) - simplified to: Pick today's nearest even if past, but let's do "Next Occurrence".
-    
-    let diffAM = dateAM - now;
-    let diffPM = datePM - now;
-
-    // If time passed today, assume it means tomorrow
-    if (diffAM < -1000 * 60 * 30) diffAM += 24 * 60 * 60 * 1000; // Add 24h
-    if (diffPM < -1000 * 60 * 30) diffPM += 24 * 60 * 60 * 1000; // Add 24h
-
-    // Return the one with smaller positive difference
+    const dateAM = new Date(); dateAM.setHours(h === 12 ? 0 : h, m, 0, 0);
+    const datePM = new Date(); datePM.setHours(h === 12 ? 12 : h + 12, m, 0, 0);
+    let diffAM = dateAM - now; if (diffAM < -900000) diffAM += 86400000; 
+    let diffPM = datePM - now; if (diffPM < -900000) diffPM += 86400000;
     const isPM = diffPM < diffAM;
-    
-    const displayH = h;
-    const ampm = isPM ? 'PM' : 'AM';
-    return `${displayH}:${m.toString().padStart(2,'0')} ${ampm}`;
+    return `${h}:${m.toString().padStart(2,'0')} ${isPM ? 'PM' : 'AM'}`;
 };
 
-// --- DYNAMIC OPTION GENERATORS ---
 const generateDateOptions = (config) => {
     const options = [];
     const today = new Date();
-    const daysToShow = config?.daysToShow || 7;
-    const includeToday = config?.includeToday !== false;
-    
-    let startIndex = includeToday ? 0 : 1;
-    
-    for (let i = startIndex; i < (startIndex + daysToShow); i++) {
-        const d = new Date(today);
-        d.setDate(today.getDate() + i);
-        
-        let title = '';
-        if (i === 0) title = 'Today';
-        else if (i === 1) title = 'Tomorrow';
-        else title = d.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric', month: 'short' });
-        
-        const id = d.toISOString().split('T')[0]; // YYYY-MM-DD
-        options.push({ id, title: title.substring(0, 24) });
+    const days = config?.daysToShow || 5;
+    for (let i = 0; i < days; i++) {
+        const d = new Date(today); d.setDate(today.getDate() + i);
+        let title = i === 0 ? 'Today' : i === 1 ? 'Tomorrow' : d.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' });
+        options.push({ id: d.toISOString().split('T')[0], title });
     }
     return options;
 };
 
-// 30-Minute Interval Rolling Window Generator
-const generateTimeOptions = (config) => {
+const generatePeriodOptions = (candidate) => {
     const options = [];
-    
-    // Use current server time as baseline
     const now = new Date();
-    
-    // Round minutes to next 30
-    let startMinutes = Math.ceil(now.getMinutes() / 30) * 30;
-    let startHour = now.getHours();
-    
-    if (startMinutes === 60) {
-        startMinutes = 0;
-        startHour += 1;
-    }
-    
-    const baseTime = new Date();
-    baseTime.setHours(startHour, startMinutes, 0, 0);
-
-    // Generate next 9 slots (covering ~4.5 hours) to fit within WhatsApp 10-item limit
-    for (let i = 0; i < 9; i++) {
-        const slot = new Date(baseTime.getTime() + (i * 30 * 60000));
-        
-        let hours = slot.getHours();
-        const mins = slot.getMinutes();
-        const ampm = hours >= 12 ? 'PM' : 'AM';
-        
-        hours = hours % 12;
-        hours = hours ? hours : 12; // the hour '0' should be '12'
-        
-        const timeStr = `${hours}:${mins.toString().padStart(2, '0')} ${ampm}`;
-        const id = slot.toTimeString().substring(0, 5); // 24h format for ID
-        
-        options.push({ id, title: timeStr });
-    }
-    
-    options.push({ id: 'custom_time', title: 'Type Specific Time', description: 'e.g. 11:25' });
-    
+    const isToday = candidate?.variables?.pickup_date === now.toISOString().split('T')[0];
+    const curH = now.getHours();
+    const isValid = (pKey) => {
+        if (!isToday) return true;
+        if (pKey === 'NIGHT') return true; 
+        return PERIODS[pKey].end >= curH;
+    };
+    if (isValid('MORNING')) options.push({ id: 'PERIOD_MORNING', title: PERIODS.MORNING.label });
+    if (isValid('AFTERNOON')) options.push({ id: 'PERIOD_AFTERNOON', title: PERIODS.AFTERNOON.label });
+    if (isValid('EVENING')) options.push({ id: 'PERIOD_EVENING', title: PERIODS.EVENING.label });
+    options.push({ id: 'PERIOD_NIGHT', title: PERIODS.NIGHT.label });
     return options;
 };
 
-// --- HELPER: DETECT MANUAL PRESET ---
-const isPresetManual = (p) => {
-    // If type is explicitly 'manual' OR if lat/long are missing (implies manual)
-    return p.type === 'manual' || (!p.latitude && !p.longitude);
+const generateTimeOptions = (candidate) => {
+    const options = [];
+    const now = new Date();
+    const periodKey = candidate?.variables?.time_period?.replace('PERIOD_', '');
+    if (!periodKey || !PERIODS[periodKey]) return [{ id: 'custom', title: 'Type Time' }];
+    const { start, end } = PERIODS[periodKey];
+    const isToday = candidate?.variables?.pickup_date === now.toISOString().split('T')[0];
+    for (let h = start; h <= end; h++) {
+        for (let m = 0; m < 60; m += 30) {
+            let realH = h >= 24 ? h - 24 : h;
+            if (isToday) {
+                if (realH < now.getHours()) continue;
+                if (realH === now.getHours() && m < now.getMinutes()) continue;
+            }
+            const ampm = realH >= 12 ? 'PM' : 'AM';
+            const dispH = realH % 12 || 12;
+            const timeStr = `${dispH}:${m.toString().padStart(2,'0')} ${ampm}`;
+            options.push({ id: timeStr, title: timeStr });
+        }
+    }
+    const final = options.slice(0, 9);
+    final.push({ id: 'custom_time', title: 'Type Specific Time' });
+    return final;
 };
 
-// --- DEFAULT BOT CONFIG ---
+// --- DEFAULT CONFIG ---
 const getDefaultBotConfig = () => ({
     isEnabled: true,
     shouldRepeat: false,
     routingStrategy: 'BOT_ONLY',
     nodes: [
-        { 
-            id: 'start', 
-            type: 'custom', 
-            position: { x: 50, y: 50 }, 
-            data: { id: 'start', type: 'start', label: 'Start Flow' } 
-        },
-        { 
-            id: 'welcome_msg', 
-            type: 'custom', 
-            position: { x: 50, y: 200 }, 
-            data: { id: 'welcome_msg', type: 'text', label: 'Welcome Message', content: 'Welcome to Encho Cabs! 👋\n\nHow can we help you today?' } 
-        }
+        { id: 'start', type: 'custom', position: { x: 50, y: 50 }, data: { id: 'start', type: 'start', label: 'Start Flow' } },
+        { id: 'welcome', type: 'custom', position: { x: 50, y: 200 }, data: { id: 'welcome', type: 'text', label: 'Welcome', content: 'Welcome to Encho Cabs!' } }
     ],
-    edges: [
-        { id: 'e1', source: 'start', target: 'welcome_msg', type: 'smoothstep' }
-    ]
+    edges: [{ id: 'e1', source: 'start', target: 'welcome', type: 'smoothstep' }]
 });
 
-// --- DB RECOVERY & INIT ---
+// --- ADVANCED BOT ENGINE ---
+// GUARD: DO NOT ADD ARTIFICIAL DELAYS (setTimeout) INSIDE THIS LOOP UNLESS 'DELAY' NODE.
+// GUARD: LOCATION MESSAGES MUST BE PARSED FROM JSON STRING.
+const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null, incomingType = 'text') => {
+    // Check Kill Switch
+    const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
+    const config = sys.rows[0]?.value || { automation_enabled: true };
+    if (config.automation_enabled === false || candidate.is_human_mode) return;
+
+    // Load Bot Config (Cache Strategy)
+    let botSettings = memoryCache.botSettings;
+    const now = Date.now();
+    if (!botSettings || (now - memoryCache.lastUpdated > SYSTEM_CONFIG.CACHE_TTL)) {
+        const res = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
+        botSettings = res.rows[0]?.settings || getDefaultBotConfig();
+        memoryCache.botSettings = botSettings;
+        memoryCache.lastUpdated = now;
+    }
+
+    const { nodes, edges } = botSettings;
+    let currentNodeId = candidate.current_bot_step_id;
+    let nextNodeId = null;
+    const cleanInput = (incomingText || '').trim().toLowerCase();
+
+    // Reset Commands
+    if (['start', 'restart', 'menu', 'hi', 'hello'].includes(cleanInput)) {
+        currentNodeId = null;
+        await client.query("UPDATE candidates SET current_bot_step_id = NULL, variables = '{}' WHERE id = $1", [candidate.id]);
+        candidate.variables = {};
+    }
+
+    // --- STEP 1: PATHFINDING (Determine Next Node) ---
+    if (!currentNodeId) {
+        const start = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
+        nextNodeId = start ? start.id : nodes[0]?.id;
+    } else {
+        const currentNode = nodes.find(n => n.id === currentNodeId);
+        if (currentNode) {
+            const type = currentNode.data.type;
+            const outgoing = edges.filter(e => e.source === currentNodeId);
+            let edge = null;
+
+            // -- LOCATION SPECIFIC LOGIC (CRITICAL) --
+            // If the current node asked for a location, and we got a location type message
+            if (incomingType === 'location' && (type === 'pickup_location' || type === 'location_request' || type === 'destination_location')) {
+                try {
+                    const locData = JSON.parse(incomingText); // Webhook stores JSON string in text field for location
+                    const varName = currentNode.data.variable || (type === 'pickup_location' ? 'pickup' : 'destination');
+                    
+                    // Save specific components for better usability
+                    await client.query(
+                        `UPDATE candidates SET variables = jsonb_set(
+                            jsonb_set(
+                                jsonb_set(variables, '{${varName}}', $1),
+                                '{${varName}_lat}', $2
+                            ),
+                            '{${varName}_long}', $3
+                        ) WHERE id = $4`,
+                        [JSON.stringify(incomingText), JSON.stringify(locData.latitude), JSON.stringify(locData.longitude), candidate.id]
+                    );
+                    
+                    // Force advance
+                    edge = outgoing.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
+                } catch(e) {
+                    console.error("Location Parse Error", e);
+                }
+            }
+            
+            // -- 3-STAGE DATE PICKER LOGIC --
+            else if (type === 'datetime_picker') {
+                let saveVar = null;
+                let isManual = false;
+
+                if (incomingPayloadId?.startsWith('PERIOD_')) {
+                    await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{time_period}', $1)", [JSON.stringify(incomingPayloadId)]);
+                    candidate.variables.time_period = incomingPayloadId;
+                } else if (incomingPayloadId?.match(/^\d{4}-\d{2}-\d{2}$/)) {
+                    await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{pickup_date}', $1)", [JSON.stringify(incomingPayloadId)]);
+                    await client.query("UPDATE candidates SET variables = variables - 'time_period' - 'time_slot' WHERE id = $1", [candidate.id]);
+                    delete candidate.variables.time_period;
+                    delete candidate.variables.time_slot;
+                    candidate.variables.pickup_date = incomingPayloadId;
+                } else if (incomingPayloadId === 'custom_time') {
+                    isManual = true;
+                } else if (incomingPayloadId) {
+                    saveVar = incomingPayloadId; 
+                } else if (cleanInput) {
+                    const timeMatch = cleanInput.match(/([0-9]{1,2})[:.]([0-9]{2})\s*(am|pm)?/i);
+                    if (timeMatch) saveVar = resolveTimeAmbiguity(timeMatch[0]);
+                    else saveVar = incomingText;
+                }
+
+                if (saveVar) {
+                    const varName = currentNode.data.variable || 'time_slot';
+                    const newVars = { ...candidate.variables, [varName]: saveVar };
+                    await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
+                    candidate.variables = newVars;
+                }
+                
+                if (isManual) {
+                    await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "Please type your preferred time (e.g. 10:30 PM):" } });
+                    return; 
+                }
+                
+                // Only advance if we have final slot
+                if (candidate.variables.time_slot || candidate.variables[currentNode.data.variable]) {
+                    edge = outgoing.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
+                }
+            }
+            
+            // -- GENERIC INPUT LOGIC --
+            else if (['input', 'location_request', 'pickup_location', 'destination_location'].includes(type) && incomingType !== 'location') {
+                // Handle text fallbacks for location nodes (e.g. user types address) or standard inputs
+                let val = incomingText;
+                if (incomingPayloadId) val = incomingPayloadId;
+                if (val && currentNode.data.variable) {
+                    await client.query(`UPDATE candidates SET variables = jsonb_set(variables, '{${currentNode.data.variable}}', $1) WHERE id = $2`, [JSON.stringify(val), candidate.id]);
+                    candidate.variables[currentNode.data.variable] = val;
+                }
+                edge = outgoing.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
+            }
+
+            // -- STANDARD EDGE MATCHING --
+            if (!edge) {
+                // 1. Try Payload Match
+                if (incomingPayloadId) {
+                    edge = outgoing.find(e => e.sourceHandle === incomingPayloadId);
+                }
+                // 2. Try Text Match (Buttons - Fuzzy)
+                if (!edge && cleanInput && currentNode.data.buttons) {
+                    const btn = currentNode.data.buttons.find(b => b.title.toLowerCase().trim() === cleanInput);
+                    if (btn) edge = outgoing.find(e => e.sourceHandle === btn.id);
+                }
+                // 3. Default Advance
+                if (!edge && ['text', 'image', 'video', 'rich_card'].includes(type)) {
+                    edge = outgoing.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
+                }
+            }
+
+            if (edge) nextNodeId = edge.target;
+            else nextNodeId = currentNodeId; // Stay if no match
+        }
+    }
+
+    // --- STEP 2: EXECUTION LOOP (High Performance) ---
+    // GUARD: Ensure this loop executes as fast as possible. No sleeps.
+    let activeNodeId = nextNodeId;
+    let safety = 0;
+    
+    while(activeNodeId && safety < 15) {
+        safety++;
+        const node = nodes.find(n => n.id === activeNodeId);
+        if (!node) break;
+        
+        const data = node.data;
+        let autoAdvance = true;
+
+        // 1. SAVE STATE FIRST
+        await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
+
+        // 2. PROCESS NODE TYPE
+        if (data.type === 'text') {
+            const body = processText(data.content, candidate);
+            if (isValidContent(body)) await sendToMeta(candidate.phone_number, { type: 'text', text: { body } });
+        } 
+        
+        else if (data.type === 'image' && data.mediaUrl) {
+            const url = await refreshMediaUrl(data.mediaUrl);
+            await sendToMeta(candidate.phone_number, { type: 'image', image: { link: url, caption: processText(data.content, candidate) } });
+        }
+
+        else if (data.type === 'interactive_button' || data.type === 'rich_card') {
+            autoAdvance = false; 
+            const buttons = (data.buttons || []).slice(0, 3).map(b => ({
+                type: "reply",
+                reply: { id: b.id, title: b.title.substring(0, 20) } 
+            }));
+            
+            let header = undefined;
+            if (data.mediaUrl && (data.headerType === 'image' || data.headerType === 'video')) {
+                const url = await refreshMediaUrl(data.mediaUrl);
+                header = { type: data.headerType, [data.headerType]: { link: url } };
+            }
+
+            await sendToMeta(candidate.phone_number, {
+                type: "interactive",
+                interactive: {
+                    type: "button",
+                    header,
+                    body: { text: processText(data.content || "Please select:", candidate) },
+                    footer: data.footerText ? { text: data.footerText } : undefined,
+                    action: { buttons }
+                }
+            });
+        }
+
+        else if (data.type === 'interactive_list') {
+            autoAdvance = false;
+            await sendToMeta(candidate.phone_number, {
+                type: "interactive",
+                interactive: {
+                    type: "list",
+                    body: { text: processText(data.content || "Select an option:", candidate) },
+                    action: {
+                        button: data.listButtonText || "Menu",
+                        sections: data.sections || []
+                    }
+                }
+            });
+        }
+
+        else if (data.type === 'datetime_picker') {
+            autoAdvance = false;
+            let body = "Select an option:";
+            let rows = [];
+            let btn = "Select";
+            
+            if (!candidate.variables.pickup_date) {
+                body = processText(data.content || "Select Date:", candidate);
+                rows = generateDateOptions(data.dateConfig);
+                btn = "Dates";
+            } else if (!candidate.variables.time_period) {
+                body = `Date: ${candidate.variables.pickup_date}\n\nSelect Time of Day:`;
+                rows = generatePeriodOptions(candidate);
+                btn = "Periods";
+            } else {
+                body = `Date: ${candidate.variables.pickup_date}\nPeriod: ${candidate.variables.time_period}\n\nSelect Time:`;
+                rows = generateTimeOptions(candidate);
+                btn = "Times";
+            }
+
+            await sendToMeta(candidate.phone_number, {
+                type: 'interactive',
+                interactive: {
+                    type: 'list',
+                    body: { text: body },
+                    action: { button: btn, sections: [{ title: 'Options', rows }] }
+                }
+            });
+        }
+
+        else if (['input', 'location_request', 'pickup_location', 'destination_location'].includes(data.type)) {
+            autoAdvance = false;
+            if (['location_request', 'pickup_location', 'destination_location'].includes(data.type)) {
+                 // Send location request message
+                 await sendToMeta(candidate.phone_number, {
+                    type: "interactive",
+                    interactive: {
+                        type: "location_request_message",
+                        body: { text: processText(data.content || "Share Location", candidate) },
+                        action: { name: "send_location" }
+                    }
+                });
+            } else {
+                // Normal text input prompt
+                if (data.content) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: processText(data.content, candidate) } });
+            }
+        }
+        
+        else if (data.type === 'set_variable') {
+            // Instant Variable Set
+            if (data.variable && data.operationValue) {
+                await client.query(`UPDATE candidates SET variables = jsonb_set(variables, '{${data.variable}}', $1) WHERE id = $2`, [JSON.stringify(data.operationValue), candidate.id]);
+                candidate.variables[data.variable] = data.operationValue;
+            }
+        }
+        
+        else if (data.type === 'delay') {
+            await new Promise(r => setTimeout(r, Math.min(data.delayTime || 2000, 5000)));
+        }
+
+        if (!autoAdvance) break;
+        
+        // --- 3. AUTO ADVANCE LOGIC ---
+        const outEdges = edges.filter(e => e.source === node.id);
+        
+        if (data.type === 'condition') {
+            let matched = false;
+            if (data.variable) {
+                const val = candidate.variables[data.variable];
+                const target = data.value;
+                if (data.operator === 'equals') matched = val == target;
+                else if (data.operator === 'contains') matched = String(val).includes(target);
+                else if (data.operator === 'is_set') matched = !!val;
+            }
+            const handle = matched ? 'true' : 'false';
+            const nextEdge = outEdges.find(e => e.sourceHandle === handle);
+            activeNodeId = nextEdge ? nextEdge.target : null;
+        } else {
+            const nextEdge = outEdges.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
+            activeNodeId = nextEdge ? nextEdge.target : null;
+        }
+    }
+};
+
+// --- DB RECOVERY ---
 const initDatabase = async (client) => {
     await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
     await client.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";');
-
     await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB);`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
@@ -321,877 +551,382 @@ const initDatabase = async (client) => {
     await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
     
-    await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
+    // --- MEDIA LIBRARY SCHEMA ---
+    await client.query(`CREATE TABLE IF NOT EXISTS media_folders (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name VARCHAR(255), parent_path VARCHAR(500), is_public_showcase BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS media_files (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), filename VARCHAR(255), url TEXT, s3_key TEXT, type VARCHAR(50), folder_path VARCHAR(500), created_at TIMESTAMP DEFAULT NOW());`);
 
-    const botCheck = await client.query("SELECT id FROM bot_versions WHERE status = 'published' LIMIT 1");
+    await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
+    const botCheck = await client.query("SELECT id FROM bot_versions LIMIT 1");
     if (botCheck.rows.length === 0) {
         await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), getDefaultBotConfig()]);
     }
 };
 
-const executeWithRetry = async (client, operation) => {
+// --- ROUTES ---
+
+app.get('/ping', async (req, res) => {
     try {
-        return await operation();
-    } catch (err) {
-        if (err.code === '42P01') {
-            console.warn("[Auto-Heal] Tables missing. Re-initializing database...");
-            await initDatabase(client);
-            return await operation(); 
-        }
-        throw err;
-    }
-};
-
-// --- BOT ENGINE ---
-const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
-    console.log(`[Bot Engine] START for ${candidate.phone_number}`);
-    try {
-        const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
-        const config = sys.rows[0]?.value || { automation_enabled: true }; 
-        if (config.automation_enabled === false || candidate.is_human_mode) return;
-
-        let botSettings;
-
-        // 1. TRY CACHE
-        const now = Date.now();
-        if (memoryCache.botSettings && (now - memoryCache.lastUpdated < SYSTEM_CONFIG.CACHE_TTL)) {
-            botSettings = memoryCache.botSettings;
-        } else {
-            // 2. FALLBACK TO DB
-            let botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
-            if (botRes.rows.length > 0) {
-                botSettings = botRes.rows[0].settings;
-                memoryCache.botSettings = botSettings;
-                memoryCache.lastUpdated = now;
-            } else {
-                botSettings = getDefaultBotConfig();
-            }
-        }
-        
-        const { nodes, edges } = botSettings;
-        if (!nodes || nodes.length === 0) return;
-
-        let currentNodeId = candidate.current_bot_step_id;
-        let nextNodeId = null;
-        let shouldReplyInvalid = false;
-        const cleanInput = (incomingText || '').trim().toLowerCase();
-
-        // 1. Global Resets
-        if (['start', 'restart', 'hi', 'hello', 'menu'].includes(cleanInput)) {
-            currentNodeId = null;
-            await client.query("UPDATE candidates SET current_bot_step_id = NULL WHERE id = $1", [candidate.id]);
-        }
-
-        // 2. Determine Current State
-        if (!currentNodeId) {
-            const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
-            nextNodeId = startNode ? startNode.id : nodes[0]?.id;
-        } else {
-            const currentNode = nodes.find(n => n.id === currentNodeId);
-            if (currentNode) {
-                // A. Handle Variable Capture
-                const captureTypes = ['input', 'location_request', 'pickup_location', 'destination_location', 'datetime_picker'];
-                
-                if (captureTypes.includes(currentNode.data.type)) {
-                    let varName = currentNode.data.variable;
-                    
-                    if (!varName) {
-                        if (currentNode.data.type === 'pickup_location') varName = 'pickup_coords';
-                        else if (currentNode.data.type === 'destination_location') varName = 'dest_coords';
-                        else if (currentNode.data.type === 'location_request') varName = 'location_data';
-                        else if (currentNode.data.type === 'datetime_picker') varName = currentNode.data.dateConfig?.mode === 'time' ? 'time_slot' : 'pickup_date';
-                    }
-
-                    // --- SMART LOGIC START ---
-                    let valueToSave = null;
-                    let isManualTrigger = false;
-
-                    // Check for Preset/List Selection
-                    if (currentNode.data.presets) {
-                        let matchedPreset = currentNode.data.presets.find(p => p.id === incomingPayloadId);
-                        if (!matchedPreset && cleanInput) matchedPreset = currentNode.data.presets.find(p => p.title.toLowerCase().trim() === cleanInput);
-
-                        if (matchedPreset) {
-                            if (isPresetManual(matchedPreset)) isManualTrigger = true;
-                            else valueToSave = JSON.stringify({ lat: matchedPreset.latitude, long: matchedPreset.longitude, label: matchedPreset.title });
-                        }
-                    }
-                    
-                    // --- DYNAMIC DATETIME CAPTURE ---
-                    if (currentNode.data.type === 'datetime_picker') {
-                        if (incomingPayloadId === 'custom_time') {
-                            isManualTrigger = true; 
-                        } else if (incomingPayloadId) {
-                            valueToSave = incomingPayloadId;
-                        } else if (cleanInput) {
-                            // Enhanced Time Regex to catch "11:25", "11.25", "11:25pm"
-                            const timeRegex = /([0-9]{1,2})[:.]([0-9]{2})\s*(am|pm)?/i;
-                            const match = cleanInput.match(timeRegex);
-                            
-                            if (match) {
-                                // If AM/PM is present
-                                if (match[3]) {
-                                    valueToSave = match[0].toUpperCase();
-                                } else {
-                                    // Missing AM/PM: Use Smart Resolver
-                                    valueToSave = resolveTimeAmbiguity(match[0]);
-                                }
-                            } else if (cleanInput.length > 3) {
-                                valueToSave = incomingText; // Fallback
-                            }
-                        }
-                    }
-
-                    // Check for Real Location Message
-                    else if (!isManualTrigger && incomingText && incomingText.startsWith('{') && incomingText.includes('"latitude"')) {
-                        valueToSave = incomingText;
-                    } 
-                    // Fallback for simple text input
-                    else if (!isManualTrigger && currentNode.data.type === 'input') {
-                        valueToSave = incomingText;
-                    }
-
-                    if (valueToSave) {
-                        const newVars = { ...candidate.variables, [varName]: valueToSave };
-                        await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
-                        candidate.variables = newVars;
-                    } else if (isManualTrigger && currentNode.data.type === 'datetime_picker') {
-                        await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "Sure, please type your preferred time below (e.g., 11:25):" } });
-                        return; 
-                    }
-                    // --- SMART LOGIC END ---
-                }
-
-                // B. Find Next Path
-                const outgoingEdges = edges.filter(e => e.source === currentNodeId);
-                let matchedEdge = null;
-
-                // Match Buttons / List Rows via Payload ID
-                if (incomingPayloadId) {
-                    if (currentNode.data.buttons) {
-                        const btn = currentNode.data.buttons.find(b => b.id === incomingPayloadId);
-                        if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
-                    }
-                    if (!matchedEdge && currentNode.data.sections) {
-                        const row = currentNode.data.sections.flatMap(s => s.rows).find(r => r.id === incomingPayloadId);
-                        if (row) matchedEdge = outgoingEdges.find(e => e.sourceHandle === row.id);
-                    }
-                    // Presets
-                    if (!matchedEdge && currentNode.data.presets) {
-                        const preset = currentNode.data.presets.find(p => p.id === incomingPayloadId);
-                        if (preset && !isPresetManual(preset)) matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
-                    }
-                    if (!matchedEdge && currentNode.data.type === 'datetime_picker') {
-                        matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
-                    }
-                }
-
-                // Match Text Fallback
-                if (!matchedEdge && cleanInput) {
-                    if (currentNode.data.buttons) {
-                        const btn = currentNode.data.buttons.find(b => b.title.toLowerCase().trim() === cleanInput);
-                        if (btn) matchedEdge = outgoingEdges.find(e => e.sourceHandle === btn.id);
-                    }
-                    if (currentNode.data.type === 'datetime_picker') {
-                        matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
-                    }
-                }
-                
-                // Match Location Input (Auto Advance)
-                if (!matchedEdge && incomingText && incomingText.startsWith('{') && incomingText.includes('"latitude"')) {
-                     matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
-                }
-
-                // Default Path
-                if (!matchedEdge) {
-                    const isSmartNode = ['input', 'location_request', 'pickup_location', 'destination_location'].includes(currentNode.data.type);
-                    
-                    if (isSmartNode) {
-                         let isManualClick = false;
-                         if (currentNode.data.presets) {
-                             const preset = currentNode.data.presets.find(p => (incomingPayloadId && p.id === incomingPayloadId) || (cleanInput && p.title.toLowerCase().trim() === cleanInput));
-                             if (preset && isPresetManual(preset)) isManualClick = true;
-                         }
-                         if (incomingPayloadId === 'custom_time') isManualClick = true;
-
-                         if (!isManualClick) matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
-                    } 
-                    else if (currentNode.data.type !== 'datetime_picker') {
-                        matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
-                    }
-                }
-
-                if (matchedEdge) {
-                    nextNodeId = matchedEdge.target;
-                } else {
-                    if (outgoingEdges.length === 0) {
-                        const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
-                        nextNodeId = startNode ? startNode.id : null;
-                    } else {
-                        // Stay on node
-                        nextNodeId = currentNodeId;
-                        let isManualClick = false;
-                        if (currentNode.data.presets) {
-                             const preset = currentNode.data.presets.find(p => (incomingPayloadId && p.id === incomingPayloadId) || (cleanInput && p.title.toLowerCase().trim() === cleanInput));
-                             if (preset && isPresetManual(preset)) isManualClick = true;
-                        }
-                        if (incomingPayloadId === 'custom_time') isManualClick = true;
-                        
-                        if (['interactive_button', 'interactive_list', 'rich_card'].includes(currentNode.data.type) && !isManualClick) {
-                            shouldReplyInvalid = true;
-                        }
-                    }
-                }
-            } else {
-                const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
-                nextNodeId = startNode ? startNode.id : null;
-            }
-        }
-
-        if (shouldReplyInvalid) {
-            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "I didn't catch that. Please select an option from the menu." } });
-            return;
-        }
-
-        // 3. Execute Node Chain (Synchronous Loop)
-        let activeNodeId = nextNodeId;
-        let opsCount = 0;
-        const MAX_OPS = 15; 
-
-        while (activeNodeId && opsCount < MAX_OPS) {
-            opsCount++;
-            const node = nodes.find(n => n.id === activeNodeId);
-            if (!node) break;
-
-            const data = node.data || {};
-            let autoAdvance = true; 
-            
-            if (data.type === 'status_update') {
-                if (data.targetStatus) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [data.targetStatus, candidate.id]);
-            }
-
-            else if (data.type === 'set_variable') {
-                if (data.variable && data.operationValue) {
-                    const newVars = { ...candidate.variables, [data.variable]: data.operationValue };
-                    await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
-                    candidate.variables = newVars;
-                }
-            }
-            
-            else if (data.type === 'delay') {
-                const ms = Math.min(data.delayTime || 2000, 5000);
-                await new Promise(r => setTimeout(r, ms));
-            }
-
-            else if (data.type === 'condition') {
-                let isMatch = false;
-                if (data.variable) {
-                    const val = candidate.variables[data.variable];
-                    const target = data.value;
-                    const op = data.operator || 'equals';
-                    if (val !== undefined) {
-                        if (op === 'equals') isMatch = val == target;
-                        else if (op === 'contains') isMatch = String(val).toLowerCase().includes(String(target).toLowerCase());
-                        else if (op === 'is_set') isMatch = !!val;
-                    }
-                }
-                const handle = isMatch ? 'true' : 'false';
-                const nextEdge = edges.find(e => e.source === node.id && (e.sourceHandle === handle || !e.sourceHandle));
-                activeNodeId = nextEdge ? nextEdge.target : null;
-                continue; 
-            }
-
-            else if (data.type === 'handoff') {
-                await client.query("UPDATE candidates SET is_human_mode = TRUE WHERE id = $1", [candidate.id]);
-                const msg = processText(data.content, candidate);
-                if (isValidContent(msg)) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } });
-                break; 
-            }
-
-            // --- MESSAGE NODES ---
-            
-            else if (data.type !== 'start') {
-                let rawBody = processText(data.content || '', candidate);
-                let validBody = isValidContent(rawBody) ? rawBody : null;
-                let payload = null;
-
-                if (data.type === 'text') {
-                    if (validBody) {
-                        payload = { type: 'text', text: { body: validBody } };
-                        if (data.footerText) payload.text.body += `\n\n_${data.footerText}_`;
-                    }
-                } 
-                else if (data.type === 'input') {
-                    payload = { type: 'text', text: { body: validBody || "Please enter your response below:" } };
-                    autoAdvance = false; 
-                } 
-                
-                else if (data.type === 'datetime_picker') {
-                    const mode = data.dateConfig?.mode || 'date';
-                    const listRows = mode === 'date' ? generateDateOptions(data.dateConfig) : generateTimeOptions(data.dateConfig);
-                    
-                    payload = {
-                        type: "interactive",
-                        interactive: {
-                            type: "list",
-                            body: { text: validBody || (mode === 'date' ? "Please select a date:" : "Select upcoming time:") },
-                            action: {
-                                button: mode === 'date' ? "Select Date" : "Select Time",
-                                sections: [{ title: "Options", rows: listRows }]
-                            }
-                        }
-                    };
-                    if (data.footerText) payload.interactive.footer = { text: data.footerText };
-                    autoAdvance = false;
-                }
-
-                else if (data.type === 'pickup_location' || data.type === 'destination_location') {
-                     let isManualTrigger = false;
-                     if (data.presets) {
-                         const preset = data.presets.find(p => (incomingPayloadId && p.id === incomingPayloadId) || (cleanInput && p.title.toLowerCase().trim() === cleanInput));
-                         if (preset && isPresetManual(preset)) isManualTrigger = true;
-                     }
-                     const hasPresets = data.presets && data.presets.length > 0;
-                     
-                     if (hasPresets && !isManualTrigger) {
-                         const rows = data.presets.slice(0, 10).map(p => {
-                             const row = { id: p.id, title: p.title.substring(0, 24) };
-                             if (p.description) row.description = p.description.substring(0, 72);
-                             return row;
-                         });
-                         payload = {
-                            type: "interactive",
-                            interactive: {
-                                type: "list",
-                                body: { text: validBody || (data.type === 'pickup_location' ? "Select Pickup Location:" : "Select Destination:") },
-                                action: { button: "Locations", sections: [{ title: "Options", rows }] }
-                            }
-                        };
-                     } else {
-                         const label = data.type === 'pickup_location' ? "Pickup Location" : "Destination";
-                         payload = {
-                            type: "interactive",
-                            interactive: {
-                                type: "location_request_message",
-                                body: { text: (validBody || `Please share your *${label}*:`) },
-                                action: { name: "send_location" }
-                            }
-                        };
-                     }
-                     autoAdvance = false;
-                }
-                else if (data.type === 'location_request') {
-                     payload = {
-                        type: "interactive",
-                        interactive: {
-                            type: "location_request_message",
-                            body: { text: validBody || "Please share your current location:" },
-                            action: { name: "send_location" }
-                        }
-                    };
-                    autoAdvance = false;
-                }
-                else if (data.type === 'image' && data.mediaUrl) {
-                    const url = await refreshMediaUrl(data.mediaUrl);
-                    payload = { type: 'image', image: { link: url, caption: validBody || '' } };
-                } 
-                else if ((data.type === 'interactive_button' || data.type === 'rich_card') && data.buttons?.length > 0) {
-                    let header = undefined;
-                    if (data.mediaUrl && (data.headerType === 'image' || data.headerType === 'video')) {
-                        const url = await refreshMediaUrl(data.mediaUrl);
-                        header = { type: data.headerType, [data.headerType]: { link: url } };
-                    }
-                    payload = {
-                        type: "interactive",
-                        interactive: {
-                            type: "button",
-                            header: header,
-                            body: { text: validBody || "Please select an option:" },
-                            footer: data.footerText ? { text: data.footerText } : undefined,
-                            action: {
-                                buttons: data.buttons.slice(0, 3).map(b => ({
-                                    type: "reply",
-                                    reply: { id: b.id, title: b.title.substring(0, 20) } 
-                                }))
-                            }
-                        }
-                    };
-                    autoAdvance = false;
-                } 
-                else if (data.type === 'interactive_list' && data.sections?.length > 0) {
-                    payload = {
-                        type: "interactive",
-                        interactive: {
-                            type: "list",
-                            body: { text: validBody || "Please make a selection:" },
-                            action: {
-                                button: data.listButtonText || "Menu",
-                                sections: data.sections
-                            }
-                        }
-                    };
-                    autoAdvance = false;
-                }
-
-                if (payload) {
-                    try {
-                        await sendToMeta(candidate.phone_number, payload);
-                        await client.query(
-                            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
-                            [crypto.randomUUID(), candidate.id, payload.text?.body || payload.interactive?.body?.text || '[Media]', data.type]
-                        );
-                    } catch (apiError) {
-                        console.error("Meta Send Error:", apiError);
-                    }
-                }
-            }
-
-            // 4. Update State & Move On
-            await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
-
-            if (!autoAdvance) break; 
-
-            const nextEdge = edges.find(e => e.source === node.id);
-            if (nextEdge) {
-                activeNodeId = nextEdge.target;
-                await new Promise(r => setTimeout(r, 200));
-            } else {
-                activeNodeId = null;
-            }
-        }
-    } catch (fatalError) {
-        console.error("Bot Engine Fatal Crash:", fatalError);
-    }
-};
-
-// --- EXPRESS APP ---
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-
-app.use((req, res, next) => {
-    console.log(`[${req.method}] ${req.url}`);
-    next();
-});
-
-const apiRouter = express.Router();
-
-apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
-
-// --- DEEP WAKE PING ---
-apiRouter.get('/ping', async (req, res) => {
-    try {
-        if (pgPool) {
-             // Wakes up Neon Postgres
-             await pgPool.query('SELECT 1');
-             res.status(200).send('pong - db active');
-        } else {
-            res.status(200).send('pong - no db pool');
-        }
+        await withDb(c => c.query('SELECT 1'));
+        res.send('pong');
     } catch (e) {
-        console.error("Ping DB Wake Failed", e.message);
-        res.status(200).send('pong - db waking...');
+        res.status(500).send('db_error');
     }
 });
 
-apiRouter.get('/debug/status', async (req, res) => {
-    const status = {
-        postgres: 'unknown',
-        tables: { candidates: false, bot_versions: false },
-        counts: { candidates: 0 },
-        env: { hasPostgres: !!(process.env.POSTGRES_URL || process.env.DATABASE_URL) },
-        lastError: null
-    };
+// --- MEDIA LIBRARY ROUTES ---
+app.get('/api/media', async (req, res) => {
+    const path = req.query.path || '/';
     try {
         await withDb(async (client) => {
-            await client.query('SELECT 1');
-            status.postgres = 'connected';
-            const tablesRes = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
-            const tables = tablesRes.rows.map(r => r.table_name);
-            status.tables.candidates = tables.includes('candidates');
-            status.tables.bot_versions = tables.includes('bot_versions');
-            if (status.tables.candidates) {
-                const countRes = await client.query('SELECT COUNT(*) FROM candidates');
-                status.counts.candidates = parseInt(countRes.rows[0].count);
-            }
+            const folders = await client.query("SELECT * FROM media_folders WHERE parent_path = $1 ORDER BY name ASC", [path]);
+            const files = await client.query("SELECT * FROM media_files WHERE folder_path = $1 ORDER BY filename ASC", [path]);
+            
+            // Presign URLs for freshness
+            const signedFiles = await Promise.all(files.rows.map(async f => ({
+                ...f,
+                url: await refreshMediaUrl(f.url)
+            })));
+
+            res.json({ folders: folders.rows, files: signedFiles });
         });
     } catch (e) {
-        status.postgres = 'error';
-        status.lastError = e.message;
+        res.status(500).send(e.message);
     }
-    res.json(status);
 });
 
-apiRouter.get('/webhook', (req, res) => {
-    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
-        res.status(200).send(req.query['hub.challenge']);
+app.post('/api/media/upload', upload.single('file'), async (req, res) => {
+    if (!req.file) return res.status(400).send('No file uploaded');
+    const { path } = req.body;
+    const folderPath = path || '/';
+    
+    try {
+        const key = `${Date.now()}_${req.file.originalname}`;
+        const command = new PutObjectCommand({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Key: key,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype
+        });
+        
+        if (s3Client) await s3Client.send(command);
+        
+        const url = `https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.${SYSTEM_CONFIG.AWS_REGION}.amazonaws.com/${key}`;
+        let type = 'document';
+        if (req.file.mimetype.startsWith('image/')) type = 'image';
+        else if (req.file.mimetype.startsWith('video/')) type = 'video';
+
+        await withDb(c => c.query(
+            "INSERT INTO media_files (filename, url, s3_key, type, folder_path) VALUES ($1, $2, $3, $4, $5) RETURNING *",
+            [req.file.originalname, url, key, type, folderPath]
+        ));
+        
+        res.json({ success: true, url });
+    } catch (e) {
+        console.error(e);
+        res.status(500).send(e.message);
+    }
+});
+
+app.post('/api/media/folders', async (req, res) => {
+    const { name, parentPath } = req.body;
+    try {
+        await withDb(async (client) => {
+            const check = await client.query("SELECT id FROM media_folders WHERE name = $1 AND parent_path = $2", [name, parentPath || '/']);
+            if (check.rows.length > 0) return res.status(409).send('Folder exists');
+            await client.query("INSERT INTO media_folders (name, parent_path) VALUES ($1, $2)", [name, parentPath || '/']);
+            res.json({ success: true });
+        });
+    } catch (e) {
+        res.status(500).send(e.message);
+    }
+});
+
+app.delete('/api/media/files/:id', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const file = await client.query("SELECT s3_key FROM media_files WHERE id = $1", [req.params.id]);
+            if (file.rows.length > 0 && file.rows[0].s3_key && s3Client) {
+                await s3Client.send(new DeleteObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: file.rows[0].s3_key }));
+            }
+            await client.query("DELETE FROM media_files WHERE id = $1", [req.params.id]);
+            res.json({ success: true });
+        });
+    } catch (e) {
+        res.status(500).send(e.message);
+    }
+});
+
+app.delete('/api/media/folders/:id', async (req, res) => {
+    try {
+        await withDb(c => c.query("DELETE FROM media_folders WHERE id = $1", [req.params.id]));
+        res.json({ success: true });
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+app.post('/api/media/folders/:id/public', async (req, res) => {
+    try {
+        await withDb(c => c.query("UPDATE media_folders SET is_public_showcase = TRUE WHERE id = $1", [req.params.id]));
+        res.json({ success: true });
+    } catch(e) { res.status(500).send(e.message); }
+});
+
+app.delete('/api/media/folders/:id/public', async (req, res) => {
+    try {
+        await withDb(c => c.query("UPDATE media_folders SET is_public_showcase = FALSE WHERE id = $1", [req.params.id]));
+        res.json({ success: true });
+    } catch(e) { res.status(500).send(e.message); }
+});
+
+app.post('/api/media/sync-s3', async (req, res) => {
+    if (!s3Client) return res.status(500).send("S3 Not Configured");
+    try {
+        const data = await s3Client.send(new ListObjectsV2Command({ Bucket: SYSTEM_CONFIG.AWS_BUCKET }));
+        if (!data.Contents) return res.json({ added: 0 });
+        
+        let added = 0;
+        await withDb(async (client) => {
+            for (const item of data.Contents) {
+                if (!item.Key) continue;
+                const check = await client.query("SELECT id FROM media_files WHERE s3_key = $1", [item.Key]);
+                if (check.rows.length === 0) {
+                    const url = `https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.${SYSTEM_CONFIG.AWS_REGION}.amazonaws.com/${item.Key}`;
+                    let type = 'document';
+                    if (item.Key.match(/\.(jpg|jpeg|png|gif|webp)$/i)) type = 'image';
+                    else if (item.Key.match(/\.(mp4|mov|webm)$/i)) type = 'video';
+                    
+                    await client.query("INSERT INTO media_files (filename, url, s3_key, type, folder_path) VALUES ($1, $2, $3, $4, '/')", [item.Key, url, item.Key, type]);
+                    added++;
+                }
+            }
+        });
+        res.json({ added });
+    } catch(e) {
+        res.status(500).send(e.message);
+    }
+});
+
+app.get('/api/showcase/:folderName?', async (req, res) => {
+    try {
+        const folderName = req.params.folderName ? decodeURIComponent(req.params.folderName) : null;
+        await withDb(async (client) => {
+            let query = "SELECT * FROM media_folders WHERE is_public_showcase = TRUE";
+            let params = [];
+            if (folderName) {
+                query += " AND name = $1";
+                params.push(folderName);
+            }
+            query += " LIMIT 1";
+            
+            const folderRes = await client.query(query, params);
+            if (folderRes.rows.length === 0) return res.json({ title: 'Not Found', items: [] });
+            
+            const folder = folderRes.rows[0];
+            const files = await client.query("SELECT * FROM media_files WHERE folder_path = $1", [`/${folder.name}`]);
+            
+            const signedFiles = await Promise.all(files.rows.map(async f => ({
+                id: f.id,
+                url: await refreshMediaUrl(f.url),
+                type: f.type,
+                filename: f.filename
+            })));
+            
+            res.json({ title: folder.name, items: signedFiles });
+        });
+    } catch(e) { res.status(500).send(e.message); }
+});
+
+app.get('/api/showcase/status', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const active = await client.query("SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE LIMIT 1");
+            if (active.rows.length > 0) {
+                res.json({ active: true, folderName: active.rows[0].name, folderId: active.rows[0].id });
+            } else {
+                res.json({ active: false });
+            }
+        });
+    } catch(e) { res.json({ active: false }); }
+});
+
+// --- EXISTING ROUTES ---
+
+app.get('/api/debug/status', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const tables = await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'");
+            const tableNames = tables.rows.map(r => r.table_name);
+            const count = await client.query('SELECT COUNT(*) FROM candidates');
+            res.json({
+                postgres: 'connected',
+                tables: {
+                    candidates: tableNames.includes('candidates'),
+                    bot_versions: tableNames.includes('bot_versions')
+                },
+                counts: { candidates: parseInt(count.rows[0].count) },
+                env: { hasPostgres: true }
+            });
+        });
+    } catch (e) {
+        res.status(500).json({ postgres: 'error', lastError: e.message });
+    }
+});
+
+app.get('/api/drivers', async (req, res) => {
+    try {
+        const result = await withDb(c => c.query(`
+            SELECT 
+                id, phone_number as "phoneNumber", name, stage as status, 
+                last_message as "lastMessage", last_message_at as "lastMessageTime", 
+                source, is_human_mode as "isHumanMode", variables
+            FROM candidates 
+            ORDER BY last_message_at DESC NULLS LAST LIMIT 100
+        `));
+        res.json(result.rows);
+    } catch (e) {
+        res.status(500).send(e.message);
+    }
+});
+
+app.post('/api/drivers/:id/messages', async (req, res) => {
+    const { id } = req.params;
+    const { text, mediaUrl } = req.body;
+    try {
+        await withDb(async (client) => {
+            const driver = await client.query("SELECT phone_number FROM candidates WHERE id = $1", [id]);
+            if (driver.rows.length === 0) throw new Error("Driver not found");
+            
+            const payload = mediaUrl 
+                ? { type: 'image', image: { link: await refreshMediaUrl(mediaUrl), caption: text } }
+                : { type: 'text', text: { body: text } };
+                
+            await sendToMeta(driver.rows[0].phone_number, payload);
+            await client.query("INSERT INTO candidate_messages (candidate_id, direction, text, type) VALUES ($1, 'out', $2, $3)", [id, text || '[Media]', mediaUrl ? 'image' : 'text']);
+        });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).send(e.message);
+    }
+});
+
+app.get('/api/drivers/:id/messages', async (req, res) => {
+    try {
+        const result = await withDb(c => c.query(
+            "SELECT id, direction as sender, text, created_at as timestamp, type FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at ASC",
+            [req.params.id]
+        ));
+        const messages = result.rows.map(r => ({
+            id: r.id,
+            sender: r.sender === 'in' ? 'driver' : 'agent',
+            text: r.text,
+            timestamp: new Date(r.timestamp).getTime(),
+            type: r.type
+        }));
+        res.json(messages);
+    } catch (e) {
+        res.status(500).send(e.message);
+    }
+});
+
+app.get('/api/bot/settings', async (req, res) => {
+    try {
+        const result = await withDb(c => c.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1"));
+        res.json(result.rows[0]?.settings || getDefaultBotConfig());
+    } catch (e) {
+        res.json(getDefaultBotConfig());
+    }
+});
+
+app.post('/api/bot/save', async (req, res) => {
+    try {
+        await withDb(c => c.query("INSERT INTO bot_versions (status, settings) VALUES ('published', $1)", [req.body]));
+        memoryCache.botSettings = req.body;
+        memoryCache.lastUpdated = Date.now();
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).send(e.message);
+    }
+});
+
+app.post('/api/system/hard-reset', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query("DROP TABLE IF EXISTS candidates CASCADE; DROP TABLE IF EXISTS bot_versions CASCADE; DROP TABLE IF EXISTS media_files CASCADE; DROP TABLE IF EXISTS media_folders CASCADE;");
+            await initDatabase(client);
+        });
+        res.json({ success: true });
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+// WEBHOOK
+app.get('/webhook', (req, res) => {
+    if (req.query['hub.verify_token'] === (process.env.VERIFY_TOKEN || 'uber_fleet_verify_token')) {
+        res.send(req.query['hub.challenge']);
     } else {
         res.sendStatus(403);
     }
 });
 
-apiRouter.post('/webhook', async (req, res) => {
-    const body = req.body;
-    if (!body.object) { res.sendStatus(404); return; }
+app.post('/webhook', async (req, res) => {
+    res.sendStatus(200); 
     try {
-        const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
-        if (!msg) { res.sendStatus(200); return; }
+        const body = req.body;
+        if (!body.entry?.[0]?.changes?.[0]?.value?.messages) return;
 
-        const processPromise = withDb(async (client) => {
-            // WRAPPER: Retry logic for cold starts / missing tables
-            await executeWithRetry(client, async () => {
-                const existing = await client.query("SELECT id FROM candidate_messages WHERE whatsapp_message_id = $1", [msg.id]);
-                if (existing.rows.length > 0) return;
+        const msg = body.entry[0].changes[0].value.messages[0];
+        const contact = body.entry[0].changes[0].value.contacts?.[0];
+        const phone = msg.from;
+        const name = contact?.profile?.name || 'Unknown';
+        
+        let text = '';
+        let type = 'text';
+        let payloadId = null;
 
-                const from = msg.from;
-                const name = body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || 'Unknown';
-                let text = '';
-                let payloadId = null;
-
-                if (msg.type === 'text') text = msg.text.body;
-                else if (msg.type === 'interactive') {
-                    if (msg.interactive.type === 'button_reply') {
-                        text = msg.interactive.button_reply.title;
-                        payloadId = msg.interactive.button_reply.id;
-                    } else if (msg.interactive.type === 'list_reply') {
-                        text = msg.interactive.list_reply.title;
-                        payloadId = msg.interactive.list_reply.id;
-                    }
-                } 
-                else if (msg.type === 'location') {
-                    // Extract structured location data
-                    text = JSON.stringify(msg.location);
-                }
-                else text = `[${msg.type.toUpperCase()}]`;
-
-                let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
-                let candidate;
-                if (c.rows.length === 0) {
-                    const id = crypto.randomUUID();
-                    await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at, is_human_mode, variables) VALUES ($1, $2, $3, 'New', $4, $5, FALSE, '{}')`, [id, from, name, text, Date.now()]);
-                    candidate = { id, phone_number: from, is_human_mode: false, current_bot_step_id: null, variables: {}, name };
-                } else {
-                    candidate = c.rows[0];
-                    await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
-                }
-
-                await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, 'text', $4, 'received', NOW())`, [crypto.randomUUID(), candidate.id, text, msg.id]);
-                await runBotEngine(client, candidate, text, payloadId);
-            });
-        });
-
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Webhook Processing Timeout")), 9000));
-        await Promise.race([processPromise, timeoutPromise]).catch(err => console.error("[Webhook Warning]", err.message));
-        res.sendStatus(200);
-    } catch(e) { console.error("Webhook Error", e); res.sendStatus(200); }
-});
-
-apiRouter.post('/auth/google', async (req, res) => {
-    try {
-        const { credential } = req.body;
-        const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
-        res.json({ success: true, user: ticket.getPayload() });
-    } catch (e) { res.status(401).json({ success: false, error: e.message }); }
-});
-
-apiRouter.get('/bot/settings', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const r = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
-            res.json(r.rows[0]?.settings || { isEnabled: false, nodes: [], edges: [] });
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/bot/save', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), req.body]);
-        });
-        memoryCache.botSettings = null;
-        memoryCache.lastUpdated = 0;
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/bot/publish', async (req, res) => res.json({ success: true }));
-
-apiRouter.get('/drivers', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC NULLS LAST LIMIT 50');
-            res.json(r.rows.map(row => ({
-                id: row.id, phoneNumber: row.phone_number, name: row.name, status: row.stage, 
-                lastMessage: row.last_message, lastMessageTime: parseInt(row.last_message_at || '0'), 
-                source: row.source, isHumanMode: row.is_human_mode
-            })));
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.patch('/drivers/:id', async (req, res) => {
-    try {
-        const { status, isHumanMode, name } = req.body;
-        await withDb(async (client) => {
-            if (status) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [status, req.params.id]);
-            if (isHumanMode !== undefined) await client.query("UPDATE candidates SET is_human_mode = $1 WHERE id = $2", [isHumanMode, req.params.id]);
-            if (name) await client.query("UPDATE candidates SET name = $1 WHERE id = $2", [name, req.params.id]);
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.get('/drivers/:id/messages', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [req.params.id]);
-            const msgs = await Promise.all(r.rows.map(async row => {
-                let text = row.text, imageUrl = null;
-                if (['image','video','document'].includes(row.type) && row.text.startsWith('{')) {
-                    try { const p = JSON.parse(row.text); text = p.caption; if(p.url) imageUrl = await refreshMediaUrl(p.url); } catch(e){}
-                }
-                return { 
-                    id: row.id, sender: row.direction === 'in' ? 'driver' : 'agent', text, imageUrl, 
-                    timestamp: new Date(row.created_at).getTime(), type: row.type || 'text', status: row.status 
-                };
-            }));
-            res.json(msgs.reverse());
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/drivers/:id/messages', async (req, res) => {
-    try {
-        const { text, mediaUrl, mediaType } = req.body;
-        await withDb(async (client) => {
-            const c = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
-            if (c.rows.length === 0) throw new Error("Candidate not found");
-            let payload = { type: 'text', text: { body: text } };
-            let dbText = text;
-            if (mediaUrl) {
-                const freshUrl = await refreshMediaUrl(mediaUrl);
-                const type = mediaType || 'image';
-                payload = { type, [type]: { link: freshUrl, caption: text } };
-                if (type === 'document') payload[type].filename = decodeURIComponent(new URL(freshUrl).pathname.split('/').pop() || 'file.pdf');
-                dbText = JSON.stringify({ url: mediaUrl, caption: text });
+        if (msg.type === 'text') text = msg.text.body;
+        else if (msg.type === 'interactive') {
+            type = 'interactive';
+            if (msg.interactive.type === 'button_reply') {
+                payloadId = msg.interactive.button_reply.id;
+                text = msg.interactive.button_reply.title;
+            } else if (msg.interactive.type === 'list_reply') {
+                payloadId = msg.interactive.list_reply.id;
+                text = msg.interactive.list_reply.title;
             }
-            await sendToMeta(c.rows[0].phone_number, payload);
-            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text']);
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
+        } else if (msg.type === 'location') {
+            type = 'location';
+            text = JSON.stringify(msg.location); // Convert location obj to string for storage
+        }
 
-apiRouter.get('/drivers/:id/documents', async (req, res) => {
-    try {
         await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM driver_documents WHERE candidate_id = $1', [req.params.id]);
-            const docs = await Promise.all(r.rows.map(async d => ({ id: d.id, docType: d.type, url: await refreshMediaUrl(d.url), verificationStatus: d.status, timestamp: new Date(d.created_at).getTime() })));
-            res.json(docs);
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
+            let cand = await client.query("SELECT * FROM candidates WHERE phone_number = $1", [phone]);
+            if (cand.rows.length === 0) {
+                cand = await client.query("INSERT INTO candidates (phone_number, name) VALUES ($1, $2) RETURNING *", [phone, name]);
+            }
+            const candidate = cand.rows[0];
 
-// --- OPTIMIZED BULK SCHEDULER ---
-apiRouter.post('/scheduled-messages', async (req, res) => {
-    try {
-        const { driverIds, message, timestamp } = req.body;
-        if (!driverIds || driverIds.length === 0) return res.status(400).json({error: "No recipients"});
-        
-        const payload = typeof message === 'string' ? { text: message } : message;
-        
-        await withDb(async (client) => {
-            // Bulk Insert using UNNEST for performance
-            // $1 = ids array, $2 = payload, $3 = timestamp
-            const query = `
-                INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status)
-                SELECT gen_random_uuid(), unnest($1::uuid[]), $2, $3, 'pending'
-            `;
-            await client.query(query, [driverIds, payload, timestamp]);
+            await client.query("INSERT INTO candidate_messages (candidate_id, direction, text, type, whatsapp_message_id) VALUES ($1, 'in', $2, $3, $4)", [candidate.id, text, type, msg.id]);
+            await client.query("UPDATE candidates SET last_message = $1, last_message_at = extract(epoch from now()) * 1000 WHERE id = $2", [text, candidate.id]);
+
+            // Pass msg.type to the engine so it knows how to handle location
+            await runBotEngine(client, candidate, text, payloadId, msg.type);
         });
-        
-        res.json({ success: true, count: driverIds.length });
-    } catch (e) { 
-        console.error("Bulk Schedule Error:", e);
-        res.status(500).json({ error: e.message }); 
+
+    } catch (e) {
+        console.error("Webhook Error:", e);
     }
 });
 
-apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => {
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, async () => {
+    console.log(`🚀 Server running on port ${PORT}`);
     try {
-        await withDb(async (client) => {
-            const r = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status = 'pending' ORDER BY scheduled_time ASC`, [req.params.id]);
-            const mapped = await Promise.all(r.rows.map(async row => {
-                const p = row.payload || {};
-                if(p.mediaUrl) p.mediaUrl = await refreshMediaUrl(p.mediaUrl);
-                return { id: row.id, scheduledTime: parseInt(row.scheduled_time), payload: p, status: row.status };
-            }));
-            res.json(mapped);
+        await withDb(async (c) => {
+            await c.query('SELECT NOW()');
+            await initDatabase(c);
+            console.log(`✅ Database Ready.`);
         });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        console.error(`❌ DB Connection Failed: ${e.message}`);
+    }
 });
-
-apiRouter.delete('/scheduled-messages/:id', async (req, res) => {
-    try {
-        await withDb(async (client) => { await client.query("DELETE FROM scheduled_messages WHERE id = $1", [req.params.id]); });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
-    try {
-        const { text, scheduledTime } = req.body;
-        await withDb(async (client) => {
-            if (text) {
-                const r = await client.query("SELECT payload FROM scheduled_messages WHERE id = $1", [req.params.id]);
-                if (r.rows.length > 0) {
-                    const newPayload = { ...r.rows[0].payload, text };
-                    await client.query("UPDATE scheduled_messages SET payload = $1 WHERE id = $2", [newPayload, req.params.id]);
-                }
-            }
-            if (scheduledTime) await client.query("UPDATE scheduled_messages SET scheduled_time = $1 WHERE id = $2", [scheduledTime, req.params.id]);
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// --- ADVANCED PARALLEL CRON PROCESSOR ---
-apiRouter.get('/cron/process-queue', async (req, res) => {
-    let processed = 0, errors = 0;
-    try {
-        await withDb(async (client) => {
-            await executeWithRetry(client, async () => {
-                const now = Date.now();
-                
-                // Fetch larger batch (50) for efficiency
-                const jobs = await client.query(`
-                    SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number 
-                    FROM scheduled_messages sm 
-                    JOIN candidates c ON sm.candidate_id = c.id 
-                    WHERE sm.status = 'pending' AND sm.scheduled_time <= $1 
-                    LIMIT 50 
-                    FOR UPDATE OF sm SKIP LOCKED
-                `, [now]);
-
-                if (jobs.rows.length === 0) return;
-
-                // Helper for processing a single job
-                const processJob = async (job) => {
-                    try {
-                        // Optimistic update to processing
-                        await client.query("UPDATE scheduled_messages SET status = 'processing' WHERE id = $1", [job.id]);
-                        
-                        const p = job.payload || {};
-                        let metaP, dbLogText = p.text || '', dbType = 'text';
-                        
-                        // Smart Media Handling
-                        if (p.mediaUrl) {
-                            const url = await refreshMediaUrl(p.mediaUrl);
-                            const mediaType = p.mediaType || 'image';
-                            dbType = mediaType;
-                            
-                            // Construct caption/filename
-                            dbLogText = JSON.stringify({ url: p.mediaUrl, caption: p.text || '' });
-                            
-                            metaP = { type: mediaType, [mediaType]: { link: url, caption: p.text || '' } };
-                            
-                            // Specific fix for Documents: Needs 'filename'
-                            if (mediaType === 'document') {
-                                metaP[mediaType].filename = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'document.pdf');
-                                // Documents don't support 'caption' in some API versions, but we leave it as valid property
-                            }
-                        } else {
-                            metaP = { type: 'text', text: { body: dbLogText } };
-                        }
-                        
-                        await sendToMeta(job.phone_number, metaP);
-                        
-                        // Log success
-                        await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]);
-                        await client.query("UPDATE scheduled_messages SET status = 'sent' WHERE id = $1", [job.id]);
-                        processed++;
-                    } catch (e) {
-                        errors++;
-                        console.error(`Job ${job.id} failed:`, e.message);
-                        await client.query("UPDATE scheduled_messages SET status = 'failed', error_log = $2 WHERE id = $1", [job.id, e.message]);
-                    }
-                };
-
-                // PARALLEL EXECUTION (Batch of 5 concurrently)
-                const BATCH_SIZE = 5;
-                for (let i = 0; i < jobs.rows.length; i += BATCH_SIZE) {
-                    const chunk = jobs.rows.slice(i, i + BATCH_SIZE);
-                    await Promise.all(chunk.map(job => processJob(job)));
-                }
-            });
-        });
-        res.json({ status: 'ok', processed, errors, queueSize: processed + errors });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/system/init-db', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            await initDatabase(client);
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/system/hard-reset', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            await client.query('BEGIN');
-            try {
-                await client.query(`DROP TABLE IF EXISTS scheduled_messages, candidate_messages, driver_documents, bot_versions, candidates, system_settings CASCADE`);
-                await initDatabase(client); // Uses the shared robust init function
-                await client.query('COMMIT');
-            } catch (err) {
-                await client.query('ROLLBACK');
-                throw err;
-            }
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/system/seed-db', async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const id = crypto.randomUUID();
-            await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at) VALUES ($1, '+919999999999', 'Demo Driver', 'New', 'Hello', $2)`, [id, Date.now()]);
-        });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.use('/api', apiRouter);
-app.use('/', apiRouter);
-app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
-
-if (require.main === module) {
-    const PORT = process.env.PORT || 3001;
-    app.listen(PORT, () => {
-        console.log(`Server running on ${PORT}`);
-        // Auto-Init Check on Start (For Local/VPS, NOT Vercel)
-        (async () => {
-            try {
-                if (pgPool) {
-                    const client = await pgPool.connect();
-                    try {
-                        const res = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'candidates'`);
-                        if (res.rows.length === 0) {
-                            console.log("[Auto-Init] Database schema missing. Initializing...");
-                            await initDatabase(client);
-                            console.log("[Auto-Init] Database ready.");
-                        }
-                    } finally {
-                        client.release();
-                    }
-                }
-            } catch(e) { console.error("[Auto-Init] Failed:", e.message); }
-        })();
-    });
-}
 
 module.exports = app;

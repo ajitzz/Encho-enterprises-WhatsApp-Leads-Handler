@@ -55,7 +55,7 @@ The `PublicShowcase` component allows customers to view vehicle/hotel media via 
 *   **Checks:** Verifies PostgreSQL connection, table existence (`candidates`, `bot_versions`), and row counts.
 *   **UI:** Displays a "System Monitor" bar at the bottom. If tables are missing, it offers a "Repair Schema" button.
 
-## 8. Bot Interaction Enhancements (Recent Updates)
+## 8. Bot Interaction Enhancements
 ### A. Hybrid Date & Time Picker
 *   **Logic:** Combines structured List Messages with NLP-lite text recognition.
 *   **Behavior:** Users can select a slot from a list OR type a specific time (e.g., "11:15 PM"). The engine detects time formats via Regex and accepts the input immediately, bypassing the need for a specific "Custom" button click if the intent is clear.
@@ -65,5 +65,20 @@ The `PublicShowcase` component allows customers to view vehicle/hotel media via 
 *   **Heuristic:** If a Location Preset is configured in the Bot Builder but lacks coordinates (Lat/Long), the engine automatically treats it as a "Manual Pin Trigger".
 *   **Benefit:** Prevents bot loops if an admin forgets to change the preset type from 'Static' to 'Manual' while leaving coordinates empty.
 
-### C. API Payload Strictness
-*   **Fix:** `location_request_message` payloads are strictly formatted. The `body` object contains *only* the `text` field. Adding `type: "text"` (common in other message types) causes the "Send Location" button to vanish on WhatsApp iOS/Android clients.
+## 9. CRITICAL ENGINE RULES (PROTECTED)
+**Do not modify the following logic without explicit instruction:**
+
+### A. Zero-Latency Loop
+*   **Rule:** The `runBotEngine` `while` loop must **NOT** contain `setTimeout` or artificial delays.
+*   **Reason:** Delays accumulate linearly (3 nodes * 500ms = 1.5s delay). We need <500ms total response time.
+*   **Implementation:** `await new Promise` is removed from the main loop unless a specific `delay` node is encountered.
+
+### B. Location Parsing
+*   **Rule:** When `incomingType === 'location'`, the `incomingText` is a JSON String.
+*   **Required Action:** The engine MUST `JSON.parse(incomingText)` to extract `latitude` and `longitude`.
+*   **Storage:** These must be saved to variables (e.g., `pickup_lat`, `pickup_long`) *immediately* before advancing.
+*   **Flow:** Upon receiving a location, the engine MUST force-advance to the default edge.
+
+### C. Variable Persistence
+*   **Rule:** `UPDATE candidates SET variables...` must happen **synchronously** inside the loop node execution, *before* finding the next edge.
+*   **Reason:** The next node might be a Condition Node that relies on the variable just set. If saved asynchronously, the condition will fail.
