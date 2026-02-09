@@ -245,14 +245,14 @@ const getDefaultBotConfig = () => ({
     edges: [{ id: 'e1', source: 'start', target: 'welcome', type: 'smoothstep' }]
 });
 
-// --- BOT ENGINE ---
-const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
+// --- ADVANCED BOT ENGINE ---
+const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null, incomingType = 'text') => {
     // Check Kill Switch
     const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
     const config = sys.rows[0]?.value || { automation_enabled: true };
     if (config.automation_enabled === false || candidate.is_human_mode) return;
 
-    // Load Bot Config
+    // Load Bot Config (Cache Strategy)
     let botSettings = memoryCache.botSettings;
     const now = Date.now();
     if (!botSettings || (now - memoryCache.lastUpdated > SYSTEM_CONFIG.CACHE_TTL)) {
@@ -274,7 +274,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         candidate.variables = {};
     }
 
-    // Determine Next Step (Pathfinding)
+    // --- STEP 1: PATHFINDING (Determine Next Node) ---
     if (!currentNodeId) {
         const start = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
         nextNodeId = start ? start.id : nodes[0]?.id;
@@ -282,9 +282,37 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         const currentNode = nodes.find(n => n.id === currentNodeId);
         if (currentNode) {
             const type = currentNode.data.type;
+            const outgoing = edges.filter(e => e.source === currentNodeId);
+            let edge = null;
+
+            // -- LOCATION SPECIFIC LOGIC --
+            // If the current node asked for a location, and we got a location type message
+            if (incomingType === 'location' && (type === 'pickup_location' || type === 'location_request' || type === 'destination_location')) {
+                try {
+                    const locData = JSON.parse(incomingText); // Webhook stores JSON string in text field for location
+                    const varName = currentNode.data.variable || (type === 'pickup_location' ? 'pickup' : 'destination');
+                    
+                    // Save specific components for better usability
+                    await client.query(
+                        `UPDATE candidates SET variables = jsonb_set(
+                            jsonb_set(
+                                jsonb_set(variables, '{${varName}}', $1),
+                                '{${varName}_lat}', $2
+                            ),
+                            '{${varName}_long}', $3
+                        ) WHERE id = $4`,
+                        [JSON.stringify(incomingText), JSON.stringify(locData.latitude), JSON.stringify(locData.longitude), candidate.id]
+                    );
+                    
+                    // Force advance
+                    edge = outgoing.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
+                } catch(e) {
+                    console.error("Location Parse Error", e);
+                }
+            }
             
-            // --- 3-STAGE DATE PICKER LOGIC ---
-            if (type === 'datetime_picker') {
+            // -- 3-STAGE DATE PICKER LOGIC --
+            else if (type === 'datetime_picker') {
                 let saveVar = null;
                 let isManual = false;
 
@@ -318,58 +346,52 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "Please type your preferred time (e.g. 10:30 PM):" } });
                     return; 
                 }
+                
+                // Only advance if we have final slot
+                if (candidate.variables.time_slot || candidate.variables[currentNode.data.variable]) {
+                    edge = outgoing.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
+                }
             }
-            // --- VARIABLE CAPTURE LOGIC ---
-            else if (['input', 'location_request', 'pickup_location'].includes(type)) {
+            
+            // -- GENERIC INPUT LOGIC --
+            else if (['input', 'location_request', 'pickup_location', 'destination_location'].includes(type) && incomingType !== 'location') {
+                // Handle text fallbacks for location nodes (e.g. user types address) or standard inputs
                 let val = incomingText;
                 if (incomingPayloadId) val = incomingPayloadId;
                 if (val && currentNode.data.variable) {
                     await client.query(`UPDATE candidates SET variables = jsonb_set(variables, '{${currentNode.data.variable}}', $1) WHERE id = $2`, [JSON.stringify(val), candidate.id]);
                     candidate.variables[currentNode.data.variable] = val;
                 }
-            }
-
-            // --- EDGE MATCHING LOGIC ---
-            const outgoing = edges.filter(e => e.source === currentNodeId);
-            let edge = null;
-
-            // 1. Try Payload Match (Buttons/Lists)
-            if (incomingPayloadId) {
-                edge = outgoing.find(e => e.sourceHandle === incomingPayloadId);
-            }
-            
-            // 2. Try Text Match (Buttons - Fuzzy)
-            if (!edge && cleanInput && currentNode.data.buttons) {
-                const btn = currentNode.data.buttons.find(b => b.title.toLowerCase().trim() === cleanInput);
-                if (btn) edge = outgoing.find(e => e.sourceHandle === btn.id);
-            }
-
-            // 3. Logic for DateTime Advance
-            if (!edge && type === 'datetime_picker') {
-                if (candidate.variables.time_slot || candidate.variables[currentNode.data.variable]) {
-                    edge = outgoing.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
-                }
-            } 
-            
-            // 4. Default Advance (Text/Input inputs)
-            if (!edge && ['input', 'location_request', 'text', 'image'].includes(type)) {
                 edge = outgoing.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
             }
 
-            if (edge) nextNodeId = edge.target;
-            else {
-                // If interactive and no match, stay on node (ask again or invalid input reply)
-                nextNodeId = currentNodeId;
-                if (type === 'interactive_button' && !incomingPayloadId) {
-                    // Optional: Send invalid reply
+            // -- STANDARD EDGE MATCHING --
+            if (!edge) {
+                // 1. Try Payload Match
+                if (incomingPayloadId) {
+                    edge = outgoing.find(e => e.sourceHandle === incomingPayloadId);
+                }
+                // 2. Try Text Match (Buttons - Fuzzy)
+                if (!edge && cleanInput && currentNode.data.buttons) {
+                    const btn = currentNode.data.buttons.find(b => b.title.toLowerCase().trim() === cleanInput);
+                    if (btn) edge = outgoing.find(e => e.sourceHandle === btn.id);
+                }
+                // 3. Default Advance
+                if (!edge && ['text', 'image', 'video', 'rich_card'].includes(type)) {
+                    edge = outgoing.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
                 }
             }
+
+            if (edge) nextNodeId = edge.target;
+            else nextNodeId = currentNodeId; // Stay if no match
         }
     }
 
-    // Execute Nodes Loop
+    // --- STEP 2: EXECUTION LOOP (High Performance) ---
     let activeNodeId = nextNodeId;
     let safety = 0;
+    
+    // Performance optimization: Removed unnecessary sleeps in loop
     while(activeNodeId && safety < 15) {
         safety++;
         const node = nodes.find(n => n.id === activeNodeId);
@@ -378,6 +400,10 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         const data = node.data;
         let autoAdvance = true;
 
+        // 1. SAVE STATE FIRST
+        await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
+
+        // 2. PROCESS NODE TYPE
         if (data.type === 'text') {
             const body = processText(data.content, candidate);
             if (isValidContent(body)) await sendToMeta(candidate.phone_number, { type: 'text', text: { body } });
@@ -388,7 +414,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             await sendToMeta(candidate.phone_number, { type: 'image', image: { link: url, caption: processText(data.content, candidate) } });
         }
 
-        // --- INTERACTIVE BUTTONS ---
         else if (data.type === 'interactive_button' || data.type === 'rich_card') {
             autoAdvance = false; 
             const buttons = (data.buttons || []).slice(0, 3).map(b => ({
@@ -414,7 +439,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             });
         }
 
-        // --- INTERACTIVE LIST ---
         else if (data.type === 'interactive_list') {
             autoAdvance = false;
             await sendToMeta(candidate.phone_number, {
@@ -430,7 +454,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             });
         }
 
-        // --- DATETIME PICKER ---
         else if (data.type === 'datetime_picker') {
             autoAdvance = false;
             let body = "Select an option:";
@@ -463,7 +486,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
         else if (['input', 'location_request', 'pickup_location', 'destination_location'].includes(data.type)) {
             autoAdvance = false;
-            if (data.type === 'location_request' || data.type === 'pickup_location') {
+            if (['location_request', 'pickup_location', 'destination_location'].includes(data.type)) {
                  // Send location request message
                  await sendToMeta(candidate.phone_number, {
                     type: "interactive",
@@ -479,24 +502,24 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             }
         }
         
-        else if (data.type === 'condition') {
-            // Logic handled in next pass (edge finding), this node is instantaneous
+        else if (data.type === 'set_variable') {
+            // Instant Variable Set
+            if (data.variable && data.operationValue) {
+                await client.query(`UPDATE candidates SET variables = jsonb_set(variables, '{${data.variable}}', $1) WHERE id = $2`, [JSON.stringify(data.operationValue), candidate.id]);
+                candidate.variables[data.variable] = data.operationValue;
+            }
         }
         
         else if (data.type === 'delay') {
             await new Promise(r => setTimeout(r, Math.min(data.delayTime || 2000, 5000)));
         }
 
-        // Save State
-        await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
-        
         if (!autoAdvance) break;
         
-        // --- AUTO ADVANCE LOGIC ---
+        // --- 3. AUTO ADVANCE LOGIC ---
         const outEdges = edges.filter(e => e.source === node.id);
         
         if (data.type === 'condition') {
-            // Check condition logic
             let matched = false;
             if (data.variable) {
                 const val = candidate.variables[data.variable];
@@ -510,12 +533,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             activeNodeId = nextEdge ? nextEdge.target : null;
         } else {
             const nextEdge = outEdges.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
-            if (nextEdge) {
-                activeNodeId = nextEdge.target;
-                await new Promise(r => setTimeout(r, 300));
-            } else {
-                activeNodeId = null;
-            }
+            activeNodeId = nextEdge ? nextEdge.target : null;
         }
     }
 };
@@ -873,7 +891,7 @@ app.post('/webhook', async (req, res) => {
             }
         } else if (msg.type === 'location') {
             type = 'location';
-            text = JSON.stringify(msg.location);
+            text = JSON.stringify(msg.location); // Convert location obj to string for storage
         }
 
         await withDb(async (client) => {
@@ -886,7 +904,8 @@ app.post('/webhook', async (req, res) => {
             await client.query("INSERT INTO candidate_messages (candidate_id, direction, text, type, whatsapp_message_id) VALUES ($1, 'in', $2, $3, $4)", [candidate.id, text, type, msg.id]);
             await client.query("UPDATE candidates SET last_message = $1, last_message_at = extract(epoch from now()) * 1000 WHERE id = $2", [text, candidate.id]);
 
-            await runBotEngine(client, candidate, text, payloadId);
+            // Pass msg.type to the engine so it knows how to handle location
+            await runBotEngine(client, candidate, text, payloadId, msg.type);
         });
 
     } catch (e) {

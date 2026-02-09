@@ -24,13 +24,13 @@ import {
   Image as ImageIcon, MousePointer, Settings, GripVertical, Plus, 
   ListPlus, LayoutTemplate, RefreshCw, User, Check, Clock, MapPin, 
   CreditCard, FileText, Type, Variable, CornerRightDown, Navigation,
-  LocateFixed, AlertTriangle, Bot, CalendarClock, Calendar
+  LocateFixed, AlertTriangle, Bot, CalendarClock, Calendar, ArrowRight
 } from 'lucide-react';
 import { FlowNodeData, NodeType, ListSection, LocationPreset } from '../types';
 
 // --- 1. ADVANCED NODE COMPONENT (VISUALIZER) ---
 
-const NodeHeader = ({ color, icon, label, selected, subtitle }: any) => (
+const NodeHeader = ({ color, icon, label, selected, subtitle, badgeText }: any) => (
     <div className={`px-4 py-2.5 flex items-center gap-3 border-b border-gray-100 rounded-t-xl transition-colors ${selected ? 'bg-blue-50/80' : 'bg-white'}`}>
         <div className={`p-1.5 rounded-lg ${color} text-white shadow-sm shrink-0`}>
             {icon}
@@ -39,30 +39,34 @@ const NodeHeader = ({ color, icon, label, selected, subtitle }: any) => (
             <span className="font-extrabold text-[11px] text-gray-700 uppercase tracking-wider truncate">{label}</span>
             {subtitle && <span className="text-[10px] text-gray-400 truncate font-medium">{subtitle}</span>}
         </div>
-        <GripVertical size={14} className="text-gray-300 opacity-0 group-hover:opacity-100 cursor-grab ml-auto" />
+        {badgeText && (
+            <span className="ml-auto text-[9px] font-bold bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full border border-gray-200">
+                {badgeText}
+            </span>
+        )}
+        <GripVertical size={14} className={`text-gray-300 opacity-0 group-hover:opacity-100 cursor-grab ${badgeText ? 'ml-1' : 'ml-auto'}`} />
     </div>
 );
 
 const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boolean, id: string }) => {
-    let config = { color: 'bg-slate-600', icon: <MessageSquare size={14} />, label: 'Message', subtitle: '' };
+    let config = { color: 'bg-slate-600', icon: <MessageSquare size={14} />, label: 'Message', subtitle: '', badgeText: '' };
     
     switch(data.type) {
-        case 'start': config = { color: 'bg-emerald-500', icon: <Zap size={14} />, label: 'Start Flow', subtitle: 'Entry Point' }; break;
-        case 'text': config = { color: 'bg-blue-500', icon: <Type size={14} />, label: 'Text Message', subtitle: 'Simple Reply' }; break;
-        case 'image': config = { color: 'bg-purple-500', icon: <ImageIcon size={14} />, label: 'Media', subtitle: 'Image/Video' }; break;
-        case 'rich_card': config = { color: 'bg-pink-600', icon: <CreditCard size={14} />, label: 'Rich Card', subtitle: 'Media + Buttons' }; break;
-        case 'input': config = { color: 'bg-orange-500', icon: <CornerRightDown size={14} />, label: 'Collect Input', subtitle: 'Wait for user' }; break;
-        case 'interactive_button': config = { color: 'bg-rose-500', icon: <MousePointer size={14} />, label: 'Buttons', subtitle: 'Quick Reply' }; break;
-        case 'interactive_list': config = { color: 'bg-indigo-500', icon: <List size={14} />, label: 'List Menu', subtitle: 'Up to 10 Options' }; break;
-        case 'condition': config = { color: 'bg-amber-500', icon: <GitBranch size={14} />, label: 'Logic Check', subtitle: 'If/Else' }; break;
-        case 'set_variable': config = { color: 'bg-cyan-600', icon: <Variable size={14} />, label: 'Set Variable', subtitle: 'Update Data' }; break;
-        case 'delay': config = { color: 'bg-gray-500', icon: <Clock size={14} />, label: 'Smart Delay', subtitle: 'Human Pause' }; break;
-        case 'location_request': config = { color: 'bg-teal-600', icon: <MapPin size={14} />, label: 'Location', subtitle: 'Request GPS' }; break;
-        case 'pickup_location': config = { color: 'bg-lime-600', icon: <MapPin size={14} />, label: 'Pickup Location', subtitle: 'Get Start Point' }; break;
-        case 'destination_location': config = { color: 'bg-red-500', icon: <Navigation size={14} />, label: 'Destination', subtitle: 'Get End Point' }; break;
-        case 'datetime_picker': config = { color: 'bg-cyan-500', icon: <CalendarClock size={14} />, label: 'Smart Booking', subtitle: '3-Step Flow' }; break;
-        case 'handoff': config = { color: 'bg-red-500', icon: <User size={14} />, label: 'Agent Handoff', subtitle: 'Stop Bot' }; break;
-        case 'status_update': config = { color: 'bg-green-600', icon: <Check size={14} />, label: 'Set Status', subtitle: 'CRM Update' }; break;
+        case 'start': config = { color: 'bg-emerald-500', icon: <Zap size={14} />, label: 'Start Flow', subtitle: 'Entry Point', badgeText: 'TRIGGER' }; break;
+        case 'text': config = { color: 'bg-blue-500', icon: <Type size={14} />, label: 'Text Message', subtitle: 'Simple Reply', badgeText: 'SEND' }; break;
+        case 'image': config = { color: 'bg-purple-500', icon: <ImageIcon size={14} />, label: 'Media', subtitle: 'Image/Video', badgeText: 'SEND' }; break;
+        case 'rich_card': config = { color: 'bg-pink-600', icon: <CreditCard size={14} />, label: 'Rich Card', subtitle: 'Media + Buttons', badgeText: 'WAIT' }; break;
+        case 'input': config = { color: 'bg-orange-500', icon: <CornerRightDown size={14} />, label: 'Collect Input', subtitle: 'Wait for user', badgeText: 'INPUT' }; break;
+        case 'interactive_button': config = { color: 'bg-rose-500', icon: <MousePointer size={14} />, label: 'Buttons', subtitle: 'Quick Reply', badgeText: 'WAIT' }; break;
+        case 'interactive_list': config = { color: 'bg-indigo-500', icon: <List size={14} />, label: 'List Menu', subtitle: 'Up to 10 Options', badgeText: 'WAIT' }; break;
+        case 'condition': config = { color: 'bg-amber-500', icon: <GitBranch size={14} />, label: 'Logic Check', subtitle: 'If/Else', badgeText: 'LOGIC' }; break;
+        case 'set_variable': config = { color: 'bg-cyan-600', icon: <Variable size={14} />, label: 'Set Variable', subtitle: 'Update Data', badgeText: 'LOGIC' }; break;
+        case 'delay': config = { color: 'bg-gray-500', icon: <Clock size={14} />, label: 'Smart Delay', subtitle: 'Human Pause', badgeText: 'WAIT' }; break;
+        case 'location_request': config = { color: 'bg-teal-600', icon: <MapPin size={14} />, label: 'Location', subtitle: 'Request GPS', badgeText: 'WAIT' }; break;
+        case 'pickup_location': config = { color: 'bg-lime-600', icon: <MapPin size={14} />, label: 'Pickup Location', subtitle: 'Get Start Point', badgeText: 'WAIT' }; break;
+        case 'destination_location': config = { color: 'bg-red-500', icon: <Navigation size={14} />, label: 'Destination', subtitle: 'Get End Point', badgeText: 'WAIT' }; break;
+        case 'datetime_picker': config = { color: 'bg-cyan-500', icon: <CalendarClock size={14} />, label: 'Smart Booking', subtitle: '3-Step Flow', badgeText: 'WAIT' }; break;
+        case 'handoff': config = { color: 'bg-red-500', icon: <User size={14} />, label: 'Agent Handoff', subtitle: 'Stop Bot', badgeText: 'END' }; break;
     }
 
     return (
@@ -131,8 +135,9 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                                 </span>
                             </div>
                         </div>
-                        <div className="text-[10px] text-gray-400 font-mono text-right">
-                            Final Var: {data.variable || 'time_slot'}
+                        <div className="text-[10px] text-gray-400 font-mono text-right flex items-center justify-end gap-1">
+                            <span className="opacity-50">Saves to:</span> 
+                            <span className="bg-gray-100 px-1 rounded font-bold text-gray-700">{data.variable || 'time_slot'}</span>
                         </div>
                     </div>
                 )}
@@ -142,7 +147,10 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                         {/* Status Banner */}
                         <div className={`flex items-center justify-center gap-2 py-2 rounded-lg border text-xs font-bold font-mono uppercase tracking-wide ${data.type === 'pickup_location' ? 'bg-lime-50 text-lime-700 border-lime-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
                             {data.type === 'pickup_location' ? <MapPin size={12}/> : <Navigation size={12}/>}
-                            {data.type === 'pickup_location' ? 'Saves to: pickup_coords' : 'Saves to: dest_coords'}
+                            {data.type === 'pickup_location' ? 'Var: pickup' : 'Var: destination'}
+                        </div>
+                        <div className="text-[9px] text-gray-400 text-center">
+                            Automatically captures <span className="font-mono bg-gray-100 px-1 rounded text-gray-600">lat/long</span>
                         </div>
                         
                         {/* Presets Preview */}
@@ -175,8 +183,21 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
 
                 {data.type === 'set_variable' && (
                     <div className="bg-cyan-50 text-cyan-800 p-2 rounded-lg border border-cyan-100 text-xs font-mono">
-                        <div className="font-bold">{data.variable || 'var_name'}</div>
-                        <div className="text-[10px] opacity-70">= {data.operationValue || 'value'}</div>
+                        <div className="font-bold flex justify-between">
+                            {data.variable || 'var_name'}
+                            <span className="text-cyan-400">=</span>
+                        </div>
+                        <div className="text-[10px] opacity-70 truncate" title={data.operationValue}>{data.operationValue || 'value'}</div>
+                    </div>
+                )}
+
+                {data.type === 'input' && (
+                    <div className="bg-orange-50 text-orange-800 p-2 rounded-lg border border-orange-100 text-xs font-mono mb-2">
+                        <div className="font-bold text-[9px] uppercase opacity-60">Saves Input To</div>
+                        <div className="font-bold flex items-center gap-1">
+                            <Variable size={10} />
+                            {data.variable || 'input_var'}
+                        </div>
                     </div>
                 )}
 
@@ -238,11 +259,14 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
 
                 {/* Default Output (Next Step) */}
                 {!['interactive_button', 'interactive_list', 'rich_card', 'condition', 'handoff'].includes(data.type) && (
-                    <Handle 
-                        type="source" 
-                        position={Position.Right} 
-                        className={`!w-3.5 !h-3.5 !border-4 !border-white !-right-[19px] !shadow-sm ${config.color.replace('bg-', '!bg-')}`} 
-                    />
+                    <div className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-[20px] flex items-center">
+                        <div className="bg-white px-1.5 py-0.5 rounded text-[8px] font-bold text-gray-400 border shadow-sm mr-1 pointer-events-none">NEXT</div>
+                        <Handle 
+                            type="source" 
+                            position={Position.Right} 
+                            className={`!w-3.5 !h-3.5 !border-4 !border-white !relative !right-0 !transform-none !shadow-sm ${config.color.replace('bg-', '!bg-')}`} 
+                        />
+                    </div>
                 )}
             </div>
         </div>
@@ -325,8 +349,8 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                 value={local.content || ''} 
                                 onChange={e => update('content', e.target.value)} 
                                 placeholder={
-                                    local.type === 'pickup_location' ? "Select your pickup location below:" :
-                                    local.type === 'destination_location' ? "Select your destination below:" :
+                                    local.type === 'pickup_location' ? "Please share your pickup location:" :
+                                    local.type === 'destination_location' ? "Please share your destination:" :
                                     local.type === 'datetime_picker' ? "When would you like to book?" :
                                     "Type your message here..."
                                 }
@@ -654,21 +678,12 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                     )}
 
                     {/* Input Logic */}
-                    {local.type === 'input' && (
+                    {(local.type === 'input' || local.type === 'location_request' || local.type === 'pickup_location' || local.type === 'destination_location') && (
                         <div className="bg-orange-50 p-4 rounded-xl border border-orange-100 space-y-4">
                              <div>
                                 <label className="block text-[10px] font-bold text-orange-800 uppercase mb-1">Save Response To</label>
-                                <input className="w-full border border-orange-200 p-2 rounded text-sm bg-white" value={local.variable || ''} onChange={e => update('variable', e.target.value)} placeholder="variable_name" />
-                            </div>
-                            <div>
-                                <label className="block text-[10px] font-bold text-orange-800 uppercase mb-1">Expected Format</label>
-                                <select className="w-full border border-orange-200 p-2 rounded text-sm bg-white" value={local.validationType || 'text'} onChange={e => update('validationType', e.target.value)}>
-                                    <option value="text">Text</option>
-                                    <option value="email">Email</option>
-                                    <option value="phone">Phone Number</option>
-                                    <option value="number">Number</option>
-                                    <option value="location">Live Location</option>
-                                </select>
+                                <input className="w-full border border-orange-200 p-2 rounded text-sm bg-white" value={local.variable || (local.type === 'pickup_location' ? 'pickup' : (local.type === 'destination_location' ? 'destination' : ''))} onChange={e => update('variable', e.target.value)} placeholder="variable_name" />
+                                <p className="text-[9px] text-orange-600 mt-1">For locations, backend auto-saves `_lat` and `_long`.</p>
                             </div>
                         </div>
                     )}
@@ -781,7 +796,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
               id, 
               type, 
               label: type.replace(/_/g, ' '), 
-              content: type === 'pickup_location' ? 'Select Pickup Location:' : type === 'destination_location' ? 'Select Destination:' : '',
+              content: type === 'pickup_location' ? 'Please share your pickup location:' : type === 'destination_location' ? 'Please share your destination:' : '',
               presets: (type === 'pickup_location' || type === 'destination_location') ? [{ id: 'pre_1', title: 'Select on Map', type: 'manual' }] : undefined 
           }
       };
