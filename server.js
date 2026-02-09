@@ -6,7 +6,7 @@ const { Pool } = require('pg');
 const multer = require('multer');
 const axios = require('axios');
 const https = require('https');
-const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { OAuth2Client } = require('google-auth-library');
 const { GoogleGenAI } = require("@google/genai");
@@ -531,6 +531,10 @@ const initDatabase = async (client) => {
     await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
     
+    // --- MEDIA LIBRARY SCHEMA ---
+    await client.query(`CREATE TABLE IF NOT EXISTS media_folders (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name VARCHAR(255), parent_path VARCHAR(500), is_public_showcase BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS media_files (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), filename VARCHAR(255), url TEXT, s3_key TEXT, type VARCHAR(50), folder_path VARCHAR(500), created_at TIMESTAMP DEFAULT NOW());`);
+
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
     const botCheck = await client.query("SELECT id FROM bot_versions LIMIT 1");
     if (botCheck.rows.length === 0) {
@@ -548,6 +552,183 @@ app.get('/ping', async (req, res) => {
         res.status(500).send('db_error');
     }
 });
+
+// --- MEDIA LIBRARY ROUTES ---
+app.get('/api/media', async (req, res) => {
+    const path = req.query.path || '/';
+    try {
+        await withDb(async (client) => {
+            const folders = await client.query("SELECT * FROM media_folders WHERE parent_path = $1 ORDER BY name ASC", [path]);
+            const files = await client.query("SELECT * FROM media_files WHERE folder_path = $1 ORDER BY filename ASC", [path]);
+            
+            // Presign URLs for freshness
+            const signedFiles = await Promise.all(files.rows.map(async f => ({
+                ...f,
+                url: await refreshMediaUrl(f.url)
+            })));
+
+            res.json({ folders: folders.rows, files: signedFiles });
+        });
+    } catch (e) {
+        res.status(500).send(e.message);
+    }
+});
+
+app.post('/api/media/upload', upload.single('file'), async (req, res) => {
+    if (!req.file) return res.status(400).send('No file uploaded');
+    const { path } = req.body;
+    const folderPath = path || '/';
+    
+    try {
+        const key = `${Date.now()}_${req.file.originalname}`;
+        const command = new PutObjectCommand({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Key: key,
+            Body: req.file.buffer,
+            ContentType: req.file.mimetype
+        });
+        
+        if (s3Client) await s3Client.send(command);
+        
+        const url = `https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.${SYSTEM_CONFIG.AWS_REGION}.amazonaws.com/${key}`;
+        let type = 'document';
+        if (req.file.mimetype.startsWith('image/')) type = 'image';
+        else if (req.file.mimetype.startsWith('video/')) type = 'video';
+
+        await withDb(c => c.query(
+            "INSERT INTO media_files (filename, url, s3_key, type, folder_path) VALUES ($1, $2, $3, $4, $5) RETURNING *",
+            [req.file.originalname, url, key, type, folderPath]
+        ));
+        
+        res.json({ success: true, url });
+    } catch (e) {
+        console.error(e);
+        res.status(500).send(e.message);
+    }
+});
+
+app.post('/api/media/folders', async (req, res) => {
+    const { name, parentPath } = req.body;
+    try {
+        await withDb(async (client) => {
+            const check = await client.query("SELECT id FROM media_folders WHERE name = $1 AND parent_path = $2", [name, parentPath || '/']);
+            if (check.rows.length > 0) return res.status(409).send('Folder exists');
+            await client.query("INSERT INTO media_folders (name, parent_path) VALUES ($1, $2)", [name, parentPath || '/']);
+            res.json({ success: true });
+        });
+    } catch (e) {
+        res.status(500).send(e.message);
+    }
+});
+
+app.delete('/api/media/files/:id', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const file = await client.query("SELECT s3_key FROM media_files WHERE id = $1", [req.params.id]);
+            if (file.rows.length > 0 && file.rows[0].s3_key && s3Client) {
+                await s3Client.send(new DeleteObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: file.rows[0].s3_key }));
+            }
+            await client.query("DELETE FROM media_files WHERE id = $1", [req.params.id]);
+            res.json({ success: true });
+        });
+    } catch (e) {
+        res.status(500).send(e.message);
+    }
+});
+
+app.delete('/api/media/folders/:id', async (req, res) => {
+    try {
+        await withDb(c => c.query("DELETE FROM media_folders WHERE id = $1", [req.params.id]));
+        res.json({ success: true });
+    } catch (e) { res.status(500).send(e.message); }
+});
+
+app.post('/api/media/folders/:id/public', async (req, res) => {
+    try {
+        await withDb(c => c.query("UPDATE media_folders SET is_public_showcase = TRUE WHERE id = $1", [req.params.id]));
+        res.json({ success: true });
+    } catch(e) { res.status(500).send(e.message); }
+});
+
+app.delete('/api/media/folders/:id/public', async (req, res) => {
+    try {
+        await withDb(c => c.query("UPDATE media_folders SET is_public_showcase = FALSE WHERE id = $1", [req.params.id]));
+        res.json({ success: true });
+    } catch(e) { res.status(500).send(e.message); }
+});
+
+app.post('/api/media/sync-s3', async (req, res) => {
+    if (!s3Client) return res.status(500).send("S3 Not Configured");
+    try {
+        const data = await s3Client.send(new ListObjectsV2Command({ Bucket: SYSTEM_CONFIG.AWS_BUCKET }));
+        if (!data.Contents) return res.json({ added: 0 });
+        
+        let added = 0;
+        await withDb(async (client) => {
+            for (const item of data.Contents) {
+                if (!item.Key) continue;
+                const check = await client.query("SELECT id FROM media_files WHERE s3_key = $1", [item.Key]);
+                if (check.rows.length === 0) {
+                    const url = `https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.${SYSTEM_CONFIG.AWS_REGION}.amazonaws.com/${item.Key}`;
+                    let type = 'document';
+                    if (item.Key.match(/\.(jpg|jpeg|png|gif|webp)$/i)) type = 'image';
+                    else if (item.Key.match(/\.(mp4|mov|webm)$/i)) type = 'video';
+                    
+                    await client.query("INSERT INTO media_files (filename, url, s3_key, type, folder_path) VALUES ($1, $2, $3, $4, '/')", [item.Key, url, item.Key, type]);
+                    added++;
+                }
+            }
+        });
+        res.json({ added });
+    } catch(e) {
+        res.status(500).send(e.message);
+    }
+});
+
+app.get('/api/showcase/:folderName?', async (req, res) => {
+    try {
+        const folderName = req.params.folderName ? decodeURIComponent(req.params.folderName) : null;
+        await withDb(async (client) => {
+            let query = "SELECT * FROM media_folders WHERE is_public_showcase = TRUE";
+            let params = [];
+            if (folderName) {
+                query += " AND name = $1";
+                params.push(folderName);
+            }
+            query += " LIMIT 1";
+            
+            const folderRes = await client.query(query, params);
+            if (folderRes.rows.length === 0) return res.json({ title: 'Not Found', items: [] });
+            
+            const folder = folderRes.rows[0];
+            const files = await client.query("SELECT * FROM media_files WHERE folder_path = $1", [`/${folder.name}`]);
+            
+            const signedFiles = await Promise.all(files.rows.map(async f => ({
+                id: f.id,
+                url: await refreshMediaUrl(f.url),
+                type: f.type,
+                filename: f.filename
+            })));
+            
+            res.json({ title: folder.name, items: signedFiles });
+        });
+    } catch(e) { res.status(500).send(e.message); }
+});
+
+app.get('/api/showcase/status', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const active = await client.query("SELECT id, name FROM media_folders WHERE is_public_showcase = TRUE LIMIT 1");
+            if (active.rows.length > 0) {
+                res.json({ active: true, folderName: active.rows[0].name, folderId: active.rows[0].id });
+            } else {
+                res.json({ active: false });
+            }
+        });
+    } catch(e) { res.json({ active: false }); }
+});
+
+// --- EXISTING ROUTES ---
 
 app.get('/api/debug/status', async (req, res) => {
     try {
@@ -649,7 +830,7 @@ app.post('/api/bot/save', async (req, res) => {
 app.post('/api/system/hard-reset', async (req, res) => {
     try {
         await withDb(async (client) => {
-            await client.query("DROP TABLE IF EXISTS candidates CASCADE; DROP TABLE IF EXISTS bot_versions CASCADE;");
+            await client.query("DROP TABLE IF EXISTS candidates CASCADE; DROP TABLE IF EXISTS bot_versions CASCADE; DROP TABLE IF EXISTS media_files CASCADE; DROP TABLE IF EXISTS media_folders CASCADE;");
             await initDatabase(client);
         });
         res.json({ success: true });
