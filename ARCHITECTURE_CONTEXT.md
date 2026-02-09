@@ -19,16 +19,12 @@ The following mechanisms prevent "Cold Starts" and "Database Sleep" issues inher
 *   **Logic:** It does NOT just return 200 OK. It executes `await client.query('SELECT 1')`.
 *   **Purpose:** This forces a connection to the Neon Database, resetting its 5-minute inactivity timer. This is hit by an external Cron Job every 5 minutes to ensure sub-second response times for WhatsApp.
 
-### C. Neon Connection Strategy
-*   **SSL Handling:** The `pg` library can conflict with Neon's `sslmode=require` query parameter.
-*   **Solution:** The backend logic in `server.js` explicitly strips `sslmode=...` from the `DATABASE_URL` string and injects `ssl: { rejectUnauthorized: false }` into the Pool config object. This ensures robust connectivity across local and cloud environments.
-
-### D. In-Memory Bot Fallback
+### C. In-Memory Bot Fallback
 *   **Problem:** If the database is empty or slow, the bot previously sent nothing.
 *   **Solution:** If `SELECT settings FROM bot_versions` returns no rows, the code generates a **Default Bot Configuration** in RAM immediately to reply to the user. It simultaneously seeds this config into the DB for the next request.
 *   **Rule:** The bot engine must NEVER return an empty response.
 
-### E. Performance Caching
+### D. Performance Caching
 *   **Memory Cache:** Bot Settings are cached in a Node.js variable (`memoryCache`) with a 60-second TTL.
 *   **Benefit:** Prevents fetching the huge flow JSON from the database for every single incoming message burst.
 
@@ -57,9 +53,7 @@ The `PublicShowcase` component allows customers to view vehicle/hotel media via 
 ## 7. System Diagnostics
 *   **Polling:** The dashboard polls `/api/debug/status` every 5 seconds.
 *   **Checks:** Verifies PostgreSQL connection, table existence (`candidates`, `bot_versions`), and row counts.
-*   **UI:** Displays a "System Monitor" bar at the bottom.
-    *   **Server Offline:** Detects if the backend is unreachable (e.g., crashed or network error) and displays a "SERVER OFFLINE" warning.
-    *   **Missing Schema:** Offers a "Repair Schema" button if tables are missing.
+*   **UI:** Displays a "System Monitor" bar at the bottom. If tables are missing, it offers a "Repair Schema" button.
 
 ## 8. Bot Interaction Enhancements (Recent Updates)
 ### A. Hybrid Date & Time Picker
@@ -73,13 +67,3 @@ The `PublicShowcase` component allows customers to view vehicle/hotel media via 
 
 ### C. API Payload Strictness
 *   **Fix:** `location_request_message` payloads are strictly formatted. The `body` object contains *only* the `text` field. Adding `type: "text"` (common in other message types) causes the "Send Location" button to vanish on WhatsApp iOS/Android clients.
-
-### D. 3-Stage Smart Booking Flow
-*   **Problem:** WhatsApp List messages limit rows to 10. Showing 30-min intervals for 24 hours (48 slots) is impossible in one view.
-*   **Solution:** A "Drill-Down" state machine within the `datetime_picker` node.
-    1.  **Stage 1 (Date):** Asks user to select "Today", "Tomorrow", etc.
-    2.  **Stage 2 (Period):** Asks "Morning", "Afternoon", "Evening", "Night".
-        *   *Smart Filtering:* If "Today" is selected, passed periods (e.g., Morning if it's 4 PM) are hidden.
-    3.  **Stage 3 (Time):** Shows 30-min slots for that specific period only.
-*   **Backend Logic:** The engine **loops** on the same node ID until the final variable (`time_slot`) is captured. It uses `jsonb_set` to incrementally save state (`pickup_date`, `time_period`) without advancing the workflow prematurely.
-*   **Reset Capability:** Selecting a new Date automatically clears the previously selected Period/Time to allow corrections.
