@@ -375,6 +375,12 @@ const executeWithRetry = async (client, operation) => {
 };
 
 // --- BOT ENGINE ---
+// =========================================================================
+// [STABLE LOCK] 🛡️ DO NOT REFACTOR THIS FUNCTION
+// This engine contains critical logic for 3-Stage Date Picking and Location Handling.
+// It is protected based on the GitHub "Source of Truth".
+// Any changes to the loop structure, delays, or variable saving will break the bot.
+// =========================================================================
 const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
     console.log(`[Bot Engine] START for ${candidate.phone_number}`);
     try {
@@ -450,7 +456,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         }
                     }
                     
-                    // --- DYNAMIC DATETIME CAPTURE (3-STAGE) ---
+                    // --- DYNAMIC DATETIME CAPTURE (3-STAGE) [PROTECTED LOGIC] ---
                     if (currentNode.data.type === 'datetime_picker') {
                         // 1. Check if user sent a PERIOD (Morning, Afternoon...)
                         if (incomingPayloadId && incomingPayloadId.startsWith('PERIOD_')) {

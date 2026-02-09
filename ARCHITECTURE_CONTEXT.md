@@ -55,7 +55,7 @@ The `PublicShowcase` component allows customers to view vehicle/hotel media via 
 *   **Checks:** Verifies PostgreSQL connection, table existence (`candidates`, `bot_versions`), and row counts.
 *   **UI:** Displays a "System Monitor" bar at the bottom. If tables are missing, it offers a "Repair Schema" button.
 
-## 8. Bot Interaction Enhancements (Recent Updates)
+## 8. Bot Interaction Enhancements
 ### A. Hybrid Date & Time Picker
 *   **Logic:** Combines structured List Messages with NLP-lite text recognition.
 *   **Behavior:** Users can select a slot from a list OR type a specific time (e.g., "11:15 PM"). The engine detects time formats via Regex and accepts the input immediately, bypassing the need for a specific "Custom" button click if the intent is clear.
@@ -65,15 +65,27 @@ The `PublicShowcase` component allows customers to view vehicle/hotel media via 
 *   **Heuristic:** If a Location Preset is configured in the Bot Builder but lacks coordinates (Lat/Long), the engine automatically treats it as a "Manual Pin Trigger".
 *   **Benefit:** Prevents bot loops if an admin forgets to change the preset type from 'Static' to 'Manual' while leaving coordinates empty.
 
-### C. API Payload Strictness
-*   **Fix:** `location_request_message` payloads are strictly formatted. The `body` object contains *only* the `text` field. Adding `type: "text"` (common in other message types) causes the "Send Location" button to vanish on WhatsApp iOS/Android clients.
+## 9. CRITICAL ENGINE RULES (PROTECTED)
+**Do not modify the following logic without explicit instruction:**
 
-### D. 3-Stage Smart Booking Flow
-*   **Problem:** WhatsApp List messages limit rows to 10. Showing 30-min intervals for 24 hours (48 slots) is impossible in one view.
-*   **Solution:** A "Drill-Down" state machine within the `datetime_picker` node.
-    1.  **Stage 1 (Date):** Asks user to select "Today", "Tomorrow", etc.
-    2.  **Stage 2 (Period):** Asks "Morning", "Afternoon", "Evening", "Night".
-        *   *Smart Filtering:* If "Today" is selected, passed periods (e.g., Morning if it's 4 PM) are hidden.
-    3.  **Stage 3 (Time):** Shows 30-min slots for that specific period only.
-*   **Backend Logic:** The engine **loops** on the same node ID until the final variable (`time_slot`) is captured. It uses `jsonb_set` to incrementally save state (`pickup_date`, `time_period`) without advancing the workflow prematurely.
-*   **Reset Capability:** Selecting a new Date automatically clears the previously selected Period/Time to allow corrections.
+### A. Zero-Latency Loop
+*   **Rule:** The `runBotEngine` `while` loop must **NOT** contain `setTimeout` or artificial delays.
+*   **Reason:** Delays accumulate linearly (3 nodes * 500ms = 1.5s delay). We need <500ms total response time.
+*   **Implementation:** `await new Promise` is removed from the main loop unless a specific `delay` node is encountered.
+
+### B. Location Parsing
+*   **Rule:** When `incomingType === 'location'`, the `incomingText` is a JSON String.
+*   **Required Action:** The engine MUST `JSON.parse(incomingText)` to extract `latitude` and `longitude`.
+*   **Storage:** These must be saved to variables (e.g., `pickup_lat`, `pickup_long`) *immediately* before advancing.
+*   **Flow:** Upon receiving a location, the engine MUST force-advance to the default edge.
+
+### C. Variable Persistence
+*   **Rule:** `UPDATE candidates SET variables...` must happen **synchronously** inside the loop node execution, *before* finding the next edge.
+*   **Reason:** The next node might be a Condition Node that relies on the variable just set. If saved asynchronously, the condition will fail.
+
+## 10. GOLD STANDARD PROTECTION (GITHUB LOCK)
+**The current state of `server.js` (Bot Engine) and `BotBuilder.tsx` is LOCKED.**
+
+*   **Source of Truth:** The files currently in `server.js` represent the stable, working production version pushed to GitHub.
+*   **Logic Lock:** The `datetime_picker` 3-stage logic and the `runBotEngine` execution loop are heavily optimized. **DO NOT REFACTOR** these functions. 
+*   **Regression Prevention:** Any future update requests must NOT alter the fundamental structure of `runBotEngine` or the `jsonb_set` variable handling logic in `server.js`.
