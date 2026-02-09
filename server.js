@@ -6,7 +6,7 @@ const { Pool } = require('pg');
 const multer = require('multer');
 const axios = require('axios');
 const https = require('https');
-const { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { OAuth2Client } = require('google-auth-library');
 const { GoogleGenAI } = require("@google/genai");
@@ -24,7 +24,7 @@ const SYSTEM_CONFIG = {
     AWS_REGION: process.env.AWS_REGION || 'us-east-1',
     AWS_BUCKET: process.env.AWS_BUCKET_NAME || 'uber-fleet-assets',
     GOOGLE_CLIENT_ID: process.env.VITE_GOOGLE_CLIENT_ID,
-    CACHE_TTL: 60 * 1000 // 60 Seconds Cache for Bot Settings
+    CACHE_TTL: 60 * 1000
 };
 
 // --- IN-MEMORY CACHE ---
@@ -53,7 +53,6 @@ try {
         genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     }
 
-    // NEON CONNECTION STRATEGY (Sanitize SSL Mode)
     let connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
     if (connectionString && connectionString.includes('sslmode=')) {
         connectionString = connectionString.replace(/([?&])sslmode=[^&]+(&|$)/, '$1').replace(/[?&]$/, '');
@@ -64,7 +63,7 @@ try {
             connectionString,
             connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
             idleTimeoutMillis: 30000,
-            ssl: { rejectUnauthorized: false }, // Critical for Neon
+            ssl: { rejectUnauthorized: false }, 
             max: 20, 
             keepAlive: true
         });
@@ -79,7 +78,7 @@ try {
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// --- DB HELPERS ---
+// --- HELPERS ---
 const withDb = async (operation) => {
     if (!pgPool) throw new Error("Database not initialized");
     let client;
@@ -103,7 +102,6 @@ const getMetaClient = () => axios.create({
     }
 });
 
-// --- MEDIA & TEXT HELPERS ---
 const refreshMediaUrl = async (url) => {
     if (!url || typeof url !== 'string') return null;
     if (!s3Client || (!url.includes('amazonaws.com') && !url.includes(SYSTEM_CONFIG.AWS_BUCKET))) return url;
@@ -111,7 +109,6 @@ const refreshMediaUrl = async (url) => {
     try {
         const urlObj = new URL(url);
         let key = decodeURIComponent(urlObj.pathname.substring(1));
-        // Remove bucket name if present in path
         if (key.startsWith(SYSTEM_CONFIG.AWS_BUCKET + '/')) {
             key = key.substring(SYSTEM_CONFIG.AWS_BUCKET.length + 1);
         }
@@ -155,7 +152,7 @@ const isValidContent = (text) => {
     if (!text || typeof text !== 'string') return false;
     const clean = text.trim().toLowerCase();
     if (clean.length === 0) return false;
-    const blockers = ['replace this sample', 'type your message', 'enter your message'];
+    const blockers = ['replace this sample', 'type your message', 'enter your message', 'replace this text'];
     if (clean.length < 50 && blockers.some(b => clean.includes(b))) return false;
     return true;
 };
@@ -172,16 +169,12 @@ const resolveTimeAmbiguity = (inputTimeStr) => {
     const [hStr, mStr] = inputTimeStr.split(/[:.]/);
     let h = parseInt(hStr);
     const m = parseInt(mStr);
-    if (h > 12) return `${h}:${m.toString().padStart(2,'0')}`; // Already 24h
-    // Heuristic: If it's 8:00, is it AM or PM?
-    // We assume Next Occurrence.
+    if (h > 12) return `${h}:${m.toString().padStart(2,'0')}`; 
     const now = new Date();
     const dateAM = new Date(); dateAM.setHours(h === 12 ? 0 : h, m, 0, 0);
     const datePM = new Date(); datePM.setHours(h === 12 ? 12 : h + 12, m, 0, 0);
-    
-    let diffAM = dateAM - now; if (diffAM < -900000) diffAM += 86400000; // Allow 15m past
+    let diffAM = dateAM - now; if (diffAM < -900000) diffAM += 86400000; 
     let diffPM = datePM - now; if (diffPM < -900000) diffPM += 86400000;
-    
     const isPM = diffPM < diffAM;
     return `${h}:${m.toString().padStart(2,'0')} ${isPM ? 'PM' : 'AM'}`;
 };
@@ -203,13 +196,11 @@ const generatePeriodOptions = (candidate) => {
     const now = new Date();
     const isToday = candidate?.variables?.pickup_date === now.toISOString().split('T')[0];
     const curH = now.getHours();
-
     const isValid = (pKey) => {
         if (!isToday) return true;
         if (pKey === 'NIGHT') return true; 
         return PERIODS[pKey].end >= curH;
     };
-
     if (isValid('MORNING')) options.push({ id: 'PERIOD_MORNING', title: PERIODS.MORNING.label });
     if (isValid('AFTERNOON')) options.push({ id: 'PERIOD_AFTERNOON', title: PERIODS.AFTERNOON.label });
     if (isValid('EVENING')) options.push({ id: 'PERIOD_EVENING', title: PERIODS.EVENING.label });
@@ -222,10 +213,8 @@ const generateTimeOptions = (candidate) => {
     const now = new Date();
     const periodKey = candidate?.variables?.time_period?.replace('PERIOD_', '');
     if (!periodKey || !PERIODS[periodKey]) return [{ id: 'custom', title: 'Type Time' }];
-
     const { start, end } = PERIODS[periodKey];
     const isToday = candidate?.variables?.pickup_date === now.toISOString().split('T')[0];
-
     for (let h = start; h <= end; h++) {
         for (let m = 0; m < 60; m += 30) {
             let realH = h >= 24 ? h - 24 : h;
@@ -256,38 +245,7 @@ const getDefaultBotConfig = () => ({
     edges: [{ id: 'e1', source: 'start', target: 'welcome', type: 'smoothstep' }]
 });
 
-// --- DB RECOVERY ---
-const initDatabase = async (client) => {
-    await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
-    await client.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";');
-    await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB);`);
-    await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
-    
-    await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
-    const botCheck = await client.query("SELECT id FROM bot_versions LIMIT 1");
-    if (botCheck.rows.length === 0) {
-        await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), getDefaultBotConfig()]);
-    }
-};
-
-const executeWithRetry = async (client, operation) => {
-    try {
-        return await operation();
-    } catch (err) {
-        if (err.code === '42P01') { // Undefined Table
-            console.warn("[Auto-Heal] Tables missing. Re-initializing database...");
-            await initDatabase(client);
-            return await operation(); 
-        }
-        throw err;
-    }
-};
-
-// --- BOT ENGINE (3-STAGE BOOKING SUPPORT) ---
+// --- BOT ENGINE ---
 const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
     // Check Kill Switch
     const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
@@ -310,20 +268,19 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
     const cleanInput = (incomingText || '').trim().toLowerCase();
 
     // Reset Commands
-    if (['start', 'restart', 'menu'].includes(cleanInput)) {
+    if (['start', 'restart', 'menu', 'hi', 'hello'].includes(cleanInput)) {
         currentNodeId = null;
         await client.query("UPDATE candidates SET current_bot_step_id = NULL, variables = '{}' WHERE id = $1", [candidate.id]);
         candidate.variables = {};
     }
 
-    // Determine Next Step
+    // Determine Next Step (Pathfinding)
     if (!currentNodeId) {
         const start = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
         nextNodeId = start ? start.id : nodes[0]?.id;
     } else {
         const currentNode = nodes.find(n => n.id === currentNodeId);
         if (currentNode) {
-            // Handle Logic based on type
             const type = currentNode.data.type;
             
             // --- 3-STAGE DATE PICKER LOGIC ---
@@ -332,13 +289,10 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 let isManual = false;
 
                 if (incomingPayloadId?.startsWith('PERIOD_')) {
-                    // Stage 2: Period Selected -> Save -> Loop
                     await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{time_period}', $1)", [JSON.stringify(incomingPayloadId)]);
                     candidate.variables.time_period = incomingPayloadId;
                 } else if (incomingPayloadId?.match(/^\d{4}-\d{2}-\d{2}$/)) {
-                    // Stage 1: Date Selected -> Save -> Reset Period -> Loop
                     await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{pickup_date}', $1)", [JSON.stringify(incomingPayloadId)]);
-                    // Reset period/time
                     await client.query("UPDATE candidates SET variables = variables - 'time_period' - 'time_slot' WHERE id = $1", [candidate.id]);
                     delete candidate.variables.time_period;
                     delete candidate.variables.time_slot;
@@ -346,9 +300,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 } else if (incomingPayloadId === 'custom_time') {
                     isManual = true;
                 } else if (incomingPayloadId) {
-                    saveVar = incomingPayloadId; // Final Time
+                    saveVar = incomingPayloadId; 
                 } else if (cleanInput) {
-                    // Regex Time Match
                     const timeMatch = cleanInput.match(/([0-9]{1,2})[:.]([0-9]{2})\s*(am|pm)?/i);
                     if (timeMatch) saveVar = resolveTimeAmbiguity(timeMatch[0]);
                     else saveVar = incomingText;
@@ -363,42 +316,58 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 
                 if (isManual) {
                     await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "Please type your preferred time (e.g. 10:30 PM):" } });
-                    return; // Stop and wait for input
+                    return; 
                 }
             }
-            // --- GENERIC INPUT LOGIC ---
+            // --- VARIABLE CAPTURE LOGIC ---
             else if (['input', 'location_request', 'pickup_location'].includes(type)) {
                 let val = incomingText;
-                if (incomingPayloadId) val = incomingPayloadId; // For presets
-                // Save variable logic...
+                if (incomingPayloadId) val = incomingPayloadId;
                 if (val && currentNode.data.variable) {
                     await client.query(`UPDATE candidates SET variables = jsonb_set(variables, '{${currentNode.data.variable}}', $1) WHERE id = $2`, [JSON.stringify(val), candidate.id]);
                     candidate.variables[currentNode.data.variable] = val;
                 }
             }
 
-            // Find Edge
+            // --- EDGE MATCHING LOGIC ---
             const outgoing = edges.filter(e => e.source === currentNodeId);
             let edge = null;
+
+            // 1. Try Payload Match (Buttons/Lists)
+            if (incomingPayloadId) {
+                edge = outgoing.find(e => e.sourceHandle === incomingPayloadId);
+            }
             
-            // Advance logic
-            if (type === 'datetime_picker') {
-                // Only advance if we have the final time slot
+            // 2. Try Text Match (Buttons - Fuzzy)
+            if (!edge && cleanInput && currentNode.data.buttons) {
+                const btn = currentNode.data.buttons.find(b => b.title.toLowerCase().trim() === cleanInput);
+                if (btn) edge = outgoing.find(e => e.sourceHandle === btn.id);
+            }
+
+            // 3. Logic for DateTime Advance
+            if (!edge && type === 'datetime_picker') {
                 if (candidate.variables.time_slot || candidate.variables[currentNode.data.variable]) {
                     edge = outgoing.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
                 }
-                // Else loop (nextNodeId = currentNodeId implicit)
-            } else {
-                // Default advance
+            } 
+            
+            // 4. Default Advance (Text/Input inputs)
+            if (!edge && ['input', 'location_request', 'text', 'image'].includes(type)) {
                 edge = outgoing.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
             }
 
             if (edge) nextNodeId = edge.target;
-            else nextNodeId = currentNodeId; // Loop if no edge found
+            else {
+                // If interactive and no match, stay on node (ask again or invalid input reply)
+                nextNodeId = currentNodeId;
+                if (type === 'interactive_button' && !incomingPayloadId) {
+                    // Optional: Send invalid reply
+                }
+            }
         }
     }
 
-    // Execute Nodes
+    // Execute Nodes Loop
     let activeNodeId = nextNodeId;
     let safety = 0;
     while(activeNodeId && safety < 15) {
@@ -413,9 +382,57 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             const body = processText(data.content, candidate);
             if (isValidContent(body)) await sendToMeta(candidate.phone_number, { type: 'text', text: { body } });
         } 
+        
+        else if (data.type === 'image' && data.mediaUrl) {
+            const url = await refreshMediaUrl(data.mediaUrl);
+            await sendToMeta(candidate.phone_number, { type: 'image', image: { link: url, caption: processText(data.content, candidate) } });
+        }
+
+        // --- INTERACTIVE BUTTONS ---
+        else if (data.type === 'interactive_button' || data.type === 'rich_card') {
+            autoAdvance = false; 
+            const buttons = (data.buttons || []).slice(0, 3).map(b => ({
+                type: "reply",
+                reply: { id: b.id, title: b.title.substring(0, 20) } 
+            }));
+            
+            let header = undefined;
+            if (data.mediaUrl && (data.headerType === 'image' || data.headerType === 'video')) {
+                const url = await refreshMediaUrl(data.mediaUrl);
+                header = { type: data.headerType, [data.headerType]: { link: url } };
+            }
+
+            await sendToMeta(candidate.phone_number, {
+                type: "interactive",
+                interactive: {
+                    type: "button",
+                    header,
+                    body: { text: processText(data.content || "Please select:", candidate) },
+                    footer: data.footerText ? { text: data.footerText } : undefined,
+                    action: { buttons }
+                }
+            });
+        }
+
+        // --- INTERACTIVE LIST ---
+        else if (data.type === 'interactive_list') {
+            autoAdvance = false;
+            await sendToMeta(candidate.phone_number, {
+                type: "interactive",
+                interactive: {
+                    type: "list",
+                    body: { text: processText(data.content || "Select an option:", candidate) },
+                    action: {
+                        button: data.listButtonText || "Menu",
+                        sections: data.sections || []
+                    }
+                }
+            });
+        }
+
+        // --- DATETIME PICKER ---
         else if (data.type === 'datetime_picker') {
             autoAdvance = false;
-            // Determine Phase
             let body = "Select an option:";
             let rows = [];
             let btn = "Select";
@@ -443,24 +460,81 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 }
             });
         }
-        else if (['input', 'location_request'].includes(data.type)) {
-            autoAdvance = false; // Wait for user
-            // Send prompt...
-            if (data.content) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: processText(data.content, candidate) } });
+
+        else if (['input', 'location_request', 'pickup_location', 'destination_location'].includes(data.type)) {
+            autoAdvance = false;
+            if (data.type === 'location_request' || data.type === 'pickup_location') {
+                 // Send location request message
+                 await sendToMeta(candidate.phone_number, {
+                    type: "interactive",
+                    interactive: {
+                        type: "location_request_message",
+                        body: { text: processText(data.content || "Share Location", candidate) },
+                        action: { name: "send_location" }
+                    }
+                });
+            } else {
+                // Normal text input prompt
+                if (data.content) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: processText(data.content, candidate) } });
+            }
+        }
+        
+        else if (data.type === 'condition') {
+            // Logic handled in next pass (edge finding), this node is instantaneous
+        }
+        
+        else if (data.type === 'delay') {
+            await new Promise(r => setTimeout(r, Math.min(data.delayTime || 2000, 5000)));
         }
 
+        // Save State
         await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
         
         if (!autoAdvance) break;
         
-        // Find next edge for auto-advance nodes (like text)
-        const edge = edges.find(e => e.source === node.id);
-        if (edge) {
-            activeNodeId = edge.target;
-            await new Promise(r => setTimeout(r, 500)); // Delay for natural feel
+        // --- AUTO ADVANCE LOGIC ---
+        const outEdges = edges.filter(e => e.source === node.id);
+        
+        if (data.type === 'condition') {
+            // Check condition logic
+            let matched = false;
+            if (data.variable) {
+                const val = candidate.variables[data.variable];
+                const target = data.value;
+                if (data.operator === 'equals') matched = val == target;
+                else if (data.operator === 'contains') matched = String(val).includes(target);
+                else if (data.operator === 'is_set') matched = !!val;
+            }
+            const handle = matched ? 'true' : 'false';
+            const nextEdge = outEdges.find(e => e.sourceHandle === handle);
+            activeNodeId = nextEdge ? nextEdge.target : null;
         } else {
-            activeNodeId = null;
+            const nextEdge = outEdges.find(e => e.sourceHandle === 'default' || !e.sourceHandle);
+            if (nextEdge) {
+                activeNodeId = nextEdge.target;
+                await new Promise(r => setTimeout(r, 300));
+            } else {
+                activeNodeId = null;
+            }
         }
+    }
+};
+
+// --- DB RECOVERY ---
+const initDatabase = async (client) => {
+    await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
+    await client.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";');
+    await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB);`);
+    await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
+    
+    await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
+    const botCheck = await client.query("SELECT id FROM bot_versions LIMIT 1");
+    if (botCheck.rows.length === 0) {
+        await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), getDefaultBotConfig()]);
     }
 };
 
@@ -592,7 +666,7 @@ app.get('/webhook', (req, res) => {
 });
 
 app.post('/webhook', async (req, res) => {
-    res.sendStatus(200); // Ack immediately
+    res.sendStatus(200); 
     try {
         const body = req.body;
         if (!body.entry?.[0]?.changes?.[0]?.value?.messages) return;
@@ -622,18 +696,15 @@ app.post('/webhook', async (req, res) => {
         }
 
         await withDb(async (client) => {
-            // Upsert Candidate
             let cand = await client.query("SELECT * FROM candidates WHERE phone_number = $1", [phone]);
             if (cand.rows.length === 0) {
                 cand = await client.query("INSERT INTO candidates (phone_number, name) VALUES ($1, $2) RETURNING *", [phone, name]);
             }
             const candidate = cand.rows[0];
 
-            // Log Message
             await client.query("INSERT INTO candidate_messages (candidate_id, direction, text, type, whatsapp_message_id) VALUES ($1, 'in', $2, $3, $4)", [candidate.id, text, type, msg.id]);
             await client.query("UPDATE candidates SET last_message = $1, last_message_at = extract(epoch from now()) * 1000 WHERE id = $2", [text, candidate.id]);
 
-            // Run Bot
             await runBotEngine(client, candidate, text, payloadId);
         });
 
@@ -642,21 +713,17 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-// STARTUP DIAGNOSTICS
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, async () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`🔌 Testing Database Connection...`);
     try {
         await withDb(async (c) => {
-            const res = await c.query('SELECT NOW()');
-            console.log(`✅ DB Connected! Server Time: ${res.rows[0].now}`);
+            await c.query('SELECT NOW()');
             await initDatabase(c);
-            console.log(`✅ Schema Verified.`);
+            console.log(`✅ Database Ready.`);
         });
     } catch (e) {
-        console.error(`❌ DB Connection FAILED: ${e.message}`);
-        console.error(`   Ensure POSTGRES_URL is correct in .env`);
+        console.error(`❌ DB Connection Failed: ${e.message}`);
     }
 });
 
