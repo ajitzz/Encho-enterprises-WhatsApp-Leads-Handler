@@ -527,9 +527,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         }
 
                         // 2. EXECUTE STATE TRANSITION
-                        let finalVar = currentNode.data.variable || 'time_slot';
-                        // SAFETY: Prevent variable name collisions that cause infinite loops
-                        if (['pickup_date', 'time_period'].includes(finalVar)) finalVar = 'time_slot_final';
+                        const finalVar = currentNode.data.variable || 'time_slot';
 
                         if (detectedDate) {
                             // STATE 1 CAUGHT -> SAVE DATE, WIPE EVERYTHING ELSE
@@ -626,9 +624,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     else if (currentNode.data.type === 'datetime_picker') {
                         // CRITICAL STATE MACHINE LOOP CHECK
                         // Only advance if ALL 3 variables are present
-                        let finalVar = currentNode.data.variable || 'time_slot';
-                        if (['pickup_date', 'time_period'].includes(finalVar)) finalVar = 'time_slot_final';
-
+                        const finalVar = currentNode.data.variable || 'time_slot';
                         const hasDate = !!candidate.variables.pickup_date;
                         const hasPeriod = !!candidate.variables.time_period;
                         const hasTime = !!candidate.variables[finalVar];
@@ -763,20 +759,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             try {
                                 if (typeof val === 'string' && val.startsWith('{')) {
                                     const parsed = JSON.parse(val);
-                                    let lat = parsed.latitude || parsed.lat;
-                                    let lng = parsed.longitude || parsed.long;
-                                    
-                                    if (lat && lng) {
-                                        // Actual Map Pin
-                                        const link = `https://www.google.com/maps?q=${lat},${lng}`;
-                                        if (parsed.label || parsed.name || parsed.address) {
-                                            displayVal = `${parsed.label || parsed.name || parsed.address}\n${link}`;
-                                        } else {
-                                            displayVal = `📍 Map Pin: ${link}`;
-                                        }
-                                    } else if (parsed.label) {
-                                        displayVal = parsed.label; // Just a label (e.g. preset w/o coords)
-                                    }
+                                    if (parsed.label) displayVal = parsed.label;
+                                    else if (parsed.latitude) displayVal = `Location Shared`;
                                 }
                             } catch(e) {}
                             
@@ -965,4 +949,434 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
     }
 };
 
-// ... (rest of file remains same)
+// --- EXPRESS APP ---
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+
+app.use((req, res, next) => {
+    console.log(`[${req.method}] ${req.url}`);
+    next();
+});
+
+const apiRouter = express.Router();
+
+apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
+
+// --- DEEP WAKE PING ---
+apiRouter.get('/ping', async (req, res) => {
+    try {
+        if (pgPool) {
+             // Wakes up Neon Postgres
+             await pgPool.query('SELECT 1');
+             res.status(200).send('pong - db active');
+        } else {
+            res.status(200).send('pong - no db pool');
+        }
+    } catch (e) {
+        console.error("Ping DB Wake Failed", e.message);
+        res.status(200).send('pong - db waking...');
+    }
+});
+
+apiRouter.get('/debug/status', async (req, res) => {
+    const status = {
+        postgres: 'unknown',
+        tables: { candidates: false, bot_versions: false },
+        counts: { candidates: 0 },
+        env: { hasPostgres: !!(process.env.POSTGRES_URL || process.env.DATABASE_URL) },
+        lastError: null
+    };
+    try {
+        await withDb(async (client) => {
+            await client.query('SELECT 1');
+            status.postgres = 'connected';
+            const tablesRes = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
+            const tables = tablesRes.rows.map(r => r.table_name);
+            status.tables.candidates = tables.includes('candidates');
+            status.tables.bot_versions = tables.includes('bot_versions');
+            if (status.tables.candidates) {
+                const countRes = await client.query('SELECT COUNT(*) FROM candidates');
+                status.counts.candidates = parseInt(countRes.rows[0].count);
+            }
+        });
+    } catch (e) {
+        status.postgres = 'error';
+        status.lastError = e.message;
+    }
+    res.json(status);
+});
+
+apiRouter.get('/webhook', (req, res) => {
+    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
+        res.status(200).send(req.query['hub.challenge']);
+    } else {
+        res.sendStatus(403);
+    }
+});
+
+apiRouter.post('/webhook', async (req, res) => {
+    const body = req.body;
+    if (!body.object) { res.sendStatus(404); return; }
+    try {
+        const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+        if (!msg) { res.sendStatus(200); return; }
+
+        const processPromise = withDb(async (client) => {
+            // WRAPPER: Retry logic for cold starts / missing tables
+            await executeWithRetry(client, async () => {
+                const existing = await client.query("SELECT id FROM candidate_messages WHERE whatsapp_message_id = $1", [msg.id]);
+                if (existing.rows.length > 0) return;
+
+                const from = msg.from;
+                const name = body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || 'Unknown';
+                let text = '';
+                let payloadId = null;
+
+                if (msg.type === 'text') text = msg.text.body;
+                else if (msg.type === 'interactive') {
+                    if (msg.interactive.type === 'button_reply') {
+                        text = msg.interactive.button_reply.title;
+                        payloadId = msg.interactive.button_reply.id;
+                    } else if (msg.interactive.type === 'list_reply') {
+                        text = msg.interactive.list_reply.title;
+                        payloadId = msg.interactive.list_reply.id;
+                    }
+                } 
+                else if (msg.type === 'location') {
+                    // Extract structured location data
+                    text = JSON.stringify(msg.location);
+                }
+                else text = `[${msg.type.toUpperCase()}]`;
+
+                let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
+                let candidate;
+                if (c.rows.length === 0) {
+                    const id = crypto.randomUUID();
+                    await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at, is_human_mode, variables) VALUES ($1, $2, $3, 'New', $4, $5, FALSE, '{}')`, [id, from, name, text, Date.now()]);
+                    candidate = { id, phone_number: from, is_human_mode: false, current_bot_step_id: null, variables: {}, name };
+                } else {
+                    candidate = c.rows[0];
+                    await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
+                }
+
+                await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, 'text', $4, 'received', NOW())`, [crypto.randomUUID(), candidate.id, text, msg.id]);
+                await runBotEngine(client, candidate, text, payloadId);
+            });
+        });
+
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Webhook Processing Timeout")), 9000));
+        await Promise.race([processPromise, timeoutPromise]).catch(err => console.error("[Webhook Warning]", err.message));
+        res.sendStatus(200);
+    } catch(e) { console.error("Webhook Error", e); res.sendStatus(200); }
+});
+
+apiRouter.post('/auth/google', async (req, res) => {
+    try {
+        const { credential } = req.body;
+        const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
+        res.json({ success: true, user: ticket.getPayload() });
+    } catch (e) { res.status(401).json({ success: false, error: e.message }); }
+});
+
+apiRouter.get('/bot/settings', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
+            res.json(r.rows[0]?.settings || { isEnabled: false, nodes: [], edges: [] });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/bot/save', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), req.body]);
+        });
+        memoryCache.botSettings = null;
+        memoryCache.lastUpdated = 0;
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/bot/publish', async (req, res) => res.json({ success: true }));
+
+apiRouter.get('/drivers', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC NULLS LAST LIMIT 50');
+            res.json(r.rows.map(row => ({
+                id: row.id, phoneNumber: row.phone_number, name: row.name, status: row.stage, 
+                lastMessage: row.last_message, lastMessageTime: parseInt(row.last_message_at || '0'), 
+                source: row.source, isHumanMode: row.is_human_mode
+            })));
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.patch('/drivers/:id', async (req, res) => {
+    try {
+        const { status, isHumanMode, name } = req.body;
+        await withDb(async (client) => {
+            if (status) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [status, req.params.id]);
+            if (isHumanMode !== undefined) await client.query("UPDATE candidates SET is_human_mode = $1 WHERE id = $2", [isHumanMode, req.params.id]);
+            if (name) await client.query("UPDATE candidates SET name = $1 WHERE id = $2", [name, req.params.id]);
+        });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/drivers/:id/messages', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [req.params.id]);
+            const msgs = await Promise.all(r.rows.map(async row => {
+                let text = row.text, imageUrl = null;
+                if (['image','video','document'].includes(row.type) && row.text.startsWith('{')) {
+                    try { const p = JSON.parse(row.text); text = p.caption; if(p.url) imageUrl = await refreshMediaUrl(p.url); } catch(e){}
+                }
+                return { 
+                    id: row.id, sender: row.direction === 'in' ? 'driver' : 'agent', text, imageUrl, 
+                    timestamp: new Date(row.created_at).getTime(), type: row.type || 'text', status: row.status 
+                };
+            }));
+            res.json(msgs.reverse());
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/drivers/:id/messages', async (req, res) => {
+    try {
+        const { text, mediaUrl, mediaType } = req.body;
+        await withDb(async (client) => {
+            const c = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
+            if (c.rows.length === 0) throw new Error("Candidate not found");
+            let payload = { type: 'text', text: { body: text } };
+            let dbText = text;
+            if (mediaUrl) {
+                const freshUrl = await refreshMediaUrl(mediaUrl);
+                const type = mediaType || 'image';
+                payload = { type, [type]: { link: freshUrl, caption: text } };
+                if (type === 'document') payload[type].filename = decodeURIComponent(new URL(freshUrl).pathname.split('/').pop() || 'file.pdf');
+                dbText = JSON.stringify({ url: mediaUrl, caption: text });
+            }
+            await sendToMeta(c.rows[0].phone_number, payload);
+            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text']);
+        });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/drivers/:id/documents', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query('SELECT * FROM driver_documents WHERE candidate_id = $1', [req.params.id]);
+            const docs = await Promise.all(r.rows.map(async d => ({ id: d.id, docType: d.type, url: await refreshMediaUrl(d.url), verificationStatus: d.status, timestamp: new Date(d.created_at).getTime() })));
+            res.json(docs);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- OPTIMIZED BULK SCHEDULER ---
+apiRouter.post('/scheduled-messages', async (req, res) => {
+    try {
+        const { driverIds, message, timestamp } = req.body;
+        if (!driverIds || driverIds.length === 0) return res.status(400).json({error: "No recipients"});
+        
+        const payload = typeof message === 'string' ? { text: message } : message;
+        
+        await withDb(async (client) => {
+            // Bulk Insert using UNNEST for performance
+            // $1 = ids array, $2 = payload, $3 = timestamp
+            const query = `
+                INSERT INTO scheduled_messages (id, candidate_id, payload, scheduled_time, status)
+                SELECT gen_random_uuid(), unnest($1::uuid[]), $2, $3, 'pending'
+            `;
+            await client.query(query, [driverIds, payload, timestamp]);
+        });
+        
+        res.json({ success: true, count: driverIds.length });
+    } catch (e) { 
+        console.error("Bulk Schedule Error:", e);
+        res.status(500).json({ error: e.message }); 
+    }
+});
+
+apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status = 'pending' ORDER BY scheduled_time ASC`, [req.params.id]);
+            const mapped = await Promise.all(r.rows.map(async row => {
+                const p = row.payload || {};
+                if(p.mediaUrl) p.mediaUrl = await refreshMediaUrl(p.mediaUrl);
+                return { id: row.id, scheduledTime: parseInt(row.scheduled_time), payload: p, status: row.status };
+            }));
+            res.json(mapped);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.delete('/scheduled-messages/:id', async (req, res) => {
+    try {
+        await withDb(async (client) => { await client.query("DELETE FROM scheduled_messages WHERE id = $1", [req.params.id]); });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
+    try {
+        const { text, scheduledTime } = req.body;
+        await withDb(async (client) => {
+            if (text) {
+                const r = await client.query("SELECT payload FROM scheduled_messages WHERE id = $1", [req.params.id]);
+                if (r.rows.length > 0) {
+                    const newPayload = { ...r.rows[0].payload, text };
+                    await client.query("UPDATE scheduled_messages SET payload = $1 WHERE id = $2", [newPayload, req.params.id]);
+                }
+            }
+            if (scheduledTime) await client.query("UPDATE scheduled_messages SET scheduled_time = $1 WHERE id = $2", [scheduledTime, req.params.id]);
+        });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- ADVANCED PARALLEL CRON PROCESSOR ---
+apiRouter.get('/cron/process-queue', async (req, res) => {
+    let processed = 0, errors = 0;
+    try {
+        await withDb(async (client) => {
+            await executeWithRetry(client, async () => {
+                const now = Date.now();
+                
+                // Fetch larger batch (50) for efficiency
+                const jobs = await client.query(`
+                    SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number 
+                    FROM scheduled_messages sm 
+                    JOIN candidates c ON sm.candidate_id = c.id 
+                    WHERE sm.status = 'pending' AND sm.scheduled_time <= $1 
+                    LIMIT 50 
+                    FOR UPDATE OF sm SKIP LOCKED
+                `, [now]);
+
+                if (jobs.rows.length === 0) return;
+
+                // Helper for processing a single job
+                const processJob = async (job) => {
+                    try {
+                        // Optimistic update to processing
+                        await client.query("UPDATE scheduled_messages SET status = 'processing' WHERE id = $1", [job.id]);
+                        
+                        const p = job.payload || {};
+                        let metaP, dbLogText = p.text || '', dbType = 'text';
+                        
+                        // Smart Media Handling
+                        if (p.mediaUrl) {
+                            const url = await refreshMediaUrl(p.mediaUrl);
+                            const mediaType = p.mediaType || 'image';
+                            dbType = mediaType;
+                            
+                            // Construct caption/filename
+                            dbLogText = JSON.stringify({ url: p.mediaUrl, caption: p.text || '' });
+                            
+                            metaP = { type: mediaType, [mediaType]: { link: url, caption: p.text || '' } };
+                            
+                            // Specific fix for Documents: Needs 'filename'
+                            if (mediaType === 'document') {
+                                metaP[mediaType].filename = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'document.pdf');
+                                // Documents don't support 'caption' in some API versions, but we leave it as valid property
+                            }
+                        } else {
+                            metaP = { type: 'text', text: { body: dbLogText } };
+                        }
+                        
+                        await sendToMeta(job.phone_number, metaP);
+                        
+                        // Log success
+                        await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]);
+                        await client.query("UPDATE scheduled_messages SET status = 'sent' WHERE id = $1", [job.id]);
+                        processed++;
+                    } catch (e) {
+                        errors++;
+                        console.error(`Job ${job.id} failed:`, e.message);
+                        await client.query("UPDATE scheduled_messages SET status = 'failed', error_log = $2 WHERE id = $1", [job.id, e.message]);
+                    }
+                };
+
+                // PARALLEL EXECUTION (Batch of 5 concurrently)
+                const BATCH_SIZE = 5;
+                for (let i = 0; i < jobs.rows.length; i += BATCH_SIZE) {
+                    const chunk = jobs.rows.slice(i, i + BATCH_SIZE);
+                    await Promise.all(chunk.map(job => processJob(job)));
+                }
+            });
+        });
+        res.json({ status: 'ok', processed, errors, queueSize: processed + errors });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/system/init-db', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await initDatabase(client);
+        });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/system/hard-reset', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query('BEGIN');
+            try {
+                await client.query(`DROP TABLE IF EXISTS scheduled_messages, candidate_messages, driver_documents, bot_versions, candidates, system_settings CASCADE`);
+                await initDatabase(client); // Uses the shared robust init function
+                await client.query('COMMIT');
+            } catch (err) {
+                await client.query('ROLLBACK');
+                throw err;
+            }
+        });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/system/seed-db', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const id = crypto.randomUUID();
+            await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at) VALUES ($1, '+919999999999', 'Demo Driver', 'New', 'Hello', $2)`, [id, Date.now()]);
+        });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.use('/api', apiRouter);
+app.use('/', apiRouter);
+app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
+
+if (require.main === module) {
+    const PORT = process.env.PORT || 3001;
+    app.listen(PORT, () => {
+        console.log(`Server running on ${PORT}`);
+        // Auto-Init Check on Start (For Local/VPS, NOT Vercel)
+        (async () => {
+            try {
+                if (pgPool) {
+                    const client = await pgPool.connect();
+                    try {
+                        const res = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'candidates'`);
+                        if (res.rows.length === 0) {
+                            console.log("[Auto-Init] Database schema missing. Initializing...");
+                            await initDatabase(client);
+                            console.log("[Auto-Init] Database ready.");
+                        }
+                    } finally {
+                        client.release();
+                    }
+                }
+            } catch(e) { console.error("[Auto-Init] Failed:", e.message); }
+        })();
+    });
+}
+
+module.exports = app;
