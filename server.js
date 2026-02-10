@@ -291,7 +291,15 @@ const generateTimeOptions = (candidate) => {
 
             // For "Today", don't show past times
             if (isToday) {
-                if (realH < now.getHours()) continue;
+                // If the hour is technically "tomorrow" (e.g. 0, 1, 2) but in the "Night" range
+                // we should allow it if we are currently late night. 
+                // But simplified check: compare total minutes or just ignore if it's "tomorrow" hours
+                
+                // If realH is smaller than currentHour (e.g. 1 AM < 23 PM), it means next day, so valid.
+                // We only block if realH > currentHour logic applies to SAME day hours.
+                
+                // Better Check:
+                if (realH > 4 && realH < now.getHours()) continue; // Past hours today
                 if (realH === now.getHours() && m < now.getMinutes()) continue;
             }
 
@@ -477,16 +485,18 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             // Stay on same node to ask for Time next
                             valueToSave = null; 
                         }
-                        // 2. Check if user sent a DATE (YYYY-MM-DD)
-                        else if (incomingPayloadId && incomingPayloadId.match(/^\d{4}-\d{2}-\d{2}$/)) {
+                        // 2. Check if user sent a DATE (YYYY-MM-DD) - Either via Button Payload OR Manual Text
+                        else if ((incomingPayloadId && incomingPayloadId.match(/^\d{4}-\d{2}-\d{2}$/)) || (cleanInput && cleanInput.match(/^\d{4}-\d{2}-\d{2}$/))) {
+                            const dateVal = incomingPayloadId || cleanInput;
+                            
                             // User selected a Date. Save it.
-                            await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{pickup_date}', $1)", [JSON.stringify(incomingPayloadId)]);
+                            await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{pickup_date}', $1)", [JSON.stringify(dateVal)]);
                             
                             // IMPORTANT: Reset Period and Time to force the bot to ask for Period again (Stage 2).
                             // This ensures the bot loops if they change the date.
                             await client.query(`UPDATE candidates SET variables = variables - 'time_period' - $1 WHERE id = $2`, [targetVar, candidate.id]);
                             
-                            candidate.variables.pickup_date = incomingPayloadId;
+                            candidate.variables.pickup_date = dateVal;
                             delete candidate.variables.time_period;
                             delete candidate.variables[targetVar];
                             
@@ -510,7 +520,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                                 if (match[3]) valueToSave = match[0].toUpperCase();
                                 else valueToSave = resolveTimeAmbiguity(match[0]);
                             } else if (cleanInput.length > 3) {
-                                // Fallback for raw text
+                                // Fallback for raw text - Only if it's NOT a date format (handled above)
                                 valueToSave = incomingText; 
                             }
                         }
