@@ -430,33 +430,24 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         } else {
             const currentNode = nodes.find(n => n.id === currentNodeId);
             if (currentNode) {
-                // A. Handle Variable Capture (IMPROVED FOR ALL INTERACTIVE NODES)
-                const captureTypes = ['input', 'location_request', 'pickup_location', 'destination_location', 'datetime_picker', 'interactive_button', 'interactive_list', 'rich_card'];
+                // A. Handle Variable Capture
+                const captureTypes = ['input', 'location_request', 'pickup_location', 'destination_location', 'datetime_picker'];
                 
                 if (captureTypes.includes(currentNode.data.type)) {
                     let varName = currentNode.data.variable;
                     
-                    // --- AUTO-GENERATE VARIABLE NAME IF MISSING ---
-                    // This ensures we capture EVERY user input regardless of explicit variable naming
                     if (!varName) {
                         if (currentNode.data.type === 'pickup_location') varName = 'pickup_coords';
                         else if (currentNode.data.type === 'destination_location') varName = 'dest_coords';
                         else if (currentNode.data.type === 'location_request') varName = 'location_data';
-                        else if (currentNode.data.type === 'datetime_picker') varName = 'time_slot';
-                        else {
-                            // Fallback: Create a variable from the Node Label (e.g. "Select Service" -> "select_service")
-                            varName = (currentNode.data.label || currentNode.id)
-                                .toLowerCase()
-                                .replace(/[^a-z0-9]/g, '_')
-                                .replace(/^_+|_+$/g, '');
-                        }
+                        else if (currentNode.data.type === 'datetime_picker') varName = 'time_slot'; // Default for legacy
                     }
 
                     // --- SMART LOGIC START ---
                     let valueToSave = null;
                     let isManualTrigger = false;
 
-                    // 1. Check for Preset/List/Button Selection (Payload or Text Match)
+                    // Check for Preset/List Selection
                     if (currentNode.data.presets) {
                         let matchedPreset = currentNode.data.presets.find(p => p.id === incomingPayloadId);
                         if (!matchedPreset && cleanInput) matchedPreset = currentNode.data.presets.find(p => p.title.toLowerCase().trim() === cleanInput);
@@ -464,18 +455,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         if (matchedPreset) {
                             if (isPresetManual(matchedPreset)) isManualTrigger = true;
                             else valueToSave = JSON.stringify({ lat: matchedPreset.latitude, long: matchedPreset.longitude, label: matchedPreset.title });
-                        }
-                    }
-                    
-                    // 2. Check for Buttons/List Options
-                    if (!valueToSave) {
-                        if (currentNode.data.buttons) {
-                            const btn = currentNode.data.buttons.find(b => b.id === incomingPayloadId || b.title.toLowerCase().trim() === cleanInput);
-                            if (btn) valueToSave = btn.title;
-                        }
-                        if (currentNode.data.sections) {
-                            const row = currentNode.data.sections.flatMap(s => s.rows).find(r => r.id === incomingPayloadId || r.title.toLowerCase().trim() === cleanInput);
-                            if (row) valueToSave = row.title;
                         }
                     }
                     
@@ -562,8 +541,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     else if (!isManualTrigger && incomingText && incomingText.startsWith('{') && incomingText.includes('"latitude"')) {
                         valueToSave = incomingText;
                     } 
-                    // Fallback for simple text input (Only if we haven't already captured a button click value)
-                    else if (!isManualTrigger && !valueToSave && (currentNode.data.type === 'input' || cleanInput.length > 0)) {
+                    // Fallback for simple text input
+                    else if (!isManualTrigger && currentNode.data.type === 'input') {
                         valueToSave = incomingText;
                     }
 
@@ -737,45 +716,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 let validBody = isValidContent(rawBody) ? rawBody : null;
                 let payload = null;
 
-                if (data.type === 'summary') {
-                    // --- SUMMARY REPORT GENERATION ---
-                    // 1. Filter out internal system variables (start with underscore or known technical keys)
-                    // 2. Format nicely as Bold Key: Value
-                    let summaryText = validBody || "Here is the information we collected:\n";
-                    
-                    const ignoredKeys = ['current_bot_step_id', 'is_human_mode', 'undefined', 'null'];
-                    const entries = Object.entries(candidate.variables || {}).filter(([k, v]) => {
-                        return !k.startsWith('_') && !ignoredKeys.includes(k) && v !== null && v !== undefined && v !== '';
-                    });
-
-                    if (entries.length > 0) {
-                        summaryText += "\n";
-                        entries.forEach(([key, val]) => {
-                            // Convert snake_case to Title Case (e.g. pickup_date -> Pickup Date)
-                            const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-                            
-                            // Format Value (handle JSON location strings)
-                            let displayVal = val;
-                            try {
-                                if (typeof val === 'string' && val.startsWith('{')) {
-                                    const parsed = JSON.parse(val);
-                                    if (parsed.label) displayVal = parsed.label;
-                                    else if (parsed.latitude) displayVal = `Location Shared`;
-                                }
-                            } catch(e) {}
-                            
-                            summaryText += `*${label}:* ${displayVal}\n`;
-                        });
-                    } else {
-                        summaryText += "\n(No data collected yet)";
-                    }
-
-                    if (data.footerText) summaryText += `\n_${data.footerText}_`;
-                    
-                    payload = { type: 'text', text: { body: summaryText } };
-                }
-
-                else if (data.type === 'text') {
+                if (data.type === 'text') {
                     if (validBody) {
                         payload = { type: 'text', text: { body: validBody } };
                         if (data.footerText) payload.text.body += `\n\n_${data.footerText}_`;
