@@ -60,7 +60,7 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
         case 'location_request': config = { color: 'bg-teal-600', icon: <MapPin size={14} />, label: 'Location', subtitle: 'Request GPS' }; break;
         case 'pickup_location': config = { color: 'bg-lime-600', icon: <MapPin size={14} />, label: 'Pickup Location', subtitle: 'Get Start Point' }; break;
         case 'destination_location': config = { color: 'bg-red-500', icon: <Navigation size={14} />, label: 'Destination', subtitle: 'Get End Point' }; break;
-        case 'datetime_picker': config = { color: 'bg-cyan-500', icon: <CalendarClock size={14} />, label: 'Date/Time', subtitle: 'Smart Picker' }; break;
+        case 'datetime_picker': config = { color: 'bg-cyan-500', icon: <CalendarClock size={14} />, label: 'Smart Date/Time', subtitle: 'Drill-Down Logic' }; break;
         case 'handoff': config = { color: 'bg-red-500', icon: <User size={14} />, label: 'Agent Handoff', subtitle: 'Stop Bot' }; break;
         case 'status_update': config = { color: 'bg-green-600', icon: <Check size={14} />, label: 'Set Status', subtitle: 'CRM Update' }; break;
     }
@@ -122,20 +122,30 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                 
                 {data.type === 'datetime_picker' && (
                     <div className="flex flex-col gap-2">
+                        {/* 3-Stage Badge */}
+                        <div className="flex items-center justify-between text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-1">
+                            <span>Sequence</span>
+                            <span className="text-cyan-600 bg-cyan-50 px-1.5 py-0.5 rounded">3-Step Loop</span>
+                        </div>
+                        
+                        <div className="flex gap-1 mb-2">
+                            <div className="h-1 flex-1 bg-cyan-500 rounded-full" title="Step 1: Date"></div>
+                            <div className="h-1 flex-1 bg-cyan-400 rounded-full" title="Step 2: Period"></div>
+                            <div className="h-1 flex-1 bg-cyan-300 rounded-full" title="Step 3: Time"></div>
+                        </div>
+
                         <div className="flex items-center gap-2 p-2 bg-cyan-50 border border-cyan-100 rounded-lg text-xs">
-                            <Calendar size={14} className="text-cyan-600" />
-                            <div className="flex flex-col">
-                                <span className="font-bold text-cyan-800 uppercase text-[10px]">{data.dateConfig?.mode === 'time' ? 'Time Selection' : 'Date Selection'}</span>
+                            <CalendarClock size={14} className="text-cyan-600" />
+                            <div className="flex flex-col flex-1">
+                                <span className="font-bold text-cyan-800 uppercase text-[10px]">Smart Drill-Down</span>
                                 <span className="text-[10px] text-cyan-600 truncate">
-                                    {data.dateConfig?.mode === 'time' 
-                                        ? `${data.dateConfig.startHour || 9}:00 - ${data.dateConfig.endHour || 18}:00` 
-                                        : `Next ${data.dateConfig?.daysToShow || 7} Days`
-                                    }
+                                    Shows {data.dateConfig?.daysToShow || 7} Days &bull; {data.dateConfig?.startHour || 9}:00 - {data.dateConfig?.endHour || 18}:00
                                 </span>
                             </div>
                         </div>
-                        <div className="text-[10px] text-gray-400 font-mono text-right">
-                            Var: {data.variable || (data.dateConfig?.mode === 'time' ? 'time_slot' : 'date_slot')}
+                        <div className="text-[10px] text-gray-400 font-mono text-right flex justify-between">
+                            <span>Final Output:</span>
+                            <span className="text-cyan-700 font-bold">{data.variable || 'time_slot'}</span>
                         </div>
                     </div>
                 )}
@@ -330,7 +340,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                 placeholder={
                                     local.type === 'pickup_location' ? "Select your pickup location below:" :
                                     local.type === 'destination_location' ? "Select your destination below:" :
-                                    local.type === 'datetime_picker' ? "Select a preferred time:" :
+                                    local.type === 'datetime_picker' ? "When would you like to schedule this?" :
                                     "Type your message here..."
                                 }
                             />
@@ -346,75 +356,62 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                     {local.type === 'datetime_picker' && (
                         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm space-y-4">
                             <div className="flex justify-between items-center">
-                                <label className="block text-xs font-bold text-gray-800 uppercase">Picker Configuration</label>
-                                <span className="text-[10px] text-blue-600 font-bold bg-blue-50 px-2 py-0.5 rounded-full">Auto-Generated</span>
+                                <label className="block text-xs font-bold text-gray-800 uppercase">Drill-Down Logic</label>
+                                <span className="text-[10px] text-cyan-600 font-bold bg-cyan-50 px-2 py-0.5 rounded-full border border-cyan-100">3-Stage Machine</span>
+                            </div>
+                            
+                            <div className="bg-cyan-50/50 p-3 rounded-lg border border-cyan-100 mb-2">
+                                <p className="text-[10px] text-cyan-800 leading-relaxed">
+                                    <strong>How it works:</strong> The bot will automatically ask for the <strong>Date</strong>, then the <strong>Time of Day (Period)</strong>, and finally the exact <strong>Time Slot</strong>. It loops until all 3 are collected.
+                                </p>
                             </div>
                             
                             <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 space-y-3">
-                                <div>
-                                    <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Mode</label>
-                                    <div className="flex gap-2">
-                                        <button 
-                                            onClick={() => update('dateConfig', { ...local.dateConfig, mode: 'date' })}
-                                            className={`flex-1 py-2 text-xs font-bold rounded border transition-all ${local.dateConfig?.mode === 'date' || !local.dateConfig?.mode ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200'}`}
-                                        >
-                                            Date Picker
-                                        </button>
-                                        <button 
-                                            onClick={() => update('dateConfig', { ...local.dateConfig, mode: 'time' })}
-                                            className={`flex-1 py-2 text-xs font-bold rounded border transition-all ${local.dateConfig?.mode === 'time' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200'}`}
-                                        >
-                                            Time Picker
-                                        </button>
-                                    </div>
+                                <div className="space-y-2">
+                                    <label className="flex items-center justify-between text-xs text-gray-700 font-medium cursor-pointer">
+                                        <span>Show Next (Days)</span>
+                                        <input 
+                                            type="number" 
+                                            min={1} 
+                                            max={14} 
+                                            className="w-16 p-1 border rounded text-center outline-none focus:border-cyan-500"
+                                            value={local.dateConfig?.daysToShow || 7}
+                                            onChange={e => update('dateConfig', { ...local.dateConfig, daysToShow: parseInt(e.target.value) })}
+                                        />
+                                    </label>
+                                    <label className="flex items-center gap-2 text-xs text-gray-700 font-medium cursor-pointer">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={local.dateConfig?.includeToday !== false}
+                                            onChange={e => update('dateConfig', { ...local.dateConfig, includeToday: e.target.checked })}
+                                        />
+                                        Allow Booking for Today
+                                    </label>
                                 </div>
 
-                                {(local.dateConfig?.mode === 'date' || !local.dateConfig?.mode) && (
-                                    <div className="space-y-2">
-                                        <label className="flex items-center justify-between text-xs text-gray-700 font-medium cursor-pointer">
-                                            <span>Show Days</span>
-                                            <input 
-                                                type="number" 
-                                                min={1} 
-                                                max={10} 
-                                                className="w-16 p-1 border rounded text-center"
-                                                value={local.dateConfig?.daysToShow || 7}
-                                                onChange={e => update('dateConfig', { ...local.dateConfig, daysToShow: parseInt(e.target.value) })}
-                                            />
-                                        </label>
-                                        <label className="flex items-center gap-2 text-xs text-gray-700 font-medium cursor-pointer">
-                                            <input 
-                                                type="checkbox" 
-                                                checked={local.dateConfig?.includeToday !== false}
-                                                onChange={e => update('dateConfig', { ...local.dateConfig, includeToday: e.target.checked })}
-                                            />
-                                            Include Today
-                                        </label>
-                                    </div>
-                                )}
-
-                                {local.dateConfig?.mode === 'time' && (
+                                <div className="border-t border-gray-200 pt-3">
+                                    <label className="block text-[10px] font-bold text-gray-500 uppercase mb-2">Available Hours (24h Format)</label>
                                     <div className="grid grid-cols-2 gap-2">
                                         <div>
-                                            <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">Start Hour</label>
+                                            <span className="text-[10px] text-gray-400 block mb-1">Start Hour</span>
                                             <input 
                                                 type="number" min={0} max={23} placeholder="0-23"
-                                                className="w-full p-2 border rounded text-xs"
+                                                className="w-full p-2 border rounded text-xs outline-none focus:border-cyan-500"
                                                 value={local.dateConfig?.startHour ?? 9}
                                                 onChange={e => update('dateConfig', { ...local.dateConfig, startHour: parseInt(e.target.value) })}
                                             />
                                         </div>
                                         <div>
-                                            <label className="block text-[10px] font-bold text-gray-500 uppercase mb-1">End Hour</label>
+                                            <span className="text-[10px] text-gray-400 block mb-1">End Hour</span>
                                             <input 
                                                 type="number" min={0} max={23} placeholder="0-23"
-                                                className="w-full p-2 border rounded text-xs"
+                                                className="w-full p-2 border rounded text-xs outline-none focus:border-cyan-500"
                                                 value={local.dateConfig?.endHour ?? 18}
                                                 onChange={e => update('dateConfig', { ...local.dateConfig, endHour: parseInt(e.target.value) })}
                                             />
                                         </div>
                                     </div>
-                                )}
+                                </div>
                             </div>
                         </div>
                     )}
@@ -679,7 +676,8 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         <div className="bg-cyan-50 p-4 rounded-xl border border-cyan-100 space-y-4">
                             <div>
                                 <label className="block text-[10px] font-bold text-cyan-800 uppercase mb-1">Save Result To Variable</label>
-                                <input className="w-full border border-cyan-200 p-2 rounded text-sm bg-white" value={local.variable || ''} onChange={e => update('variable', e.target.value)} placeholder={local.dateConfig?.mode === 'time' ? 'time_slot' : 'pickup_date'} />
+                                <input className="w-full border border-cyan-200 p-2 rounded text-sm bg-white" value={local.variable || ''} onChange={e => update('variable', e.target.value)} placeholder="time_slot" />
+                                <p className="text-[9px] text-cyan-700 mt-1">This variable will hold the final formatted time (e.g. "10:30 AM").</p>
                             </div>
                         </div>
                     )}
@@ -827,8 +825,9 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
       };
       
       if (type === 'datetime_picker') {
-          newNode.data.content = "When would you like to book?";
-          newNode.data.dateConfig = { mode: 'date', includeToday: true, daysToShow: 7 };
+          newNode.data.content = "When would you like to schedule this?";
+          newNode.data.dateConfig = { mode: 'date', includeToday: true, daysToShow: 7, startHour: 9, endHour: 18 };
+          newNode.data.variable = 'time_slot';
       }
 
       addNode(newNode);
