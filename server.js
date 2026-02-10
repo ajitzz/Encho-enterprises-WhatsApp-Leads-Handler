@@ -459,17 +459,20 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     // --- DYNAMIC DATETIME CAPTURE (3-STAGE STATE MACHINE) [PROTECTED LOGIC] ---
                     // STAGE 1: Date -> STAGE 2: Period -> STAGE 3: Time
                     if (currentNode.data.type === 'datetime_picker') {
+                        // Dynamically determine the target variable for the final time slot
+                        const targetVar = currentNode.data.variable || 'time_slot';
+
                         // 1. Check if user sent a PERIOD (Morning, Afternoon...)
                         if (incomingPayloadId && incomingPayloadId.startsWith('PERIOD_')) {
                             // User selected "Afternoon". Save it.
                             await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{time_period}', $1)", [JSON.stringify(incomingPayloadId)]);
                             
                             // IMPORTANT: Reset any existing time_slot to force the bot to ask for time again (Stage 3).
-                            const timeVar = currentNode.data.variable || 'time_slot';
-                            await client.query(`UPDATE candidates SET variables = variables - $1 WHERE id = $2`, [timeVar, candidate.id]);
+                            // This handles the "Drill-Down" correction logic if they go back.
+                            await client.query(`UPDATE candidates SET variables = variables - $1 WHERE id = $2`, [targetVar, candidate.id]);
                             
                             candidate.variables.time_period = incomingPayloadId;
-                            delete candidate.variables[timeVar];
+                            delete candidate.variables[targetVar];
                             
                             // Stay on same node to ask for Time next
                             valueToSave = null; 
@@ -480,12 +483,12 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{pickup_date}', $1)", [JSON.stringify(incomingPayloadId)]);
                             
                             // IMPORTANT: Reset Period and Time to force the bot to ask for Period again (Stage 2).
-                            const timeVar = currentNode.data.variable || 'time_slot';
-                            await client.query(`UPDATE candidates SET variables = variables - 'time_period' - $1 WHERE id = $2`, [timeVar, candidate.id]);
+                            // This ensures the bot loops if they change the date.
+                            await client.query(`UPDATE candidates SET variables = variables - 'time_period' - $1 WHERE id = $2`, [targetVar, candidate.id]);
                             
                             candidate.variables.pickup_date = incomingPayloadId;
                             delete candidate.variables.time_period;
-                            delete candidate.variables[timeVar];
+                            delete candidate.variables[targetVar];
                             
                             // Stay on same node to ask Period next
                             valueToSave = null;
@@ -578,6 +581,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     } 
                     else if (currentNode.data.type === 'datetime_picker') {
                         // CRITICAL CHANGE: Only advance if the FINAL time slot is captured
+                        // This prevents the bot from advancing if only the Date or Period was selected
                         let timeVar = currentNode.data.variable || 'time_slot';
                         if (candidate.variables[timeVar]) {
                             matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');

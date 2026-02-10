@@ -56,10 +56,12 @@ The `PublicShowcase` component allows customers to view vehicle/hotel media via 
 *   **UI:** Displays a "System Monitor" bar at the bottom. If tables are missing, it offers a "Repair Schema" button.
 
 ## 8. Bot Interaction Enhancements
-### A. Hybrid Date & Time Picker
-*   **Logic:** Combines structured List Messages with NLP-lite text recognition.
-*   **Behavior:** Users can select a slot from a list OR type a specific time (e.g., "11:15 PM"). The engine detects time formats via Regex and accepts the input immediately, bypassing the need for a specific "Custom" button click if the intent is clear.
-*   **Manual Trigger:** Includes a "Type Specific Time" list option that explicitly pauses automation to wait for user input.
+### A. Hybrid Date & Time Picker (Drill-Down State Machine)
+*   **Concept:** A single node (`datetime_picker`) acts as a self-contained loop until 3 data points are collected: Date, Period, and Time.
+*   **Strict Reset Rules:** 
+    1.  If a user selects a **Date**, the system MUST clear any previously selected `time_period` and `time_slot` variables.
+    2.  If a user selects a **Period**, the system MUST clear any previously selected `time_slot` variable.
+*   **Exit Condition:** The node only advances to the next step when the final `time_slot` variable (or configured variable) is populated.
 
 ### B. Smart Location Triggers
 *   **Heuristic:** If a Location Preset is configured in the Bot Builder but lacks coordinates (Lat/Long), the engine automatically treats it as a "Manual Pin Trigger".
