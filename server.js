@@ -759,17 +759,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             try {
                                 if (typeof val === 'string' && val.startsWith('{')) {
                                     const parsed = JSON.parse(val);
-                                    if (parsed.label) {
-                                        displayVal = parsed.label; // Preset selection
-                                    } else if (parsed.latitude && parsed.longitude) {
-                                        // Actual Map Pin
-                                        const link = `https://www.google.com/maps?q=${parsed.latitude},${parsed.longitude}`;
-                                        if (parsed.name || parsed.address) {
-                                            displayVal = `${parsed.name || ''} ${parsed.address || ''}\n${link}`;
-                                        } else {
-                                            displayVal = `📍 Map Pin: ${link}`;
-                                        }
-                                    }
+                                    if (parsed.label) displayVal = parsed.label;
+                                    else if (parsed.latitude) displayVal = `Location Shared`;
                                 }
                             } catch(e) {}
                             
