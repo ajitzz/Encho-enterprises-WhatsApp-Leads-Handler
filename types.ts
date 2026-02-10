@@ -63,7 +63,8 @@ export type NodeType =
   | 'delay'              
   | 'handoff' 
   | 'status_update'
-  | 'template';
+  | 'template'
+  | 'summary';
 
 export interface ConditionRule {
   id: string;

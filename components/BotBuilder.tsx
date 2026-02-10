@@ -24,7 +24,7 @@ import {
   Image as ImageIcon, MousePointer, Settings, GripVertical, Plus, 
   ListPlus, LayoutTemplate, RefreshCw, User, Check, Clock, MapPin, 
   CreditCard, FileText, Type, Variable, CornerRightDown, Navigation,
-  LocateFixed, AlertTriangle, Bot, CalendarClock, Calendar
+  LocateFixed, AlertTriangle, Bot, CalendarClock, Calendar, FileCheck
 } from 'lucide-react';
 import { FlowNodeData, NodeType, ListSection, LocationPreset } from '../types';
 
@@ -60,7 +60,8 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
         case 'location_request': config = { color: 'bg-teal-600', icon: <MapPin size={14} />, label: 'Location', subtitle: 'Request GPS' }; break;
         case 'pickup_location': config = { color: 'bg-lime-600', icon: <MapPin size={14} />, label: 'Pickup Location', subtitle: 'Get Start Point' }; break;
         case 'destination_location': config = { color: 'bg-red-500', icon: <Navigation size={14} />, label: 'Destination', subtitle: 'Get End Point' }; break;
-        case 'datetime_picker': config = { color: 'bg-cyan-500', icon: <CalendarClock size={14} />, label: 'Date & Time', subtitle: '3-Stage Drill-Down' }; break;
+        case 'datetime_picker': config = { color: 'bg-cyan-500', icon: <CalendarClock size={14} />, label: 'Smart Date/Time', subtitle: '3-Stage Drill-Down' }; break;
+        case 'summary': config = { color: 'bg-violet-600', icon: <FileCheck size={14} />, label: 'Summary Report', subtitle: 'List All Responses' }; break;
         case 'handoff': config = { color: 'bg-red-500', icon: <User size={14} />, label: 'Agent Handoff', subtitle: 'Stop Bot' }; break;
         case 'status_update': config = { color: 'bg-green-600', icon: <Check size={14} />, label: 'Set Status', subtitle: 'CRM Update' }; break;
     }
@@ -95,7 +96,7 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                 )}
 
                 {/* 2. Text Content */}
-                {data.type !== 'delay' && data.type !== 'set_variable' && (
+                {data.type !== 'delay' && data.type !== 'set_variable' && data.type !== 'summary' && (
                     <div className="text-xs mb-3 text-gray-800 leading-relaxed font-medium">
                         {data.content ? (
                             <div className="whitespace-pre-wrap">{data.content}</div>
@@ -117,6 +118,19 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                     <div className="flex items-center justify-center gap-2 text-gray-500 py-2 bg-gray-50 rounded-lg border border-gray-100 border-dashed">
                         <Clock size={16} className="animate-pulse" />
                         <span className="font-bold font-mono text-xs">Wait {data.delayTime ? (data.delayTime/1000) : 2}s</span>
+                    </div>
+                )}
+                
+                {data.type === 'summary' && (
+                    <div className="flex flex-col gap-2 p-2 bg-violet-50 rounded-lg border border-violet-100">
+                        <div className="text-[10px] text-violet-800 font-bold mb-1 uppercase">Auto-Generated Report</div>
+                        <div className="text-[10px] text-gray-500 italic border-l-2 border-violet-300 pl-2">
+                            "{data.content || 'Here are your details:'}"
+                            <br/>
+                            <span className="text-violet-400 font-mono">[ ...List of Variables... ]</span>
+                            <br/>
+                            "{data.footerText || ''}"
+                        </div>
                     </div>
                 )}
                 
@@ -330,9 +344,11 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                     )}
 
                     {/* Main Message Body */}
-                    {['text', 'image', 'input', 'interactive_button', 'interactive_list', 'handoff', 'rich_card', 'location_request', 'pickup_location', 'destination_location', 'datetime_picker'].includes(local.type) && (
+                    {['text', 'image', 'input', 'interactive_button', 'interactive_list', 'handoff', 'rich_card', 'location_request', 'pickup_location', 'destination_location', 'datetime_picker', 'summary'].includes(local.type) && (
                         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
-                            <label className="block text-xs font-bold text-gray-700 uppercase mb-2">Message Body</label>
+                            <label className="block text-xs font-bold text-gray-700 uppercase mb-2">
+                                {local.type === 'summary' ? 'Summary Header Text' : 'Message Body'}
+                            </label>
                             <textarea 
                                 className="w-full border border-gray-200 p-3 rounded-lg text-sm h-32 resize-none outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50 focus:bg-white transition-all"
                                 value={local.content || ''} 
@@ -341,14 +357,17 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                     local.type === 'pickup_location' ? "Select your pickup location below:" :
                                     local.type === 'destination_location' ? "Select your destination below:" :
                                     local.type === 'datetime_picker' ? "When would you like to schedule this?" :
+                                    local.type === 'summary' ? "Here is what we captured:" :
                                     "Type your message here..."
                                 }
                             />
-                            <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
-                                {['{{name}}', '{{phone}}', '{{email}}'].map(tag => (
-                                    <button key={tag} onClick={() => update('content', (local.content || '') + ' ' + tag)} className="text-[10px] bg-gray-100 px-2 py-1 rounded border border-gray-200 hover:bg-gray-200 transition-colors">{tag}</button>
-                                ))}
-                            </div>
+                            {local.type !== 'summary' && (
+                                <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
+                                    {['{{name}}', '{{phone}}', '{{email}}'].map(tag => (
+                                        <button key={tag} onClick={() => update('content', (local.content || '') + ' ' + tag)} className="text-[10px] bg-gray-100 px-2 py-1 rounded border border-gray-200 hover:bg-gray-200 transition-colors">{tag}</button>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     )}
 
@@ -529,7 +548,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                     )}
 
                     {/* Footer Text */}
-                    {['text', 'rich_card', 'interactive_button', 'datetime_picker'].includes(local.type) && (
+                    {['text', 'rich_card', 'interactive_button', 'datetime_picker', 'summary'].includes(local.type) && (
                         <div>
                              <label className="block text-xs font-bold text-gray-500 uppercase mb-1.5 ml-1">Footer Text (Optional)</label>
                              <input 
@@ -830,6 +849,11 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
           newNode.data.dateConfig = { mode: 'date', includeToday: true, daysToShow: 7, startHour: 9, endHour: 18 };
           newNode.data.variable = 'time_slot';
       }
+      
+      if (type === 'summary') {
+          newNode.data.content = "Here are the details we've collected:";
+          newNode.data.footerText = "Is this information correct?";
+      }
 
       addNode(newNode);
   };
@@ -909,6 +933,10 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
                      <button onClick={() => handleAddNode('set_variable')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-cyan-400 hover:shadow-sm transition-all text-gray-600 hover:text-cyan-600">
                          <Variable size={20} className="mb-1" />
                          <span className="text-[10px] font-bold">Set Var</span>
+                     </button>
+                     <button onClick={() => handleAddNode('summary')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-violet-400 hover:shadow-sm transition-all text-gray-600 hover:text-violet-600">
+                         <FileCheck size={20} className="mb-1" />
+                         <span className="text-[10px] font-bold">Summary</span>
                      </button>
                  </div>
 
