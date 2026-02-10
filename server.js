@@ -291,15 +291,9 @@ const generateTimeOptions = (candidate) => {
 
             // For "Today", don't show past times
             if (isToday) {
-                // If the hour is technically "tomorrow" (e.g. 0, 1, 2) but in the "Night" range
-                // we should allow it if we are currently late night. 
-                // But simplified check: compare total minutes or just ignore if it's "tomorrow" hours
-                
-                // If realH is smaller than currentHour (e.g. 1 AM < 23 PM), it means next day, so valid.
-                // We only block if realH > currentHour logic applies to SAME day hours.
-                
-                // Better Check:
-                if (realH > 4 && realH < now.getHours()) continue; // Past hours today
+                // If realH (e.g. 13) < currentHour (e.g. 14), skip.
+                if (realH < now.getHours()) continue; 
+                // If same hour, check minutes
                 if (realH === now.getHours() && m < now.getMinutes()) continue;
             }
 
@@ -503,6 +497,21 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             // Stay on same node to ask Period next
                             valueToSave = null;
                         }
+                        // 2b. Handle "Today"/"Tomorrow" text inputs for date picker (User Experience Fix)
+                        else if (cleanInput === 'today' || cleanInput === 'tomorrow') {
+                             const d = new Date();
+                             if (cleanInput === 'tomorrow') d.setDate(d.getDate() + 1);
+                             const dateVal = d.toISOString().split('T')[0];
+                             
+                             await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{pickup_date}', $1)", [JSON.stringify(dateVal)]);
+                             await client.query(`UPDATE candidates SET variables = variables - 'time_period' - $1 WHERE id = $2`, [targetVar, candidate.id]);
+                             
+                             candidate.variables.pickup_date = dateVal;
+                             delete candidate.variables.time_period;
+                             delete candidate.variables[targetVar];
+                             
+                             valueToSave = null;
+                        }
                         // 3. Check if user sent "Type Specific Time" or actual Time
                         else if (incomingPayloadId === 'custom_time') {
                             isManualTrigger = true; 
@@ -618,7 +627,12 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         }
                         if (incomingPayloadId === 'custom_time') isManualClick = true;
                         
-                        if (['interactive_button', 'interactive_list', 'rich_card'].includes(currentNode.data.type) && !isManualClick && currentNode.data.type !== 'datetime_picker') {
+                        // Check if interactive node received invalid input
+                        // EXPLICITLY IGNORE DATETIME_PICKER from this check to allow looping
+                        const isInteractive = ['interactive_button', 'interactive_list', 'rich_card'].includes(currentNode.data.type);
+                        const isNotSpecial = currentNode.data.type !== 'datetime_picker';
+                        
+                        if (isInteractive && !isManualClick && isNotSpecial) {
                             shouldReplyInvalid = true;
                         }
                     }
