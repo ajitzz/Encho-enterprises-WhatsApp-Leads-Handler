@@ -447,7 +447,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     let valueToSave = null;
                     let isManualTrigger = false;
 
-                    // Check for Preset/List Selection (Standard Logic)
+                    // Check for Preset/List Selection
                     if (currentNode.data.presets) {
                         let matchedPreset = currentNode.data.presets.find(p => p.id === incomingPayloadId);
                         if (!matchedPreset && cleanInput) matchedPreset = currentNode.data.presets.find(p => p.title.toLowerCase().trim() === cleanInput);

@@ -5,7 +5,7 @@ import {
   MiniMap, 
   Controls, 
   Background, 
-  BackgroundVariant,
+  BackgroundVariant, 
   Handle, 
   Position,
   useReactFlow,
