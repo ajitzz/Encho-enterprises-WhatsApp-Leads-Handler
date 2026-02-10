@@ -416,6 +416,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         </div>
                     )}
 
+                    {/* ... (Keep existing code for Location Presets, Buttons, List Config etc.) ... */}
                     {/* --- SMART PRESETS FOR LOCATIONS --- */}
                     {['pickup_location', 'destination_location'].includes(local.type) && (
                         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm space-y-4">
