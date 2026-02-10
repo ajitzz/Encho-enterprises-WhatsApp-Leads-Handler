@@ -469,15 +469,21 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         if ((incomingPayloadId && incomingPayloadId.match(/^\d{4}-\d{2}-\d{2}$/)) || (cleanInput && cleanInput.match(/^\d{4}-\d{2}-\d{2}$/))) {
                             detectedDate = incomingPayloadId || cleanInput;
                         } 
-                        else if (cleanInput === 'today' || cleanInput === 'tomorrow') {
+                        else if (cleanInput === 'today') {
+                             detectedDate = new Date().toISOString().split('T')[0];
+                        }
+                        else if (cleanInput === 'tomorrow') {
                              const d = new Date();
-                             if (cleanInput === 'tomorrow') d.setDate(d.getDate() + 1);
+                             d.setDate(d.getDate() + 1);
                              detectedDate = d.toISOString().split('T')[0];
                         }
 
                         // Check for Period (PERIOD_MORNING, etc.)
                         if (incomingPayloadId && incomingPayloadId.startsWith('PERIOD_')) {
                             detectedPeriod = incomingPayloadId;
+                        }
+                        else if (['morning', 'afternoon', 'evening', 'night'].includes(cleanInput)) {
+                            detectedPeriod = `PERIOD_${cleanInput.toUpperCase()}`;
                         }
 
                         // Check for Time (HH:MM or custom input)
@@ -486,7 +492,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         } else if (incomingPayloadId && !detectedDate && !detectedPeriod) {
                             // If it's a payload but not date/period, assume it's time slot
                             detectedTime = incomingPayloadId;
-                        } else if (cleanInput && !detectedDate) {
+                        } else if (cleanInput && !detectedDate && !detectedPeriod) {
                             // Try to parse manual time
                             const timeRegex = /([0-9]{1,2})[:.]([0-9]{2})\s*(am|pm)?/i;
                             const match = cleanInput.match(timeRegex);

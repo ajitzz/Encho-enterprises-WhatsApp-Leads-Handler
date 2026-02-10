@@ -60,7 +60,7 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
         case 'location_request': config = { color: 'bg-teal-600', icon: <MapPin size={14} />, label: 'Location', subtitle: 'Request GPS' }; break;
         case 'pickup_location': config = { color: 'bg-lime-600', icon: <MapPin size={14} />, label: 'Pickup Location', subtitle: 'Get Start Point' }; break;
         case 'destination_location': config = { color: 'bg-red-500', icon: <Navigation size={14} />, label: 'Destination', subtitle: 'Get End Point' }; break;
-        case 'datetime_picker': config = { color: 'bg-cyan-500', icon: <CalendarClock size={14} />, label: 'Smart Date/Time', subtitle: 'Drill-Down Logic' }; break;
+        case 'datetime_picker': config = { color: 'bg-cyan-500', icon: <CalendarClock size={14} />, label: 'Date & Time', subtitle: '3-Stage Drill-Down' }; break;
         case 'handoff': config = { color: 'bg-red-500', icon: <User size={14} />, label: 'Agent Handoff', subtitle: 'Stop Bot' }; break;
         case 'status_update': config = { color: 'bg-green-600', icon: <Check size={14} />, label: 'Set Status', subtitle: 'CRM Update' }; break;
     }
