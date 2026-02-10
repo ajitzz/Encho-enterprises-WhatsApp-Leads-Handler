@@ -440,7 +440,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         if (currentNode.data.type === 'pickup_location') varName = 'pickup_coords';
                         else if (currentNode.data.type === 'destination_location') varName = 'dest_coords';
                         else if (currentNode.data.type === 'location_request') varName = 'location_data';
-                        else if (currentNode.data.type === 'datetime_picker') varName = 'time_slot'; // Default for legacy
+                        else if (currentNode.data.type === 'datetime_picker') varName = currentNode.data.dateConfig?.mode === 'time' ? 'time_slot' : 'pickup_date';
                     }
 
                     // --- SMART LOGIC START ---
@@ -458,82 +458,80 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         }
                     }
                     
-                    // --- NEW 3-STAGE STATE MACHINE FOR DATETIME PICKER (STRICT) ---
+                    // --- DYNAMIC DATETIME CAPTURE (3-STAGE STATE MACHINE) [PROTECTED LOGIC] ---
+                    // STAGE 1: Date -> STAGE 2: Period -> STAGE 3: Time
                     if (currentNode.data.type === 'datetime_picker') {
-                        // 1. ANALYZE INPUT TYPE (What did the user send?)
-                        let detectedDate = null;
-                        let detectedPeriod = null;
-                        let detectedTime = null;
+                        // Dynamically determine the target variable for the final time slot
+                        const targetVar = currentNode.data.variable || 'time_slot';
 
-                        // Check for Date (YYYY-MM-DD)
-                        if ((incomingPayloadId && incomingPayloadId.match(/^\d{4}-\d{2}-\d{2}$/)) || (cleanInput && cleanInput.match(/^\d{4}-\d{2}-\d{2}$/))) {
-                            detectedDate = incomingPayloadId || cleanInput;
-                        } 
-                        else if (cleanInput === 'today') {
-                             detectedDate = new Date().toISOString().split('T')[0];
-                        }
-                        else if (cleanInput === 'tomorrow') {
-                             const d = new Date();
-                             d.setDate(d.getDate() + 1);
-                             detectedDate = d.toISOString().split('T')[0];
-                        }
-
-                        // Check for Period (PERIOD_MORNING, etc.)
+                        // 1. Check if user sent a PERIOD (Morning, Afternoon...)
                         if (incomingPayloadId && incomingPayloadId.startsWith('PERIOD_')) {
-                            detectedPeriod = incomingPayloadId;
+                            // User selected "Afternoon". Save it.
+                            await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{time_period}', $1)", [JSON.stringify(incomingPayloadId)]);
+                            
+                            // IMPORTANT: Reset any existing time_slot to force the bot to ask for time again (Stage 3).
+                            // This handles the "Drill-Down" correction logic if they go back.
+                            await client.query(`UPDATE candidates SET variables = variables - $1 WHERE id = $2`, [targetVar, candidate.id]);
+                            
+                            candidate.variables.time_period = incomingPayloadId;
+                            delete candidate.variables[targetVar];
+                            
+                            // Stay on same node to ask for Time next
+                            valueToSave = null; 
                         }
-                        else if (['morning', 'afternoon', 'evening', 'night'].includes(cleanInput)) {
-                            detectedPeriod = `PERIOD_${cleanInput.toUpperCase()}`;
+                        // 2. Check if user sent a DATE (YYYY-MM-DD) - Either via Button Payload OR Manual Text
+                        else if ((incomingPayloadId && incomingPayloadId.match(/^\d{4}-\d{2}-\d{2}$/)) || (cleanInput && cleanInput.match(/^\d{4}-\d{2}-\d{2}$/))) {
+                            const dateVal = incomingPayloadId || cleanInput;
+                            
+                            // User selected a Date. Save it.
+                            await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{pickup_date}', $1)", [JSON.stringify(dateVal)]);
+                            
+                            // IMPORTANT: Reset Period and Time to force the bot to ask for Period again (Stage 2).
+                            // This ensures the bot loops if they change the date.
+                            await client.query(`UPDATE candidates SET variables = variables - 'time_period' - $1 WHERE id = $2`, [targetVar, candidate.id]);
+                            
+                            candidate.variables.pickup_date = dateVal;
+                            delete candidate.variables.time_period;
+                            delete candidate.variables[targetVar];
+                            
+                            // Stay on same node to ask Period next
+                            valueToSave = null;
                         }
-
-                        // Check for Time (HH:MM or custom input)
-                        if (incomingPayloadId === 'custom_time') {
-                            isManualTrigger = true;
-                        } else if (incomingPayloadId && !detectedDate && !detectedPeriod) {
-                            // If it's a payload but not date/period, assume it's time slot
-                            detectedTime = incomingPayloadId;
-                        } else if (cleanInput && !detectedDate && !detectedPeriod) {
-                            // Try to parse manual time
+                        // 2b. Handle "Today"/"Tomorrow" text inputs for date picker (User Experience Fix)
+                        else if (cleanInput === 'today' || cleanInput === 'tomorrow') {
+                             const d = new Date();
+                             if (cleanInput === 'tomorrow') d.setDate(d.getDate() + 1);
+                             const dateVal = d.toISOString().split('T')[0];
+                             
+                             await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{pickup_date}', $1)", [JSON.stringify(dateVal)]);
+                             await client.query(`UPDATE candidates SET variables = variables - 'time_period' - $1 WHERE id = $2`, [targetVar, candidate.id]);
+                             
+                             candidate.variables.pickup_date = dateVal;
+                             delete candidate.variables.time_period;
+                             delete candidate.variables[targetVar];
+                             
+                             valueToSave = null;
+                        }
+                        // 3. Check if user sent "Type Specific Time" or actual Time
+                        else if (incomingPayloadId === 'custom_time') {
+                            isManualTrigger = true; 
+                        } 
+                        else if (incomingPayloadId) {
+                            valueToSave = incomingPayloadId; // Likely a time slot (2:30 PM)
+                        } 
+                        else if (cleanInput) {
+                            // Handle Manual Text Input
                             const timeRegex = /([0-9]{1,2})[:.]([0-9]{2})\s*(am|pm)?/i;
                             const match = cleanInput.match(timeRegex);
+                            
                             if (match) {
-                                if (match[3]) detectedTime = match[0].toUpperCase();
-                                else detectedTime = resolveTimeAmbiguity(match[0]);
-                            } else if (cleanInput.length > 2 && !isManualTrigger) {
-                                // Fallback: If they typed something and it's not date/period, maybe it's raw time
-                                detectedTime = cleanInput;
+                                // Explicit Time Input
+                                if (match[3]) valueToSave = match[0].toUpperCase();
+                                else valueToSave = resolveTimeAmbiguity(match[0]);
+                            } else if (cleanInput.length > 3) {
+                                // Fallback for raw text - Only if it's NOT a date format (handled above)
+                                valueToSave = incomingText; 
                             }
-                        }
-
-                        // 2. EXECUTE STATE TRANSITION
-                        const finalVar = currentNode.data.variable || 'time_slot';
-
-                        if (detectedDate) {
-                            // STATE 1 CAUGHT -> SAVE DATE, WIPE EVERYTHING ELSE
-                            // This ensures the loop resets if they change the date
-                            await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{pickup_date}', $1)", [JSON.stringify(detectedDate)]);
-                            await client.query(`UPDATE candidates SET variables = variables - 'time_period' - $1 WHERE id = $2`, [finalVar, candidate.id]);
-                            
-                            candidate.variables.pickup_date = detectedDate;
-                            delete candidate.variables.time_period;
-                            delete candidate.variables[finalVar];
-                            
-                            valueToSave = null; // Do not save to generic variable, we handled it
-                        } 
-                        else if (detectedPeriod) {
-                            // STATE 2 CAUGHT -> SAVE PERIOD, WIPE TIME
-                            await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{time_period}', $1)", [JSON.stringify(detectedPeriod)]);
-                            await client.query(`UPDATE candidates SET variables = variables - $1 WHERE id = $2`, [finalVar, candidate.id]);
-                            
-                            candidate.variables.time_period = detectedPeriod;
-                            delete candidate.variables[finalVar];
-                            
-                            valueToSave = null;
-                        } 
-                        else if (detectedTime) {
-                            // STATE 3 CAUGHT -> SAVE TIME
-                            valueToSave = detectedTime;
-                            varName = finalVar;
                         }
                     }
 
@@ -601,17 +599,12 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                          if (!isManualClick) matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
                     } 
                     else if (currentNode.data.type === 'datetime_picker') {
-                        // CRITICAL STATE MACHINE LOOP CHECK
-                        // Only advance if ALL 3 variables are present
-                        const finalVar = currentNode.data.variable || 'time_slot';
-                        const hasDate = !!candidate.variables.pickup_date;
-                        const hasPeriod = !!candidate.variables.time_period;
-                        const hasTime = !!candidate.variables[finalVar];
-
-                        if (hasDate && hasPeriod && hasTime) {
+                        // CRITICAL CHANGE: Only advance if the FINAL time slot is captured
+                        // This prevents the bot from advancing if only the Date or Period was selected
+                        let timeVar = currentNode.data.variable || 'time_slot';
+                        if (candidate.variables[timeVar]) {
                             matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
                         }
-                        // If any is missing, matchedEdge stays null -> triggers stay on node logic
                     }
                     else {
                         matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'true' || e.sourceHandle === 'default');
@@ -625,7 +618,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
                         nextNodeId = startNode ? startNode.id : null;
                     } else {
-                        // Stay on node (Loop)
+                        // Stay on node
                         nextNodeId = currentNodeId;
                         let isManualClick = false;
                         if (currentNode.data.presets) {
@@ -634,7 +627,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         }
                         if (incomingPayloadId === 'custom_time') isManualClick = true;
                         
-                        // Explicitly ignore DatePicker from invalid checks because it handles its own loops
+                        // Check if interactive node received invalid input
+                        // EXPLICITLY IGNORE DATETIME_PICKER from this check to allow looping
                         const isInteractive = ['interactive_button', 'interactive_list', 'rich_card'].includes(currentNode.data.type);
                         const isNotSpecial = currentNode.data.type !== 'datetime_picker';
                         
@@ -728,32 +722,29 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 } 
                 
                 else if (data.type === 'datetime_picker') {
-                    // --- 3-STAGE MESSAGE GENERATION ---
-                    // This node logic now dynamically changes its output based on what data is missing
-                    
+                    // MULTI-STEP LOGIC: Date -> Period -> Time
                     const hasDate = !!candidate.variables.pickup_date;
                     const hasPeriod = !!candidate.variables.time_period;
                     
                     let buttonText = "Select Option";
-                    let listBody = validBody || "Please select an option:";
+                    let listBody = validBody;
                     let listRows = [];
 
                     if (!hasDate) {
-                        // Stage 1: Ask for Date
+                        // Step 1: Show Dates
                         listRows = generateDateOptions(data.dateConfig);
                         buttonText = "Select Date";
-                        listBody = validBody || "When would you like to schedule this?";
+                        listBody = listBody || "When would you like to book?";
                     } else if (!hasPeriod) {
-                        // Stage 2: Ask for Period
+                        // Step 2: Show Periods (Morning, Afternoon, etc.)
                         listRows = generatePeriodOptions(candidate);
                         buttonText = "Select Time of Day";
-                        listBody = `🗓️ Date: *${candidate.variables.pickup_date}*\n\nWhat time of day works best?`;
+                        listBody = `Date selected: ${candidate.variables.pickup_date}\n\nWhat time of day works best?`;
                     } else {
-                        // Stage 3: Ask for Time Slot
+                        // Step 3: Show Specific Times
                         listRows = generateTimeOptions(candidate);
                         buttonText = "Select Time";
-                        const prettyPeriod = candidate.variables.time_period.replace('PERIOD_', '');
-                        listBody = `🗓️ Date: *${candidate.variables.pickup_date}*\n🌅 Period: *${prettyPeriod}*\n\nPlease select an exact time:`;
+                        listBody = `Date: ${candidate.variables.pickup_date}\nPeriod: ${candidate.variables.time_period.replace('PERIOD_', '')}\n\nSelect exact time:`;
                     }
                     
                     payload = {
@@ -763,7 +754,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             body: { text: listBody },
                             action: {
                                 button: buttonText,
-                                sections: [{ title: "Available Slots", rows: listRows }]
+                                sections: [{ title: "Options", rows: listRows }]
                             }
                         }
                     };
