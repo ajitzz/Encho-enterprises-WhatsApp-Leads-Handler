@@ -128,7 +128,15 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                         <div className="text-[10px] text-gray-500 italic border-l-2 border-violet-300 pl-2">
                             "{data.content || 'Here are your details:'}"
                             <br/>
-                            <span className="text-violet-400 font-mono">[ ...List of Variables... ]</span>
+                            <span className="text-violet-400 font-mono">
+                                [{(data.summaryVariables && data.summaryVariables.length > 0)
+                                    ? `${data.summaryVariables.length} configured variable${data.summaryVariables.length > 1 ? 's' : ''}`
+                                    : '...List of Variables...'}]
+                            </span>
+                            <br/>
+                            <span className="text-[9px] text-violet-600 not-italic">
+                                Style: {data.summaryStyle || 'card'} · Template: {data.summaryTemplate || 'advanced'}
+                            </span>
                             <br/>
                             "{data.footerText || ''}"
                         </div>
@@ -294,6 +302,13 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
 const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>, onChange: (id: string, d: any) => void, onClose: () => void }) => {
     const [local, setLocal] = useState(node.data);
     const [activeTab, setActiveTab] = useState<'content' | 'settings'>('content');
+
+    const sanitizeVariableName = (value: string) =>
+        value
+            .replace(/[^a-zA-Z0-9_]/g, '_')
+            .replace(/_+/g, '_')
+            .replace(/^_+|_+$/g, '')
+            .toLowerCase();
     
     useEffect(() => setLocal(node.data), [node.id]);
 
@@ -575,6 +590,117 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         </div>
                     )}
 
+                    {local.type === 'summary' && (
+                        <div className="bg-gradient-to-br from-violet-50 via-fuchsia-50 to-indigo-50 p-4 rounded-xl border border-violet-100 shadow-sm space-y-4">
+                            <div className="flex items-start gap-3">
+                                <div className="bg-white p-2 rounded-lg border border-violet-200"><Sparkles size={15} className="text-violet-600"/></div>
+                                <div>
+                                    <h4 className="text-sm font-bold text-violet-900">Advanced Summary Composer</h4>
+                                    <p className="text-xs text-violet-700 mt-1">
+                                        Pick specific response variables, choose a layout style, and auto-generate customer-ready WhatsApp summaries.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div className="bg-white p-3 rounded-lg border border-violet-100">
+                                    <label className="text-[10px] font-bold text-gray-600 uppercase">Summary Template</label>
+                                    <select
+                                        className="mt-1 w-full border border-gray-200 p-2 rounded-lg text-xs bg-gray-50"
+                                        value={local.summaryTemplate || 'advanced'}
+                                        onChange={e => update('summaryTemplate', e.target.value)}
+                                    >
+                                        <option value="advanced">Advanced (Sectioned)</option>
+                                        <option value="compact">Compact (Single Block)</option>
+                                        <option value="minimal">Minimal (Only Key/Value)</option>
+                                    </select>
+                                </div>
+                                <div className="bg-white p-3 rounded-lg border border-violet-100">
+                                    <label className="text-[10px] font-bold text-gray-600 uppercase">Visual Style</label>
+                                    <select
+                                        className="mt-1 w-full border border-gray-200 p-2 rounded-lg text-xs bg-gray-50"
+                                        value={local.summaryStyle || 'card'}
+                                        onChange={e => update('summaryStyle', e.target.value)}
+                                    >
+                                        <option value="card">Card (Emoji + spacing)</option>
+                                        <option value="plain">Plain (Simple)</option>
+                                        <option value="bullet">Bullet Points</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div className="bg-white p-3 rounded-lg border border-violet-100 space-y-3">
+                                <div className="flex items-center justify-between">
+                                    <label className="text-[10px] font-bold text-gray-600 uppercase">Variables to include (ordered)</label>
+                                    <span className="text-[10px] font-bold text-violet-700 bg-violet-100 px-2 py-0.5 rounded-full">{(local.summaryVariables || []).length}</span>
+                                </div>
+
+                                {(local.summaryVariables || []).length === 0 && (
+                                    <div className="text-[11px] text-gray-500 bg-gray-50 border border-dashed border-gray-200 rounded-lg p-2">
+                                        No variables configured. Summary will fallback to all collected variables.
+                                    </div>
+                                )}
+
+                                {(local.summaryVariables || []).map((item: any, i: number) => (
+                                    <div key={`${item?.variable || 'var'}_${i}`} className="grid grid-cols-12 gap-2">
+                                        <input
+                                            className="col-span-5 border border-gray-200 p-2 rounded-lg text-xs font-mono bg-gray-50"
+                                            value={item.variable || ''}
+                                            onChange={e => {
+                                                const next = [...(local.summaryVariables || [])];
+                                                next[i] = { ...next[i], variable: sanitizeVariableName(e.target.value) };
+                                                update('summaryVariables', next);
+                                            }}
+                                            placeholder="pickup_date"
+                                        />
+                                        <input
+                                            className="col-span-5 border border-gray-200 p-2 rounded-lg text-xs bg-gray-50"
+                                            value={item.label || ''}
+                                            onChange={e => {
+                                                const next = [...(local.summaryVariables || [])];
+                                                next[i] = { ...next[i], label: e.target.value };
+                                                update('summaryVariables', next);
+                                            }}
+                                            placeholder="Pickup Date"
+                                        />
+                                        <button
+                                            onClick={() => update('summaryVariables', (local.summaryVariables || []).filter((_: any, idx: number) => idx !== i))}
+                                            className="col-span-2 p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                        >
+                                            <Trash2 size={14} className="mx-auto"/>
+                                        </button>
+                                    </div>
+                                ))}
+
+                                <button
+                                    onClick={() => update('summaryVariables', [...(local.summaryVariables || []), { variable: '', label: '' }])}
+                                    className="w-full py-2 border border-dashed border-violet-300 rounded-lg text-xs font-bold text-violet-700 hover:bg-violet-50 transition-colors"
+                                >
+                                    <Plus size={12} className="inline mr-1" /> Add Variable Row
+                                </button>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <label className="flex items-center gap-2 text-[11px] text-gray-700 bg-white p-2 rounded border border-violet-100">
+                                    <input
+                                        type="checkbox"
+                                        checked={local.includeEmptyValues !== false}
+                                        onChange={e => update('includeEmptyValues', e.target.checked)}
+                                    />
+                                    Include empty/missing fields
+                                </label>
+                                <label className="flex items-center gap-2 text-[11px] text-gray-700 bg-white p-2 rounded border border-violet-100">
+                                    <input
+                                        type="checkbox"
+                                        checked={local.useDisplayLabels !== false}
+                                        onChange={e => update('useDisplayLabels', e.target.checked)}
+                                    />
+                                    Use display labels when available
+                                </label>
+                            </div>
+                        </div>
+                    )}
+
                     {/* Buttons Config (Rich Card & Buttons) */}
                     {['interactive_button', 'rich_card'].includes(local.type) && (
                         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
@@ -851,6 +977,11 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
       if (type === 'summary') {
           newNode.data.content = "Here are the details we've collected:";
           newNode.data.footerText = "Is this information correct?";
+          newNode.data.summaryTemplate = 'advanced';
+          newNode.data.summaryStyle = 'card';
+          newNode.data.includeEmptyValues = false;
+          newNode.data.useDisplayLabels = true;
+          newNode.data.summaryVariables = [];
       }
       if (type === 'datetime_picker') {
           newNode.data.content = "When would you like to schedule this ride?";

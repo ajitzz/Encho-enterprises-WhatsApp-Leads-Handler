@@ -142,6 +142,28 @@ class MockBackendService {
         if (matchedEdge) {
             nextNodeId = matchedEdge.target;
         } else {
+            if (['input', 'interactive_button', 'interactive_list'].includes(currentNode.data?.type)) {
+                const fallbackVar = (currentNode.data?.variable
+                    || currentNode.data?.label
+                    || currentNode.id
+                    || 'response')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]/g, '_')
+                    .replace(/^_+|_+$/g, '');
+
+                const selectedButton = currentNode.data?.buttons?.find((b: any) => b.title.toLowerCase() === text.toLowerCase());
+                const selectedRow = currentNode.data?.sections?.flatMap((section: any) => section.rows || [])
+                    .find((row: any) => row.title.toLowerCase() === text.toLowerCase());
+
+                const finalValue = selectedButton?.title || selectedRow?.title || text;
+                if (finalValue) {
+                    driver.variables = {
+                        ...(driver.variables || {}),
+                        [fallbackVar]: finalValue,
+                    };
+                }
+            }
+
             // Default path
             const edge = edges.find(e => e.source === currentNodeId && !e.sourceHandle);
             if (edge) nextNodeId = edge.target;
@@ -159,13 +181,64 @@ class MockBackendService {
         if (!node) break;
 
         const data = node.data || {};
+
+        if (data.type === 'summary') {
+            const configured = (data.summaryVariables || [])
+                .filter((entry: any) => entry?.variable)
+                .map((entry: any) => ({
+                    variable: entry.variable,
+                    label: entry.label || entry.variable,
+                }));
+
+            const sourcePairs = configured.length > 0
+                ? configured.map((field: any) => {
+                    const value = driver.variables?.[field.variable];
+                    return { ...field, value };
+                })
+                : Object.entries(driver.variables || {}).map(([key, value]) => ({
+                    variable: key,
+                    label: key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+                    value,
+                }));
+
+            const includeEmpty = data.includeEmptyValues === true;
+            const lines = sourcePairs
+                .filter((entry: any) => includeEmpty || (entry.value !== undefined && entry.value !== null && entry.value !== ''))
+                .map((entry: any) => {
+                    const value = (entry.value === undefined || entry.value === null || entry.value === '') ? '—' : String(entry.value);
+                    if (data.summaryStyle === 'bullet') return `• ${entry.label}: ${value}`;
+                    if (data.summaryStyle === 'plain') return `${entry.label}: ${value}`;
+                    return `🔹 *${entry.label}:* ${value}`;
+                });
+
+            const summaryHeader = data.content || "Here are the details we've collected:";
+            const summaryFooter = data.footerText ? `\n\n_${data.footerText}_` : '';
+
+            let summaryBody = '';
+            if ((data.summaryTemplate || 'advanced') === 'minimal') {
+                summaryBody = lines.join('\n') || '(No data collected yet)';
+            } else if (data.summaryTemplate === 'compact') {
+                summaryBody = lines.length > 0 ? lines.join(' | ') : '(No data collected yet)';
+            } else {
+                summaryBody = lines.length > 0 ? lines.join('\n') : '_(No data collected yet)_';
+            }
+
+            const composed = `${summaryHeader}\n\n${summaryBody}${summaryFooter}`;
+            this.addMessage(driver.id, {
+                id: Date.now().toString() + '_' + limit,
+                sender: 'system',
+                text: composed,
+                timestamp: Date.now() + (10 - limit) * 100,
+                type: 'text'
+            });
+        }
         
         // Execute Node
         let msgType: any = 'text';
         if (data.type === 'interactive_button') msgType = 'interactive';
         if (data.type === 'interactive_list') msgType = 'interactive';
         
-        if (data.content || data.mediaUrl) {
+        if (data.type !== 'summary' && (data.content || data.mediaUrl)) {
              this.addMessage(driver.id, {
                  id: Date.now().toString() + '_' + limit,
                  sender: 'system',
