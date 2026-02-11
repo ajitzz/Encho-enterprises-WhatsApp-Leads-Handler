@@ -175,6 +175,43 @@ const isValidContent = (text) => {
     return true;
 };
 
+const formatSummaryValue = (val) => {
+    let displayVal = val;
+    try {
+        if (typeof val === 'string' && val.startsWith('{')) {
+            const parsed = JSON.parse(val);
+            if (parsed.label) {
+                displayVal = parsed.label;
+            } else if (parsed.latitude && parsed.longitude) {
+                const link = `https://www.google.com/maps?q=${parsed.latitude},${parsed.longitude}`;
+                if (parsed.name || parsed.address) {
+                    displayVal = `${parsed.name || ''} ${parsed.address || ''}
+${link}`.trim();
+                } else {
+                    displayVal = `📍 ${link}`;
+                }
+            } else if (parsed.lat && parsed.long) {
+                displayVal = `${parsed.label || 'Pinned Location'} (${parsed.lat}, ${parsed.long})`;
+            }
+        }
+    } catch (e) {}
+
+    if (displayVal === null || displayVal === undefined) return '';
+    if (typeof displayVal === 'object') return JSON.stringify(displayVal);
+    return String(displayVal);
+};
+
+const formatSummaryToken = (text, style = 'plain') => {
+    const safeText = String(text || '');
+    if (!safeText) return '';
+
+    if (style === 'bold') return `*${safeText}*`;
+    if (style === 'italic') return `_${safeText}_`;
+    if (style === 'code') return `\`${safeText}\``;
+    if (style === 'uppercase') return safeText.toUpperCase();
+    return safeText;
+};
+
 // --- SMART PARSING HELPERS ---
 
 const resolveTimeAmbiguity = (inputTimeStr) => {
@@ -823,51 +860,59 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 let payload = null;
 
                 if (data.type === 'summary') {
-                    // --- SUMMARY REPORT GENERATION ---
-                    // 1. Filter out internal system variables (start with underscore or known technical keys)
-                    // 2. Format nicely as Bold Key: Value
-                    let summaryText = validBody || "Here is the information we collected:\n";
-                    
+                    let summaryText = validBody || "📋 Summary";
+                    if (data.summaryDescription) summaryText += `
+${processText(data.summaryDescription, candidate)}`;
+
                     const ignoredKeys = ['current_bot_step_id', 'is_human_mode', 'undefined', 'null'];
-                    const entries = Object.entries(candidate.variables || {}).filter(([k, v]) => {
+                    const filteredEntries = Object.entries(candidate.variables || {}).filter(([k, v]) => {
                         return !k.startsWith('_') && !ignoredKeys.includes(k) && v !== null && v !== undefined && v !== '';
                     });
 
-                    if (entries.length > 0) {
-                        summaryText += "\n";
-                        entries.forEach(([key, val]) => {
-                            // Convert snake_case to Title Case (e.g. pickup_date -> Pickup Date)
+                    const configuredRows = [];
+                    const usedVariables = new Set();
+                    const summaryFields = Array.isArray(data.summaryFields) ? data.summaryFields : [];
+
+                    summaryFields.forEach((field) => {
+                        if (!field?.variable) return;
+                        const key = String(field.variable).trim();
+                        if (!key || !(key in (candidate.variables || {}))) return;
+
+                        const raw = candidate.variables[key];
+                        if (raw === null || raw === undefined || raw === '') return;
+
+                        usedVariables.add(key);
+                        const label = field.label || key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                        const styledLabel = formatSummaryToken(label, field.labelStyle || 'bold');
+                        const styledValue = formatSummaryToken(formatSummaryValue(raw), field.valueStyle || 'plain');
+                        configuredRows.push(`${field.prefix || '• '} ${styledLabel}: ${styledValue}${field.suffix || ''}`);
+                    });
+
+                    const includeAutoVariables = data.summaryUseAutoVariables !== false;
+                    if (includeAutoVariables) {
+                        filteredEntries.forEach(([key, val]) => {
+                            if (usedVariables.has(key)) return;
                             const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-                            
-                            // Format Value (handle JSON location strings)
-                            let displayVal = val;
-                            try {
-                                if (typeof val === 'string' && val.startsWith('{')) {
-                                    const parsed = JSON.parse(val);
-                                    if (parsed.label) {
-                                        displayVal = parsed.label; // Preset selection
-                                    } else if (parsed.latitude && parsed.longitude) {
-                                        // Actual Map Pin
-                                        const link = `https://www.google.com/maps?q=${parsed.latitude},${parsed.longitude}`;
-                                        if (parsed.name || parsed.address) {
-                                            displayVal = `${parsed.name || ''} ${parsed.address || ''}\n${link}`;
-                                        } else {
-                                            displayVal = `📍 Map Pin: ${link}`;
-                                        }
-                                    }
-                                }
-                            } catch(e) {}
-                            
-                            summaryText += `*${label}:* ${displayVal}\n`;
+                            configuredRows.push(`• *${label}:* ${formatSummaryValue(val)}`);
                         });
-                    } else {
-                        summaryText += "\n(No data collected yet)";
                     }
 
-                    if (data.footerText) summaryText += `\n_${data.footerText}_`;
-                    
+                    if (configuredRows.length > 0) {
+                        summaryText += `
+
+${configuredRows.join('\n')}`;
+                    } else {
+                        summaryText += `
+
+${data.summaryEmptyText || '(No data collected yet)'}`;
+                    }
+
+                    if (data.footerText) summaryText += `
+
+_${data.footerText}_`;
                     payload = { type: 'text', text: { body: summaryText } };
                 }
+
 
                 else if (data.type === 'text') {
                     if (validBody) {
