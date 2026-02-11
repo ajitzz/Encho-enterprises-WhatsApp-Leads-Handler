@@ -83,6 +83,8 @@ export interface SummaryFieldConfig {
   suffix?: string;
 }
 
+export type SummaryTextStyle = 'plain' | 'bold' | 'italic' | 'uppercase' | 'code';
+
 export interface FlowNodeData {
   id: string;
   label: string;
@@ -132,6 +134,9 @@ export interface FlowNodeData {
   summaryFields?: SummaryFieldConfig[];
   summaryUseAutoVariables?: boolean;
   summaryEmptyText?: string;
+  summaryHeaderStyle?: SummaryTextStyle;
+  summaryDescriptionStyle?: SummaryTextStyle;
+  summaryFooterStyle?: SummaryTextStyle;
 
   [key: string]: any;
 }
