@@ -29,6 +29,29 @@ import {
 } from 'lucide-react';
 import { FlowNodeData, NodeType, ListSection, LocationPreset } from '../types';
 
+const sanitizeVariableName = (value: string) => value.replace(/[^a-zA-Z0-9_]/g, '_').replace(/_{2,}/g, '_').replace(/^_+|_+$/g, '').toLowerCase();
+
+const DEFAULT_VARIABLE_BY_TYPE: Partial<Record<NodeType, string>> = {
+    pickup_location: 'pickup_coords',
+    destination_location: 'destination_coords',
+    location_request: 'live_location',
+    datetime_picker: 'pickup_time'
+};
+
+const getNodeVariableMeta = (data: any, nodeId?: string) => {
+    const explicitVariable = sanitizeVariableName(String(data?.variable || ''));
+    const autoVariable = data?.type ? DEFAULT_VARIABLE_BY_TYPE[data.type as NodeType] : undefined;
+    const variable = explicitVariable || autoVariable;
+    if (!variable) return null;
+
+    return {
+        variable,
+        label: data?.label || data?.type?.replace(/_/g, ' ') || `Node ${nodeId || ''}`,
+        type: data?.type,
+        isAuto: !explicitVariable && !!autoVariable
+    };
+};
+
 // --- 1. ADVANCED NODE COMPONENT (VISUALIZER) ---
 
 const NodeHeader = ({ color, icon, label, selected, subtitle }: any) => (
@@ -123,14 +146,22 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                 )}
                 
                 {data.type === 'summary' && (
-                    <div className="flex flex-col gap-2 p-2 bg-violet-50 rounded-lg border border-violet-100">
-                        <div className="text-[10px] text-violet-800 font-bold mb-1 uppercase">Auto-Generated Report</div>
-                        <div className="text-[10px] text-gray-500 italic border-l-2 border-violet-300 pl-2">
-                            "{data.content || 'Here are your details:'}"
-                            <br/>
-                            <span className="text-violet-400 font-mono">[ ...List of Variables... ]</span>
-                            <br/>
-                            "{data.footerText || ''}"
+                    <div className="flex flex-col gap-2 p-2.5 bg-gradient-to-br from-violet-50 via-purple-50 to-fuchsia-50 rounded-lg border border-violet-100">
+                        <div className="text-[10px] text-violet-800 font-bold uppercase flex items-center justify-between">
+                            <span>Advanced Summary</span>
+                            <span className="px-1.5 py-0.5 rounded bg-white/80 border border-violet-100 text-[9px]">{(data.summaryStyle || 'card').toUpperCase()}</span>
+                        </div>
+                        <div className="text-[10px] text-gray-700 leading-relaxed">{data.content || 'Here are your details:'}</div>
+                        <div className="space-y-1">
+                            {(data.summaryVariables?.length ? data.summaryVariables : [{ variable: 'name', label: 'Name' }, { variable: 'phone', label: 'Phone' }]).slice(0, 3).map((item: any) => (
+                                <div key={item.variable} className="flex items-center justify-between text-[10px] bg-white/80 border border-violet-100 rounded px-2 py-1">
+                                    <span className="font-semibold text-gray-700 truncate">{item.label || item.variable}</span>
+                                    <span className="font-mono text-violet-500">{`{{${item.variable}}}`}</span>
+                                </div>
+                            ))}
+                            {(data.summaryVariables?.length || 0) > 3 && (
+                                <div className="text-[9px] text-gray-400 italic text-center">+{data.summaryVariables.length - 3} more fields</div>
+                            )}
                         </div>
                     </div>
                 )}
@@ -294,8 +325,30 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
 const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>, onChange: (id: string, d: any) => void, onClose: () => void }) => {
     const [local, setLocal] = useState(node.data);
     const [activeTab, setActiveTab] = useState<'content' | 'settings'>('content');
+    const [customSummaryVariable, setCustomSummaryVariable] = useState('');
+    const allNodes = useFlowStore(s => s.nodes);
+
+    const availableVariables = useMemo(() => {
+        const variableNodes = allNodes
+            .filter(n => n.id !== node.id)
+            .map(n => getNodeVariableMeta(n.data, n.id))
+            .filter((v): v is NonNullable<typeof v> => Boolean(v));
+
+        const deduped = Array.from(new Map(variableNodes.map(v => [v.variable, v])).values());
+        return deduped.sort((a, b) => a.variable.localeCompare(b.variable));
+    }, [allNodes, node.id]);
+
+    const selectedSummaryVariables = useMemo(() => {
+        return (local.summaryVariables || []).map((entry: any) => ({
+            ...entry,
+            variable: sanitizeVariableName(String(entry.variable || ''))
+        })).filter((entry: any) => entry.variable);
+    }, [local.summaryVariables]);
     
-    useEffect(() => setLocal(node.data), [node.id]);
+    useEffect(() => {
+        setLocal(node.data);
+        setCustomSummaryVariable('');
+    }, [node.id, node.data]);
 
     const update = (k: string, v: any) => {
         const n = { ...local, [k]: v };
@@ -384,6 +437,107 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         </div>
                     )}
 
+                    {local.type === 'summary' && (
+                        <div className="bg-gradient-to-br from-violet-50 via-purple-50 to-fuchsia-50 p-4 rounded-xl border border-violet-200 shadow-sm space-y-4">
+                            <div className="flex items-start gap-3">
+                                <div className="bg-white p-2 rounded-lg border border-violet-200"><Sparkles size={16} className="text-violet-600"/></div>
+                                <div>
+                                    <h4 className="text-sm font-bold text-violet-900">Advanced Summary Designer</h4>
+                                    <p className="text-xs text-violet-800 mt-1">Pick collected variables and build a polished summary message ready to send to customers.</p>
+                                </div>
+                            </div>
+
+                            <div className="bg-white p-3 rounded-lg border border-violet-100 space-y-2">
+                                <label className="text-[10px] font-bold text-gray-600 uppercase">Design Style</label>
+                                <div className="grid grid-cols-3 gap-2">
+                                    {[
+                                        { key: 'card', label: 'Card' },
+                                        { key: 'clean', label: 'Clean' },
+                                        { key: 'compact', label: 'Compact' }
+                                    ].map(style => (
+                                        <button
+                                            key={style.key}
+                                            onClick={() => update('summaryStyle', style.key)}
+                                            className={`py-2 text-xs font-bold rounded-lg border transition-colors ${
+                                                (local.summaryStyle || 'card') === style.key
+                                                    ? 'bg-violet-100 border-violet-300 text-violet-800'
+                                                    : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-violet-50'
+                                            }`}
+                                        >
+                                            {style.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="bg-white p-3 rounded-lg border border-violet-100 space-y-2.5">
+                                <div className="flex items-center justify-between">
+                                    <label className="text-[10px] font-bold text-gray-600 uppercase">Collected Variables</label>
+                                    <span className="text-[10px] text-violet-700 font-bold">{selectedSummaryVariables.length} selected</span>
+                                </div>
+
+                                {availableVariables.length === 0 && (
+                                    <p className="text-xs text-gray-500">No mapped variables yet. Add variable names in node settings or add a custom variable below.</p>
+                                )}
+
+                                {availableVariables.length > 0 && (
+                                    <div className="max-h-56 overflow-y-auto space-y-2 pr-1">
+                                        {availableVariables.map(item => {
+                                            const selected = selectedSummaryVariables.some((v: any) => v.variable === item.variable);
+                                            return (
+                                                <label key={item.variable} className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer ${selected ? 'border-violet-300 bg-violet-50' : 'border-gray-200 bg-gray-50'}`}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={selected}
+                                                        onChange={(e) => {
+                                                            const current = selectedSummaryVariables;
+                                                            if (e.target.checked) {
+                                                                update('summaryVariables', [...current, { variable: item.variable, label: item.label }]);
+                                                            } else {
+                                                                update('summaryVariables', current.filter((v: any) => v.variable !== item.variable));
+                                                            }
+                                                        }}
+                                                    />
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="flex items-center gap-1.5">
+                                                            <p className="text-xs font-semibold text-gray-700 truncate">{item.label}</p>
+                                                            {item.isAuto && <span className="text-[9px] px-1 py-0.5 rounded bg-amber-100 text-amber-700 font-bold">AUTO</span>}
+                                                        </div>
+                                                        <p className="text-[10px] font-mono text-gray-500 truncate">{`{{${item.variable}}}`}</p>
+                                                    </div>
+                                                    <span className="text-[9px] uppercase text-gray-400 font-bold">{item.type?.replace(/_/g, ' ')}</span>
+                                                </label>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+
+                                <div className="pt-2 border-t border-violet-100 space-y-2">
+                                    <label className="text-[10px] font-bold text-gray-600 uppercase">Add Custom Variable</label>
+                                    <div className="flex gap-2">
+                                        <input
+                                            className="flex-1 border border-gray-200 p-2 rounded-lg text-xs font-mono bg-gray-50"
+                                            value={customSummaryVariable}
+                                            onChange={(e) => setCustomSummaryVariable(sanitizeVariableName(e.target.value))}
+                                            placeholder="e.g. preferred_vehicle_type"
+                                        />
+                                        <button
+                                            onClick={() => {
+                                                if (!customSummaryVariable) return;
+                                                if (selectedSummaryVariables.some((v: any) => v.variable === customSummaryVariable)) return;
+                                                update('summaryVariables', [...selectedSummaryVariables, { variable: customSummaryVariable, label: customSummaryVariable.replace(/_/g, ' ') }]);
+                                                setCustomSummaryVariable('');
+                                            }}
+                                            className="px-3 py-2 rounded-lg text-xs font-bold bg-violet-600 text-white hover:bg-violet-700"
+                                        >
+                                            Add
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {/* Smart Scheduler V2 Config */}
                     {local.type === 'datetime_picker' && (
                         <div className="bg-gradient-to-br from-cyan-50 via-sky-50 to-indigo-50 p-4 rounded-xl border border-cyan-100 shadow-sm space-y-4">
@@ -403,7 +557,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                     <input
                                         className="mt-1 w-full border border-gray-200 p-2 rounded-lg text-xs font-mono bg-gray-50"
                                         value={local.variable || 'time_slot'}
-                                        onChange={e => update('variable', e.target.value.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase())}
+                                        onChange={e => update('variable', sanitizeVariableName(e.target.value))}
                                         placeholder="time_slot"
                                     />
                                     <p className="text-[10px] text-gray-500 mt-1">Final selected time key.</p>
@@ -697,7 +851,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         <div className="bg-cyan-50 p-4 rounded-xl border border-cyan-100 space-y-4">
                             <div>
                                 <label className="block text-[10px] font-bold text-cyan-800 uppercase mb-1">Variable Name</label>
-                                <input className="w-full border border-cyan-200 p-2 rounded text-sm bg-white" value={local.variable || ''} onChange={e => update('variable', e.target.value)} placeholder="e.g. is_qualified" />
+                                <input className="w-full border border-cyan-200 p-2 rounded text-sm bg-white" value={local.variable || ''} onChange={e => update('variable', sanitizeVariableName(e.target.value))} placeholder="e.g. is_qualified" />
                             </div>
                             <div>
                                 <label className="block text-[10px] font-bold text-cyan-800 uppercase mb-1">Value to Assign</label>
@@ -720,7 +874,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         <div className="bg-orange-50 p-4 rounded-xl border border-orange-100 space-y-4">
                              <div>
                                 <label className="block text-[10px] font-bold text-orange-800 uppercase mb-1">Save Response To</label>
-                                <input className="w-full border border-orange-200 p-2 rounded text-sm bg-white" value={local.variable || ''} onChange={e => update('variable', e.target.value)} placeholder="variable_name" />
+                                <input className="w-full border border-orange-200 p-2 rounded text-sm bg-white" value={local.variable || ''} onChange={e => update('variable', sanitizeVariableName(e.target.value))} placeholder="variable_name" />
                             </div>
                             <div>
                                 <label className="block text-[10px] font-bold text-orange-800 uppercase mb-1">Expected Format</label>
@@ -735,12 +889,26 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         </div>
                     )}
 
+                    {/* Variable Mapping for Interactive/Location Nodes */}
+                    {['interactive_button', 'interactive_list', 'location_request', 'pickup_location', 'destination_location'].includes(local.type) && (
+                        <div className="bg-violet-50 p-4 rounded-xl border border-violet-100 space-y-2">
+                            <label className="block text-[10px] font-bold text-violet-800 uppercase">Save Response To Variable</label>
+                            <input
+                                className="w-full border border-violet-200 p-2 rounded text-sm bg-white font-mono"
+                                value={local.variable || DEFAULT_VARIABLE_BY_TYPE[local.type as NodeType] || ''}
+                                onChange={e => update('variable', sanitizeVariableName(e.target.value))}
+                                placeholder="response_variable"
+                            />
+                            <p className="text-[10px] text-violet-700">This response variable will appear in Summary Designer as <span className="font-mono">{`{{variable_name}}`}</span>.</p>
+                        </div>
+                    )}
+
                     {/* Condition Logic */}
                     {local.type === 'condition' && (
                          <div className="bg-amber-50 p-4 rounded-xl border border-amber-100 space-y-3">
                              <div>
                                 <label className="block text-[10px] font-bold text-amber-800 uppercase mb-1">Check Variable</label>
-                                <input className="w-full border border-amber-200 p-2 rounded text-sm bg-white" value={local.variable || ''} onChange={e => update('variable', e.target.value)} />
+                                <input className="w-full border border-amber-200 p-2 rounded text-sm bg-white" value={local.variable || ''} onChange={e => update('variable', sanitizeVariableName(e.target.value))} />
                              </div>
                              <div className="grid grid-cols-2 gap-2">
                                 <select className="w-full border border-amber-200 p-2 rounded text-sm bg-white" value={local.operator || 'equals'} onChange={e => update('operator', e.target.value)}>
@@ -844,13 +1012,16 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
               type, 
               label: type.replace(/_/g, ' '), 
               content: type === 'pickup_location' ? 'Select Pickup Location:' : type === 'destination_location' ? 'Select Destination:' : '',
+              variable: type === 'input' ? 'customer_response' : type === 'interactive_button' ? 'selected_option' : type === 'interactive_list' ? 'selected_menu_option' : DEFAULT_VARIABLE_BY_TYPE[type],
               presets: (type === 'pickup_location' || type === 'destination_location') ? [{ id: 'pre_1', title: 'Select on Map', type: 'manual' }] : undefined 
           }
       };
       
       if (type === 'summary') {
-          newNode.data.content = "Here are the details we've collected:";
-          newNode.data.footerText = "Is this information correct?";
+          newNode.data.content = "✨ Booking Summary";
+          newNode.data.footerText = "Please confirm the details above.";
+          newNode.data.summaryStyle = 'card';
+          newNode.data.summaryVariables = [];
       }
       if (type === 'datetime_picker') {
           newNode.data.content = "When would you like to schedule this ride?";
