@@ -198,12 +198,7 @@ ${link}`.trim();
 
     if (displayVal === null || displayVal === undefined) return '';
     if (typeof displayVal === 'object') return JSON.stringify(displayVal);
-
-    const asText = String(displayVal);
-    if (asText.startsWith('PERIOD_')) {
-        return asText.replace('PERIOD_', '').toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
-    }
-    return asText;
+    return String(displayVal);
 };
 
 const formatSummaryToken = (text, style = 'plain') => {
@@ -865,12 +860,9 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 let payload = null;
 
                 if (data.type === 'summary') {
-                    const headerText = formatSummaryToken(validBody || "📋 Summary", data.summaryHeaderStyle || 'bold');
-                    let summaryText = headerText;
-                    if (data.summaryDescription) {
-                        const descriptionText = processText(data.summaryDescription, candidate);
-                        summaryText += `\n${formatSummaryToken(descriptionText, data.summaryDescriptionStyle || 'plain')}`;
-                    }
+                    let summaryText = validBody || "📋 Summary";
+                    if (data.summaryDescription) summaryText += `
+${processText(data.summaryDescription, candidate)}`;
 
                     const ignoredKeys = ['current_bot_step_id', 'is_human_mode', 'undefined', 'null'];
                     const filteredEntries = Object.entries(candidate.variables || {}).filter(([k, v]) => {
@@ -896,7 +888,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         configuredRows.push(`${field.prefix || '• '} ${styledLabel}: ${styledValue}${field.suffix || ''}`);
                     });
 
-                    const includeAutoVariables = data.summaryUseAutoVariables === true || (!summaryFields.length && data.summaryUseAutoVariables !== false);
+                    const includeAutoVariables = data.summaryUseAutoVariables !== false;
                     if (includeAutoVariables) {
                         filteredEntries.forEach(([key, val]) => {
                             if (usedVariables.has(key)) return;
@@ -915,7 +907,9 @@ ${configuredRows.join('\n')}`;
 ${data.summaryEmptyText || '(No data collected yet)'}`;
                     }
 
-                    if (data.footerText) summaryText += `\n\n${formatSummaryToken(data.footerText, data.summaryFooterStyle || 'italic')}`;
+                    if (data.footerText) summaryText += `
+
+_${data.footerText}_`;
                     payload = { type: 'text', text: { body: summaryText } };
                 }
 

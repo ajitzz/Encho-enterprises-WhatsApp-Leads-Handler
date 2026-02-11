@@ -132,9 +132,6 @@ export interface FlowNodeData {
   summaryFields?: SummaryFieldConfig[];
   summaryUseAutoVariables?: boolean;
   summaryEmptyText?: string;
-  summaryHeaderStyle?: 'plain' | 'bold' | 'italic' | 'uppercase' | 'code';
-  summaryDescriptionStyle?: 'plain' | 'bold' | 'italic' | 'uppercase' | 'code';
-  summaryFooterStyle?: 'plain' | 'bold' | 'italic' | 'uppercase' | 'code';
 
   [key: string]: any;
 }

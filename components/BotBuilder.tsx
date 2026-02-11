@@ -29,27 +29,19 @@ import {
 } from 'lucide-react';
 import { FlowNodeData, NodeType, ListSection, LocationPreset, SummaryFieldConfig } from '../types';
 
-const inferCapturedVariableNames = (data: FlowNodeData, nodeId?: string): string[] => {
-    const vars = new Set<string>();
-    if (data.variable) vars.add(data.variable);
+const inferCapturedVariableName = (data: FlowNodeData, nodeId?: string): string | null => {
+    if (data.variable) return data.variable;
 
-    if (data.type === 'pickup_location') vars.add('pickup_coords');
-    if (data.type === 'destination_location') vars.add('dest_coords');
-    if (data.type === 'location_request') vars.add('location_data');
-    if (data.type === 'datetime_picker') {
-        vars.add(data.variable || 'time_slot');
-        vars.add('pickup_date');
-        vars.add('time_period');
-    }
-    if (data.type === 'set_variable' && data.variable) vars.add(data.variable);
+    if (data.type === 'pickup_location') return 'pickup_coords';
+    if (data.type === 'destination_location') return 'dest_coords';
+    if (data.type === 'location_request') return 'location_data';
+    if (data.type === 'datetime_picker') return 'time_slot';
 
     const captureTypes: NodeType[] = ['input', 'interactive_button', 'interactive_list', 'rich_card'];
-    if (captureTypes.includes(data.type) && !data.variable) {
-        const fallback = (data.label || nodeId || '').toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/^_+|_+$/g, '');
-        if (fallback) vars.add(fallback);
-    }
+    if (!captureTypes.includes(data.type)) return null;
 
-    return Array.from(vars).filter(Boolean);
+    const fallback = (data.label || nodeId || '').toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/^_+|_+$/g, '');
+    return fallback || null;
 };
 
 const labelFromVariable = (variable: string) => variable.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -325,7 +317,8 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
         allNodes
             .filter(n => n.id !== node.id)
             .forEach((n) => {
-                inferCapturedVariableNames(n.data as FlowNodeData, n.id).forEach((variableName) => vars.add(variableName));
+                const variableName = inferCapturedVariableName(n.data as FlowNodeData, n.id);
+                if (variableName) vars.add(variableName);
             });
         return Array.from(vars);
     }, [allNodes, node.id]);
@@ -802,28 +795,6 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                             />
                                         </div>
                                         <div className="grid grid-cols-2 gap-2">
-                                            <input
-                                                className="border border-violet-200 p-2 rounded text-xs"
-                                                value={field.prefix || ''}
-                                                onChange={e => {
-                                                    const next = [...(local.summaryFields || [])];
-                                                    next[index] = { ...next[index], prefix: e.target.value };
-                                                    updateSummaryFields(next);
-                                                }}
-                                                placeholder="Prefix (e.g. • )"
-                                            />
-                                            <input
-                                                className="border border-violet-200 p-2 rounded text-xs"
-                                                value={field.suffix || ''}
-                                                onChange={e => {
-                                                    const next = [...(local.summaryFields || [])];
-                                                    next[index] = { ...next[index], suffix: e.target.value };
-                                                    updateSummaryFields(next);
-                                                }}
-                                                placeholder="Suffix (optional)"
-                                            />
-                                        </div>
-                                        <div className="grid grid-cols-2 gap-2">
                                             <select
                                                 className="border border-violet-200 p-2 rounded text-xs"
                                                 value={field.labelStyle || 'bold'}
@@ -891,7 +862,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                 <label className="flex items-center gap-2 text-[11px] text-violet-800">
                                     <input
                                         type="checkbox"
-                                        checked={local.summaryUseAutoVariables ?? false}
+                                        checked={local.summaryUseAutoVariables ?? true}
                                         onChange={e => update('summaryUseAutoVariables', e.target.checked)}
                                     />
                                     Include unconfigured variables
@@ -902,33 +873,6 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                     onChange={e => update('summaryEmptyText', e.target.value)}
                                     placeholder="No data fallback"
                                 />
-                            </div>
-
-                            <div className="grid grid-cols-1 gap-2">
-                                <p className="text-[10px] text-violet-700">WhatsApp does not support font size changes. You can control style (bold/italic/code/uppercase).</p>
-                                <div className="grid grid-cols-3 gap-2">
-                                    <select className="border border-violet-200 p-2 rounded text-xs" value={local.summaryHeaderStyle || 'bold'} onChange={e => update('summaryHeaderStyle', e.target.value)}>
-                                        <option value="bold">Header: Bold</option>
-                                        <option value="plain">Header: Plain</option>
-                                        <option value="italic">Header: Italic</option>
-                                        <option value="uppercase">Header: Uppercase</option>
-                                        <option value="code">Header: Code</option>
-                                    </select>
-                                    <select className="border border-violet-200 p-2 rounded text-xs" value={local.summaryDescriptionStyle || 'plain'} onChange={e => update('summaryDescriptionStyle', e.target.value)}>
-                                        <option value="plain">Description: Plain</option>
-                                        <option value="bold">Description: Bold</option>
-                                        <option value="italic">Description: Italic</option>
-                                        <option value="uppercase">Description: Uppercase</option>
-                                        <option value="code">Description: Code</option>
-                                    </select>
-                                    <select className="border border-violet-200 p-2 rounded text-xs" value={local.summaryFooterStyle || 'italic'} onChange={e => update('summaryFooterStyle', e.target.value)}>
-                                        <option value="italic">Footer: Italic</option>
-                                        <option value="plain">Footer: Plain</option>
-                                        <option value="bold">Footer: Bold</option>
-                                        <option value="uppercase">Footer: Uppercase</option>
-                                        <option value="code">Footer: Code</option>
-                                    </select>
-                                </div>
                             </div>
                         </div>
                     )}
@@ -1092,10 +1036,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
       if (type === 'summary') {
           newNode.data.content = "📋 Booking Summary";
           newNode.data.summaryDescription = "Please review your responses below.";
-          newNode.data.summaryUseAutoVariables = false;
-          newNode.data.summaryHeaderStyle = 'bold';
-          newNode.data.summaryDescriptionStyle = 'plain';
-          newNode.data.summaryFooterStyle = 'italic';
+          newNode.data.summaryUseAutoVariables = true;
           newNode.data.summaryEmptyText = "No responses captured yet.";
           newNode.data.footerText = "Reply YES to confirm or NO to edit.";
       }
