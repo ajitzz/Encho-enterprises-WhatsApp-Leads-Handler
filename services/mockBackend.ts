@@ -70,6 +70,80 @@ class MockBackendService {
     }
   }
 
+  private interpolateTemplate(template: string, variables: Record<string, any>) {
+    return template.replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (_, key) => {
+      const value = variables[key];
+      return value === undefined || value === null || value === '' ? '—' : String(value);
+    });
+  }
+
+  private resolveNodeVariableName(node: any) {
+    const explicit = String(node?.data?.variable || '').trim();
+    if (explicit) return explicit;
+
+    const fallbackByType: Record<string, string> = {
+      pickup_location: 'pickup_coords',
+      destination_location: 'destination_coords',
+      location_request: 'live_location',
+      datetime_picker: 'pickup_time',
+      interactive_button: 'selected_option',
+      interactive_list: 'selected_menu_option'
+    };
+
+    return fallbackByType[node?.data?.type] || '';
+  }
+
+  private saveNodeResponse(driver: Driver, node: any, text: string) {
+    const nodeType = node?.data?.type;
+    const variableName = this.resolveNodeVariableName(node);
+    if (!variableName) return;
+
+    if (['input', 'interactive_button', 'interactive_list', 'datetime_picker', 'pickup_location', 'destination_location', 'location_request'].includes(nodeType)) {
+      driver.variables[variableName] = text;
+    }
+  }
+
+  private buildSummaryMessage(data: any, variables: Record<string, any>) {
+    const style = data.summaryStyle || 'card';
+    const configuredRows = (data.summaryVariables || []) as Array<{ variable: string; label?: string; emoji?: string }>;
+    const rows = configuredRows.length
+      ? configuredRows
+      : Object.keys(variables || {}).map((key) => ({ variable: key, label: key.replace(/_/g, ' ') }));
+
+    const formattedRows = rows
+      .filter((row) => row.variable)
+      .map((row) => {
+        const value = variables[row.variable];
+        const safeValue = value === undefined || value === null || value === '' ? '—' : String(value);
+        const prefix = row.emoji || (style === 'compact' ? '•' : '▪️');
+        return `${prefix} *${row.label || row.variable}:* ${safeValue}`;
+      });
+
+    const header = this.interpolateTemplate(data.content || 'Summary', variables);
+    const footer = this.interpolateTemplate(data.footerText || '', variables);
+
+    if (style === 'compact') {
+      return [header, ...formattedRows, footer].filter(Boolean).join('\n');
+    }
+
+    if (style === 'clean') {
+      return [
+        `*${header}*`,
+        ...formattedRows,
+        footer
+      ].filter(Boolean).join('\n');
+    }
+
+    return [
+      '┏━━━ 📋 *Summary* ━━━',
+      `┃ ${header}`,
+      '┣━━━━━━━━━━━━━━━━━━',
+      ...formattedRows.map((line) => `┃ ${line}`),
+      ...(footer ? ['┣━━━━━━━━━━━━━━━━━━', `┃ ${footer}`] : []),
+      '┗━━━━━━━━━━━━━━━━━━'
+    ].join('\n');
+  }
+
   // --- MOCK STATE MACHINE ENGINE ---
   processIncomingMessage(phoneNumber: string, text: string, imageUrl?: string): { driver: Driver, reply?: Message, actionNeeded: 'NONE' } {
     let driver = this.drivers.find((d) => d.phoneNumber === phoneNumber);
@@ -126,6 +200,8 @@ class MockBackendService {
     let nextNodeId = null;
 
     if (currentNodeId) {
+        this.saveNodeResponse(driver, currentNode, text);
+
         // Mocking Button/List Logic: 
         // In simulation, we assume if the user types something similar to a button title, they clicked it.
         // Or if they type 'btn_...' (debug id).
@@ -136,6 +212,14 @@ class MockBackendService {
              const matchedBtn = currentNode.data.buttons.find((b: any) => b.title.toLowerCase() === text.toLowerCase());
              if (matchedBtn) {
                  matchedEdge = edges.find(e => e.source === currentNodeId && e.sourceHandle === matchedBtn.id);
+             }
+        }
+
+        if (currentNode.data.type === 'interactive_list' && currentNode.data.sections) {
+             const allRows = currentNode.data.sections.flatMap((section: any) => section.rows || []);
+             const matchedRow = allRows.find((row: any) => row.title.toLowerCase() === text.toLowerCase());
+             if (matchedRow) {
+                 matchedEdge = edges.find(e => e.source === currentNodeId && e.sourceHandle === matchedRow.id);
              }
         }
         
@@ -165,11 +249,15 @@ class MockBackendService {
         if (data.type === 'interactive_button') msgType = 'interactive';
         if (data.type === 'interactive_list') msgType = 'interactive';
         
-        if (data.content || data.mediaUrl) {
+        if (data.content || data.mediaUrl || data.type === 'summary') {
+             const renderedText = data.type === 'summary'
+               ? this.buildSummaryMessage(data, driver.variables || {})
+               : this.interpolateTemplate(data.content || '', driver.variables || {});
+
              this.addMessage(driver.id, {
                  id: Date.now().toString() + '_' + limit,
                  sender: 'system',
-                 text: data.content,
+                 text: renderedText,
                  imageUrl: data.mediaUrl,
                  timestamp: Date.now() + (10 - limit) * 100,
                  type: msgType

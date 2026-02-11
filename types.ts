@@ -117,6 +117,14 @@ export interface FlowNodeData {
   templateLanguage?: string;
   templateVariables?: string[]; 
 
+  // Summary Node
+  summaryStyle?: 'clean' | 'card' | 'compact';
+  summaryVariables?: Array<{
+    variable: string;
+    label?: string;
+    emoji?: string;
+  }>;
+
   [key: string]: any;
 }
 
