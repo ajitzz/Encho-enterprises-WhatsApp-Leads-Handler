@@ -860,9 +860,10 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 let payload = null;
 
                 if (data.type === 'summary') {
-                    let summaryText = validBody || "📋 Summary";
+                    const headerText = formatSummaryToken(validBody || "📋 Summary", data.summaryHeaderStyle || 'bold');
+                    let summaryText = headerText;
                     if (data.summaryDescription) summaryText += `
-${processText(data.summaryDescription, candidate)}`;
+${formatSummaryToken(processText(data.summaryDescription, candidate), data.summaryDescriptionStyle || 'plain')}`;
 
                     const ignoredKeys = ['current_bot_step_id', 'is_human_mode', 'undefined', 'null'];
                     const filteredEntries = Object.entries(candidate.variables || {}).filter(([k, v]) => {
@@ -885,10 +886,12 @@ ${processText(data.summaryDescription, candidate)}`;
                         const label = field.label || key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
                         const styledLabel = formatSummaryToken(label, field.labelStyle || 'bold');
                         const styledValue = formatSummaryToken(formatSummaryValue(raw), field.valueStyle || 'plain');
-                        configuredRows.push(`${field.prefix || '• '} ${styledLabel}: ${styledValue}${field.suffix || ''}`);
+                        const rowPrefix = field.prefix ?? '•';
+                        const rowSuffix = field.suffix ?? '';
+                        configuredRows.push(`${rowPrefix} ${styledLabel}: ${styledValue}${rowSuffix}`);
                     });
 
-                    const includeAutoVariables = data.summaryUseAutoVariables !== false;
+                    const includeAutoVariables = data.summaryUseAutoVariables === true || (summaryFields.length === 0 && data.summaryUseAutoVariables !== false);
                     if (includeAutoVariables) {
                         filteredEntries.forEach(([key, val]) => {
                             if (usedVariables.has(key)) return;
@@ -909,7 +912,7 @@ ${data.summaryEmptyText || '(No data collected yet)'}`;
 
                     if (data.footerText) summaryText += `
 
-_${data.footerText}_`;
+${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooterStyle || 'italic')}`;
                     payload = { type: 'text', text: { body: summaryText } };
                 }
 

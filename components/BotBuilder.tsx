@@ -27,21 +27,28 @@ import {
   LocateFixed, AlertTriangle, Bot, CalendarClock, Calendar, FileCheck,
   Sparkles, TimerReset
 } from 'lucide-react';
-import { FlowNodeData, NodeType, ListSection, LocationPreset, SummaryFieldConfig } from '../types';
+import { FlowNodeData, NodeType, ListSection, LocationPreset, SummaryFieldConfig, SummaryTextStyle } from '../types';
 
-const inferCapturedVariableName = (data: FlowNodeData, nodeId?: string): string | null => {
-    if (data.variable) return data.variable;
+const inferCapturedVariableNames = (data: FlowNodeData, nodeId?: string): string[] => {
+    const variables = new Set<string>();
 
-    if (data.type === 'pickup_location') return 'pickup_coords';
-    if (data.type === 'destination_location') return 'dest_coords';
-    if (data.type === 'location_request') return 'location_data';
-    if (data.type === 'datetime_picker') return 'time_slot';
+    if (data.variable) variables.add(String(data.variable).trim());
+
+    if (data.type === 'datetime_picker') {
+        ['pickup_date', 'time_period', 'time_slot'].forEach(v => variables.add(v));
+    }
+
+    if (data.type === 'pickup_location') variables.add('pickup_coords');
+    if (data.type === 'destination_location') variables.add('dest_coords');
+    if (data.type === 'location_request') variables.add('location_data');
 
     const captureTypes: NodeType[] = ['input', 'interactive_button', 'interactive_list', 'rich_card'];
-    if (!captureTypes.includes(data.type)) return null;
+    if (captureTypes.includes(data.type) && !data.variable) {
+        const fallback = (data.label || nodeId || '').toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/^_+|_+$/g, '');
+        if (fallback) variables.add(fallback);
+    }
 
-    const fallback = (data.label || nodeId || '').toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/^_+|_+$/g, '');
-    return fallback || null;
+    return Array.from(variables).filter(Boolean);
 };
 
 const labelFromVariable = (variable: string) => variable.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -317,8 +324,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
         allNodes
             .filter(n => n.id !== node.id)
             .forEach((n) => {
-                const variableName = inferCapturedVariableName(n.data as FlowNodeData, n.id);
-                if (variableName) vars.add(variableName);
+                inferCapturedVariableNames(n.data as FlowNodeData, n.id).forEach((variableName) => vars.add(variableName));
             });
         return Array.from(vars);
     }, [allNodes, node.id]);
@@ -767,22 +773,66 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                         </button>
                                     ))}
                                 </div>
+                                <datalist id="summary-detected-variables">
+                                    {detectedVariables.map(variable => (
+                                        <option key={`suggest_${variable}`} value={variable} />
+                                    ))}
+                                </datalist>
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-2">
+                                <select
+                                    className="border border-violet-200 p-2 rounded text-xs"
+                                    value={(local.summaryHeaderStyle || 'bold') as SummaryTextStyle}
+                                    onChange={e => update('summaryHeaderStyle', e.target.value as SummaryTextStyle)}
+                                >
+                                    <option value="bold">Header: Bold</option>
+                                    <option value="plain">Header: Plain</option>
+                                    <option value="uppercase">Header: Uppercase</option>
+                                    <option value="italic">Header: Italic</option>
+                                    <option value="code">Header: Code</option>
+                                </select>
+                                <select
+                                    className="border border-violet-200 p-2 rounded text-xs"
+                                    value={(local.summaryDescriptionStyle || 'plain') as SummaryTextStyle}
+                                    onChange={e => update('summaryDescriptionStyle', e.target.value as SummaryTextStyle)}
+                                >
+                                    <option value="plain">Description: Plain</option>
+                                    <option value="bold">Description: Bold</option>
+                                    <option value="uppercase">Description: Uppercase</option>
+                                    <option value="italic">Description: Italic</option>
+                                    <option value="code">Description: Code</option>
+                                </select>
+                                <select
+                                    className="border border-violet-200 p-2 rounded text-xs"
+                                    value={(local.summaryFooterStyle || 'italic') as SummaryTextStyle}
+                                    onChange={e => update('summaryFooterStyle', e.target.value as SummaryTextStyle)}
+                                >
+                                    <option value="italic">Footer: Italic</option>
+                                    <option value="plain">Footer: Plain</option>
+                                    <option value="bold">Footer: Bold</option>
+                                    <option value="uppercase">Footer: Uppercase</option>
+                                    <option value="code">Footer: Code</option>
+                                </select>
                             </div>
 
                             <div className="space-y-2">
                                 {(local.summaryFields || []).map((field: SummaryFieldConfig, index: number) => (
                                     <div key={field.id || index} className="bg-white border border-violet-200 rounded-lg p-2.5 space-y-2">
                                         <div className="grid grid-cols-2 gap-2">
-                                            <input
-                                                className="border border-violet-200 p-2 rounded text-xs font-mono"
-                                                value={field.variable || ''}
-                                                onChange={e => {
-                                                    const next = [...(local.summaryFields || [])];
-                                                    next[index] = { ...next[index], variable: e.target.value.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() };
-                                                    updateSummaryFields(next);
-                                                }}
-                                                placeholder="variable_name"
-                                            />
+                                            <div className="space-y-1">
+                                                <input
+                                                    list="summary-detected-variables"
+                                                    className="border border-violet-200 p-2 rounded text-xs font-mono w-full"
+                                                    value={field.variable || ''}
+                                                    onChange={e => {
+                                                        const next = [...(local.summaryFields || [])];
+                                                        next[index] = { ...next[index], variable: e.target.value.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() };
+                                                        updateSummaryFields(next);
+                                                    }}
+                                                    placeholder="variable_name"
+                                                />
+                                            </div>
                                             <input
                                                 className="border border-violet-200 p-2 rounded text-xs"
                                                 value={field.label || ''}
@@ -792,6 +842,28 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                                     updateSummaryFields(next);
                                                 }}
                                                 placeholder="Customer label"
+                                            />
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <input
+                                                className="border border-violet-200 p-2 rounded text-xs"
+                                                value={field.prefix || ''}
+                                                onChange={e => {
+                                                    const next = [...(local.summaryFields || [])];
+                                                    next[index] = { ...next[index], prefix: e.target.value };
+                                                    updateSummaryFields(next);
+                                                }}
+                                                placeholder="Prefix (e.g. • )"
+                                            />
+                                            <input
+                                                className="border border-violet-200 p-2 rounded text-xs"
+                                                value={field.suffix || ''}
+                                                onChange={e => {
+                                                    const next = [...(local.summaryFields || [])];
+                                                    next[index] = { ...next[index], suffix: e.target.value };
+                                                    updateSummaryFields(next);
+                                                }}
+                                                placeholder="Suffix (e.g. ✅)"
                                             />
                                         </div>
                                         <div className="grid grid-cols-2 gap-2">
@@ -862,7 +934,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                 <label className="flex items-center gap-2 text-[11px] text-violet-800">
                                     <input
                                         type="checkbox"
-                                        checked={local.summaryUseAutoVariables ?? true}
+                                        checked={local.summaryUseAutoVariables ?? false}
                                         onChange={e => update('summaryUseAutoVariables', e.target.checked)}
                                     />
                                     Include unconfigured variables
@@ -1036,7 +1108,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
       if (type === 'summary') {
           newNode.data.content = "📋 Booking Summary";
           newNode.data.summaryDescription = "Please review your responses below.";
-          newNode.data.summaryUseAutoVariables = true;
+          newNode.data.summaryUseAutoVariables = false;
           newNode.data.summaryEmptyText = "No responses captured yet.";
           newNode.data.footerText = "Reply YES to confirm or NO to edit.";
       }
