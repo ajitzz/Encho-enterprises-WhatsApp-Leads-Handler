@@ -73,6 +73,16 @@ export interface ConditionRule {
   value: string;
 }
 
+export interface SummaryFieldConfig {
+  id: string;
+  variable: string;
+  label?: string;
+  labelStyle?: 'plain' | 'bold' | 'uppercase';
+  valueStyle?: 'plain' | 'bold' | 'italic' | 'code';
+  prefix?: string;
+  suffix?: string;
+}
+
 export interface FlowNodeData {
   id: string;
   label: string;
@@ -116,6 +126,12 @@ export interface FlowNodeData {
   templateName?: string;
   templateLanguage?: string;
   templateVariables?: string[]; 
+
+  // Summary Node Advanced Layout
+  summaryDescription?: string;
+  summaryFields?: SummaryFieldConfig[];
+  summaryUseAutoVariables?: boolean;
+  summaryEmptyText?: string;
 
   [key: string]: any;
 }

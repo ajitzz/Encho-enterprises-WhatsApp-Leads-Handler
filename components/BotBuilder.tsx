@@ -27,7 +27,24 @@ import {
   LocateFixed, AlertTriangle, Bot, CalendarClock, Calendar, FileCheck,
   Sparkles, TimerReset
 } from 'lucide-react';
-import { FlowNodeData, NodeType, ListSection, LocationPreset } from '../types';
+import { FlowNodeData, NodeType, ListSection, LocationPreset, SummaryFieldConfig } from '../types';
+
+const inferCapturedVariableName = (data: FlowNodeData, nodeId?: string): string | null => {
+    if (data.variable) return data.variable;
+
+    if (data.type === 'pickup_location') return 'pickup_coords';
+    if (data.type === 'destination_location') return 'dest_coords';
+    if (data.type === 'location_request') return 'location_data';
+    if (data.type === 'datetime_picker') return 'time_slot';
+
+    const captureTypes: NodeType[] = ['input', 'interactive_button', 'interactive_list', 'rich_card'];
+    if (!captureTypes.includes(data.type)) return null;
+
+    const fallback = (data.label || nodeId || '').toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/^_+|_+$/g, '');
+    return fallback || null;
+};
+
+const labelFromVariable = (variable: string) => variable.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
 // --- 1. ADVANCED NODE COMPONENT (VISUALIZER) ---
 
@@ -61,7 +78,7 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
         case 'location_request': config = { color: 'bg-teal-600', icon: <MapPin size={14} />, label: 'Location', subtitle: 'Request GPS' }; break;
         case 'pickup_location': config = { color: 'bg-lime-600', icon: <MapPin size={14} />, label: 'Pickup Location', subtitle: 'Get Start Point' }; break;
         case 'destination_location': config = { color: 'bg-red-500', icon: <Navigation size={14} />, label: 'Destination', subtitle: 'Get End Point' }; break;
-        case 'summary': config = { color: 'bg-violet-600', icon: <FileCheck size={14} />, label: 'Summary Report', subtitle: 'List All Responses' }; break;
+        case 'summary': config = { color: 'bg-violet-600', icon: <FileCheck size={14} />, label: 'Advanced Summary', subtitle: 'Styled Variable Report' }; break;
         case 'datetime_picker': config = { color: 'bg-cyan-600', icon: <CalendarClock size={14} />, label: 'Smart Scheduler', subtitle: 'Date → Period → Time' }; break;
         case 'handoff': config = { color: 'bg-red-500', icon: <User size={14} />, label: 'Agent Handoff', subtitle: 'Stop Bot' }; break;
         case 'status_update': config = { color: 'bg-green-600', icon: <Check size={14} />, label: 'Set Status', subtitle: 'CRM Update' }; break;
@@ -124,13 +141,12 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                 
                 {data.type === 'summary' && (
                     <div className="flex flex-col gap-2 p-2 bg-violet-50 rounded-lg border border-violet-100">
-                        <div className="text-[10px] text-violet-800 font-bold mb-1 uppercase">Auto-Generated Report</div>
-                        <div className="text-[10px] text-gray-500 italic border-l-2 border-violet-300 pl-2">
-                            "{data.content || 'Here are your details:'}"
-                            <br/>
-                            <span className="text-violet-400 font-mono">[ ...List of Variables... ]</span>
-                            <br/>
-                            "{data.footerText || ''}"
+                        <div className="text-[10px] text-violet-800 font-bold mb-1 uppercase">Advanced Summary</div>
+                        <div className="text-[10px] text-gray-600 leading-relaxed">
+                            <div className="font-semibold text-violet-700">{data.content || 'Summary'}</div>
+                            {data.summaryDescription && <div className="text-gray-500">{data.summaryDescription}</div>}
+                            <div className="mt-1 text-violet-500 font-mono">Rows: {(data.summaryFields || []).length || 'Auto'}</div>
+                            {data.footerText && <div className="text-gray-400 italic">{data.footerText}</div>}
                         </div>
                     </div>
                 )}
@@ -294,6 +310,18 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
 const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>, onChange: (id: string, d: any) => void, onClose: () => void }) => {
     const [local, setLocal] = useState(node.data);
     const [activeTab, setActiveTab] = useState<'content' | 'settings'>('content');
+    const allNodes = useFlowStore((state) => state.nodes);
+
+    const detectedVariables = useMemo(() => {
+        const vars = new Set<string>();
+        allNodes
+            .filter(n => n.id !== node.id)
+            .forEach((n) => {
+                const variableName = inferCapturedVariableName(n.data as FlowNodeData, n.id);
+                if (variableName) vars.add(variableName);
+            });
+        return Array.from(vars);
+    }, [allNodes, node.id]);
     
     useEffect(() => setLocal(node.data), [node.id]);
 
@@ -302,6 +330,8 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
         setLocal(n);
         onChange(node.id, n);
     };
+
+    const updateSummaryFields = (fields: SummaryFieldConfig[]) => update('summaryFields', fields);
 
     return (
         <div className="w-[420px] bg-white border-l border-gray-200 h-full flex flex-col shadow-2xl z-30 animate-in slide-in-from-right duration-300 absolute right-0 top-0 bottom-0">
@@ -381,6 +411,18 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                     ))}
                                 </div>
                             )}
+                        </div>
+                    )}
+
+                    {local.type === 'summary' && (
+                        <div className="bg-violet-50 p-4 rounded-xl border border-violet-100 space-y-2">
+                            <label className="block text-[10px] font-bold text-violet-800 uppercase">Summary Description (Optional)</label>
+                            <textarea
+                                className="w-full border border-violet-200 p-2.5 rounded text-sm bg-white h-20 resize-none"
+                                value={local.summaryDescription || ''}
+                                onChange={e => update('summaryDescription', e.target.value)}
+                                placeholder="Thanks! Please review your responses below before we continue."
+                            />
                         </div>
                     )}
 
@@ -692,6 +734,149 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         <p className="text-[10px] text-gray-400 mt-1">Used for identifying this node in the canvas.</p>
                     </div>
 
+                    {local.type === 'summary' && (
+                        <div className="bg-violet-50 p-4 rounded-xl border border-violet-100 space-y-3">
+                            <div className="flex items-center justify-between">
+                                <label className="text-[10px] font-bold text-violet-800 uppercase">Advanced Summary Builder</label>
+                                <span className="text-[10px] text-violet-700 font-semibold">{(local.summaryFields || []).length} fields</span>
+                            </div>
+
+                            <div>
+                                <label className="block text-[10px] font-bold text-violet-700 uppercase mb-1">Detected Variables</label>
+                                <div className="flex flex-wrap gap-1.5">
+                                    {detectedVariables.length === 0 && (
+                                        <span className="text-[10px] text-violet-500">No variables detected yet. Configure Input/Interactive nodes first.</span>
+                                    )}
+                                    {detectedVariables.map(variable => (
+                                        <button
+                                            key={variable}
+                                            onClick={() => {
+                                                const existing = (local.summaryFields || []).some((f: SummaryFieldConfig) => f.variable === variable);
+                                                if (existing) return;
+                                                updateSummaryFields([...(local.summaryFields || []), {
+                                                    id: `sum_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                                                    variable,
+                                                    label: labelFromVariable(variable),
+                                                    labelStyle: 'bold',
+                                                    valueStyle: 'plain'
+                                                }]);
+                                            }}
+                                            className="px-2 py-1 rounded-full border border-violet-200 bg-white text-[10px] font-mono text-violet-700 hover:bg-violet-100"
+                                        >
+                                            + {variable}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="space-y-2">
+                                {(local.summaryFields || []).map((field: SummaryFieldConfig, index: number) => (
+                                    <div key={field.id || index} className="bg-white border border-violet-200 rounded-lg p-2.5 space-y-2">
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <input
+                                                className="border border-violet-200 p-2 rounded text-xs font-mono"
+                                                value={field.variable || ''}
+                                                onChange={e => {
+                                                    const next = [...(local.summaryFields || [])];
+                                                    next[index] = { ...next[index], variable: e.target.value.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() };
+                                                    updateSummaryFields(next);
+                                                }}
+                                                placeholder="variable_name"
+                                            />
+                                            <input
+                                                className="border border-violet-200 p-2 rounded text-xs"
+                                                value={field.label || ''}
+                                                onChange={e => {
+                                                    const next = [...(local.summaryFields || [])];
+                                                    next[index] = { ...next[index], label: e.target.value };
+                                                    updateSummaryFields(next);
+                                                }}
+                                                placeholder="Customer label"
+                                            />
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <select
+                                                className="border border-violet-200 p-2 rounded text-xs"
+                                                value={field.labelStyle || 'bold'}
+                                                onChange={e => {
+                                                    const next = [...(local.summaryFields || [])];
+                                                    next[index] = { ...next[index], labelStyle: e.target.value as SummaryFieldConfig['labelStyle'] };
+                                                    updateSummaryFields(next);
+                                                }}
+                                            >
+                                                <option value="bold">Label: Bold</option>
+                                                <option value="plain">Label: Plain</option>
+                                                <option value="uppercase">Label: Uppercase</option>
+                                            </select>
+                                            <select
+                                                className="border border-violet-200 p-2 rounded text-xs"
+                                                value={field.valueStyle || 'plain'}
+                                                onChange={e => {
+                                                    const next = [...(local.summaryFields || [])];
+                                                    next[index] = { ...next[index], valueStyle: e.target.value as SummaryFieldConfig['valueStyle'] };
+                                                    updateSummaryFields(next);
+                                                }}
+                                            >
+                                                <option value="plain">Value: Plain</option>
+                                                <option value="bold">Value: Bold</option>
+                                                <option value="italic">Value: Italic</option>
+                                                <option value="code">Value: Code</option>
+                                            </select>
+                                        </div>
+                                        <div className="flex justify-between">
+                                            <button
+                                                onClick={() => {
+                                                    if (index === 0) return;
+                                                    const next = [...(local.summaryFields || [])];
+                                                    [next[index - 1], next[index]] = [next[index], next[index - 1]];
+                                                    updateSummaryFields(next);
+                                                }}
+                                                className="text-[10px] text-violet-700"
+                                            >↑ Move</button>
+                                            <button
+                                                onClick={() => {
+                                                    const next = (local.summaryFields || []).filter((_: SummaryFieldConfig, i: number) => i !== index);
+                                                    updateSummaryFields(next);
+                                                }}
+                                                className="text-[10px] text-red-500"
+                                            >Remove</button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <button
+                                onClick={() => updateSummaryFields([...(local.summaryFields || []), {
+                                    id: `sum_${Date.now()}`,
+                                    variable: '',
+                                    label: '',
+                                    labelStyle: 'bold',
+                                    valueStyle: 'plain'
+                                }])}
+                                className="w-full py-2 border border-dashed border-violet-300 rounded-lg text-xs font-bold text-violet-700"
+                            >
+                                <Plus size={12} className="inline mr-1" /> Add Custom Summary Row
+                            </button>
+
+                            <div className="grid grid-cols-2 gap-2">
+                                <label className="flex items-center gap-2 text-[11px] text-violet-800">
+                                    <input
+                                        type="checkbox"
+                                        checked={local.summaryUseAutoVariables ?? true}
+                                        onChange={e => update('summaryUseAutoVariables', e.target.checked)}
+                                    />
+                                    Include unconfigured variables
+                                </label>
+                                <input
+                                    className="border border-violet-200 p-2 rounded text-xs"
+                                    value={local.summaryEmptyText || ''}
+                                    onChange={e => update('summaryEmptyText', e.target.value)}
+                                    placeholder="No data fallback"
+                                />
+                            </div>
+                        </div>
+                    )}
+
                     {/* Set Variable Logic */}
                     {local.type === 'set_variable' && (
                         <div className="bg-cyan-50 p-4 rounded-xl border border-cyan-100 space-y-4">
@@ -849,8 +1034,11 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
       };
       
       if (type === 'summary') {
-          newNode.data.content = "Here are the details we've collected:";
-          newNode.data.footerText = "Is this information correct?";
+          newNode.data.content = "📋 Booking Summary";
+          newNode.data.summaryDescription = "Please review your responses below.";
+          newNode.data.summaryUseAutoVariables = true;
+          newNode.data.summaryEmptyText = "No responses captured yet.";
+          newNode.data.footerText = "Reply YES to confirm or NO to edit.";
       }
       if (type === 'datetime_picker') {
           newNode.data.content = "When would you like to schedule this ride?";
