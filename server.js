@@ -175,7 +175,8 @@ const isValidContent = (text) => {
     return true;
 };
 
-// --- SMART TIME RESOLVER (AM/PM GUESSER) ---
+// --- SMART PARSING HELPERS ---
+
 const resolveTimeAmbiguity = (inputTimeStr) => {
     const [hStr, mStr] = inputTimeStr.split(/[:.]/);
     let h = parseInt(hStr);
@@ -197,6 +198,38 @@ const resolveTimeAmbiguity = (inputTimeStr) => {
     const displayH = h;
     const ampm = isPM ? 'PM' : 'AM';
     return `${displayH}:${m.toString().padStart(2,'0')} ${ampm}`;
+};
+
+// Robust Date Parser: Handles "2025-02-15", "Feb 15", "Tomorrow"
+const tryParseDate = (input) => {
+    if (!input) return null;
+    const clean = input.trim();
+    
+    // 1. Strict ISO (YYYY-MM-DD)
+    if (clean.match(/^\d{4}-\d{2}-\d{2}$/)) return clean;
+    
+    // 2. Relative Keywords
+    const lower = clean.toLowerCase();
+    const today = new Date();
+    if (lower === 'today') return today.toISOString().split('T')[0];
+    if (lower === 'tomorrow') {
+        const tmrw = new Date(today);
+        tmrw.setDate(today.getDate() + 1);
+        return tmrw.toISOString().split('T')[0];
+    }
+
+    // 3. Natural Language (using Date constructor)
+    // Works for "Feb 15", "15 Feb 2025", "2025/02/15"
+    const parsed = new Date(clean);
+    if (!isNaN(parsed.getTime())) {
+        // If year is way off (e.g. user typed "15" and it parsed to 1915 or 2001), 
+        // we might want to default to current year, but Date() usually handles "Feb 15" as current year.
+        // Let's ensure it's in the future or today to be safe? 
+        // For now, just return ISO.
+        return parsed.toISOString().split('T')[0];
+    }
+    
+    return null;
 };
 
 // --- DYNAMIC OPTION GENERATORS (3-STEP FLOW) ---
@@ -479,40 +512,49 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         }
                     }
                     
-                    // --- NEW 3-STAGE STATE MACHINE FOR DATETIME PICKER (STRICT) ---
+                    // --- NEW 3-STAGE STATE MACHINE FOR DATETIME PICKER (STRICT & SMART) ---
                     if (currentNode.data.type === 'datetime_picker') {
                         // 1. ANALYZE INPUT TYPE (What did the user send?)
                         let detectedDate = null;
                         let detectedPeriod = null;
                         let detectedTime = null;
+                        let matchFound = false;
 
-                        // Check for Date (YYYY-MM-DD)
-                        if ((incomingPayloadId && incomingPayloadId.match(/^\d{4}-\d{2}-\d{2}$/)) || (cleanInput && cleanInput.match(/^\d{4}-\d{2}-\d{2}$/))) {
-                            detectedDate = incomingPayloadId || cleanInput;
+                        // Check for Date using Smart Parser (Handles "2025-02-15" AND "Feb 15")
+                        const parsedDate = tryParseDate(incomingPayloadId) || tryParseDate(incomingText);
+                        
+                        if (parsedDate) {
+                            detectedDate = parsedDate;
+                            matchFound = true;
                         } 
-                        else if (cleanInput === 'today') {
-                             detectedDate = new Date().toISOString().split('T')[0];
-                        }
-                        else if (cleanInput === 'tomorrow') {
-                             const d = new Date();
-                             d.setDate(d.getDate() + 1);
-                             detectedDate = d.toISOString().split('T')[0];
+                        // Fallback: Check if it matches a Title in the generated list
+                        else {
+                            const validDates = generateDateOptions(currentNode.data.dateConfig);
+                            const matchedTitle = validDates.find(d => cleanInput && d.title.toLowerCase().includes(cleanInput));
+                            if (matchedTitle) {
+                                detectedDate = matchedTitle.id;
+                                matchFound = true;
+                            }
                         }
 
                         // Check for Period (PERIOD_MORNING, etc.)
                         if (incomingPayloadId && incomingPayloadId.startsWith('PERIOD_')) {
                             detectedPeriod = incomingPayloadId;
+                            matchFound = true;
                         }
                         else if (['morning', 'afternoon', 'evening', 'night'].includes(cleanInput)) {
                             detectedPeriod = `PERIOD_${cleanInput.toUpperCase()}`;
+                            matchFound = true;
                         }
 
                         // Check for Time (HH:MM or custom input)
                         if (incomingPayloadId === 'custom_time') {
                             isManualTrigger = true;
+                            matchFound = true;
                         } else if (incomingPayloadId && !detectedDate && !detectedPeriod) {
                             // If it's a payload but not date/period, assume it's time slot
                             detectedTime = incomingPayloadId;
+                            matchFound = true;
                         } else if (cleanInput && !detectedDate && !detectedPeriod) {
                             // Try to parse manual time
                             const timeRegex = /([0-9]{1,2})[:.]([0-9]{2})\s*(am|pm)?/i;
@@ -520,10 +562,29 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             if (match) {
                                 if (match[3]) detectedTime = match[0].toUpperCase();
                                 else detectedTime = resolveTimeAmbiguity(match[0]);
+                                matchFound = true;
                             } else if (cleanInput.length > 2 && !isManualTrigger) {
                                 // Fallback: If they typed something and it's not date/period, maybe it's raw time
                                 detectedTime = cleanInput;
+                                matchFound = true;
                             }
+                        }
+
+                        // ERROR HANDLING: If matchFound is FALSE, respond immediately with correction help
+                        if (!matchFound && cleanInput.length > 0 && !isManualTrigger) {
+                            const currentStage = !candidate.variables.pickup_date ? 'DATE' : !candidate.variables.time_period ? 'PERIOD' : 'TIME';
+                            let errorMsg = "I didn't understand that.";
+                            
+                            if (currentStage === 'DATE') {
+                                errorMsg = "⚠️ I couldn't recognize that date format.\n\nPlease select an option from the list, or type it strictly like *YYYY-MM-DD* (e.g., 2025-02-20).";
+                            } else if (currentStage === 'PERIOD') {
+                                errorMsg = "⚠️ Please select a valid time of day (Morning, Afternoon, Evening, Night).";
+                            } else {
+                                errorMsg = "⚠️ Invalid time format.\n\nPlease select a slot or type a time like *5:30 PM*.";
+                            }
+                            
+                            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: errorMsg } });
+                            return; // STOP EXECUTION HERE - Wait for user to correct input
                         }
 
                         // 2. EXECUTE STATE TRANSITION
