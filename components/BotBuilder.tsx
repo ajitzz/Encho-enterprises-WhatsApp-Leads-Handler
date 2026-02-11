@@ -25,7 +25,7 @@ import {
   ListPlus, LayoutTemplate, RefreshCw, User, Check, Clock, MapPin, 
   CreditCard, FileText, Type, Variable, CornerRightDown, Navigation,
   LocateFixed, AlertTriangle, Bot, CalendarClock, Calendar, FileCheck,
-  ChevronRight
+  Sparkles, TimerReset
 } from 'lucide-react';
 import { FlowNodeData, NodeType, ListSection, LocationPreset } from '../types';
 
@@ -136,41 +136,42 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                 )}
                 
                 {data.type === 'datetime_picker' && (
-                    <div className="flex flex-col gap-2 p-2 bg-cyan-50 rounded-lg border border-cyan-100">
-                        <div className="flex items-center justify-between text-[9px] font-bold text-cyan-800 uppercase border-b border-cyan-200 pb-1 mb-1">
-                            <span>Smart Funnel</span>
-                            <span>Checkpoint Logic</span>
+                    <div className="flex flex-col gap-2 p-2.5 bg-gradient-to-br from-cyan-50 via-sky-50 to-indigo-50 rounded-lg border border-cyan-100">
+                        <div className="flex items-center justify-between text-[9px] font-bold text-cyan-900 uppercase border-b border-cyan-200 pb-1.5 mb-1">
+                            <span className="flex items-center gap-1"><Sparkles size={10}/> Smart Scheduler V2</span>
+                            <span>Checkpoint Safe-Run</span>
                         </div>
-                        <div className="space-y-2">
-                            <div className="flex items-center gap-2 text-[10px] text-gray-600 bg-white p-1.5 rounded border border-gray-100">
+                        <div className="grid grid-cols-2 gap-1.5 text-[9px]">
+                            <div className="bg-white/80 rounded border border-cyan-100 px-1.5 py-1">
+                                <div className="text-[8px] text-gray-400 uppercase">Date Window</div>
+                                <div className="font-bold text-cyan-800">{data?.dateConfig?.daysToShow || 7} days</div>
+                            </div>
+                            <div className="bg-white/80 rounded border border-cyan-100 px-1.5 py-1">
+                                <div className="text-[8px] text-gray-400 uppercase">Buffer</div>
+                                <div className="font-bold text-cyan-800">+30m safety</div>
+                            </div>
+                        </div>
+                        <div className="space-y-1.5">
+                            <div className="flex items-center gap-2 text-[10px] text-gray-700 bg-white p-1.5 rounded border border-gray-100">
                                 <Calendar size={12} className="text-cyan-500"/>
                                 <div className="flex-1 flex flex-col">
-                                    <span className="font-bold">1. Ask Date</span>
-                                    <span className="text-[8px] text-gray-400">e.g. Today, Tomorrow</span>
+                                    <span className="font-bold">1. Date</span>
+                                    <span className="text-[8px] text-gray-400">Today, Tomorrow, custom date</span>
                                 </div>
-                                <div className="w-2 h-2 rounded-full bg-green-400"></div>
                             </div>
-                            <div className="flex items-center justify-center">
-                                <ChevronRight size={12} className="text-cyan-300 rotate-90" />
-                            </div>
-                            <div className="flex items-center gap-2 text-[10px] text-gray-600 bg-white p-1.5 rounded border border-gray-100">
-                                <div className="text-xs">🌅</div>
+                            <div className="flex items-center gap-2 text-[10px] text-gray-700 bg-white p-1.5 rounded border border-gray-100">
+                                <TimerReset size={12} className="text-amber-500"/>
                                 <div className="flex-1 flex flex-col">
-                                    <span className="font-bold">2. Ask Period</span>
-                                    <span className="text-[8px] text-gray-400">Morning, Evening...</span>
+                                    <span className="font-bold">2. Period</span>
+                                    <span className="text-[8px] text-gray-400">Morning/Afternoon/Evening/Night</span>
                                 </div>
-                                <div className="w-2 h-2 rounded-full bg-green-400"></div>
                             </div>
-                            <div className="flex items-center justify-center">
-                                <ChevronRight size={12} className="text-cyan-300 rotate-90" />
-                            </div>
-                            <div className="flex items-center gap-2 text-[10px] text-gray-600 bg-white p-1.5 rounded border border-gray-100">
+                            <div className="flex items-center gap-2 text-[10px] text-gray-700 bg-white p-1.5 rounded border border-gray-100">
                                 <Clock size={12} className="text-cyan-500"/>
                                 <div className="flex-1 flex flex-col">
-                                    <span className="font-bold">3. Ask Time</span>
-                                    <span className="text-[8px] text-gray-400">30m slots filtered by Period</span>
+                                    <span className="font-bold">3. Time Slot</span>
+                                    <span className="text-[8px] text-gray-400">Period-based 30-minute slots</span>
                                 </div>
-                                <div className="w-2 h-2 rounded-full bg-green-400"></div>
                             </div>
                         </div>
                     </div>
@@ -383,19 +384,66 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         </div>
                     )}
 
-                    {/* Date Picker Config (Empty but placeholder for future customisation) */}
+                    {/* Smart Scheduler V2 Config */}
                     {local.type === 'datetime_picker' && (
-                        <div className="bg-cyan-50 p-4 rounded-xl border border-cyan-100 space-y-3">
-                            <div className="flex items-start gap-2">
-                                <div className="bg-cyan-100 p-1.5 rounded-full mt-0.5"><CalendarClock size={16} className="text-cyan-600"/></div>
+                        <div className="bg-gradient-to-br from-cyan-50 via-sky-50 to-indigo-50 p-4 rounded-xl border border-cyan-100 shadow-sm space-y-4">
+                            <div className="flex items-start gap-3">
+                                <div className="bg-white p-2 rounded-lg border border-cyan-200"><CalendarClock size={16} className="text-cyan-600"/></div>
                                 <div>
-                                    <h4 className="text-sm font-bold text-cyan-900">Checkpoint System Active</h4>
-                                    <p className="text-xs text-cyan-700 mt-1 leading-relaxed">
-                                        This node automatically manages the flow:
-                                        <br/>1. Asks for <strong>Date</strong>
-                                        <br/>2. Asks for <strong>Period</strong> (Morning, Evening...)
-                                        <br/>3. Asks for <strong>Time</strong> (30m slots)
+                                    <h4 className="text-sm font-bold text-cyan-900">Smart Scheduler V2 · Checkpoint Architecture</h4>
+                                    <p className="text-xs text-cyan-800 mt-1 leading-relaxed">
+                                        Safe flow: <strong>Date → Period → Time</strong>. The bot stays on this node until all checkpoints are completed.
                                     </p>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                                <div className="bg-white p-3 rounded-lg border border-cyan-100">
+                                    <label className="text-[10px] font-bold text-gray-600 uppercase">Response Variable</label>
+                                    <input
+                                        className="mt-1 w-full border border-gray-200 p-2 rounded-lg text-xs font-mono bg-gray-50"
+                                        value={local.variable || 'time_slot'}
+                                        onChange={e => update('variable', e.target.value.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase())}
+                                        placeholder="time_slot"
+                                    />
+                                    <p className="text-[10px] text-gray-500 mt-1">Final selected time key.</p>
+                                </div>
+                                <div className="bg-white p-3 rounded-lg border border-cyan-100">
+                                    <label className="text-[10px] font-bold text-gray-600 uppercase">Date Window (days)</label>
+                                    <input
+                                        type="number"
+                                        min={2}
+                                        max={30}
+                                        className="mt-1 w-full border border-gray-200 p-2 rounded-lg text-xs bg-gray-50"
+                                        value={local.dateConfig?.daysToShow ?? 7}
+                                        onChange={e => update('dateConfig', { ...(local.dateConfig || {}), daysToShow: Math.min(30, Math.max(2, Number(e.target.value) || 7)) })}
+                                    />
+                                    <label className="mt-2 flex items-center gap-2 text-[11px] text-gray-600">
+                                        <input
+                                            type="checkbox"
+                                            checked={local.dateConfig?.includeToday !== false}
+                                            onChange={e => update('dateConfig', { ...(local.dateConfig || {}), includeToday: e.target.checked })}
+                                        />
+                                        Include "Today"
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div className="bg-white p-3 rounded-lg border border-cyan-100">
+                                <div className="text-[10px] font-bold text-gray-600 uppercase mb-2">Live Checkpoint Behaviour</div>
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+                                    <div className="rounded-lg border border-gray-100 bg-cyan-50 px-2 py-1.5">
+                                        <div className="font-bold text-cyan-700">Step 1 · Date</div>
+                                        <div className="text-gray-600">Shows Today/Tomorrow and future dates.</div>
+                                    </div>
+                                    <div className="rounded-lg border border-gray-100 bg-amber-50 px-2 py-1.5">
+                                        <div className="font-bold text-amber-700">Step 2 · Period</div>
+                                        <div className="text-gray-600">Morning/Afternoon/Evening/Night with past periods hidden for Today.</div>
+                                    </div>
+                                    <div className="rounded-lg border border-gray-100 bg-indigo-50 px-2 py-1.5">
+                                        <div className="font-bold text-indigo-700">Step 3 · Time</div>
+                                        <div className="text-gray-600">30-minute slots filtered by period and current time.</div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -806,6 +854,8 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
       }
       if (type === 'datetime_picker') {
           newNode.data.content = "When would you like to schedule this ride?";
+          newNode.data.variable = 'pickup_time';
+          newNode.data.dateConfig = { daysToShow: 7, includeToday: true };
       }
 
       addNode(newNode);

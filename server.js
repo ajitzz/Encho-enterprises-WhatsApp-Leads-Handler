@@ -235,10 +235,36 @@ const tryParseDate = (input) => {
 // --- DYNAMIC OPTION GENERATORS (3-STEP FLOW) ---
 
 const PERIODS = {
-    MORNING: { label: '🌅 Morning (5 AM - 12 PM)', start: 5, end: 11 },
-    AFTERNOON: { label: '☀️ Afternoon (12 PM - 5 PM)', start: 12, end: 16 },
-    EVENING: { label: '🌆 Evening (5 PM - 9 PM)', start: 17, end: 20 },
-    NIGHT: { label: '🌙 Night (9 PM - 5 AM)', start: 21, end: 28 } // 28 = 4AM next day
+    MORNING: { label: '🌅 Morning', description: '05:00 AM - 11:59 AM', start: 5, end: 11 },
+    AFTERNOON: { label: '☀️ Afternoon', description: '12:00 PM - 04:59 PM', start: 12, end: 16 },
+    EVENING: { label: '🌆 Evening', description: '05:00 PM - 08:59 PM', start: 17, end: 20 },
+    NIGHT: { label: '🌙 Night', description: '09:00 PM - 04:59 AM', start: 21, end: 28 } // 28 = 4AM next day
+};
+
+const truncateForMeta = (value, maxLen) => (value || '').toString().substring(0, maxLen);
+
+const sanitizeListRows = (rows = []) => {
+    return rows
+        .filter(r => r && r.id && r.title)
+        .slice(0, 10)
+        .map(r => ({
+            id: truncateForMeta(r.id, 200),
+            title: truncateForMeta(r.title, 24),
+            ...(r.description ? { description: truncateForMeta(r.description, 72) } : {})
+        }));
+};
+
+const getDateTimeCheckpointStage = (candidate, finalVar = 'time_slot') => {
+    if (!candidate?.variables?.pickup_date) return 'DATE';
+    if (!candidate?.variables?.time_period) return 'PERIOD';
+    if (!candidate?.variables?.[finalVar]) return 'TIME';
+    return 'DONE';
+};
+
+const getCheckpointErrorMessage = (stage) => {
+    if (stage === 'DATE') return "⚠️ I couldn't recognize that date format.\n\nPlease select a date from the list (Today/Tomorrow) or type *YYYY-MM-DD*.";
+    if (stage === 'PERIOD') return "⚠️ Please select a valid period: Morning, Afternoon, Evening, or Night.";
+    return "⚠️ Invalid time format.\n\nPlease pick one slot from the list or type a time like *5:30 PM*.";
 };
 
 const generateDateOptions = (config) => {
@@ -288,10 +314,10 @@ const generatePeriodOptions = (candidate) => {
         return p.end > currentHour; 
     };
 
-    if (isValidPeriod('MORNING')) options.push({ id: 'PERIOD_MORNING', title: PERIODS.MORNING.label });
-    if (isValidPeriod('AFTERNOON')) options.push({ id: 'PERIOD_AFTERNOON', title: PERIODS.AFTERNOON.label });
-    if (isValidPeriod('EVENING')) options.push({ id: 'PERIOD_EVENING', title: PERIODS.EVENING.label });
-    options.push({ id: 'PERIOD_NIGHT', title: PERIODS.NIGHT.label }); // Always show night
+    if (isValidPeriod('MORNING')) options.push({ id: 'PERIOD_MORNING', title: PERIODS.MORNING.label, description: PERIODS.MORNING.description });
+    if (isValidPeriod('AFTERNOON')) options.push({ id: 'PERIOD_AFTERNOON', title: PERIODS.AFTERNOON.label, description: PERIODS.AFTERNOON.description });
+    if (isValidPeriod('EVENING')) options.push({ id: 'PERIOD_EVENING', title: PERIODS.EVENING.label, description: PERIODS.EVENING.description });
+    options.push({ id: 'PERIOD_NIGHT', title: PERIODS.NIGHT.label, description: PERIODS.NIGHT.description }); // Always show night
 
     return options;
 };
@@ -316,6 +342,9 @@ const generateTimeOptions = (candidate) => {
     }
 
     // Generate 30 min intervals
+    const minBufferMins = 30;
+    const nowWithBuffer = new Date(now.getTime() + (minBufferMins * 60 * 1000));
+
     for (let h = startHour; h <= endHour; h++) {
         for (let m = 0; m < 60; m += 30) {
             // Logic for "Night" spillover (24, 25 -> 00, 01)
@@ -325,9 +354,9 @@ const generateTimeOptions = (candidate) => {
             // For "Today", don't show past times
             if (isToday) {
                 // If realH (e.g. 13) < currentHour (e.g. 14), skip.
-                if (realH < now.getHours()) continue; 
+                if (realH < nowWithBuffer.getHours()) continue; 
                 // If same hour, check minutes
-                if (realH === now.getHours() && m < now.getMinutes()) continue;
+                if (realH === nowWithBuffer.getHours() && m < nowWithBuffer.getMinutes()) continue;
             }
 
             const ampm = realH >= 12 ? 'PM' : 'AM';
@@ -519,81 +548,76 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         let detectedPeriod = null;
                         let detectedTime = null;
                         let matchFound = false;
+                        const finalVar = currentNode.data.variable || 'time_slot';
+                        const checkpointStage = getDateTimeCheckpointStage(candidate, finalVar);
 
-                        // Check for Date using Smart Parser (Handles "2025-02-15" AND "Feb 15")
-                        const parsedDate = tryParseDate(incomingPayloadId) || tryParseDate(incomingText);
-                        
-                        if (parsedDate) {
-                            detectedDate = parsedDate;
-                            matchFound = true;
-                        } 
-                        // Fallback: Check if it matches a Title in the generated list
-                        else {
-                            const validDates = generateDateOptions(currentNode.data.dateConfig);
-                            const matchedTitle = validDates.find(d => cleanInput && d.title.toLowerCase().includes(cleanInput));
-                            if (matchedTitle) {
-                                detectedDate = matchedTitle.id;
+                        if (checkpointStage === 'DATE') {
+                            // Check for Date using Smart Parser (Handles "2025-02-15" AND "Feb 15")
+                            const parsedDate = tryParseDate(incomingPayloadId) || tryParseDate(incomingText);
+                            
+                            if (parsedDate) {
+                                detectedDate = parsedDate;
+                                matchFound = true;
+                            } 
+                            // Fallback: Check if it matches a Title in the generated list
+                            else {
+                                const validDates = generateDateOptions(currentNode.data.dateConfig);
+                                const matchedTitle = validDates.find(d => cleanInput && d.title.toLowerCase().includes(cleanInput));
+                                if (matchedTitle) {
+                                    detectedDate = matchedTitle.id;
+                                    matchFound = true;
+                                }
+                            }
+                        }
+
+                        if (checkpointStage === 'PERIOD') {
+                            // Check for Period (PERIOD_MORNING, etc.)
+                            if (incomingPayloadId && incomingPayloadId.startsWith('PERIOD_')) {
+                                detectedPeriod = incomingPayloadId;
+                                matchFound = true;
+                            }
+                            else if (['morning', 'afternoon', 'evening', 'night'].includes(cleanInput)) {
+                                detectedPeriod = `PERIOD_${cleanInput.toUpperCase()}`;
                                 matchFound = true;
                             }
                         }
 
-                        // Check for Period (PERIOD_MORNING, etc.)
-                        if (incomingPayloadId && incomingPayloadId.startsWith('PERIOD_')) {
-                            detectedPeriod = incomingPayloadId;
-                            matchFound = true;
-                        }
-                        else if (['morning', 'afternoon', 'evening', 'night'].includes(cleanInput)) {
-                            detectedPeriod = `PERIOD_${cleanInput.toUpperCase()}`;
-                            matchFound = true;
-                        }
-
-                        // Check for Time (HH:MM or custom input)
-                        if (incomingPayloadId === 'custom_time') {
-                            isManualTrigger = true;
-                            matchFound = true;
-                        } else if (incomingPayloadId && !detectedDate && !detectedPeriod) {
-                            // If it's a payload but not date/period, assume it's time slot
-                            detectedTime = incomingPayloadId;
-                            matchFound = true;
-                        } else if (cleanInput && !detectedDate && !detectedPeriod) {
-                            // Try to parse manual time
-                            const timeRegex = /([0-9]{1,2})[:.]([0-9]{2})\s*(am|pm)?/i;
-                            const match = cleanInput.match(timeRegex);
-                            if (match) {
-                                if (match[3]) detectedTime = match[0].toUpperCase();
-                                else detectedTime = resolveTimeAmbiguity(match[0]);
+                        if (checkpointStage === 'TIME') {
+                            // Check for Time (HH:MM or custom input)
+                            if (incomingPayloadId === 'custom_time') {
+                                isManualTrigger = true;
                                 matchFound = true;
-                            } else if (cleanInput.length > 2 && !isManualTrigger) {
-                                // Fallback: If they typed something and it's not date/period, maybe it's raw time
-                                detectedTime = cleanInput;
+                            } else if (incomingPayloadId) {
+                                // If it's a payload in TIME checkpoint, assume it's selected time slot
+                                detectedTime = incomingPayloadId;
                                 matchFound = true;
+                            } else if (cleanInput) {
+                                // Try to parse manual time
+                                const timeRegex = /([0-9]{1,2})[:.]([0-9]{2})\s*(am|pm)?/i;
+                                const match = cleanInput.match(timeRegex);
+                                if (match) {
+                                    if (match[3]) detectedTime = match[0].toUpperCase();
+                                    else detectedTime = resolveTimeAmbiguity(match[0]);
+                                    matchFound = true;
+                                } else if (cleanInput.length > 2 && !isManualTrigger) {
+                                    // Fallback: If they typed something and it's not date/period, maybe it's raw time
+                                    detectedTime = cleanInput;
+                                    matchFound = true;
+                                }
                             }
                         }
 
                         // ERROR HANDLING: If matchFound is FALSE, respond immediately with correction help
                         if (!matchFound && cleanInput.length > 0 && !isManualTrigger) {
-                            const currentStage = !candidate.variables.pickup_date ? 'DATE' : !candidate.variables.time_period ? 'PERIOD' : 'TIME';
-                            let errorMsg = "I didn't understand that.";
-                            
-                            if (currentStage === 'DATE') {
-                                errorMsg = "⚠️ I couldn't recognize that date format.\n\nPlease select an option from the list, or type it strictly like *YYYY-MM-DD* (e.g., 2025-02-20).";
-                            } else if (currentStage === 'PERIOD') {
-                                errorMsg = "⚠️ Please select a valid time of day (Morning, Afternoon, Evening, Night).";
-                            } else {
-                                errorMsg = "⚠️ Invalid time format.\n\nPlease select a slot or type a time like *5:30 PM*.";
-                            }
-                            
-                            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: errorMsg } });
+                            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: getCheckpointErrorMessage(checkpointStage) } });
                             return; // STOP EXECUTION HERE - Wait for user to correct input
                         }
 
                         // 2. EXECUTE STATE TRANSITION
-                        const finalVar = currentNode.data.variable || 'time_slot';
-
                         if (detectedDate) {
                             // STATE 1 CAUGHT -> SAVE DATE, WIPE EVERYTHING ELSE
                             // This ensures the loop resets if they change the date
-                            await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{pickup_date}', $1)", [JSON.stringify(detectedDate)]);
+                            await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{pickup_date}', $1) WHERE id = $2", [JSON.stringify(detectedDate), candidate.id]);
                             await client.query(`UPDATE candidates SET variables = variables - 'time_period' - $1 WHERE id = $2`, [finalVar, candidate.id]);
                             
                             candidate.variables.pickup_date = detectedDate;
@@ -604,7 +628,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         } 
                         else if (detectedPeriod) {
                             // STATE 2 CAUGHT -> SAVE PERIOD, WIPE TIME
-                            await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{time_period}', $1)", [JSON.stringify(detectedPeriod)]);
+                            await client.query("UPDATE candidates SET variables = jsonb_set(variables, '{time_period}', $1) WHERE id = $2", [JSON.stringify(detectedPeriod), candidate.id]);
                             await client.query(`UPDATE candidates SET variables = variables - $1 WHERE id = $2`, [finalVar, candidate.id]);
                             
                             candidate.variables.time_period = detectedPeriod;
@@ -892,7 +916,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             body: { text: listBody },
                             action: {
                                 button: buttonText,
-                                sections: [{ title: "Available Slots", rows: listRows }]
+                                sections: [{ title: "Available Slots", rows: sanitizeListRows(listRows) }]
                             }
                         }
                     };
