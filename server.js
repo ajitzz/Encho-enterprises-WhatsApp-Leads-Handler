@@ -6,7 +6,7 @@ const { Pool } = require('pg');
 const multer = require('multer');
 const axios = require('axios');
 const https = require('https');
-const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { OAuth2Client } = require('google-auth-library');
 const { GoogleGenAI } = require("@google/genai");
@@ -92,6 +92,10 @@ const getMetaClient = () => axios.create({
     }
 });
 
+let driverExcelSyncInProgress = false;
+let driverExcelSyncRequested = false;
+let driverExcelSyncTimer = null;
+
 // --- HELPERS ---
 
 const refreshMediaUrl = async (url) => {
@@ -108,6 +112,241 @@ const refreshMediaUrl = async (url) => {
         return await getSignedUrl(s3Client, command, { expiresIn: 3600 });
     } catch (e) {
         return url; 
+    }
+};
+
+const sanitizePhoneForPath = (phone) => (phone || '').toString().replace(/\D/g, '') || 'unknown';
+
+const getDriverMonthFolder = (date = new Date()) => `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+
+const buildDriverDataPrefix = (phone, date = new Date()) => `Driver data/${getDriverMonthFolder(date)}/${sanitizePhoneForPath(phone)}`;
+
+const getPublicS3Url = (key) => `https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.${SYSTEM_CONFIG.AWS_REGION}.amazonaws.com/${encodeURIComponent(key).replace(/%2F/g, '/')}`;
+
+const xmlEscape = (value) => String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+
+const rowsToWorksheetXml = (rows) => rows.map((row) => {
+    const cells = row.map((cell) => `<Cell><Data ss:Type="String">${xmlEscape(cell)}</Data></Cell>`).join('');
+    return `<Row>${cells}</Row>`;
+}).join('');
+
+const buildDriverExcelXml = (customers, messages) => {
+    const customerRows = [
+        ['Candidate ID', 'Phone Number', 'Name', 'Stage', 'Created At', 'Last Message At', 'Latest License Link', 'License Folder Link', 'Variables JSON'],
+        ...customers.map((c) => [
+            c.id,
+            c.phone_number,
+            c.name,
+            c.stage,
+            c.created_at,
+            c.last_message_at,
+            c.latest_license_url,
+            c.license_folder_url,
+            c.variables
+        ])
+    ];
+
+    const messageRows = [
+        ['Message ID', 'Candidate ID', 'Phone Number', 'Direction', 'Type', 'Status', 'WhatsApp Message ID', 'Created At', 'Text'],
+        ...messages.map((m) => [
+            m.id,
+            m.candidate_id,
+            m.phone_number,
+            m.direction,
+            m.type,
+            m.status,
+            m.whatsapp_message_id,
+            m.created_at,
+            m.text
+        ])
+    ];
+
+    return `<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:html="http://www.w3.org/TR/REC-html40">
+  <Worksheet ss:Name="Customers">
+    <Table>${rowsToWorksheetXml(customerRows)}</Table>
+  </Worksheet>
+  <Worksheet ss:Name="Messages">
+    <Table>${rowsToWorksheetXml(messageRows)}</Table>
+  </Worksheet>
+</Workbook>`;
+};
+
+const uploadToS3 = async ({ key, body, contentType }) => {
+    await s3Client.send(new PutObjectCommand({
+        Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+        Key: key,
+        Body: body,
+        ContentType: contentType
+    }));
+};
+
+const deleteFromS3 = async (key) => {
+    if (!key) return;
+    await s3Client.send(new DeleteObjectCommand({
+        Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+        Key: key
+    }));
+};
+
+const normalizeVariables = (variables) => {
+    if (!variables) return {};
+    if (typeof variables === 'object') return variables;
+    try {
+        return JSON.parse(variables);
+    } catch (e) {
+        return {};
+    }
+};
+
+const syncDriverExcelToS3 = async () => {
+    if (driverExcelSyncInProgress) {
+        driverExcelSyncRequested = true;
+        return;
+    }
+
+    driverExcelSyncInProgress = true;
+    try {
+        const data = await withDb(async (client) => {
+            const candidatesRes = await client.query(`
+                SELECT c.id, c.phone_number, c.name, c.stage, c.created_at, c.last_message_at, c.variables,
+                    (
+                        SELECT d.url FROM driver_documents d
+                        WHERE d.candidate_id = c.id
+                        ORDER BY d.created_at DESC
+                        LIMIT 1
+                    ) AS latest_license_key
+                FROM candidates c
+                ORDER BY c.created_at ASC
+            `);
+
+            const messagesRes = await client.query(`
+                SELECT cm.id, cm.candidate_id, c.phone_number, cm.direction, cm.type, cm.status, cm.whatsapp_message_id, cm.created_at, cm.text
+                FROM candidate_messages cm
+                JOIN candidates c ON c.id = cm.candidate_id
+                ORDER BY cm.created_at ASC
+            `);
+
+            return { candidates: candidatesRes.rows, messages: messagesRes.rows };
+        });
+
+        const customers = data.candidates.map((row) => {
+            const vars = normalizeVariables(row.variables);
+            const latestLicenseKey = row.latest_license_key || vars.license_s3_key || '';
+            const month = latestLicenseKey.startsWith('Driver data/') ? latestLicenseKey.split('/')[1] : getDriverMonthFolder();
+            const licenseFolderKey = `Driver data/${month}/${sanitizePhoneForPath(row.phone_number)}/`;
+            const latestLicenseUrl = vars.license_url || (latestLicenseKey ? getPublicS3Url(latestLicenseKey) : '');
+            return {
+                id: row.id,
+                phone_number: row.phone_number,
+                name: row.name,
+                stage: row.stage,
+                created_at: row.created_at ? new Date(row.created_at).toISOString() : '',
+                last_message_at: row.last_message_at ? new Date(Number(row.last_message_at) || row.last_message_at).toISOString() : '',
+                latest_license_url: latestLicenseUrl,
+                license_folder_url: getPublicS3Url(licenseFolderKey),
+                variables: JSON.stringify(vars)
+            };
+        });
+
+        const messages = data.messages.map((row) => ({
+            ...row,
+            created_at: row.created_at ? new Date(row.created_at).toISOString() : '',
+            text: row.text || ''
+        }));
+
+        const workbookXml = buildDriverExcelXml(customers, messages);
+        await uploadToS3({
+            key: 'driver excel/driver-data.xls',
+            body: Buffer.from(workbookXml, 'utf8'),
+            contentType: 'application/vnd.ms-excel'
+        });
+    } catch (e) {
+        console.error('[Driver Excel Sync Error]', e.message);
+    } finally {
+        driverExcelSyncInProgress = false;
+        if (driverExcelSyncRequested) {
+            driverExcelSyncRequested = false;
+            setTimeout(() => syncDriverExcelToS3().catch(() => null), 500);
+        }
+    }
+};
+
+const scheduleDriverExcelSync = () => {
+    if (driverExcelSyncTimer) clearTimeout(driverExcelSyncTimer);
+    driverExcelSyncTimer = setTimeout(() => {
+        driverExcelSyncTimer = null;
+        syncDriverExcelToS3().catch(() => null);
+    }, 300);
+};
+
+const getFileExtensionFromMime = (mimeType = '', fallback = 'bin') => {
+    const mime = mimeType.toLowerCase();
+    if (mime.includes('jpeg') || mime.includes('jpg')) return 'jpg';
+    if (mime.includes('png')) return 'png';
+    if (mime.includes('pdf')) return 'pdf';
+    if (mime.includes('webp')) return 'webp';
+    return fallback;
+};
+
+const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candidateVariables, client }) => {
+    if (!candidateId) throw new Error('Candidate id is required for media upload');
+    const mediaId = msg?.image?.id || msg?.document?.id;
+    if (!mediaId) return null;
+
+    const metaResponse = await getMetaClient().get(`https://graph.facebook.com/v18.0/${mediaId}`);
+    const mediaUrl = metaResponse.data?.url;
+    const mimeType = metaResponse.data?.mime_type || (msg.type === 'document' ? 'application/octet-stream' : `image/${msg.type}`);
+    if (!mediaUrl) throw new Error('WhatsApp media URL not found');
+
+    const mediaFile = await axios.get(mediaUrl, {
+        responseType: 'arraybuffer',
+        timeout: SYSTEM_CONFIG.META_TIMEOUT,
+        headers: { Authorization: `Bearer ${process.env.META_API_TOKEN}` }
+    });
+
+    const ext = getFileExtensionFromMime(mimeType, msg.type === 'document' ? 'pdf' : 'jpg');
+    const prefix = buildDriverDataPrefix(phoneNumber);
+    const key = `${prefix}/license_${msg.id}.${ext}`;
+
+    await uploadToS3({
+        key,
+        body: Buffer.from(mediaFile.data),
+        contentType: mimeType
+    });
+
+    const mergedVariables = {
+        ...normalizeVariables(candidateVariables),
+        license_s3_key: key,
+        license_url: getPublicS3Url(key),
+        license_folder_url: getPublicS3Url(`${prefix}/`),
+        license_uploaded_at: new Date().toISOString()
+    };
+
+    try {
+        await client.query('BEGIN');
+        await client.query(
+            `INSERT INTO driver_documents (id, candidate_id, type, url, status, created_at)
+            VALUES ($1, $2, $3, $4, 'pending', NOW())`,
+            [crypto.randomUUID(), candidateId, 'license', key]
+        );
+        await client.query('UPDATE candidates SET variables = $1::jsonb WHERE id = $2', [JSON.stringify(mergedVariables), candidateId]);
+        await client.query('COMMIT');
+        return { key, mergedVariables };
+    } catch (e) {
+        await client.query('ROLLBACK').catch(() => null);
+        await deleteFromS3(key).catch(() => null);
+        throw e;
     }
 };
 
@@ -1067,6 +1306,7 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
                             `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
                             [crypto.randomUUID(), candidate.id, payload.text?.body || payload.interactive?.body?.text || '[Media]', data.type]
                         );
+                        scheduleDriverExcelSync();
                     } catch (apiError) {
                         console.error("Meta Send Error:", apiError);
                     }
@@ -1174,6 +1414,7 @@ apiRouter.post('/webhook', async (req, res) => {
                 const name = body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || 'Unknown';
                 let text = '';
                 let payloadId = null;
+                let messageType = msg.type === 'interactive' ? 'interactive' : msg.type;
 
                 if (msg.type === 'text') text = msg.text.body;
                 else if (msg.type === 'interactive') {
@@ -1189,7 +1430,9 @@ apiRouter.post('/webhook', async (req, res) => {
                     // Extract structured location data
                     text = JSON.stringify(msg.location);
                 }
-                else text = `[${msg.type.toUpperCase()}]`;
+                else if (msg.type === 'image' || msg.type === 'document') {
+                    text = `[${msg.type.toUpperCase()}]`;
+                } else text = `[${msg.type.toUpperCase()}]`;
 
                 let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
                 let candidate;
@@ -1202,8 +1445,28 @@ apiRouter.post('/webhook', async (req, res) => {
                     await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
                 }
 
-                await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, 'text', $4, 'received', NOW())`, [crypto.randomUUID(), candidate.id, text, msg.id]);
+                if (msg.type === 'image' || msg.type === 'document') {
+                    const mediaInfo = await fetchAndStoreLicenseMedia({
+                        msg,
+                        phoneNumber: from,
+                        candidateId: candidate.id,
+                        candidateVariables: candidate.variables,
+                        client
+                    }).catch((e) => {
+                        console.error('[License Upload Error]', e.message);
+                        return null;
+                    });
+
+                    if (mediaInfo?.key) {
+                        text = JSON.stringify({ mediaKey: mediaInfo.key, type: msg.type, folder: buildDriverDataPrefix(from) });
+                        candidate.variables = mediaInfo.mergedVariables;
+                        await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
+                    }
+                }
+
+                await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, $4, $5, 'received', NOW())`, [crypto.randomUUID(), candidate.id, text, messageType, msg.id]);
                 await runBotEngine(client, candidate, text, payloadId);
+                scheduleDriverExcelSync();
             });
         });
 
@@ -1303,7 +1566,8 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
                 dbText = JSON.stringify({ url: mediaUrl, caption: text });
             }
             await sendToMeta(c.rows[0].phone_number, payload);
-            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`, [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text']);
+            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text']);
+            scheduleDriverExcelSync();
         });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1436,6 +1700,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                         // Log success
                         await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]);
                         await client.query("UPDATE scheduled_messages SET status = 'sent' WHERE id = $1", [job.id]);
+                        scheduleDriverExcelSync();
                         processed++;
                     } catch (e) {
                         errors++;
