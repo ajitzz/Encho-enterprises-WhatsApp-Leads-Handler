@@ -69,7 +69,7 @@ try {
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-const MEDIA_ROOT_PREFIX = 'media-library/';
+const MEDIA_ROOT_PREFIX = (process.env.MEDIA_ROOT_PREFIX || 'media-library/').replace(/^\/+/, '');
 
 const normalizeMediaPath = (rawPath = '/') => {
     const cleaned = String(rawPath || '/').replace(/\\/g, '/').trim();
@@ -80,6 +80,36 @@ const normalizeMediaPath = (rawPath = '/') => {
 const toMediaPrefix = (rawPath = '/') => {
     const normalized = normalizeMediaPath(rawPath);
     return normalized ? `${MEDIA_ROOT_PREFIX}${normalized}/` : MEDIA_ROOT_PREFIX;
+};
+
+const hasAnyObjects = (listRes) => (listRes.CommonPrefixes || []).length > 0 || (listRes.Contents || []).length > 0;
+
+const listMediaObjects = async (requestedPath = '/') => {
+    const primaryPrefix = toMediaPrefix(requestedPath);
+    const primary = await s3Client.send(new ListObjectsV2Command({
+        Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+        Prefix: primaryPrefix,
+        Delimiter: '/'
+    }));
+
+    if (hasAnyObjects(primary) || !MEDIA_ROOT_PREFIX) {
+        return { listRes: primary, prefix: primaryPrefix };
+    }
+
+    const normalized = normalizeMediaPath(requestedPath);
+    const fallbackPrefix = normalized ? `${normalized}/` : '';
+    const fallback = await s3Client.send(new ListObjectsV2Command({
+        Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+        Prefix: fallbackPrefix,
+        Delimiter: '/'
+    }));
+
+    if (hasAnyObjects(fallback)) {
+        console.warn(`[MEDIA LIST FALLBACK] No objects under "${primaryPrefix}". Falling back to "${fallbackPrefix || '/'}".`);
+        return { listRes: fallback, prefix: fallbackPrefix };
+    }
+
+    return { listRes: primary, prefix: primaryPrefix };
 };
 
 const withDb = async (operation) => {
@@ -1360,14 +1390,9 @@ apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.
 
 apiRouter.get('/media', async (req, res) => {
     const requestedPath = typeof req.query.path === 'string' ? req.query.path : '/';
-    const prefix = toMediaPrefix(requestedPath);
 
     try {
-        const listRes = await s3Client.send(new ListObjectsV2Command({
-            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
-            Prefix: prefix,
-            Delimiter: '/'
-        }));
+        const { listRes, prefix } = await listMediaObjects(requestedPath);
 
         const folders = (listRes.CommonPrefixes || []).map((entry) => {
             const folderPrefix = (entry.Prefix || '').replace(prefix, '').replace(/\/$/, '');
@@ -1437,7 +1462,16 @@ apiRouter.post('/media/sync-s3', async (req, res) => {
             Bucket: SYSTEM_CONFIG.AWS_BUCKET,
             Prefix: MEDIA_ROOT_PREFIX
         }));
-        const added = (listRes.Contents || []).filter((item) => item.Key && item.Key !== MEDIA_ROOT_PREFIX).length;
+        let added = (listRes.Contents || []).filter((item) => item.Key && item.Key !== MEDIA_ROOT_PREFIX).length;
+
+        if (!added && MEDIA_ROOT_PREFIX) {
+            const fallbackRes = await s3Client.send(new ListObjectsV2Command({
+                Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+                Prefix: ''
+            }));
+            added = (fallbackRes.Contents || []).filter((item) => item.Key).length;
+        }
+
         res.json({ success: true, added });
     } catch (e) {
         console.error('[MEDIA SYNC ERROR]', e.message);
