@@ -6,7 +6,7 @@ const { Pool } = require('pg');
 const multer = require('multer');
 const axios = require('axios');
 const https = require('https');
-const { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { OAuth2Client } = require('google-auth-library');
 const { GoogleGenAI } = require("@google/genai");
@@ -68,6 +68,19 @@ try {
 }
 
 const upload = multer({ storage: multer.memoryStorage() });
+
+const MEDIA_ROOT_PREFIX = 'media-library/';
+
+const normalizeMediaPath = (rawPath = '/') => {
+    const cleaned = String(rawPath || '/').replace(/\\/g, '/').trim();
+    if (!cleaned || cleaned === '/') return '';
+    return cleaned.replace(/^\/+|\/+$/g, '');
+};
+
+const toMediaPrefix = (rawPath = '/') => {
+    const normalized = normalizeMediaPath(rawPath);
+    return normalized ? `${MEDIA_ROOT_PREFIX}${normalized}/` : MEDIA_ROOT_PREFIX;
+};
 
 const withDb = async (operation) => {
     if (!pgPool) throw new Error("Database not initialized");
@@ -1344,6 +1357,97 @@ app.use((req, res, next) => {
 const apiRouter = express.Router();
 
 apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
+
+apiRouter.get('/media', async (req, res) => {
+    const requestedPath = typeof req.query.path === 'string' ? req.query.path : '/';
+    const prefix = toMediaPrefix(requestedPath);
+
+    try {
+        const listRes = await s3Client.send(new ListObjectsV2Command({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Prefix: prefix,
+            Delimiter: '/'
+        }));
+
+        const folders = (listRes.CommonPrefixes || []).map((entry) => {
+            const folderPrefix = (entry.Prefix || '').replace(prefix, '').replace(/\/$/, '');
+            return {
+                id: `${requestedPath}:${folderPrefix}`,
+                name: folderPrefix,
+                parent_path: requestedPath,
+                is_public_showcase: false
+            };
+        }).filter((folder) => folder.name);
+
+        const files = (listRes.Contents || [])
+            .filter((item) => item.Key && item.Key !== prefix)
+            .map((item) => {
+                const key = item.Key;
+                const filename = key.replace(prefix, '');
+                const extension = filename.split('.').pop()?.toLowerCase() || '';
+                const fileType = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(extension)
+                    ? 'image'
+                    : ['mp4', 'mov', 'avi', 'webm', 'mkv'].includes(extension)
+                        ? 'video'
+                        : 'document';
+
+                return {
+                    id: key,
+                    url: getPublicS3Url(key),
+                    filename,
+                    type: fileType
+                };
+            });
+
+        res.json({ folders, files });
+    } catch (e) {
+        console.error('[MEDIA LIST ERROR]', e.message);
+        res.status(500).json({ error: 'Failed to load media library from S3', details: e.message });
+    }
+});
+
+apiRouter.post('/media/upload', upload.single('file'), async (req, res) => {
+    if (!req.file) {
+        res.status(400).json({ error: 'No file provided' });
+        return;
+    }
+
+    const path = typeof req.body.path === 'string' ? req.body.path : '/';
+    const prefix = toMediaPrefix(path);
+    const safeFileName = req.file.originalname.replace(/\s+/g, '_');
+    const key = `${prefix}${safeFileName}`;
+
+    try {
+        await uploadToS3({
+            key,
+            body: req.file.buffer,
+            contentType: req.file.mimetype || 'application/octet-stream'
+        });
+
+        res.json({ success: true, key, url: getPublicS3Url(key) });
+    } catch (e) {
+        console.error('[MEDIA UPLOAD ERROR]', e.message);
+        res.status(500).json({ error: 'Failed to upload file to S3', details: e.message });
+    }
+});
+
+apiRouter.post('/media/sync-s3', async (req, res) => {
+    try {
+        const listRes = await s3Client.send(new ListObjectsV2Command({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Prefix: MEDIA_ROOT_PREFIX
+        }));
+        const added = (listRes.Contents || []).filter((item) => item.Key && item.Key !== MEDIA_ROOT_PREFIX).length;
+        res.json({ success: true, added });
+    } catch (e) {
+        console.error('[MEDIA SYNC ERROR]', e.message);
+        res.status(500).json({ error: 'S3 sync failed', details: e.message });
+    }
+});
+
+apiRouter.get('/showcase/status', (req, res) => {
+    res.json({ active: false });
+});
 
 // --- DEEP WAKE PING ---
 apiRouter.get('/ping', async (req, res) => {
