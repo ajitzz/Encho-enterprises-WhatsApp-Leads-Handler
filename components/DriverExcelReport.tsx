@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { liveApiService } from '../services/liveApiService';
 import { DriverExcelColumn, DriverExcelRow } from '../types';
-import { Pencil, Plus, Save, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Pencil, Plus, Save, Trash2, X } from 'lucide-react';
 
 interface DriverExcelReportProps {
   isLiveMode: boolean;
@@ -125,6 +125,22 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     await loadSyncStatus();
   };
 
+  const moveColumn = async (col: DriverExcelColumn, direction: 'up' | 'down') => {
+    if (col.isCore) return;
+    const customCols = columns.filter((c) => !c.isCore);
+    const currentIndex = customCols.findIndex((c) => c.key === col.key);
+    if (currentIndex < 0) return;
+    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    if (targetIndex < 0 || targetIndex >= customCols.length) return;
+
+    const next = [...customCols];
+    const [current] = next.splice(currentIndex, 1);
+    next.splice(targetIndex, 0, current);
+    await liveApiService.reorderDriverExcelColumns(next.map((c) => c.key));
+    await loadReport();
+    await loadSyncStatus();
+  };
+
   const syncLabel = (() => {
     if (!syncStatus) return 'Sync status unavailable';
     if (syncStatus.state === 'running') return 'Syncing Excel to S3...';
@@ -187,6 +203,8 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                     <span>{col.label}</span>
                     {!col.isCore && (
                       <>
+                        <button onClick={() => moveColumn(col, 'up')} className="text-gray-500 hover:text-gray-900" title="Move column up"><ArrowUp size={13} /></button>
+                        <button onClick={() => moveColumn(col, 'down')} className="text-gray-500 hover:text-gray-900" title="Move column down"><ArrowDown size={13} /></button>
                         <button onClick={() => renameColumn(col)} className="text-gray-500 hover:text-gray-900"><Pencil size={13} /></button>
                         <button onClick={() => deleteColumn(col)} className="text-red-500 hover:text-red-700"><X size={13} /></button>
                       </>
@@ -218,7 +236,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                           </div>
                         ) : (
                           <button onClick={() => beginEdit(row.id, col, value)} className="text-left w-full">
-                            <span className="break-all">{value || <span className="text-gray-300">—</span>}</span>
+                            <span className="whitespace-pre-wrap break-words">{value || <span className="text-gray-300">—</span>}</span>
                           </button>
                         )}
                       </td>

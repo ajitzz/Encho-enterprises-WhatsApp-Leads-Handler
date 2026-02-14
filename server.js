@@ -319,12 +319,36 @@ const syncDriverExcelToS3 = async () => {
                 ORDER BY cm.created_at ASC
             `);
 
+            const captureRes = await client.query(`
+                SELECT candidate_id, text, created_at
+                FROM candidate_messages
+                WHERE type = 'variable_capture'
+                ORDER BY created_at ASC
+            `);
+
             const customCols = await getDriverExcelColumnConfig(client);
-            return { candidates: candidatesRes.rows, messages: messagesRes.rows, columns: [...DRIVER_EXCEL_CORE_COLUMNS, ...customCols] };
+            const { responseLookup, discoveredKeys } = buildVariableResponseLookup({
+                captureRows: captureRes.rows,
+                candidateRows: candidatesRes.rows
+            });
+            const mergedCustomCols = mergeDriverExcelColumns(customCols, discoveredKeys);
+            if (mergedCustomCols.length !== customCols.length) {
+                await saveDriverExcelColumnConfig(client, mergedCustomCols);
+            }
+
+            return {
+                candidates: candidatesRes.rows,
+                messages: messagesRes.rows,
+                columns: [...DRIVER_EXCEL_CORE_COLUMNS, ...mergedCustomCols],
+                responseLookup
+            };
         });
 
         const customers = data.candidates.map((row) => {
-            const vars = normalizeVariables(row.variables);
+            const vars = {
+                ...normalizeVariables(row.variables),
+                ...(data.responseLookup.get(row.id) || {})
+            };
             const latestLicenseKey = row.latest_license_key || vars.license_s3_key || '';
             const month = latestLicenseKey.startsWith('Driver data/') ? latestLicenseKey.split('/')[1] : getDriverMonthFolder();
             const licenseFolderKey = `Driver data/${month}/${sanitizePhoneForPath(row.phone_number)}/`;
@@ -403,6 +427,96 @@ const normalizeColumnKey = (label = '') => String(label)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
+
+const formatColumnLabelFromKey = (key = '') => String(key)
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase()) || 'Custom Field';
+
+const parseVariableCaptureMessage = (text) => {
+    if (!text || typeof text !== 'string') return null;
+    try {
+        const parsed = JSON.parse(text);
+        if (!parsed || typeof parsed !== 'object') return null;
+        const key = normalizeColumnKey(parsed.key || parsed.variable || '');
+        if (!key) return null;
+        const value = parsed.value == null ? '' : String(parsed.value);
+        return { key, value };
+    } catch (e) {
+        return null;
+    }
+};
+
+const buildVariableResponseLookup = ({ captureRows = [], candidateRows = [] }) => {
+    const responseLookup = new Map();
+    const discoveredKeys = new Set();
+
+    const registerValue = (candidateId, key, value) => {
+        if (!candidateId || !key) return;
+        const normalizedKey = normalizeColumnKey(key);
+        if (!normalizedKey) return;
+        const safeValue = value == null ? '' : String(value);
+        if (!responseLookup.has(candidateId)) responseLookup.set(candidateId, {});
+        const candidateVars = responseLookup.get(candidateId);
+        if (!Array.isArray(candidateVars[normalizedKey])) candidateVars[normalizedKey] = [];
+        candidateVars[normalizedKey].push(safeValue);
+        discoveredKeys.add(normalizedKey);
+    };
+
+    captureRows.forEach((row) => {
+        const parsed = parseVariableCaptureMessage(row.text);
+        if (!parsed) return;
+        registerValue(row.candidate_id, parsed.key, parsed.value);
+    });
+
+    candidateRows.forEach((row) => {
+        const vars = normalizeVariables(row.variables);
+        Object.entries(vars).forEach(([key, value]) => {
+            const normalizedKey = normalizeColumnKey(key);
+            if (!normalizedKey) return;
+            if (!responseLookup.has(row.id) || !Array.isArray(responseLookup.get(row.id)[normalizedKey])) {
+                registerValue(row.id, normalizedKey, value);
+            } else {
+                discoveredKeys.add(normalizedKey);
+            }
+        });
+    });
+
+    const finalized = new Map();
+    responseLookup.forEach((valueMap, candidateId) => {
+        const merged = {};
+        Object.entries(valueMap).forEach(([key, values]) => {
+            merged[key] = values.join('\n');
+        });
+        finalized.set(candidateId, merged);
+    });
+
+    return { responseLookup: finalized, discoveredKeys: Array.from(discoveredKeys) };
+};
+
+const mergeDriverExcelColumns = (customCols = [], dynamicKeys = []) => {
+    const uniqueCustom = customCols.filter((c) => c && typeof c.key === 'string' && typeof c.label === 'string');
+    const seen = new Set(uniqueCustom.map((c) => c.key));
+    const appended = dynamicKeys
+        .filter((key) => !seen.has(key) && !DRIVER_EXCEL_CORE_COLUMNS.some((core) => core.key === key))
+        .map((key) => ({ key, label: formatColumnLabelFromKey(key), isCore: false }));
+    return [...uniqueCustom, ...appended];
+};
+
+const logCapturedVariableResponse = async ({ client, candidateId, key, value, source = 'bot_capture' }) => {
+    const normalizedKey = normalizeColumnKey(key);
+    if (!normalizedKey) return;
+    await client.query(
+        `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
+        VALUES ($1, $2, 'system', $3, 'variable_capture', 'captured', NOW())`,
+        [
+            crypto.randomUUID(),
+            candidateId,
+            JSON.stringify({ key: normalizedKey, value: value == null ? '' : String(value), source, capturedAt: new Date().toISOString() })
+        ]
+    );
+};
 
 const getDriverExcelColumnConfig = async (client) => {
     const setting = await client.query("SELECT value FROM system_settings WHERE key = 'driver_excel_columns' LIMIT 1");
@@ -1029,6 +1143,13 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             candidate.variables.pickup_date = detectedDate;
                             delete candidate.variables.time_period;
                             delete candidate.variables[finalVar];
+                            await logCapturedVariableResponse({
+                                client,
+                                candidateId: candidate.id,
+                                key: 'pickup_date',
+                                value: detectedDate,
+                                source: 'datetime_picker'
+                            });
                             
                             valueToSave = null; // Do not save to generic variable, we handled it
                         } 
@@ -1039,6 +1160,13 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             
                             candidate.variables.time_period = detectedPeriod;
                             delete candidate.variables[finalVar];
+                            await logCapturedVariableResponse({
+                                client,
+                                candidateId: candidate.id,
+                                key: 'time_period',
+                                value: detectedPeriod,
+                                source: 'datetime_picker'
+                            });
                             
                             valueToSave = null;
                         } 
@@ -1062,6 +1190,12 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         const newVars = { ...candidate.variables, [varName]: valueToSave };
                         await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
                         candidate.variables = newVars;
+                        await logCapturedVariableResponse({
+                            client,
+                            candidateId: candidate.id,
+                            key: varName,
+                            value: valueToSave
+                        });
                     } else if (isManualTrigger && currentNode.data.type === 'datetime_picker') {
                         await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "Sure, please type your preferred time below (e.g., 11:25 PM):" } });
                         return; // Stop here, wait for text
@@ -1815,7 +1949,6 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
         const search = (req.query.search || '').toString().trim();
         await withDb(async (client) => {
             const customCols = await getDriverExcelColumnConfig(client);
-            const cols = [...DRIVER_EXCEL_CORE_COLUMNS, ...customCols];
             const params = [];
             let where = '';
             if (search) {
@@ -1830,6 +1963,29 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
                 LIMIT 500
             `;
             const rowsRes = await client.query(q, params);
+            const ids = rowsRes.rows.map((r) => r.id);
+            let captureRows = [];
+            if (ids.length > 0) {
+                const captureRes = await client.query(
+                    `SELECT candidate_id, text, created_at
+                    FROM candidate_messages
+                    WHERE type = 'variable_capture' AND candidate_id = ANY($1::uuid[])
+                    ORDER BY created_at ASC`,
+                    [ids]
+                );
+                captureRows = captureRes.rows;
+            }
+
+            const { responseLookup, discoveredKeys } = buildVariableResponseLookup({
+                captureRows,
+                candidateRows: rowsRes.rows
+            });
+            const mergedCustomCols = mergeDriverExcelColumns(customCols, discoveredKeys);
+            if (mergedCustomCols.length !== customCols.length) {
+                await saveDriverExcelColumnConfig(client, mergedCustomCols);
+            }
+            const cols = [...DRIVER_EXCEL_CORE_COLUMNS, ...mergedCustomCols];
+
             const rows = rowsRes.rows.map((r) => ({
                 id: r.id,
                 phoneNumber: r.phone_number || '',
@@ -1838,7 +1994,10 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
                 source: r.source || '',
                 createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
                 lastMessageAt: r.last_message_at ? new Date(Number(r.last_message_at) || r.last_message_at).toISOString() : '',
-                variables: normalizeVariables(r.variables)
+                variables: {
+                    ...normalizeVariables(r.variables),
+                    ...(responseLookup.get(r.id) || {})
+                }
             }));
             res.json({ columns: cols, rows });
         });
@@ -1951,6 +2110,25 @@ apiRouter.patch('/reports/driver-excel/columns/:key', async (req, res) => {
 
             scheduleDriverExcelSync();
             res.json({ success: true, key: newKey, label: newLabel });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/reports/driver-excel/columns/reorder', async (req, res) => {
+    try {
+        const orderedKeys = Array.isArray(req.body?.orderedKeys) ? req.body.orderedKeys.map((k) => String(k)) : [];
+        await withDb(async (client) => {
+            const customCols = await getDriverExcelColumnConfig(client);
+            const customByKey = new Map(customCols.map((col) => [col.key, col]));
+
+            const normalizedOrdered = orderedKeys.filter((key) => customByKey.has(key));
+            const seen = new Set(normalizedOrdered);
+            const remainder = customCols.filter((col) => !seen.has(col.key)).map((col) => col.key);
+            const nextOrder = [...normalizedOrdered, ...remainder].map((key) => customByKey.get(key)).filter(Boolean);
+
+            await saveDriverExcelColumnConfig(client, nextOrder);
+            scheduleDriverExcelSync();
+            res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
