@@ -243,6 +243,23 @@ export interface ScheduledMessage {
   status: 'pending' | 'processing' | 'failed' | 'sent';
 }
 
+export interface DriverExcelColumn {
+  key: string;
+  label: string;
+  isCore: boolean;
+}
+
+export interface DriverExcelRow {
+  id: string;
+  phoneNumber: string;
+  name: string;
+  status: string;
+  source: string;
+  createdAt: string;
+  lastMessageAt: string;
+  variables: Record<string, any>;
+}
+
 export interface AuditIssue {
   nodeId: string;
   severity: 'CRITICAL' | 'WARNING';
