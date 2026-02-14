@@ -138,6 +138,27 @@ const getMetaClient = () => axios.create({
 let driverExcelSyncInProgress = false;
 let driverExcelSyncRequested = false;
 let driverExcelSyncTimer = null;
+let driverExcelSyncStatus = {
+    state: 'idle',
+    lastTriggeredAt: null,
+    lastRunAt: null,
+    lastSuccessAt: null,
+    lastError: null,
+    lastDurationMs: null
+};
+
+const persistDriverExcelSyncStatus = async () => {
+    try {
+        await withDb(async (client) => {
+            await client.query(
+                "INSERT INTO system_settings (key, value) VALUES ('driver_excel_sync_status', $1::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                [JSON.stringify(driverExcelSyncStatus)]
+            );
+        });
+    } catch (e) {
+        console.warn('[Driver Excel Sync Status Persist Warning]', e.message);
+    }
+};
 
 // --- HELPERS ---
 
@@ -178,19 +199,29 @@ const rowsToWorksheetXml = (rows) => rows.map((row) => {
     return `<Row>${cells}</Row>`;
 }).join('');
 
-const buildDriverExcelXml = (customers, messages) => {
+const getDriverExcelCellValue = (customer, column) => {
+    const vars = customer.variables || {};
+    if (column.key === 'phoneNumber') return customer.phone_number || '';
+    if (column.key === 'name') return customer.name || '';
+    if (column.key === 'status') return customer.stage || '';
+    if (column.key === 'source') return customer.source || '';
+    if (column.key === 'createdAt') return customer.created_at || '';
+    if (column.key === 'lastMessageAt') return customer.last_message_at || '';
+    return vars[column.key] ?? '';
+};
+
+const buildDriverExcelXml = (customers, messages, columns = []) => {
+    const effectiveColumns = Array.isArray(columns) && columns.length > 0 ? columns : DRIVER_EXCEL_CORE_COLUMNS;
+    const customerHeaders = ['Candidate ID', ...effectiveColumns.map((c) => c.label), 'Latest License Link', 'License Folder Link', 'Variables JSON'];
+
     const customerRows = [
-        ['Candidate ID', 'Phone Number', 'Name', 'Stage', 'Created At', 'Last Message At', 'Latest License Link', 'License Folder Link', 'Variables JSON'],
+        customerHeaders,
         ...customers.map((c) => [
             c.id,
-            c.phone_number,
-            c.name,
-            c.stage,
-            c.created_at,
-            c.last_message_at,
+            ...effectiveColumns.map((col) => getDriverExcelCellValue(c, col)),
             c.latest_license_url,
             c.license_folder_url,
-            c.variables
+            JSON.stringify(c.variables || {})
         ])
     ];
 
@@ -255,14 +286,22 @@ const normalizeVariables = (variables) => {
 const syncDriverExcelToS3 = async () => {
     if (driverExcelSyncInProgress) {
         driverExcelSyncRequested = true;
+        driverExcelSyncStatus.state = 'queued';
+        driverExcelSyncStatus.lastTriggeredAt = new Date().toISOString();
+        persistDriverExcelSyncStatus();
         return;
     }
 
     driverExcelSyncInProgress = true;
+    driverExcelSyncStatus.state = 'running';
+    driverExcelSyncStatus.lastRunAt = new Date().toISOString();
+    driverExcelSyncStatus.lastError = null;
+    const syncStartedAt = Date.now();
+    persistDriverExcelSyncStatus();
     try {
         const data = await withDb(async (client) => {
             const candidatesRes = await client.query(`
-                SELECT c.id, c.phone_number, c.name, c.stage, c.created_at, c.last_message_at, c.variables,
+                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables,
                     (
                         SELECT d.url FROM driver_documents d
                         WHERE d.candidate_id = c.id
@@ -280,7 +319,8 @@ const syncDriverExcelToS3 = async () => {
                 ORDER BY cm.created_at ASC
             `);
 
-            return { candidates: candidatesRes.rows, messages: messagesRes.rows };
+            const customCols = await getDriverExcelColumnConfig(client);
+            return { candidates: candidatesRes.rows, messages: messagesRes.rows, columns: [...DRIVER_EXCEL_CORE_COLUMNS, ...customCols] };
         });
 
         const customers = data.candidates.map((row) => {
@@ -294,11 +334,12 @@ const syncDriverExcelToS3 = async () => {
                 phone_number: row.phone_number,
                 name: row.name,
                 stage: row.stage,
+                source: row.source || '',
                 created_at: row.created_at ? new Date(row.created_at).toISOString() : '',
                 last_message_at: row.last_message_at ? new Date(Number(row.last_message_at) || row.last_message_at).toISOString() : '',
                 latest_license_url: latestLicenseUrl,
                 license_folder_url: getPublicS3Url(licenseFolderKey),
-                variables: JSON.stringify(vars)
+                variables: vars
             };
         });
 
@@ -308,18 +349,28 @@ const syncDriverExcelToS3 = async () => {
             text: row.text || ''
         }));
 
-        const workbookXml = buildDriverExcelXml(customers, messages);
+        const workbookXml = buildDriverExcelXml(customers, messages, data.columns);
         await uploadToS3({
             key: 'driver excel/driver-data.xls',
             body: Buffer.from(workbookXml, 'utf8'),
             contentType: 'application/vnd.ms-excel'
         });
+        driverExcelSyncStatus.state = 'success';
+        driverExcelSyncStatus.lastSuccessAt = new Date().toISOString();
+        driverExcelSyncStatus.lastDurationMs = Date.now() - syncStartedAt;
+        persistDriverExcelSyncStatus();
     } catch (e) {
+        driverExcelSyncStatus.state = 'error';
+        driverExcelSyncStatus.lastError = e.message || 'Driver Excel sync failed';
+        driverExcelSyncStatus.lastDurationMs = Date.now() - syncStartedAt;
+        persistDriverExcelSyncStatus();
         console.error('[Driver Excel Sync Error]', e.message);
     } finally {
         driverExcelSyncInProgress = false;
         if (driverExcelSyncRequested) {
             driverExcelSyncRequested = false;
+            driverExcelSyncStatus.state = 'queued';
+            persistDriverExcelSyncStatus();
             setTimeout(() => syncDriverExcelToS3().catch(() => null), 500);
         }
     }
@@ -327,10 +378,46 @@ const syncDriverExcelToS3 = async () => {
 
 const scheduleDriverExcelSync = () => {
     if (driverExcelSyncTimer) clearTimeout(driverExcelSyncTimer);
+    driverExcelSyncStatus.state = 'queued';
+    driverExcelSyncStatus.lastTriggeredAt = new Date().toISOString();
+    persistDriverExcelSyncStatus();
     driverExcelSyncTimer = setTimeout(() => {
         driverExcelSyncTimer = null;
         syncDriverExcelToS3().catch(() => null);
     }, 300);
+};
+
+
+
+const DRIVER_EXCEL_CORE_COLUMNS = [
+    { key: 'phoneNumber', label: 'Phone Number', isCore: true },
+    { key: 'name', label: 'Name', isCore: true },
+    { key: 'status', label: 'Stage', isCore: true },
+    { key: 'source', label: 'Source', isCore: true },
+    { key: 'createdAt', label: 'Created At', isCore: true },
+    { key: 'lastMessageAt', label: 'Last Message At', isCore: true }
+];
+
+const normalizeColumnKey = (label = '') => String(label)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+const getDriverExcelColumnConfig = async (client) => {
+    const setting = await client.query("SELECT value FROM system_settings WHERE key = 'driver_excel_columns' LIMIT 1");
+    const value = setting.rows[0]?.value;
+    if (!Array.isArray(value)) return [];
+    return value
+        .filter((c) => c && typeof c.key === 'string' && typeof c.label === 'string')
+        .map((c) => ({ key: c.key, label: c.label, isCore: false }));
+};
+
+const saveDriverExcelColumnConfig = async (client, columns) => {
+    await client.query(
+        "INSERT INTO system_settings (key, value) VALUES ('driver_excel_columns', $1::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        [JSON.stringify(columns.map((c) => ({ key: c.key, label: c.label })))]
+    );
 };
 
 const getFileExtensionFromMime = (mimeType = '', fallback = 'bin') => {
@@ -1717,6 +1804,168 @@ apiRouter.get('/drivers/:id/documents', async (req, res) => {
             const r = await client.query('SELECT * FROM driver_documents WHERE candidate_id = $1', [req.params.id]);
             const docs = await Promise.all(r.rows.map(async d => ({ id: d.id, docType: d.type, url: await refreshMediaUrl(d.url), verificationStatus: d.status, timestamp: new Date(d.created_at).getTime() })));
             res.json(docs);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+
+apiRouter.get('/reports/driver-excel', async (req, res) => {
+    try {
+        const search = (req.query.search || '').toString().trim();
+        await withDb(async (client) => {
+            const customCols = await getDriverExcelColumnConfig(client);
+            const cols = [...DRIVER_EXCEL_CORE_COLUMNS, ...customCols];
+            const params = [];
+            let where = '';
+            if (search) {
+                params.push(`%${search}%`);
+                where = `WHERE c.name ILIKE $1 OR c.phone_number ILIKE $1 OR c.stage ILIKE $1`;
+            }
+            const q = `
+                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables
+                FROM candidates c
+                ${where}
+                ORDER BY c.created_at DESC
+                LIMIT 500
+            `;
+            const rowsRes = await client.query(q, params);
+            const rows = rowsRes.rows.map((r) => ({
+                id: r.id,
+                phoneNumber: r.phone_number || '',
+                name: r.name || '',
+                status: r.stage || '',
+                source: r.source || '',
+                createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
+                lastMessageAt: r.last_message_at ? new Date(Number(r.last_message_at) || r.last_message_at).toISOString() : '',
+                variables: normalizeVariables(r.variables)
+            }));
+            res.json({ columns: cols, rows });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/reports/driver-excel/sync-status', async (req, res) => {
+    try {
+        let persisted = {};
+        await withDb(async (client) => {
+            const r = await client.query("SELECT value FROM system_settings WHERE key = 'driver_excel_sync_status' LIMIT 1");
+            persisted = r.rows[0]?.value || {};
+        });
+        res.json({
+            ...persisted,
+            ...driverExcelSyncStatus,
+            inProgress: driverExcelSyncInProgress,
+            hasQueuedSync: Boolean(driverExcelSyncRequested || driverExcelSyncTimer)
+        });
+    } catch (e) {
+        res.json({
+            ...driverExcelSyncStatus,
+            inProgress: driverExcelSyncInProgress,
+            hasQueuedSync: Boolean(driverExcelSyncRequested || driverExcelSyncTimer)
+        });
+    }
+});
+
+apiRouter.patch('/reports/driver-excel/:id', async (req, res) => {
+    try {
+        const updates = req.body?.updates || {};
+        const id = req.params.id;
+        await withDb(async (client) => {
+            const existingRes = await client.query('SELECT variables FROM candidates WHERE id = $1 LIMIT 1', [id]);
+            if (existingRes.rows.length === 0) return res.status(404).json({ error: 'Candidate not found' });
+
+            const coreFieldMap = { phoneNumber: 'phone_number', name: 'name', status: 'stage', source: 'source' };
+            for (const [k, v] of Object.entries(updates)) {
+                if (coreFieldMap[k]) {
+                    await client.query(`UPDATE candidates SET ${coreFieldMap[k]} = $1 WHERE id = $2`, [v, id]);
+                }
+            }
+
+            const vars = normalizeVariables(existingRes.rows[0].variables);
+            const variableUpdates = Object.entries(updates).filter(([k]) => !['phoneNumber', 'name', 'status', 'source', 'createdAt', 'lastMessageAt'].includes(k));
+            if (variableUpdates.length > 0) {
+                for (const [k, v] of variableUpdates) vars[k] = v;
+                await client.query('UPDATE candidates SET variables = $1::jsonb WHERE id = $2', [JSON.stringify(vars), id]);
+            }
+            scheduleDriverExcelSync();
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.delete('/reports/driver-excel/:id', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query('DELETE FROM candidates WHERE id = $1', [req.params.id]);
+            scheduleDriverExcelSync();
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/reports/driver-excel/columns', async (req, res) => {
+    try {
+        const label = (req.body?.label || '').toString().trim();
+        if (!label) return res.status(400).json({ error: 'Column label is required' });
+        const key = normalizeColumnKey(label);
+        if (!key) return res.status(400).json({ error: 'Invalid column label' });
+
+        await withDb(async (client) => {
+            const customCols = await getDriverExcelColumnConfig(client);
+            if (customCols.some((c) => c.key === key) || DRIVER_EXCEL_CORE_COLUMNS.some((c) => c.key === key)) {
+                return res.status(400).json({ error: 'Column already exists' });
+            }
+            const next = [...customCols, { key, label, isCore: false }];
+            await saveDriverExcelColumnConfig(client, next);
+            scheduleDriverExcelSync();
+            res.json({ success: true, key, label });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.patch('/reports/driver-excel/columns/:key', async (req, res) => {
+    try {
+        const key = req.params.key;
+        const newLabel = (req.body?.newLabel || '').toString().trim();
+        if (!newLabel) return res.status(400).json({ error: 'newLabel is required' });
+        const newKey = normalizeColumnKey(newLabel);
+        await withDb(async (client) => {
+            const customCols = await getDriverExcelColumnConfig(client);
+            const existing = customCols.find((c) => c.key === key);
+            if (!existing) return res.status(404).json({ error: 'Column not found' });
+            if (newKey !== key && (customCols.some((c) => c.key === newKey) || DRIVER_EXCEL_CORE_COLUMNS.some((c) => c.key === newKey))) {
+                return res.status(400).json({ error: 'Column key conflicts with existing column' });
+            }
+
+            const renamed = customCols.map((c) => c.key === key ? { ...c, key: newKey, label: newLabel } : c);
+            await saveDriverExcelColumnConfig(client, renamed);
+
+            if (newKey !== key) {
+                await client.query(`
+                    UPDATE candidates
+                    SET variables = (variables - $1) || jsonb_build_object($2, variables->$1)
+                    WHERE variables ? $1
+                `, [key, newKey]);
+            }
+
+            scheduleDriverExcelSync();
+            res.json({ success: true, key: newKey, label: newLabel });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.delete('/reports/driver-excel/columns/:key', async (req, res) => {
+    try {
+        const key = req.params.key;
+        await withDb(async (client) => {
+            const customCols = await getDriverExcelColumnConfig(client);
+            if (!customCols.some((c) => c.key === key)) return res.status(404).json({ error: 'Column not found' });
+            const next = customCols.filter((c) => c.key !== key);
+            await saveDriverExcelColumnConfig(client, next);
+            await client.query('UPDATE candidates SET variables = variables - $1 WHERE variables ? $1', [key]);
+            scheduleDriverExcelSync();
+            res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });

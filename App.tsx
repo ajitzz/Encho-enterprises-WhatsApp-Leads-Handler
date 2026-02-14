@@ -16,6 +16,7 @@ import { PrivacyPolicy } from './components/PrivacyPolicy';
 import { TermsOfService } from './components/TermsOfService'; 
 import { DataDeletion } from './components/DataDeletion'; 
 import { SystemMonitor } from './components/SystemMonitor'; 
+import { DriverExcelReport } from './components/DriverExcelReport'; 
 import { SettingsModal } from './components/SettingsModal'; 
 import { Login } from './components/Login'; 
 import { mockBackend } from './services/mockBackend';
@@ -372,6 +373,7 @@ export default function App() {
         )}
         
         {activeTab === 'leads' && <div className="p-4 h-screen bg-gray-50"><LeadManager drivers={drivers} onSelectDriver={handleSelectDriver} onBulkSend={handleBulkSendDirect} onUpdateDriverStatus={handleBulkStatusUpdate} /></div>}
+        {activeTab === 'excel-report' && <DriverExcelReport isLiveMode={dataSource === 'live'} />}
         {activeTab === 'media-library' && <MediaLibrary />}
         {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
 

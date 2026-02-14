@@ -1,5 +1,5 @@
 
-import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage } from '../types';
+import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage, DriverExcelColumn, DriverExcelRow } from '../types';
 
 // Use relative path so the Vercel proxy/rewrite handles the domain automatically.
 const API_BASE_URL = ''; 
@@ -226,5 +226,42 @@ export const liveApiService = {
           method: 'PATCH',
           body: JSON.stringify(settings)
       });
+  },
+
+  getDriverExcelReport: async (search: string = ''): Promise<{ columns: DriverExcelColumn[]; rows: DriverExcelRow[] }> => {
+      return apiRequest(`/api/reports/driver-excel?search=${encodeURIComponent(search)}`);
+  },
+
+  getDriverExcelSyncStatus: async (): Promise<{ state: string; lastTriggeredAt?: string; lastRunAt?: string; lastSuccessAt?: string; lastError?: string; inProgress?: boolean; hasQueuedSync?: boolean; lastDurationMs?: number }> => {
+      return apiRequest('/api/reports/driver-excel/sync-status');
+  },
+
+  updateDriverExcelRow: async (id: string, updates: Record<string, any>) => {
+      return apiRequest(`/api/reports/driver-excel/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ updates })
+      });
+  },
+
+  deleteDriverExcelRow: async (id: string) => {
+      return apiRequest(`/api/reports/driver-excel/${id}`, { method: 'DELETE' });
+  },
+
+  addDriverExcelColumn: async (label: string) => {
+      return apiRequest('/api/reports/driver-excel/columns', {
+          method: 'POST',
+          body: JSON.stringify({ label })
+      });
+  },
+
+  renameDriverExcelColumn: async (key: string, newLabel: string) => {
+      return apiRequest(`/api/reports/driver-excel/columns/${encodeURIComponent(key)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ newLabel })
+      });
+  },
+
+  deleteDriverExcelColumn: async (key: string) => {
+      return apiRequest(`/api/reports/driver-excel/columns/${encodeURIComponent(key)}`, { method: 'DELETE' });
   }
 };
