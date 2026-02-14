@@ -263,5 +263,12 @@ export const liveApiService = {
 
   deleteDriverExcelColumn: async (key: string) => {
       return apiRequest(`/api/reports/driver-excel/columns/${encodeURIComponent(key)}`, { method: 'DELETE' });
+  },
+
+  reorderDriverExcelColumns: async (orderedKeys: string[]) => {
+      return apiRequest('/api/reports/driver-excel/columns/reorder', {
+          method: 'POST',
+          body: JSON.stringify({ orderedKeys })
+      });
   }
 };
