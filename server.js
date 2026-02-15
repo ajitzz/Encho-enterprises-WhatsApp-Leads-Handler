@@ -588,7 +588,7 @@ const getDriverExcelVariableCatalog = async (client) => {
 
     return Array.from(keys)
         .sort((a, b) => a.localeCompare(b))
-        .map((key) => ({ key, label: formatColumnLabelFromKey(key) }));
+        .map((key) => ({ key, label: key }));
 };
 
 const getFileExtensionFromMime = (mimeType = '', fallback = 'bin') => {
@@ -2217,7 +2217,6 @@ apiRouter.delete('/reports/driver-excel/columns/:key', async (req, res) => {
             if (orderedKeys.length > 0) {
                 await saveDriverExcelColumnOrderConfig(client, orderedKeys.filter((k) => k !== key));
             }
-            await client.query('UPDATE candidates SET variables = variables - $1 WHERE variables ? $1', [key]);
             scheduleDriverExcelSync();
             res.json({ success: true });
         });
