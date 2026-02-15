@@ -327,7 +327,6 @@ const syncDriverExcelToS3 = async () => {
             `);
 
             const customCols = await getDriverExcelColumnConfig(client);
-            const orderedKeys = await getDriverExcelColumnOrderConfig(client);
             const { responseLookup, discoveredKeys } = buildVariableResponseLookup({
                 captureRows: captureRes.rows,
                 candidateRows: candidatesRes.rows
@@ -336,15 +335,11 @@ const syncDriverExcelToS3 = async () => {
             if (mergedCustomCols.length !== customCols.length) {
                 await saveDriverExcelColumnConfig(client, mergedCustomCols);
             }
-            const effectiveColumns = applyDriverExcelColumnOrder(
-                [...DRIVER_EXCEL_CORE_COLUMNS, ...mergedCustomCols],
-                orderedKeys
-            );
 
             return {
                 candidates: candidatesRes.rows,
                 messages: messagesRes.rows,
-                columns: effectiveColumns,
+                columns: [...DRIVER_EXCEL_CORE_COLUMNS, ...mergedCustomCols],
                 responseLookup
             };
         });
@@ -2005,7 +2000,6 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
         const search = (req.query.search || '').toString().trim();
         await withDb(async (client) => {
             const customCols = await getDriverExcelColumnConfig(client);
-            const orderedKeys = await getDriverExcelColumnOrderConfig(client);
             const params = [];
             let where = '';
             if (search) {
@@ -2041,7 +2035,7 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
             if (mergedCustomCols.length !== customCols.length) {
                 await saveDriverExcelColumnConfig(client, mergedCustomCols);
             }
-            const cols = applyDriverExcelColumnOrder([...DRIVER_EXCEL_CORE_COLUMNS, ...mergedCustomCols], orderedKeys);
+            const cols = [...DRIVER_EXCEL_CORE_COLUMNS, ...mergedCustomCols];
 
             const rows = rowsRes.rows.map((r) => ({
                 id: r.id,
@@ -2191,9 +2185,14 @@ apiRouter.post('/reports/driver-excel/columns/reorder', async (req, res) => {
         const orderedKeys = Array.isArray(req.body?.orderedKeys) ? req.body.orderedKeys.map((k) => String(k)) : [];
         await withDb(async (client) => {
             const customCols = await getDriverExcelColumnConfig(client);
-            const allColumnKeys = new Set([...DRIVER_EXCEL_CORE_COLUMNS.map((c) => c.key), ...customCols.map((c) => c.key)]);
-            const normalizedOrdered = orderedKeys.filter((key) => allColumnKeys.has(key));
-            await saveDriverExcelColumnOrderConfig(client, normalizedOrdered);
+            const customByKey = new Map(customCols.map((col) => [col.key, col]));
+
+            const normalizedOrdered = orderedKeys.filter((key) => customByKey.has(key));
+            const seen = new Set(normalizedOrdered);
+            const remainder = customCols.filter((col) => !seen.has(col.key)).map((col) => col.key);
+            const nextOrder = [...normalizedOrdered, ...remainder].map((key) => customByKey.get(key)).filter(Boolean);
+
+            await saveDriverExcelColumnConfig(client, nextOrder);
             scheduleDriverExcelSync();
             res.json({ success: true });
         });
