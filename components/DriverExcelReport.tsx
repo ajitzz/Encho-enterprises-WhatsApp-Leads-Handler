@@ -499,8 +499,9 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
 
   const syncLabel = (() => {
     if (!syncStatus) return 'Sync status unavailable';
-    if (syncStatus.state === 'running') return 'Syncing Excel to S3...';
+    if (syncStatus.state === 'running') return 'Syncing Driver Excel to S3 and Google Sheets...';
     if (syncStatus.state === 'queued') return 'Excel sync queued';
+    if (syncStatus.state === 'partial_success') return 'S3 updated, Google Sheets sync skipped (check credentials)';
     if (syncStatus.state === 'success') return `Last synced ${syncStatus.lastSuccessAt ? new Date(syncStatus.lastSuccessAt).toLocaleString() : 'successfully'}`;
     if (syncStatus.state === 'error') return `Sync failed: ${syncStatus.lastError || 'unknown error'}`;
     return 'Sync idle';
@@ -510,7 +511,9 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     ? 'bg-red-100 text-red-700 border-red-200'
     : syncStatus?.state === 'running' || syncStatus?.state === 'queued'
       ? 'bg-amber-100 text-amber-700 border-amber-200'
-      : 'bg-emerald-100 text-emerald-700 border-emerald-200';
+      : syncStatus?.state === 'partial_success'
+        ? 'bg-blue-100 text-blue-700 border-blue-200'
+        : 'bg-emerald-100 text-emerald-700 border-emerald-200';
 
   if (!isLiveMode) {
     return <div className="p-8 text-amber-700">Switch to <b>Live API</b> mode to use the Excel report editor.</div>;
@@ -521,7 +524,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">Driver Excel Report</h2>
-          <p className="text-sm text-gray-500">Edit, update, delete customer rows and keep S3 driver Excel synchronized.</p>
+          <p className="text-sm text-gray-500">Edit, update, delete customer rows and keep S3 + Google Sheets synchronized.</p>
           <div className={`mt-2 inline-flex items-center px-2.5 py-1 text-xs rounded-full border ${syncBadgeClass}`}>
             {syncLabel}
           </div>
