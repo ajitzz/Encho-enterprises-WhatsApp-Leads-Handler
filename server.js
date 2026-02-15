@@ -8,7 +8,7 @@ const axios = require('axios');
 const https = require('https');
 const { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-const { OAuth2Client } = require('google-auth-library');
+const { OAuth2Client, JWT } = require('google-auth-library');
 
 require('dotenv').config();
 
@@ -19,6 +19,11 @@ const SYSTEM_CONFIG = {
     AWS_REGION: process.env.AWS_REGION || 'us-east-1',
     AWS_BUCKET: process.env.AWS_BUCKET_NAME || 'uber-fleet-assets',
     GOOGLE_CLIENT_ID: process.env.VITE_GOOGLE_CLIENT_ID,
+    GOOGLE_SHEETS_SPREADSHEET_ID: process.env.GOOGLE_SHEETS_SPREADSHEET_ID || '',
+    GOOGLE_SHEETS_CUSTOMERS_TAB_NAME: process.env.GOOGLE_SHEETS_CUSTOMERS_TAB_NAME || process.env.GOOGLE_SHEETS_CUSTOMERS_SHEET || 'Customers',
+    GOOGLE_SHEETS_MESSAGES_TAB_NAME: process.env.GOOGLE_SHEETS_MESSAGES_TAB_NAME || process.env.GOOGLE_SHEETS_MESSAGES_SHEET || 'Messages',
+    GOOGLE_SERVICE_ACCOUNT_EMAIL: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || '',
+    GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || '',
     CACHE_TTL: 60 * 1000 // 60 Seconds Cache for Bot Settings
 };
 
@@ -133,14 +138,29 @@ const getMetaClient = () => axios.create({
 let driverExcelSyncInProgress = false;
 let driverExcelSyncRequested = false;
 let driverExcelSyncTimer = null;
+let driverExcelSyncMaxWaitTimer = null;
+let driverExcelSyncPendingSince = null;
+const DRIVER_EXCEL_SYNC_IDLE_MS = Math.max(1000, Number(process.env.DRIVER_EXCEL_SYNC_IDLE_MS || 20000));
+const DRIVER_EXCEL_SYNC_MAX_WAIT_MS = Math.max(DRIVER_EXCEL_SYNC_IDLE_MS, Number(process.env.DRIVER_EXCEL_SYNC_MAX_WAIT_MS || 180000));
+const DRIVER_EXCEL_INCREMENTAL_SYNC_IDLE_MS = Math.max(500, Number(process.env.DRIVER_EXCEL_INCREMENTAL_SYNC_IDLE_MS || 2500));
+const DRIVER_EXCEL_INCREMENTAL_SYNC_MAX_WAIT_MS = Math.max(DRIVER_EXCEL_INCREMENTAL_SYNC_IDLE_MS, Number(process.env.DRIVER_EXCEL_INCREMENTAL_SYNC_MAX_WAIT_MS || 15000));
 let driverExcelSyncStatus = {
     state: 'idle',
     lastTriggeredAt: null,
     lastRunAt: null,
     lastSuccessAt: null,
     lastError: null,
-    lastDurationMs: null
+    lastDurationMs: null,
+    destinations: {
+        s3: { state: 'idle', lastSuccessAt: null, lastError: null },
+        googleSheets: { state: 'idle', lastSuccessAt: null, lastError: null }
+    }
 };
+
+let driverExcelIncrementalTimer = null;
+let driverExcelIncrementalMaxWaitTimer = null;
+let driverExcelIncrementalPendingSince = null;
+const driverExcelIncrementalQueue = new Map(); // candidateId -> 'upsert' | 'delete'
 
 const persistDriverExcelSyncStatus = async () => {
     try {
@@ -251,6 +271,342 @@ const buildDriverExcelXml = (customers, messages, columns = []) => {
 </Workbook>`;
 };
 
+const buildDriverExcelSheetValues = (customers, messages, columns = []) => {
+    const effectiveColumns = Array.isArray(columns) && columns.length > 0 ? columns : DRIVER_EXCEL_CORE_COLUMNS;
+    const customerHeaders = ['Candidate ID', ...effectiveColumns.map((c) => c.label), 'Latest License Link', 'License Folder Link', 'Variables JSON'];
+    const customerRows = [
+        customerHeaders,
+        ...customers.map((c) => [
+            c.id,
+            ...effectiveColumns.map((col) => getDriverExcelCellValue(c, col)),
+            c.latest_license_url,
+            c.license_folder_url,
+            JSON.stringify(c.variables || {})
+        ])
+    ];
+
+    const messageRows = [
+        ['Message ID', 'Candidate ID', 'Phone Number', 'Direction', 'Type', 'Status', 'WhatsApp Message ID', 'Created At', 'Text'],
+        ...messages.map((m) => [
+            m.id,
+            m.candidate_id,
+            m.phone_number,
+            m.direction,
+            m.type,
+            m.status,
+            m.whatsapp_message_id,
+            m.created_at,
+            m.text
+        ])
+    ];
+
+    return { customerRows, messageRows };
+};
+
+const isDriverExcelGoogleSyncEnabled = () => Boolean(
+    SYSTEM_CONFIG.GOOGLE_SHEETS_SPREADSHEET_ID
+    && SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_EMAIL
+    && SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY
+);
+
+const parseGooglePrivateKey = () => {
+    const raw = SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY;
+    if (!raw) return '';
+    return raw.includes('-----BEGIN PRIVATE KEY-----') ? raw.replace(/\\n/g, '\n') : raw;
+};
+
+const toSheetRangeName = (sheetName = '') => `'${String(sheetName).replace(/'/g, "''")}'`;
+
+const syncDriverExcelToGoogleSheets = async ({ customerRows, messageRows }) => {
+    const customersTabName = SYSTEM_CONFIG.GOOGLE_SHEETS_CUSTOMERS_TAB_NAME;
+    const messagesTabName = SYSTEM_CONFIG.GOOGLE_SHEETS_MESSAGES_TAB_NAME;
+    if (!isDriverExcelGoogleSyncEnabled()) {
+        return { skipped: true, reason: 'Google Sheets credentials not configured' };
+    }
+
+    const authClient = new JWT({
+        email: SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        key: parseGooglePrivateKey(),
+        scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    });
+    const { access_token: accessToken } = await authClient.authorize();
+    if (!accessToken) throw new Error('Failed to authorize Google Sheets service account');
+
+    const spreadsheetId = SYSTEM_CONFIG.GOOGLE_SHEETS_SPREADSHEET_ID;
+    const customersRange = toSheetRangeName(customersTabName);
+    const messagesRange = toSheetRangeName(messagesTabName);
+    const headers = {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+    };
+
+    const sameTab = customersTabName === messagesTabName;
+
+    if (sameTab) {
+        const unifiedRows = [
+            ...customerRows,
+            [],
+            ['Messages Table'],
+            ...messageRows
+        ];
+        await axios.post(
+            `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchClear`,
+            { ranges: [customersRange] },
+            { headers }
+        );
+        await axios.post(
+            `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchUpdate`,
+            {
+                valueInputOption: 'RAW',
+                data: [
+                    { range: `${customersRange}!A1`, values: unifiedRows }
+                ]
+            },
+            { headers }
+        );
+        return { skipped: false, mode: 'single_tab' };
+    }
+
+    await axios.post(
+        `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchClear`,
+        { ranges: [customersRange, messagesRange] },
+        { headers }
+    );
+
+    await axios.post(
+        `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchUpdate`,
+        {
+            valueInputOption: 'RAW',
+            data: [
+                { range: `${customersRange}!A1`, values: customerRows },
+                { range: `${messagesRange}!A1`, values: messageRows }
+            ]
+        },
+        { headers }
+    );
+
+    return { skipped: false, mode: 'two_tabs' };
+};
+
+
+const fetchDriverExcelCandidateForSync = async (candidateId) => {
+    if (!candidateId) return null;
+    return withDb(async (client) => {
+        const candidateRes = await client.query(`
+            SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables,
+                (
+                    SELECT d.url FROM driver_documents d
+                    WHERE d.candidate_id = c.id
+                    ORDER BY d.created_at DESC
+                    LIMIT 1
+                ) AS latest_license_key
+            FROM candidates c
+            WHERE c.id = $1
+            LIMIT 1
+        `, [candidateId]);
+
+        if (candidateRes.rows.length === 0) return null;
+
+        const captureRes = await client.query(`
+            SELECT text, created_at
+            FROM candidate_messages
+            WHERE candidate_id = $1 AND type = 'variable_capture'
+            ORDER BY created_at ASC
+        `, [candidateId]);
+
+        const customCols = await getDriverExcelColumnConfig(client);
+        const { responseLookup, discoveredKeys } = buildVariableResponseLookup({
+            captureRows: captureRes.rows.map((row) => ({ ...row, candidate_id: candidateId })),
+            candidateRows: candidateRes.rows
+        });
+        const mergedCustomCols = mergeDriverExcelColumns(customCols, discoveredKeys);
+        if (mergedCustomCols.length !== customCols.length) {
+            await saveDriverExcelColumnConfig(client, mergedCustomCols);
+        }
+
+        const row = candidateRes.rows[0];
+        const vars = {
+            ...normalizeVariables(row.variables),
+            ...(responseLookup.get(row.id) || {})
+        };
+        const latestLicenseKey = row.latest_license_key || vars.license_s3_key || '';
+        const month = latestLicenseKey.startsWith('Driver data/') ? latestLicenseKey.split('/')[1] : getDriverMonthFolder();
+        const licenseFolderKey = `Driver data/${month}/${sanitizePhoneForPath(row.phone_number)}/`;
+        const latestLicenseUrl = vars.license_url || (latestLicenseKey ? getPublicS3Url(latestLicenseKey) : '');
+
+        return {
+            customer: {
+                id: row.id,
+                phone_number: row.phone_number,
+                name: row.name,
+                stage: row.stage,
+                source: row.source || '',
+                created_at: row.created_at ? new Date(row.created_at).toISOString() : '',
+                last_message_at: row.last_message_at ? new Date(Number(row.last_message_at) || row.last_message_at).toISOString() : '',
+                latest_license_url: latestLicenseUrl,
+                license_folder_url: getPublicS3Url(licenseFolderKey),
+                variables: vars
+            },
+            columns: [...DRIVER_EXCEL_CORE_COLUMNS, ...mergedCustomCols]
+        };
+    });
+};
+
+const getGoogleSheetsAccessToken = async () => {
+    const authClient = new JWT({
+        email: SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        key: parseGooglePrivateKey(),
+        scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    });
+    const { access_token: accessToken } = await authClient.authorize();
+    if (!accessToken) throw new Error('Failed to authorize Google Sheets service account');
+    return accessToken;
+};
+
+const findCandidateRowInGoogleSheet = async ({ accessToken, spreadsheetId, customersRange, candidateId }) => {
+    const encodedRange = encodeURIComponent(`${customersRange}!A:A`);
+    const response = await axios.get(
+        `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodedRange}`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+
+    const rows = response.data?.values || [];
+    const matchIndex = rows.findIndex((cells) => String(cells?.[0] || '') === String(candidateId));
+    if (matchIndex === -1) return null;
+    return matchIndex + 1; // 1-based
+};
+
+const upsertCandidateToGoogleSheets = async (candidateId) => {
+    if (!isDriverExcelGoogleSyncEnabled() || !candidateId) return;
+    const customersTabName = SYSTEM_CONFIG.GOOGLE_SHEETS_CUSTOMERS_TAB_NAME;
+    const messagesTabName = SYSTEM_CONFIG.GOOGLE_SHEETS_MESSAGES_TAB_NAME;
+    if (customersTabName === messagesTabName) {
+        // Single-tab mode uses a unified full-sheet layout; incremental row updates are unsafe.
+        scheduleDriverExcelSync();
+        return;
+    }
+
+    const candidateData = await fetchDriverExcelCandidateForSync(candidateId);
+    if (!candidateData) {
+        await deleteCandidateFromGoogleSheets(candidateId);
+        return;
+    }
+
+    const accessToken = await getGoogleSheetsAccessToken();
+    const spreadsheetId = SYSTEM_CONFIG.GOOGLE_SHEETS_SPREADSHEET_ID;
+    const customersRange = toSheetRangeName(customersTabName);
+    const rowValues = [
+        candidateData.customer.id,
+        ...candidateData.columns.map((col) => getDriverExcelCellValue(candidateData.customer, col)),
+        candidateData.customer.latest_license_url,
+        candidateData.customer.license_folder_url,
+        JSON.stringify(candidateData.customer.variables || {})
+    ];
+
+    const headers = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
+    const rowNumber = await findCandidateRowInGoogleSheet({ accessToken, spreadsheetId, customersRange, candidateId });
+
+    if (rowNumber) {
+        await axios.post(
+            `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchClear`,
+            { ranges: [`${customersRange}!A${rowNumber}:ZZ${rowNumber}`] },
+            { headers }
+        );
+        await axios.put(
+            `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(`${customersRange}!A${rowNumber}`)}?valueInputOption=RAW`,
+            { values: [rowValues] },
+            { headers }
+        );
+        return;
+    }
+
+    await axios.post(
+        `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(`${customersRange}!A:A`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+        { values: [rowValues] },
+        { headers }
+    );
+};
+
+const deleteCandidateFromGoogleSheets = async (candidateId) => {
+    if (!isDriverExcelGoogleSyncEnabled() || !candidateId) return;
+    const customersTabName = SYSTEM_CONFIG.GOOGLE_SHEETS_CUSTOMERS_TAB_NAME;
+    const messagesTabName = SYSTEM_CONFIG.GOOGLE_SHEETS_MESSAGES_TAB_NAME;
+    if (customersTabName === messagesTabName) {
+        scheduleDriverExcelSync();
+        return;
+    }
+
+    const accessToken = await getGoogleSheetsAccessToken();
+    const spreadsheetId = SYSTEM_CONFIG.GOOGLE_SHEETS_SPREADSHEET_ID;
+    const customersRange = toSheetRangeName(customersTabName);
+    const headers = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
+
+    const rowNumber = await findCandidateRowInGoogleSheet({ accessToken, spreadsheetId, customersRange, candidateId });
+    if (!rowNumber) return;
+
+    await axios.post(
+        `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchClear`,
+        { ranges: [`${customersRange}!A${rowNumber}:ZZ${rowNumber}`] },
+        { headers }
+    );
+};
+
+const flushDriverExcelIncrementalQueue = async () => {
+    if (driverExcelIncrementalQueue.size === 0) return;
+    const actions = Array.from(driverExcelIncrementalQueue.entries());
+    driverExcelIncrementalQueue.clear();
+    driverExcelIncrementalPendingSince = null;
+
+    for (const [candidateId, action] of actions) {
+        try {
+            if (action === 'delete') await deleteCandidateFromGoogleSheets(candidateId);
+            else await upsertCandidateToGoogleSheets(candidateId);
+        } catch (e) {
+            console.error('[Driver Excel Incremental Sheets Sync Error]', candidateId, e.message);
+            // Fallback to robust full sync path on incremental failure.
+            scheduleDriverExcelSync();
+        }
+    }
+};
+
+const scheduleDriverExcelIncrementalSync = ({ candidateId, action = 'upsert' } = {}) => {
+    if (!candidateId || !isDriverExcelGoogleSyncEnabled()) return;
+
+    const normalizedAction = action === 'delete' ? 'delete' : 'upsert';
+    const existing = driverExcelIncrementalQueue.get(candidateId);
+    if (existing === 'delete') {
+        // Keep delete as highest priority terminal action.
+    } else {
+        driverExcelIncrementalQueue.set(candidateId, normalizedAction);
+    }
+
+    const now = Date.now();
+    if (!driverExcelIncrementalPendingSince) driverExcelIncrementalPendingSince = now;
+
+    if (driverExcelIncrementalTimer) clearTimeout(driverExcelIncrementalTimer);
+    driverExcelIncrementalTimer = setTimeout(() => {
+        driverExcelIncrementalTimer = null;
+        if (driverExcelIncrementalMaxWaitTimer) {
+            clearTimeout(driverExcelIncrementalMaxWaitTimer);
+            driverExcelIncrementalMaxWaitTimer = null;
+        }
+        flushDriverExcelIncrementalQueue().catch(() => null);
+    }, DRIVER_EXCEL_INCREMENTAL_SYNC_IDLE_MS);
+
+    const pendingForMs = now - driverExcelIncrementalPendingSince;
+    const remainingMaxWaitMs = Math.max(0, DRIVER_EXCEL_INCREMENTAL_SYNC_MAX_WAIT_MS - pendingForMs);
+    if (!driverExcelIncrementalMaxWaitTimer) {
+        driverExcelIncrementalMaxWaitTimer = setTimeout(() => {
+            driverExcelIncrementalMaxWaitTimer = null;
+            if (driverExcelIncrementalTimer) {
+                clearTimeout(driverExcelIncrementalTimer);
+                driverExcelIncrementalTimer = null;
+            }
+            flushDriverExcelIncrementalQueue().catch(() => null);
+        }, remainingMaxWaitMs);
+    }
+};
+
 const uploadToS3 = async ({ key, body, contentType }) => {
     await s3Client.send(new PutObjectCommand({
         Bucket: SYSTEM_CONFIG.AWS_BUCKET,
@@ -291,6 +647,10 @@ const syncDriverExcelToS3 = async () => {
     driverExcelSyncStatus.state = 'running';
     driverExcelSyncStatus.lastRunAt = new Date().toISOString();
     driverExcelSyncStatus.lastError = null;
+    driverExcelSyncStatus.destinations = {
+        s3: { ...driverExcelSyncStatus.destinations?.s3, state: 'running', lastError: null },
+        googleSheets: { ...driverExcelSyncStatus.destinations?.googleSheets, state: 'running', lastError: null }
+    };
     const syncStartedAt = Date.now();
     persistDriverExcelSyncStatus();
     try {
@@ -369,18 +729,54 @@ const syncDriverExcelToS3 = async () => {
         }));
 
         const workbookXml = buildDriverExcelXml(customers, messages, data.columns);
+        const sheetValues = buildDriverExcelSheetValues(customers, messages, data.columns);
         await uploadToS3({
             key: 'driver excel/driver-data.xls',
             body: Buffer.from(workbookXml, 'utf8'),
             contentType: 'application/vnd.ms-excel'
         });
-        driverExcelSyncStatus.state = 'success';
+        driverExcelSyncStatus.destinations.s3 = {
+            state: 'success',
+            lastSuccessAt: new Date().toISOString(),
+            lastError: null
+        };
+
+        const googleSync = await syncDriverExcelToGoogleSheets(sheetValues);
+        if (googleSync.skipped) {
+            driverExcelSyncStatus.destinations.googleSheets = {
+                ...driverExcelSyncStatus.destinations.googleSheets,
+                state: 'skipped',
+                lastError: googleSync.reason || 'Google Sheets sync skipped'
+            };
+        } else {
+            driverExcelSyncStatus.destinations.googleSheets = {
+                state: 'success',
+                lastSuccessAt: new Date().toISOString(),
+                lastError: null
+            };
+        }
+
+        driverExcelSyncStatus.state = driverExcelSyncStatus.destinations.googleSheets.state === 'success' ? 'success' : 'partial_success';
         driverExcelSyncStatus.lastSuccessAt = new Date().toISOString();
         driverExcelSyncStatus.lastDurationMs = Date.now() - syncStartedAt;
         persistDriverExcelSyncStatus();
     } catch (e) {
         driverExcelSyncStatus.state = 'error';
         driverExcelSyncStatus.lastError = e.message || 'Driver Excel sync failed';
+        if (driverExcelSyncStatus.destinations?.s3?.state === 'running') {
+            driverExcelSyncStatus.destinations.s3 = {
+                ...driverExcelSyncStatus.destinations.s3,
+                state: 'error',
+                lastError: e.message || 'S3 sync failed'
+            };
+        }
+        if (driverExcelSyncStatus.destinations?.googleSheets?.state === 'running') {
+            driverExcelSyncStatus.destinations.googleSheets = {
+                ...driverExcelSyncStatus.destinations.googleSheets,
+                state: 'error',
+                lastError: e.message || 'Google Sheets sync failed'
+            };
+        }
         driverExcelSyncStatus.lastDurationMs = Date.now() - syncStartedAt;
         persistDriverExcelSyncStatus();
         console.error('[Driver Excel Sync Error]', e.message);
@@ -395,15 +791,43 @@ const syncDriverExcelToS3 = async () => {
     }
 };
 
+const triggerDriverExcelSyncNow = () => {
+    if (driverExcelSyncTimer) {
+        clearTimeout(driverExcelSyncTimer);
+        driverExcelSyncTimer = null;
+    }
+    if (driverExcelSyncMaxWaitTimer) {
+        clearTimeout(driverExcelSyncMaxWaitTimer);
+        driverExcelSyncMaxWaitTimer = null;
+    }
+    driverExcelSyncPendingSince = null;
+    syncDriverExcelToS3().catch(() => null);
+};
+
 const scheduleDriverExcelSync = () => {
+    const now = Date.now();
+    if (!driverExcelSyncPendingSince) {
+        driverExcelSyncPendingSince = now;
+    }
+
     if (driverExcelSyncTimer) clearTimeout(driverExcelSyncTimer);
     driverExcelSyncStatus.state = 'queued';
     driverExcelSyncStatus.lastTriggeredAt = new Date().toISOString();
     persistDriverExcelSyncStatus();
+
+    // Idle-window sync: wait for a quiet period before heavy S3 + Google Sheets exports.
     driverExcelSyncTimer = setTimeout(() => {
-        driverExcelSyncTimer = null;
-        syncDriverExcelToS3().catch(() => null);
-    }, 300);
+        triggerDriverExcelSyncNow();
+    }, DRIVER_EXCEL_SYNC_IDLE_MS);
+
+    // Safety-net sync: avoid starving exports under continuous traffic.
+    const pendingForMs = now - driverExcelSyncPendingSince;
+    const remainingMaxWaitMs = Math.max(0, DRIVER_EXCEL_SYNC_MAX_WAIT_MS - pendingForMs);
+    if (!driverExcelSyncMaxWaitTimer) {
+        driverExcelSyncMaxWaitTimer = setTimeout(() => {
+            triggerDriverExcelSyncNow();
+        }, remainingMaxWaitMs);
+    }
 };
 
 
@@ -1674,6 +2098,7 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
                             [crypto.randomUUID(), candidate.id, payload.text?.body || payload.interactive?.body?.text || '[Media]', data.type]
                         );
                         scheduleDriverExcelSync();
+                        scheduleDriverExcelIncrementalSync({ candidateId: candidate.id, action: 'upsert' });
                     } catch (apiError) {
                         console.error("Meta Send Error:", apiError);
                     }
@@ -1929,6 +2354,7 @@ apiRouter.post('/webhook', async (req, res) => {
                 await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, $4, $5, 'received', NOW())`, [crypto.randomUUID(), candidate.id, text, messageType, msg.id]);
                 await runBotEngine(client, candidate, text, payloadId);
                 scheduleDriverExcelSync();
+                scheduleDriverExcelIncrementalSync({ candidateId: candidate.id, action: 'upsert' });
             });
         });
 
@@ -2030,6 +2456,7 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
             await sendToMeta(c.rows[0].phone_number, payload);
             await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text']);
             scheduleDriverExcelSync();
+            scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'upsert' });
         });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -2118,13 +2545,13 @@ apiRouter.get('/reports/driver-excel/sync-status', async (req, res) => {
             ...persisted,
             ...driverExcelSyncStatus,
             inProgress: driverExcelSyncInProgress,
-            hasQueuedSync: Boolean(driverExcelSyncRequested || driverExcelSyncTimer)
+            hasQueuedSync: Boolean(driverExcelSyncRequested || driverExcelSyncTimer || driverExcelSyncMaxWaitTimer || driverExcelIncrementalTimer || driverExcelIncrementalMaxWaitTimer || driverExcelIncrementalQueue.size > 0)
         });
     } catch (e) {
         res.json({
             ...driverExcelSyncStatus,
             inProgress: driverExcelSyncInProgress,
-            hasQueuedSync: Boolean(driverExcelSyncRequested || driverExcelSyncTimer)
+            hasQueuedSync: Boolean(driverExcelSyncRequested || driverExcelSyncTimer || driverExcelSyncMaxWaitTimer || driverExcelIncrementalTimer || driverExcelIncrementalMaxWaitTimer || driverExcelIncrementalQueue.size > 0)
         });
     }
 });
@@ -2151,6 +2578,7 @@ apiRouter.patch('/reports/driver-excel/:id', async (req, res) => {
                 await client.query('UPDATE candidates SET variables = $1::jsonb WHERE id = $2', [JSON.stringify(vars), id]);
             }
             scheduleDriverExcelSync();
+            scheduleDriverExcelIncrementalSync({ candidateId: id, action: 'upsert' });
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -2161,6 +2589,7 @@ apiRouter.delete('/reports/driver-excel/:id', async (req, res) => {
         await withDb(async (client) => {
             await client.query('DELETE FROM candidates WHERE id = $1', [req.params.id]);
             scheduleDriverExcelSync();
+            scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'delete' });
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -2387,6 +2816,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
                         await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]);
                         await client.query("UPDATE scheduled_messages SET status = 'sent' WHERE id = $1", [job.id]);
                         scheduleDriverExcelSync();
+                        scheduleDriverExcelIncrementalSync({ candidateId: job.candidate_id, action: 'upsert' });
                         processed++;
                     } catch (e) {
                         errors++;
