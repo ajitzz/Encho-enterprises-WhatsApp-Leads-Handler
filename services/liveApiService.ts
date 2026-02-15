@@ -221,6 +221,10 @@ export const liveApiService = {
       return apiRequest<any>('/api/system/settings');
   },
 
+  getSystemOperationalStatus: async () => {
+      return apiRequest<any>('/api/system/operational-status');
+  },
+
   updateSystemSettings: async (settings: any) => {
       return apiRequest('/api/system/settings', {
           method: 'PATCH',
