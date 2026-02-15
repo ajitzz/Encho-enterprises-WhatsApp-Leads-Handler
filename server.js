@@ -580,6 +580,12 @@ const getDriverExcelVariableCatalog = async (client) => {
         });
     });
 
+    const configuredColumns = await getDriverExcelColumnConfig(client);
+    configuredColumns.forEach((col) => {
+        const normalized = normalizeColumnKey(col.key);
+        if (normalized) keys.add(normalized);
+    });
+
     return Array.from(keys)
         .sort((a, b) => a.localeCompare(b))
         .map((key) => ({ key, label: formatColumnLabelFromKey(key) }));
