@@ -23,6 +23,20 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   const [uiMessage, setUiMessage] = useState('');
   const [actionKey, setActionKey] = useState<string | null>(null);
 
+  const getCurrentUserScope = () => {
+    try {
+      const token = localStorage.getItem('uber_fleet_auth_token') || '';
+      const payload = token.split('.')[1];
+      if (!payload) return 'anonymous';
+      const parsed = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+      return parsed?.email || parsed?.sub || 'anonymous';
+    } catch {
+      return 'anonymous';
+    }
+  };
+
+  const getColumnPrefsStorageKey = () => `driver_excel_columns_pref_${getCurrentUserScope()}`;
+
   const columnKeySet = useMemo(() => new Set(columns.map((c) => c.key)), [columns]);
 
   const showMessage = (message: string) => {
@@ -45,7 +59,18 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     setLoading(true);
     try {
       const data = await liveApiService.getDriverExcelReport(search);
-      setColumns(data.columns);
+      const rawColumns = data.columns || [];
+      const prefKey = getColumnPrefsStorageKey();
+      const savedKeys = JSON.parse(localStorage.getItem(prefKey) || 'null') as string[] | null;
+      const byKey = new Map(rawColumns.map((c) => [c.key, c]));
+      let nextColumns = rawColumns;
+      if (Array.isArray(savedKeys) && savedKeys.length > 0) {
+        const ordered = savedKeys.map((key) => byKey.get(key)).filter(Boolean) as DriverExcelColumn[];
+        const seen = new Set(ordered.map((c) => c.key));
+        const rest = rawColumns.filter((c) => !seen.has(c.key));
+        nextColumns = [...ordered, ...rest];
+      }
+      setColumns(nextColumns);
       setRows(data.rows);
     } catch (e: any) {
       alert(e.message || 'Failed to load driver excel report');
@@ -77,6 +102,12 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     const interval = setInterval(loadSyncStatus, 2000);
     return () => clearInterval(interval);
   }, [isLiveMode]);
+
+  useEffect(() => {
+    if (!isLiveMode || columns.length === 0) return;
+    const prefKey = getColumnPrefsStorageKey();
+    localStorage.setItem(prefKey, JSON.stringify(columns.map((c) => c.key)));
+  }, [columns, isLiveMode]);
 
   const filteredRows = useMemo(() => {
     if (!search.trim()) return rows;
@@ -151,7 +182,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
         keysToAdd.map((key) => {
           const selected = lookup.get(key);
           if (!selected) return Promise.resolve();
-          return liveApiService.addDriverExcelVariableColumn(selected.key, selected.label);
+          return liveApiService.addDriverExcelVariableColumn(selected.key, selected.key);
         })
       );
 
@@ -350,8 +381,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                         onChange={(e) => toggleVariableSelection(option.key, e.target.checked)}
                       />
                       <span className="leading-4">
-                        <b>{option.label}</b>
-                        <span className="block text-[10px]">{option.key}</span>
+                        <b>{option.key}</b>
                       </span>
                     </label>
                   );
@@ -427,7 +457,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                           </div>
                         ) : (
                           <button onClick={() => beginEdit(row.id, col, value)} className="text-left w-full">
-                            <span className="whitespace-pre-wrap break-words">{value || <span className="text-gray-300">—</span>}</span>
+                            <span className="whitespace-pre-wrap break-words">{value === '' ? '-' : value}</span>
                           </button>
                         )}
                       </td>
