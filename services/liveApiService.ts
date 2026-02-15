@@ -240,6 +240,13 @@ export const liveApiService = {
       return apiRequest('/api/reports/driver-excel/sync-status');
   },
 
+  triggerDriverExcelSync: async (mode: 'queued' | 'immediate' = 'queued') => {
+      return apiRequest('/api/reports/driver-excel/sync', {
+          method: 'POST',
+          body: JSON.stringify({ mode })
+      });
+  },
+
   updateDriverExcelRow: async (id: string, updates: Record<string, any>) => {
       return apiRequest(`/api/reports/driver-excel/${id}`, {
           method: 'PATCH',

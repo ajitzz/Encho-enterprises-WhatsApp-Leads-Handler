@@ -27,6 +27,21 @@ const SYSTEM_CONFIG = {
     CACHE_TTL: 60 * 1000 // 60 Seconds Cache for Bot Settings
 };
 
+const applyRuntimeGoogleSheetsConfig = (rawConfig = {}) => {
+    if (!rawConfig || typeof rawConfig !== 'object') return;
+
+    const assignString = (configKey, rawValue) => {
+        if (typeof rawValue !== 'string') return;
+        SYSTEM_CONFIG[configKey] = rawValue.trim();
+    };
+
+    assignString('GOOGLE_SHEETS_SPREADSHEET_ID', rawConfig.google_sheets_spreadsheet_id);
+    assignString('GOOGLE_SHEETS_CUSTOMERS_TAB_NAME', rawConfig.google_sheets_customers_tab_name);
+    assignString('GOOGLE_SHEETS_MESSAGES_TAB_NAME', rawConfig.google_sheets_messages_tab_name);
+    assignString('GOOGLE_SERVICE_ACCOUNT_EMAIL', rawConfig.google_service_account_email);
+    assignString('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY', rawConfig.google_service_account_private_key);
+};
+
 // --- IN-MEMORY CACHE (Performance Boost) ---
 const memoryCache = {
     botSettings: null,
@@ -317,6 +332,49 @@ const parseGooglePrivateKey = () => {
 
 const toSheetRangeName = (sheetName = '') => `'${String(sheetName).replace(/'/g, "''")}'`;
 
+const ensureGoogleSheetTabsExist = async ({ accessToken, spreadsheetId, desiredTabNames = [] }) => {
+    const uniqueDesired = Array.from(new Set(desiredTabNames.filter(Boolean)));
+    if (uniqueDesired.length === 0) {
+        return { existingTabNames: [], createdTabNames: [] };
+    }
+
+    const metadata = await axios.get(
+        `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties.title`,
+        {
+            headers: { Authorization: `Bearer ${accessToken}` },
+            timeout: 8000
+        }
+    );
+
+    const existingTabNames = (metadata.data?.sheets || [])
+        .map((sheet) => sheet?.properties?.title)
+        .filter(Boolean);
+
+    const missingTabNames = uniqueDesired.filter((tabName) => !existingTabNames.includes(tabName));
+    if (missingTabNames.length === 0) {
+        return { existingTabNames, createdTabNames: [] };
+    }
+
+    await axios.post(
+        `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`,
+        {
+            requests: missingTabNames.map((title) => ({ addSheet: { properties: { title } } }))
+        },
+        {
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'Content-Type': 'application/json'
+            },
+            timeout: 8000
+        }
+    );
+
+    return {
+        existingTabNames,
+        createdTabNames: missingTabNames
+    };
+};
+
 const syncDriverExcelToGoogleSheets = async ({ customerRows, messageRows }) => {
     const customersTabName = SYSTEM_CONFIG.GOOGLE_SHEETS_CUSTOMERS_TAB_NAME;
     const messagesTabName = SYSTEM_CONFIG.GOOGLE_SHEETS_MESSAGES_TAB_NAME;
@@ -339,6 +397,12 @@ const syncDriverExcelToGoogleSheets = async ({ customerRows, messageRows }) => {
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json'
     };
+
+    await ensureGoogleSheetTabsExist({
+        accessToken,
+        spreadsheetId,
+        desiredTabNames: [customersTabName, messagesTabName]
+    });
 
     const sameTab = customersTabName === messagesTabName;
 
@@ -479,10 +543,16 @@ const findCandidateRowInGoogleSheet = async ({ accessToken, spreadsheetId, custo
 const getSystemConfig = async (client) => {
     const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config' LIMIT 1");
     const rawConfig = sys.rows[0]?.value || {};
+    applyRuntimeGoogleSheetsConfig(rawConfig);
     return {
         webhook_ingest_enabled: rawConfig.webhook_ingest_enabled !== false,
         automation_enabled: rawConfig.automation_enabled !== false,
-        sending_enabled: rawConfig.sending_enabled !== false
+        sending_enabled: rawConfig.sending_enabled !== false,
+        google_sheets_spreadsheet_id: SYSTEM_CONFIG.GOOGLE_SHEETS_SPREADSHEET_ID,
+        google_sheets_customers_tab_name: SYSTEM_CONFIG.GOOGLE_SHEETS_CUSTOMERS_TAB_NAME,
+        google_sheets_messages_tab_name: SYSTEM_CONFIG.GOOGLE_SHEETS_MESSAGES_TAB_NAME,
+        google_service_account_email: SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        google_service_account_configured: Boolean(SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY)
     };
 };
 
@@ -513,6 +583,8 @@ const checkGoogleSheetsOperationalStatus = async () => {
         );
 
         const tabNames = (metadata.data?.sheets || []).map((sheet) => sheet?.properties?.title).filter(Boolean);
+        const missingTabs = [customersTabName, messagesTabName]
+            .filter((tabName, idx, arr) => tabName && !tabNames.includes(tabName) && arr.indexOf(tabName) === idx);
         return {
             state: 'connected',
             configured: true,
@@ -522,7 +594,9 @@ const checkGoogleSheetsOperationalStatus = async () => {
             messagesTabName,
             customersTabExists: tabNames.includes(customersTabName),
             messagesTabExists: tabNames.includes(messagesTabName),
-            tabMode: customersTabName === messagesTabName ? 'single_tab' : 'two_tabs'
+            tabMode: customersTabName === messagesTabName ? 'single_tab' : 'two_tabs',
+            missingTabs,
+            autoCreateOnSync: true
         };
     } catch (e) {
         return {
@@ -2217,14 +2291,21 @@ apiRouter.patch('/system/settings', async (req, res) => {
                 ...current,
                 ...(typeof updates.webhook_ingest_enabled === 'boolean' ? { webhook_ingest_enabled: updates.webhook_ingest_enabled } : {}),
                 ...(typeof updates.automation_enabled === 'boolean' ? { automation_enabled: updates.automation_enabled } : {}),
-                ...(typeof updates.sending_enabled === 'boolean' ? { sending_enabled: updates.sending_enabled } : {})
+                ...(typeof updates.sending_enabled === 'boolean' ? { sending_enabled: updates.sending_enabled } : {}),
+                ...(typeof updates.google_sheets_spreadsheet_id === 'string' ? { google_sheets_spreadsheet_id: updates.google_sheets_spreadsheet_id.trim() } : {}),
+                ...(typeof updates.google_sheets_customers_tab_name === 'string' ? { google_sheets_customers_tab_name: updates.google_sheets_customers_tab_name.trim() || 'Customers' } : {}),
+                ...(typeof updates.google_sheets_messages_tab_name === 'string' ? { google_sheets_messages_tab_name: updates.google_sheets_messages_tab_name.trim() || 'Messages' } : {}),
+                ...(typeof updates.google_service_account_email === 'string' ? { google_service_account_email: updates.google_service_account_email.trim() } : {}),
+                ...(typeof updates.google_service_account_private_key === 'string' ? { google_service_account_private_key: updates.google_service_account_private_key.trim() } : {})
             };
+
+            applyRuntimeGoogleSheetsConfig(next);
 
             await client.query(
                 "INSERT INTO system_settings (key, value) VALUES ('config', $1::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                 [JSON.stringify(next)]
             );
-            res.json({ success: true, settings: next });
+            res.json({ success: true, settings: await getSystemConfig(client) });
         });
     } catch (e) {
         res.status(500).json({ error: e.message || 'Failed to update system settings' });
@@ -2688,6 +2769,20 @@ apiRouter.get('/reports/driver-excel/sync-status', async (req, res) => {
             inProgress: driverExcelSyncInProgress,
             hasQueuedSync: Boolean(driverExcelSyncRequested || driverExcelSyncTimer || driverExcelSyncMaxWaitTimer || driverExcelIncrementalTimer || driverExcelIncrementalMaxWaitTimer || driverExcelIncrementalQueue.size > 0)
         });
+    }
+});
+
+apiRouter.post('/reports/driver-excel/sync', async (req, res) => {
+    try {
+        const mode = String(req.body?.mode || 'queued').toLowerCase();
+        if (mode === 'immediate') {
+            triggerDriverExcelSyncNow();
+            return res.json({ success: true, mode: 'immediate', message: 'Driver Excel sync started' });
+        }
+        scheduleDriverExcelSync();
+        return res.json({ success: true, mode: 'queued', message: 'Driver Excel sync queued' });
+    } catch (e) {
+        return res.status(500).json({ error: e.message || 'Failed to trigger driver excel sync' });
     }
 });
 
