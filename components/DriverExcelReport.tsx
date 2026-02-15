@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { liveApiService } from '../services/liveApiService';
 import { DriverExcelColumn, DriverExcelRow } from '../types';
-import { GripVertical, Pencil, Plus, Save, Trash2, X } from 'lucide-react';
+import { CheckSquare, GripVertical, Pencil, Plus, RotateCcw, Save, Trash2, X } from 'lucide-react';
 
 interface DriverExcelReportProps {
   isLiveMode: boolean;
@@ -16,9 +16,18 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   const [draftValue, setDraftValue] = useState('');
   const [newColumnLabel, setNewColumnLabel] = useState('');
   const [variableOptions, setVariableOptions] = useState<Array<{ key: string; label: string }>>([]);
-  const [selectedVariableKey, setSelectedVariableKey] = useState('');
+  const [variableFilter, setVariableFilter] = useState('');
+  const [selectedVariableKeys, setSelectedVariableKeys] = useState<string[]>([]);
   const [draggingColKey, setDraggingColKey] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<any>(null);
+  const [uiMessage, setUiMessage] = useState('');
+
+  const columnKeySet = useMemo(() => new Set(columns.map((c) => c.key)), [columns]);
+
+  const showMessage = (message: string) => {
+    setUiMessage(message);
+    setTimeout(() => setUiMessage(''), 2400);
+  };
 
   const loadSyncStatus = async () => {
     if (!isLiveMode) return;
@@ -48,8 +57,9 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     if (!isLiveMode) return;
     try {
       const data = await liveApiService.getDriverExcelVariables();
-      setVariableOptions(data.variables || []);
-      setSelectedVariableKey((prev) => prev || data.variables?.[0]?.key || '');
+      const vars = data.variables || [];
+      setVariableOptions(vars);
+      setSelectedVariableKeys((prev) => prev.filter((k) => vars.some((v) => v.key === k)));
     } catch (e) {
       // ignore variable-list load failures to keep page functional
     }
@@ -78,6 +88,12 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
       );
     });
   }, [rows, search]);
+
+  const filteredVariableOptions = useMemo(() => {
+    const q = variableFilter.trim().toLowerCase();
+    if (!q) return variableOptions;
+    return variableOptions.filter((v) => v.label.toLowerCase().includes(q) || v.key.toLowerCase().includes(q));
+  }, [variableOptions, variableFilter]);
 
   const getCellValue = (row: DriverExcelRow, col: DriverExcelColumn) => {
     if (col.key === 'phoneNumber') return row.phoneNumber || '';
@@ -116,13 +132,29 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     await loadVariableOptions();
   };
 
-  const addVariableColumn = async () => {
-    if (!selectedVariableKey) return;
-    const selected = variableOptions.find((v) => v.key === selectedVariableKey);
-    if (!selected) return;
-    await liveApiService.addDriverExcelVariableColumn(selected.key, selected.label);
+  const addSelectedVariables = async () => {
+    if (selectedVariableKeys.length === 0) return;
+    const keysToAdd = selectedVariableKeys.filter((key) => !columnKeySet.has(key));
+    if (keysToAdd.length === 0) {
+      showMessage('Selected variables are already added.');
+      return;
+    }
+
+    const lookup = new Map(variableOptions.map((v) => [v.key, v]));
+    const results = await Promise.allSettled(
+      keysToAdd.map((key) => {
+        const selected = lookup.get(key);
+        if (!selected) return Promise.resolve();
+        return liveApiService.addDriverExcelVariableColumn(selected.key, selected.label);
+      })
+    );
+
+    const successCount = results.filter((r) => r.status === 'fulfilled').length;
+    const failedCount = results.length - successCount;
     await loadReport();
     await loadSyncStatus();
+    await loadVariableOptions();
+    showMessage(`Added ${successCount} variable column(s)${failedCount > 0 ? `, ${failedCount} failed` : ''}.`);
   };
 
   const addColumn = async () => {
@@ -162,6 +194,22 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     setColumns(next);
     await liveApiService.reorderDriverExcelColumns(next.map((c) => c.key));
     await loadSyncStatus();
+    showMessage('Column order saved.');
+  };
+
+  const resetColumnOrder = async () => {
+    await liveApiService.reorderDriverExcelColumns([]);
+    await loadReport();
+    await loadSyncStatus();
+    showMessage('Column order reset to default.');
+  };
+
+  const toggleVariableSelection = (key: string, checked: boolean) => {
+    if (checked) {
+      setSelectedVariableKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
+    } else {
+      setSelectedVariableKeys((prev) => prev.filter((k) => k !== key));
+    }
   };
 
   const syncLabel = (() => {
@@ -192,38 +240,70 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
           <div className={`mt-2 inline-flex items-center px-2.5 py-1 text-xs rounded-full border ${syncBadgeClass}`}>
             {syncLabel}
           </div>
+          {uiMessage && <div className="mt-2 text-xs text-blue-700">{uiMessage}</div>}
         </div>
-        <button onClick={loadReport} className="px-4 py-2 bg-gray-900 text-white rounded-lg text-sm">Refresh</button>
+        <div className="flex items-center gap-2">
+          <button onClick={resetColumnOrder} className="px-3 py-2 border rounded-lg text-sm flex items-center gap-1"><RotateCcw size={13} /> Reset Order</button>
+          <button onClick={loadReport} className="px-4 py-2 bg-gray-900 text-white rounded-lg text-sm">Refresh</button>
+        </div>
       </div>
 
-      <div className="bg-white border border-gray-200 rounded-xl p-3 flex flex-wrap items-center gap-2">
-        <input
-          className="px-3 py-2 border rounded-lg text-sm min-w-[260px]"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search name / phone / stage"
-        />
-        <button onClick={loadReport} className="px-3 py-2 border rounded-lg text-sm">Search</button>
-
-        <div className="ml-auto flex items-center gap-2">
+      <div className="bg-white border border-gray-200 rounded-xl p-3 flex flex-wrap items-start gap-3">
+        <div className="flex items-center gap-2">
           <input
-            className="px-3 py-2 border rounded-lg text-sm"
-            placeholder="New column label"
-            value={newColumnLabel}
-            onChange={(e) => setNewColumnLabel(e.target.value)}
+            className="px-3 py-2 border rounded-lg text-sm min-w-[260px]"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search name / phone / stage"
           />
-          <button onClick={addColumn} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm flex items-center gap-1"><Plus size={14} /> Add Column</button>
-          <div className="flex items-center gap-2 border-l pl-2 ml-1">
-            <select
-              className="px-3 py-2 border rounded-lg text-sm min-w-[200px]"
-              value={selectedVariableKey}
-              onChange={(e) => setSelectedVariableKey(e.target.value)}
-            >
-              {variableOptions.map((option) => (
-                <option key={option.key} value={option.key}>{option.label}</option>
-              ))}
-            </select>
-            <button onClick={addVariableColumn} className="px-3 py-2 bg-emerald-600 text-white rounded-lg text-sm">Add Variable</button>
+          <button onClick={loadReport} className="px-3 py-2 border rounded-lg text-sm">Search</button>
+        </div>
+
+        <div className="ml-auto flex flex-wrap items-start gap-3">
+          <div className="flex items-center gap-2">
+            <input
+              className="px-3 py-2 border rounded-lg text-sm"
+              placeholder="New column label"
+              value={newColumnLabel}
+              onChange={(e) => setNewColumnLabel(e.target.value)}
+            />
+            <button onClick={addColumn} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm flex items-center gap-1"><Plus size={14} /> Add Column</button>
+          </div>
+
+          <div className="min-w-[340px] border rounded-lg p-2 bg-gray-50">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs font-medium text-gray-700">Variable Columns</div>
+              <button onClick={addSelectedVariables} className="px-2 py-1 bg-emerald-600 text-white rounded text-xs flex items-center gap-1"><CheckSquare size={12} /> Add Selected</button>
+            </div>
+            <input
+              className="w-full px-2 py-1.5 border rounded text-sm mb-2"
+              placeholder="Filter variables by label/key"
+              value={variableFilter}
+              onChange={(e) => setVariableFilter(e.target.value)}
+            />
+            <div className="max-h-36 overflow-auto bg-white border rounded p-1 space-y-1">
+              {filteredVariableOptions.length === 0 ? (
+                <div className="text-xs text-gray-500 px-2 py-1">No variables found</div>
+              ) : (
+                filteredVariableOptions.map((option) => {
+                  const alreadyAdded = columnKeySet.has(option.key);
+                  return (
+                    <label key={option.key} className={`flex items-start gap-2 px-2 py-1 rounded text-xs ${alreadyAdded ? 'text-gray-400' : 'text-gray-700 hover:bg-gray-50'}`}>
+                      <input
+                        type="checkbox"
+                        disabled={alreadyAdded}
+                        checked={selectedVariableKeys.includes(option.key)}
+                        onChange={(e) => toggleVariableSelection(option.key, e.target.checked)}
+                      />
+                      <span className="leading-4">
+                        <b>{option.label}</b>
+                        <span className="block text-[10px]">{option.key}{alreadyAdded ? ' (already added)' : ''}</span>
+                      </span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
           </div>
         </div>
       </div>
