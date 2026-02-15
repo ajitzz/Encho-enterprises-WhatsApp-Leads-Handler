@@ -9,7 +9,6 @@ const https = require('https');
 const { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { OAuth2Client } = require('google-auth-library');
-const { GoogleGenAI } = require("@google/genai");
 
 require('dotenv').config();
 
@@ -30,7 +29,7 @@ const memoryCache = {
 };
 
 // --- INITIALIZE CLIENTS ---
-let s3Client, googleClient, genAI, pgPool;
+let s3Client, googleClient, pgPool;
 
 try {
     s3Client = new S3Client({
@@ -43,10 +42,6 @@ try {
 
     googleClient = new OAuth2Client(SYSTEM_CONFIG.GOOGLE_CLIENT_ID);
     
-    if (process.env.GEMINI_API_KEY) {
-        genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    }
-
     let connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
     if (connectionString && connectionString.includes('sslmode=')) {
         connectionString = connectionString.replace(/([?&])sslmode=[^&]+(&|$)/, '$1').replace(/[?&]$/, '');
