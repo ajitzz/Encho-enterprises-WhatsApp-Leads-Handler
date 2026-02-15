@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { liveApiService } from '../services/liveApiService';
 import { DriverExcelColumn, DriverExcelRow } from '../types';
-import { Pencil, Plus, Save, Trash2, X } from 'lucide-react';
+import { GripVertical, Pencil, Plus, Save, Trash2, X } from 'lucide-react';
 
 interface DriverExcelReportProps {
   isLiveMode: boolean;
@@ -15,6 +15,9 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   const [editingCell, setEditingCell] = useState<{ rowId: string; colKey: string } | null>(null);
   const [draftValue, setDraftValue] = useState('');
   const [newColumnLabel, setNewColumnLabel] = useState('');
+  const [variableOptions, setVariableOptions] = useState<Array<{ key: string; label: string }>>([]);
+  const [selectedVariableKey, setSelectedVariableKey] = useState('');
+  const [draggingColKey, setDraggingColKey] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<any>(null);
 
   const loadSyncStatus = async () => {
@@ -41,9 +44,21 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     }
   };
 
+  const loadVariableOptions = async () => {
+    if (!isLiveMode) return;
+    try {
+      const data = await liveApiService.getDriverExcelVariables();
+      setVariableOptions(data.variables || []);
+      setSelectedVariableKey((prev) => prev || data.variables?.[0]?.key || '');
+    } catch (e) {
+      // ignore variable-list load failures to keep page functional
+    }
+  };
+
   useEffect(() => {
     loadReport();
     loadSyncStatus();
+    loadVariableOptions();
   }, [isLiveMode]);
 
   useEffect(() => {
@@ -98,6 +113,16 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     await liveApiService.deleteDriverExcelRow(id);
     await loadReport();
     await loadSyncStatus();
+    await loadVariableOptions();
+  };
+
+  const addVariableColumn = async () => {
+    if (!selectedVariableKey) return;
+    const selected = variableOptions.find((v) => v.key === selectedVariableKey);
+    if (!selected) return;
+    await liveApiService.addDriverExcelVariableColumn(selected.key, selected.label);
+    await loadReport();
+    await loadSyncStatus();
   };
 
   const addColumn = async () => {
@@ -122,6 +147,20 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     if (!confirm(`Delete column "${col.label}" from all customers?`)) return;
     await liveApiService.deleteDriverExcelColumn(col.key);
     await loadReport();
+    await loadSyncStatus();
+    await loadVariableOptions();
+  };
+
+  const reorderColumns = async (sourceKey: string, targetKey: string) => {
+    if (!sourceKey || !targetKey || sourceKey === targetKey) return;
+    const next = [...columns];
+    const from = next.findIndex((c) => c.key === sourceKey);
+    const to = next.findIndex((c) => c.key === targetKey);
+    if (from < 0 || to < 0) return;
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setColumns(next);
+    await liveApiService.reorderDriverExcelColumns(next.map((c) => c.key));
     await loadSyncStatus();
   };
 
@@ -174,6 +213,18 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
             onChange={(e) => setNewColumnLabel(e.target.value)}
           />
           <button onClick={addColumn} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm flex items-center gap-1"><Plus size={14} /> Add Column</button>
+          <div className="flex items-center gap-2 border-l pl-2 ml-1">
+            <select
+              className="px-3 py-2 border rounded-lg text-sm min-w-[200px]"
+              value={selectedVariableKey}
+              onChange={(e) => setSelectedVariableKey(e.target.value)}
+            >
+              {variableOptions.map((option) => (
+                <option key={option.key} value={option.key}>{option.label}</option>
+              ))}
+            </select>
+            <button onClick={addVariableColumn} className="px-3 py-2 bg-emerald-600 text-white rounded-lg text-sm">Add Variable</button>
+          </div>
         </div>
       </div>
 
@@ -182,8 +233,21 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
           <thead className="bg-gray-50">
             <tr>
               {columns.map((col) => (
-                <th key={col.key} className="px-3 py-2 text-left border-b whitespace-nowrap">
+                <th
+                  key={col.key}
+                  className="px-3 py-2 text-left border-b whitespace-nowrap"
+                  draggable
+                  onDragStart={() => setDraggingColKey(col.key)}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={async () => {
+                    if (!draggingColKey) return;
+                    await reorderColumns(draggingColKey, col.key);
+                    setDraggingColKey(null);
+                  }}
+                  onDragEnd={() => setDraggingColKey(null)}
+                >
                   <div className="flex items-center gap-2">
+                    <GripVertical size={13} className="text-gray-400" />
                     <span>{col.label}</span>
                     {!col.isCore && (
                       <>
@@ -218,7 +282,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                           </div>
                         ) : (
                           <button onClick={() => beginEdit(row.id, col, value)} className="text-left w-full">
-                            <span className="break-all">{value || <span className="text-gray-300">—</span>}</span>
+                            <span className="whitespace-pre-wrap break-words">{value || <span className="text-gray-300">—</span>}</span>
                           </button>
                         )}
                       </td>
