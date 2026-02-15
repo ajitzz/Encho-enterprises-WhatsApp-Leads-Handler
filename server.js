@@ -216,6 +216,7 @@ const getDriverMonthFolder = (date = new Date()) => `${date.getUTCFullYear()}-${
 const buildDriverDataPrefix = (phone, date = new Date()) => `Driver data/${getDriverMonthFolder(date)}/${sanitizePhoneForPath(phone)}`;
 
 const getPublicS3Url = (key) => `https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.${SYSTEM_CONFIG.AWS_REGION}.amazonaws.com/${encodeURIComponent(key).replace(/%2F/g, '/')}`;
+const getS3ConsoleFolderUrl = (prefix = '') => `https://s3.console.aws.amazon.com/s3/buckets/${encodeURIComponent(SYSTEM_CONFIG.AWS_BUCKET)}?region=${encodeURIComponent(SYSTEM_CONFIG.AWS_REGION)}&prefix=${encodeURIComponent(prefix)}&showversions=false`;
 
 const xmlEscape = (value) => String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -237,20 +238,22 @@ const getDriverExcelCellValue = (customer, column) => {
     if (column.key === 'source') return customer.source || '';
     if (column.key === 'createdAt') return customer.created_at || '';
     if (column.key === 'lastMessageAt') return customer.last_message_at || '';
+    if (column.key === 'licenseStatus') return customer.license_status || customer.licenseStatus || vars.license_status || 'missing';
+    if (column.key === 'licenseUploadedAt') return customer.license_uploaded_at || customer.licenseUploadedAt || vars.license_uploaded_at || '';
+    if (column.key === 'latestLicenseUrl') return customer.latest_license_url || customer.latestLicenseUrl || '';
+    if (column.key === 'licenseFolderUrl') return customer.license_folder_url || customer.licenseFolderUrl || '';
     return vars[column.key] ?? '';
 };
 
 const buildDriverExcelXml = (customers, messages, columns = []) => {
     const effectiveColumns = Array.isArray(columns) && columns.length > 0 ? columns : DRIVER_EXCEL_CORE_COLUMNS;
-    const customerHeaders = ['Candidate ID', ...effectiveColumns.map((c) => c.label), 'Latest License Link', 'License Folder Link', 'Variables JSON'];
+    const customerHeaders = ['Candidate ID', ...effectiveColumns.map((c) => c.label), 'Variables JSON'];
 
     const customerRows = [
         customerHeaders,
         ...customers.map((c) => [
             c.id,
             ...effectiveColumns.map((col) => getDriverExcelCellValue(c, col)),
-            c.latest_license_url,
-            c.license_folder_url,
             JSON.stringify(c.variables || {})
         ])
     ];
@@ -288,14 +291,12 @@ const buildDriverExcelXml = (customers, messages, columns = []) => {
 
 const buildDriverExcelSheetValues = (customers, messages, columns = []) => {
     const effectiveColumns = Array.isArray(columns) && columns.length > 0 ? columns : DRIVER_EXCEL_CORE_COLUMNS;
-    const customerHeaders = ['Candidate ID', ...effectiveColumns.map((c) => c.label), 'Latest License Link', 'License Folder Link', 'Variables JSON'];
+    const customerHeaders = ['Candidate ID', ...effectiveColumns.map((c) => c.label), 'Variables JSON'];
     const customerRows = [
         customerHeaders,
         ...customers.map((c) => [
             c.id,
             ...effectiveColumns.map((col) => getDriverExcelCellValue(c, col)),
-            c.latest_license_url,
-            c.license_folder_url,
             JSON.stringify(c.variables || {})
         ])
     ];
@@ -463,7 +464,13 @@ const fetchDriverExcelCandidateForSync = async (candidateId) => {
                     WHERE d.candidate_id = c.id
                     ORDER BY d.created_at DESC
                     LIMIT 1
-                ) AS latest_license_key
+                ) AS latest_license_key,
+                (
+                    SELECT d.status FROM driver_documents d
+                    WHERE d.candidate_id = c.id
+                    ORDER BY d.created_at DESC
+                    LIMIT 1
+                ) AS latest_license_status
             FROM candidates c
             WHERE c.id = $1
             LIMIT 1
@@ -497,6 +504,8 @@ const fetchDriverExcelCandidateForSync = async (candidateId) => {
         const month = latestLicenseKey.startsWith('Driver data/') ? latestLicenseKey.split('/')[1] : getDriverMonthFolder();
         const licenseFolderKey = `Driver data/${month}/${sanitizePhoneForPath(row.phone_number)}/`;
         const latestLicenseUrl = vars.license_url || (latestLicenseKey ? getPublicS3Url(latestLicenseKey) : '');
+        const licenseFolderUrl = latestLicenseKey ? getS3ConsoleFolderUrl(licenseFolderKey) : '';
+        const licenseStatus = vars.license_status || row.latest_license_status || (latestLicenseKey ? 'uploaded' : 'missing');
 
         return {
             customer: {
@@ -508,7 +517,9 @@ const fetchDriverExcelCandidateForSync = async (candidateId) => {
                 created_at: row.created_at ? new Date(row.created_at).toISOString() : '',
                 last_message_at: row.last_message_at ? new Date(Number(row.last_message_at) || row.last_message_at).toISOString() : '',
                 latest_license_url: latestLicenseUrl,
-                license_folder_url: getPublicS3Url(licenseFolderKey),
+                license_folder_url: licenseFolderUrl,
+                license_status: licenseStatus,
+                license_uploaded_at: vars.license_uploaded_at || '',
                 variables: vars
             },
             columns: [...DRIVER_EXCEL_CORE_COLUMNS, ...mergedCustomCols]
@@ -796,7 +807,13 @@ const syncDriverExcelToS3 = async () => {
                         WHERE d.candidate_id = c.id
                         ORDER BY d.created_at DESC
                         LIMIT 1
-                    ) AS latest_license_key
+                    ) AS latest_license_key,
+                (
+                    SELECT d.status FROM driver_documents d
+                    WHERE d.candidate_id = c.id
+                    ORDER BY d.created_at DESC
+                    LIMIT 1
+                ) AS latest_license_status
                 FROM candidates c
                 ORDER BY c.created_at ASC
             `);
@@ -842,6 +859,8 @@ const syncDriverExcelToS3 = async () => {
             const month = latestLicenseKey.startsWith('Driver data/') ? latestLicenseKey.split('/')[1] : getDriverMonthFolder();
             const licenseFolderKey = `Driver data/${month}/${sanitizePhoneForPath(row.phone_number)}/`;
             const latestLicenseUrl = vars.license_url || (latestLicenseKey ? getPublicS3Url(latestLicenseKey) : '');
+            const licenseFolderUrl = latestLicenseKey ? getS3ConsoleFolderUrl(licenseFolderKey) : '';
+            const licenseStatus = vars.license_status || row.latest_license_status || (latestLicenseKey ? 'uploaded' : 'missing');
             return {
                 id: row.id,
                 phone_number: row.phone_number,
@@ -851,7 +870,9 @@ const syncDriverExcelToS3 = async () => {
                 created_at: row.created_at ? new Date(row.created_at).toISOString() : '',
                 last_message_at: row.last_message_at ? new Date(Number(row.last_message_at) || row.last_message_at).toISOString() : '',
                 latest_license_url: latestLicenseUrl,
-                license_folder_url: getPublicS3Url(licenseFolderKey),
+                license_folder_url: licenseFolderUrl,
+                license_status: licenseStatus,
+                license_uploaded_at: vars.license_uploaded_at || '',
                 variables: vars
             };
         });
@@ -972,7 +993,11 @@ const DRIVER_EXCEL_CORE_COLUMNS = [
     { key: 'status', label: 'Stage', isCore: true },
     { key: 'source', label: 'Source', isCore: true },
     { key: 'createdAt', label: 'Created At', isCore: true },
-    { key: 'lastMessageAt', label: 'Last Message At', isCore: true }
+    { key: 'lastMessageAt', label: 'Last Message At', isCore: true },
+    { key: 'licenseStatus', label: 'License Status', isCore: true },
+    { key: 'licenseUploadedAt', label: 'License Uploaded At', isCore: true },
+    { key: 'latestLicenseUrl', label: 'Latest License Link', isCore: true },
+    { key: 'licenseFolderUrl', label: 'License Folder Link', isCore: true }
 ];
 
 const normalizeColumnKey = (label = '') => String(label)
@@ -1204,6 +1229,9 @@ const getFileExtensionFromMime = (mimeType = '', fallback = 'bin') => {
     return fallback;
 };
 
+const ALLOWED_LICENSE_MIME_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'application/pdf', 'image/webp']);
+const MAX_LICENSE_FILE_BYTES = 8 * 1024 * 1024;
+
 const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candidateVariables, client }) => {
     if (!candidateId) throw new Error('Candidate id is required for media upload');
     const mediaId = msg?.image?.id || msg?.document?.id;
@@ -1211,8 +1239,11 @@ const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candid
 
     const metaResponse = await getMetaClient().get(`https://graph.facebook.com/v18.0/${mediaId}`);
     const mediaUrl = metaResponse.data?.url;
-    const mimeType = metaResponse.data?.mime_type || (msg.type === 'document' ? 'application/octet-stream' : `image/${msg.type}`);
+    const mimeType = String(metaResponse.data?.mime_type || (msg.type === 'document' ? 'application/octet-stream' : `image/${msg.type}`)).toLowerCase();
     if (!mediaUrl) throw new Error('WhatsApp media URL not found');
+    if (!ALLOWED_LICENSE_MIME_TYPES.has(mimeType)) {
+        throw new Error(`Unsupported licence file type: ${mimeType}`);
+    }
 
     const mediaFile = await axios.get(mediaUrl, {
         responseType: 'arraybuffer',
@@ -1220,9 +1251,20 @@ const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candid
         headers: { Authorization: `Bearer ${process.env.META_API_TOKEN}` }
     });
 
+    if ((mediaFile.data?.byteLength || 0) > MAX_LICENSE_FILE_BYTES) {
+        throw new Error('Licence file exceeds 8MB limit');
+    }
+
     const ext = getFileExtensionFromMime(mimeType, msg.type === 'document' ? 'pdf' : 'jpg');
     const prefix = buildDriverDataPrefix(phoneNumber);
-    const key = `${prefix}/license_${msg.id}.${ext}`;
+    const timestampTag = new Date().toISOString().replace(/[:.]/g, '-');
+    const key = `${prefix}/${timestampTag}_${msg.id}.${ext}`;
+
+    await uploadToS3({
+        key: `${prefix}/.folder`,
+        body: Buffer.from(''),
+        contentType: 'application/octet-stream'
+    }).catch(() => null);
 
     await uploadToS3({
         key,
@@ -1234,8 +1276,10 @@ const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candid
         ...normalizeVariables(candidateVariables),
         license_s3_key: key,
         license_url: getPublicS3Url(key),
-        license_folder_url: getPublicS3Url(`${prefix}/`),
-        license_uploaded_at: new Date().toISOString()
+        license_folder_url: getS3ConsoleFolderUrl(`${prefix}/`),
+        license_uploaded_at: new Date().toISOString(),
+        license_status: 'uploaded',
+        license_rejection_reason: ''
     };
 
     try {
@@ -2681,13 +2725,50 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
 apiRouter.get('/drivers/:id/documents', async (req, res) => {
     try {
         await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM driver_documents WHERE candidate_id = $1', [req.params.id]);
+            const r = await client.query('SELECT * FROM driver_documents WHERE candidate_id = $1 ORDER BY created_at DESC', [req.params.id]);
             const docs = await Promise.all(r.rows.map(async d => ({ id: d.id, docType: d.type, url: await refreshMediaUrl(d.url), verificationStatus: d.status, timestamp: new Date(d.created_at).getTime() })));
             res.json(docs);
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+apiRouter.patch('/drivers/:id/license-status', async (req, res) => {
+    try {
+        const status = String(req.body?.status || '').trim().toLowerCase();
+        const reason = String(req.body?.reason || '').trim();
+        const allowed = new Set(['uploaded', 'under_review', 'approved', 'rejected', 'expired', 'missing']);
+        if (!allowed.has(status)) return res.status(400).json({ error: 'Invalid license status' });
+
+        await withDb(async (client) => {
+            const candidateRes = await client.query('SELECT variables FROM candidates WHERE id = $1 LIMIT 1', [req.params.id]);
+            if (candidateRes.rows.length === 0) return res.status(404).json({ error: 'Candidate not found' });
+
+            const vars = normalizeVariables(candidateRes.rows[0].variables);
+            vars.license_status = status;
+            vars.license_rejection_reason = status === 'rejected' ? reason : '';
+            vars.license_reviewed_at = new Date().toISOString();
+
+            await client.query('UPDATE candidates SET variables = $1::jsonb WHERE id = $2', [JSON.stringify(vars), req.params.id]);
+            if (['approved', 'rejected', 'under_review'].includes(status)) {
+                await client.query(
+                    `UPDATE driver_documents SET status = $1
+                     WHERE candidate_id = $2
+                     AND id = (
+                        SELECT id FROM driver_documents
+                        WHERE candidate_id = $2
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                     )`,
+                    [status, req.params.id]
+                );
+            }
+
+            scheduleDriverExcelSync();
+            scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'upsert' });
+            res.json({ success: true, status, reason: vars.license_rejection_reason });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 
 apiRouter.get('/reports/driver-excel', async (req, res) => {
@@ -2702,7 +2783,19 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
                 where = `WHERE c.name ILIKE $1 OR c.phone_number ILIKE $1 OR c.stage ILIKE $1`;
             }
             const q = `
-                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables
+                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables,
+                    (
+                        SELECT d.url FROM driver_documents d
+                        WHERE d.candidate_id = c.id
+                        ORDER BY d.created_at DESC
+                        LIMIT 1
+                    ) AS latest_license_key,
+                (
+                    SELECT d.status FROM driver_documents d
+                    WHERE d.candidate_id = c.id
+                    ORDER BY d.created_at DESC
+                    LIMIT 1
+                ) AS latest_license_status
                 FROM candidates c
                 ${where}
                 ORDER BY c.created_at DESC
@@ -2732,19 +2825,39 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
             }
             const cols = [...DRIVER_EXCEL_CORE_COLUMNS, ...mergedCustomCols];
 
-            const rows = rowsRes.rows.map((r) => ({
-                id: r.id,
-                phoneNumber: r.phone_number || '',
-                name: r.name || '',
-                status: r.stage || '',
-                source: r.source || '',
-                createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
-                lastMessageAt: r.last_message_at ? new Date(Number(r.last_message_at) || r.last_message_at).toISOString() : '',
-                variables: {
+            const rows = rowsRes.rows.map((r) => {
+                const mergedVars = {
                     ...normalizeVariables(r.variables),
                     ...(responseLookup.get(r.id) || {})
-                }
-            }));
+                };
+                const latestLicenseKey = r.latest_license_key || mergedVars.license_s3_key || '';
+                const month = latestLicenseKey.startsWith('Driver data/') ? latestLicenseKey.split('/')[1] : getDriverMonthFolder();
+                const licenseFolderUrl = latestLicenseKey ? getS3ConsoleFolderUrl(`Driver data/${month}/${sanitizePhoneForPath(r.phone_number)}/`) : '';
+                const latestLicenseUrl = mergedVars.license_url || (latestLicenseKey ? getPublicS3Url(latestLicenseKey) : '');
+                const licenseStatus = mergedVars.license_status || r.latest_license_status || (latestLicenseKey ? 'uploaded' : 'missing');
+                const licenseUploadedAt = mergedVars.license_uploaded_at || '';
+
+                return {
+                    id: r.id,
+                    phoneNumber: r.phone_number || '',
+                    name: r.name || '',
+                    status: r.stage || '',
+                    source: r.source || '',
+                    createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
+                    lastMessageAt: r.last_message_at ? new Date(Number(r.last_message_at) || r.last_message_at).toISOString() : '',
+                    licenseStatus,
+                    licenseUploadedAt,
+                    latestLicenseUrl,
+                    licenseFolderUrl,
+                    variables: {
+                        ...mergedVars,
+                        license_status: licenseStatus,
+                        license_uploaded_at: licenseUploadedAt,
+                        license_url: mergedVars.license_url || latestLicenseUrl,
+                        license_folder_url: mergedVars.license_folder_url || licenseFolderUrl
+                    }
+                };
+            });
             res.json({ columns: cols, rows });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
