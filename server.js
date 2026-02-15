@@ -8,7 +8,7 @@ const axios = require('axios');
 const https = require('https');
 const { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-const { OAuth2Client } = require('google-auth-library');
+const { OAuth2Client, JWT } = require('google-auth-library');
 const { GoogleGenAI } = require("@google/genai");
 
 require('dotenv').config();
@@ -20,6 +20,10 @@ const SYSTEM_CONFIG = {
     AWS_REGION: process.env.AWS_REGION || 'us-east-1',
     AWS_BUCKET: process.env.AWS_BUCKET_NAME || 'uber-fleet-assets',
     GOOGLE_CLIENT_ID: process.env.VITE_GOOGLE_CLIENT_ID,
+    GOOGLE_SHEETS_ID: process.env.GOOGLE_SHEETS_ID || '',
+    GOOGLE_SHEETS_TAB_NAME: process.env.GOOGLE_SHEETS_TAB_NAME || 'Driver Report',
+    GOOGLE_SERVICE_ACCOUNT_EMAIL: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || '',
+    GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || '',
     CACHE_TTL: 60 * 1000 // 60 Seconds Cache for Bot Settings
 };
 
@@ -144,7 +148,11 @@ let driverExcelSyncStatus = {
     lastRunAt: null,
     lastSuccessAt: null,
     lastError: null,
-    lastDurationMs: null
+    lastDurationMs: null,
+    targets: {
+        s3: { state: 'idle', updatedAt: null, error: null },
+        googleSheets: { state: 'disabled', updatedAt: null, error: null }
+    }
 };
 
 const persistDriverExcelSyncStatus = async () => {
@@ -186,6 +194,31 @@ const getDriverMonthFolder = (date = new Date()) => `${date.getUTCFullYear()}-${
 const buildDriverDataPrefix = (phone, date = new Date()) => `Driver data/${getDriverMonthFolder(date)}/${sanitizePhoneForPath(phone)}`;
 
 const getPublicS3Url = (key) => `https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.${SYSTEM_CONFIG.AWS_REGION}.amazonaws.com/${encodeURIComponent(key).replace(/%2F/g, '/')}`;
+
+const isGoogleSheetsSyncEnabled = () => Boolean(
+    SYSTEM_CONFIG.GOOGLE_SHEETS_ID &&
+    SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_EMAIL &&
+    SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY
+);
+
+const getGooglePrivateKey = () => SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY.replace(/\\n/g, '\n');
+
+const getGoogleSheetsJwtClient = () => new JWT({
+    email: SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    key: getGooglePrivateKey(),
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+});
+
+const toA1ColumnName = (index) => {
+    let current = Number(index) + 1;
+    let name = '';
+    while (current > 0) {
+        const remainder = (current - 1) % 26;
+        name = String.fromCharCode(65 + remainder) + name;
+        current = Math.floor((current - 1) / 26);
+    }
+    return name;
+};
 
 const xmlEscape = (value) => String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -256,6 +289,74 @@ const buildDriverExcelXml = (customers, messages, columns = []) => {
 </Workbook>`;
 };
 
+const buildDriverExcelSheetValues = (customers, columns = []) => {
+    const effectiveColumns = Array.isArray(columns) && columns.length > 0 ? columns : DRIVER_EXCEL_CORE_COLUMNS;
+    const headers = ['Candidate ID', ...effectiveColumns.map((c) => c.label), 'Latest License Link', 'License Folder Link', 'Variables JSON'];
+    const dataRows = customers.map((c) => ([
+        c.id,
+        ...effectiveColumns.map((col) => getDriverExcelCellValue(c, col)),
+        c.latest_license_url,
+        c.license_folder_url,
+        JSON.stringify(c.variables || {})
+    ]));
+    return [headers, ...dataRows];
+};
+
+const syncDriverExcelToGoogleSheets = async ({ customers = [], columns = [] }) => {
+    if (!isGoogleSheetsSyncEnabled()) {
+        driverExcelSyncStatus.targets.googleSheets = {
+            state: 'disabled',
+            updatedAt: new Date().toISOString(),
+            error: 'Google Sheets sync is disabled. Add GOOGLE_SHEETS_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, and GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY.'
+        };
+        return;
+    }
+
+    const values = buildDriverExcelSheetValues(customers, columns);
+    const tabName = SYSTEM_CONFIG.GOOGLE_SHEETS_TAB_NAME;
+    const lastColumn = toA1ColumnName(Math.max(0, values[0].length - 1));
+    const range = `'${tabName.replace(/'/g, "''")}'!A1:${lastColumn}`;
+
+    const jwtClient = getGoogleSheetsJwtClient();
+    const { token } = await jwtClient.getAccessToken();
+    if (!token) throw new Error('Unable to obtain Google Sheets access token');
+
+    await axios.put(
+        `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(SYSTEM_CONFIG.GOOGLE_SHEETS_ID)}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
+        {
+            range,
+            majorDimension: 'ROWS',
+            values
+        },
+        {
+            headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            timeout: SYSTEM_CONFIG.META_TIMEOUT
+        }
+    );
+
+    const clearRange = `'${tabName.replace(/'/g, "''")}'!A${values.length + 1}:${lastColumn}`;
+    await axios.post(
+        `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(SYSTEM_CONFIG.GOOGLE_SHEETS_ID)}/values/${encodeURIComponent(clearRange)}:clear`,
+        {},
+        {
+            headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            },
+            timeout: SYSTEM_CONFIG.META_TIMEOUT
+        }
+    );
+
+    driverExcelSyncStatus.targets.googleSheets = {
+        state: 'success',
+        updatedAt: new Date().toISOString(),
+        error: null
+    };
+};
+
 const uploadToS3 = async ({ key, body, contentType }) => {
     await s3Client.send(new PutObjectCommand({
         Bucket: SYSTEM_CONFIG.AWS_BUCKET,
@@ -296,6 +397,14 @@ const syncDriverExcelToS3 = async () => {
     driverExcelSyncStatus.state = 'running';
     driverExcelSyncStatus.lastRunAt = new Date().toISOString();
     driverExcelSyncStatus.lastError = null;
+    driverExcelSyncStatus.targets.s3 = { state: 'running', updatedAt: null, error: null };
+    driverExcelSyncStatus.targets.googleSheets = isGoogleSheetsSyncEnabled()
+        ? { state: 'running', updatedAt: null, error: null }
+        : {
+            state: 'disabled',
+            updatedAt: new Date().toISOString(),
+            error: 'Google Sheets sync is disabled. Add GOOGLE_SHEETS_ID, GOOGLE_SERVICE_ACCOUNT_EMAIL, and GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY.'
+        };
     const syncStartedAt = Date.now();
     persistDriverExcelSyncStatus();
     try {
@@ -379,6 +488,14 @@ const syncDriverExcelToS3 = async () => {
             body: Buffer.from(workbookXml, 'utf8'),
             contentType: 'application/vnd.ms-excel'
         });
+        driverExcelSyncStatus.targets.s3 = {
+            state: 'success',
+            updatedAt: new Date().toISOString(),
+            error: null
+        };
+
+        await syncDriverExcelToGoogleSheets({ customers, columns: data.columns });
+
         driverExcelSyncStatus.state = 'success';
         driverExcelSyncStatus.lastSuccessAt = new Date().toISOString();
         driverExcelSyncStatus.lastDurationMs = Date.now() - syncStartedAt;
@@ -387,6 +504,20 @@ const syncDriverExcelToS3 = async () => {
         driverExcelSyncStatus.state = 'error';
         driverExcelSyncStatus.lastError = e.message || 'Driver Excel sync failed';
         driverExcelSyncStatus.lastDurationMs = Date.now() - syncStartedAt;
+        if (driverExcelSyncStatus.targets.s3.state === 'running') {
+            driverExcelSyncStatus.targets.s3 = {
+                state: 'error',
+                updatedAt: new Date().toISOString(),
+                error: driverExcelSyncStatus.lastError
+            };
+        }
+        if (driverExcelSyncStatus.targets.googleSheets.state === 'running') {
+            driverExcelSyncStatus.targets.googleSheets = {
+                state: 'error',
+                updatedAt: new Date().toISOString(),
+                error: driverExcelSyncStatus.lastError
+            };
+        }
         persistDriverExcelSyncStatus();
         console.error('[Driver Excel Sync Error]', e.message);
     } finally {
