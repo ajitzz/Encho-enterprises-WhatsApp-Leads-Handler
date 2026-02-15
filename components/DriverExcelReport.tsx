@@ -1,7 +1,18 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { liveApiService } from '../services/liveApiService';
 import { DriverExcelColumn, DriverExcelRow } from '../types';
-import { CheckSquare, GripVertical, Pencil, Plus, RotateCcw, Save, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, CheckSquare, GripVertical, Pencil, Plus, RotateCcw, Save, Trash2, X } from 'lucide-react';
+
+interface VariableOption {
+  key: string;
+  label: string;
+}
+
+interface SavedColumnView {
+  id: string;
+  name: string;
+  keys: string[];
+}
 
 interface DriverExcelReportProps {
   isLiveMode: boolean;
@@ -15,18 +26,67 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   const [editingCell, setEditingCell] = useState<{ rowId: string; colKey: string } | null>(null);
   const [draftValue, setDraftValue] = useState('');
   const [newColumnLabel, setNewColumnLabel] = useState('');
-  const [variableOptions, setVariableOptions] = useState<Array<{ key: string; label: string }>>([]);
+  const [variableOptions, setVariableOptions] = useState<VariableOption[]>([]);
   const [variableFilter, setVariableFilter] = useState('');
   const [selectedVariableKeys, setSelectedVariableKeys] = useState<string[]>([]);
+  const [manuallyRemovedVariableKeys, setManuallyRemovedVariableKeys] = useState<string[]>([]);
+  const [savedViews, setSavedViews] = useState<SavedColumnView[]>([]);
+  const [selectedViewId, setSelectedViewId] = useState('');
+  const [autoAddNewVariables, setAutoAddNewVariables] = useState(false);
   const [draggingColKey, setDraggingColKey] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<any>(null);
   const [uiMessage, setUiMessage] = useState('');
+  const [actionKey, setActionKey] = useState<string | null>(null);
+
+  const getCurrentUserScope = () => {
+    try {
+      const token = localStorage.getItem('uber_fleet_auth_token') || '';
+      const payload = token.split('.')[1];
+      if (!payload) return 'anonymous';
+      const parsed = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+      return parsed?.email || parsed?.sub || 'anonymous';
+    } catch {
+      return 'anonymous';
+    }
+  };
+
+  const getColumnPrefsStorageKey = () => `driver_excel_columns_pref_${getCurrentUserScope()}`;
+  const getColumnViewsStorageKey = () => `driver_excel_column_views_${getCurrentUserScope()}`;
+  const getAutoAddStorageKey = () => `driver_excel_auto_add_vars_${getCurrentUserScope()}`;
 
   const columnKeySet = useMemo(() => new Set(columns.map((c) => c.key)), [columns]);
 
   const showMessage = (message: string) => {
     setUiMessage(message);
     setTimeout(() => setUiMessage(''), 2400);
+  };
+
+  const addVariableColumnsByKeys = async (keys: string[], messagePrefix: string = 'Added') => {
+    const keysToAdd = keys.filter((key) => !columnKeySet.has(key));
+    if (keysToAdd.length === 0) return { successCount: 0, failedCount: 0 };
+
+    const lookup = new Map(variableOptions.map((v) => [v.key, v]));
+    const results = await Promise.allSettled(
+      keysToAdd.map((key) => {
+        const selected = lookup.get(key);
+        if (!selected) return Promise.resolve();
+        return liveApiService.addDriverExcelVariableColumn(selected.key, selected.label || selected.key);
+      })
+    );
+
+    const successfulKeys = results
+      .map((result, index) => ({ result, key: keysToAdd[index] }))
+      .filter((item) => item.result.status === 'fulfilled')
+      .map((item) => item.key);
+
+    if (successfulKeys.length > 0) {
+      setManuallyRemovedVariableKeys((prev) => prev.filter((k) => !successfulKeys.includes(k)));
+    }
+
+    const successCount = successfulKeys.length;
+    const failedCount = results.length - successCount;
+    showMessage(`${messagePrefix} ${successCount} variable column(s)${failedCount > 0 ? `, ${failedCount} failed` : ''}.`);
+    return { successCount, failedCount };
   };
 
   const loadSyncStatus = async () => {
@@ -44,7 +104,18 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     setLoading(true);
     try {
       const data = await liveApiService.getDriverExcelReport(search);
-      setColumns(data.columns);
+      const rawColumns = data.columns || [];
+      const prefKey = getColumnPrefsStorageKey();
+      const savedKeys = JSON.parse(localStorage.getItem(prefKey) || 'null') as string[] | null;
+      const byKey = new Map(rawColumns.map((c) => [c.key, c]));
+      let nextColumns = rawColumns;
+      if (Array.isArray(savedKeys) && savedKeys.length > 0) {
+        const ordered = savedKeys.map((key) => byKey.get(key)).filter(Boolean) as DriverExcelColumn[];
+        const seen = new Set(ordered.map((c) => c.key));
+        const rest = rawColumns.filter((c) => !seen.has(c.key));
+        nextColumns = [...ordered, ...rest];
+      }
+      setColumns(nextColumns);
       setRows(data.rows);
     } catch (e: any) {
       alert(e.message || 'Failed to load driver excel report');
@@ -60,6 +131,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
       const vars = data.variables || [];
       setVariableOptions(vars);
       setSelectedVariableKeys((prev) => prev.filter((k) => vars.some((v) => v.key === k)));
+      setManuallyRemovedVariableKeys((prev) => prev.filter((k) => vars.some((v) => v.key === k)));
     } catch (e) {
       // ignore variable-list load failures to keep page functional
     }
@@ -69,6 +141,19 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     loadReport();
     loadSyncStatus();
     loadVariableOptions();
+
+    const savedRaw = localStorage.getItem(getColumnViewsStorageKey());
+    if (savedRaw) {
+      try {
+        const parsed = JSON.parse(savedRaw);
+        if (Array.isArray(parsed)) setSavedViews(parsed);
+      } catch {
+        setSavedViews([]);
+      }
+    }
+
+    const autoAddRaw = localStorage.getItem(getAutoAddStorageKey());
+    setAutoAddNewVariables(autoAddRaw === '1');
   }, [isLiveMode]);
 
   useEffect(() => {
@@ -76,6 +161,12 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     const interval = setInterval(loadSyncStatus, 2000);
     return () => clearInterval(interval);
   }, [isLiveMode]);
+
+  useEffect(() => {
+    if (!isLiveMode || columns.length === 0) return;
+    const prefKey = getColumnPrefsStorageKey();
+    localStorage.setItem(prefKey, JSON.stringify(columns.map((c) => c.key)));
+  }, [columns, isLiveMode]);
 
   const filteredRows = useMemo(() => {
     if (!search.trim()) return rows;
@@ -90,10 +181,49 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   }, [rows, search]);
 
   const filteredVariableOptions = useMemo(() => {
+    const hiddenKeys = columnKeySet;
     const q = variableFilter.trim().toLowerCase();
-    if (!q) return variableOptions;
-    return variableOptions.filter((v) => v.label.toLowerCase().includes(q) || v.key.toLowerCase().includes(q));
-  }, [variableOptions, variableFilter]);
+    return variableOptions
+      .filter((v) => !hiddenKeys.has(v.key))
+      .filter((v) => !q || v.label.toLowerCase().includes(q) || v.key.toLowerCase().includes(q));
+  }, [variableOptions, variableFilter, columnKeySet]);
+
+  const variableStats = useMemo(() => {
+    const total = rows.length || 1;
+    const stats = new Map<string, { filledCount: number; fillRate: number; sampleValue: string }>();
+
+    variableOptions.forEach((option) => {
+      let filledCount = 0;
+      let sampleValue = '';
+      for (const row of rows) {
+        const raw = row.variables?.[option.key];
+        const value = raw === null || raw === undefined ? '' : String(raw).trim();
+        if (value !== '') {
+          filledCount += 1;
+          if (!sampleValue) sampleValue = value;
+        }
+      }
+      stats.set(option.key, {
+        filledCount,
+        fillRate: Math.round((filledCount / total) * 100),
+        sampleValue
+      });
+    });
+
+    return stats;
+  }, [rows, variableOptions]);
+
+  const recommendedVariableKeys = useMemo(() => {
+    return filteredVariableOptions
+      .map((option) => ({
+        key: option.key,
+        fillRate: variableStats.get(option.key)?.fillRate || 0
+      }))
+      .filter((entry) => entry.fillRate >= 30)
+      .sort((a, b) => b.fillRate - a.fillRate)
+      .slice(0, 8)
+      .map((entry) => entry.key);
+  }, [filteredVariableOptions, variableStats]);
 
   const getCellValue = (row: DriverExcelRow, col: DriverExcelColumn) => {
     if (col.key === 'phoneNumber') return row.phoneNumber || '';
@@ -134,50 +264,235 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
 
   const addSelectedVariables = async () => {
     if (selectedVariableKeys.length === 0) return;
-    const keysToAdd = selectedVariableKeys.filter((key) => !columnKeySet.has(key));
-    if (keysToAdd.length === 0) {
+    setActionKey('add-selected-variables');
+    if (selectedVariableKeys.every((key) => columnKeySet.has(key))) {
       showMessage('Selected variables are already added.');
+      setActionKey(null);
       return;
     }
 
-    const lookup = new Map(variableOptions.map((v) => [v.key, v]));
-    const results = await Promise.allSettled(
-      keysToAdd.map((key) => {
-        const selected = lookup.get(key);
-        if (!selected) return Promise.resolve();
-        return liveApiService.addDriverExcelVariableColumn(selected.key, selected.label);
-      })
-    );
+    try {
+      await addVariableColumnsByKeys(selectedVariableKeys);
+      await loadReport();
+      await loadSyncStatus();
+      await loadVariableOptions();
+      setSelectedVariableKeys([]);
+    } catch (e: any) {
+      showMessage(e.message || 'Failed to add variable columns.');
+    } finally {
+      setActionKey(null);
+    }
+  };
 
-    const successCount = results.filter((r) => r.status === 'fulfilled').length;
-    const failedCount = results.length - successCount;
-    await loadReport();
-    await loadSyncStatus();
-    await loadVariableOptions();
-    showMessage(`Added ${successCount} variable column(s)${failedCount > 0 ? `, ${failedCount} failed` : ''}.`);
+  const addRecommendedVariables = async () => {
+    if (recommendedVariableKeys.length === 0) {
+      showMessage('No recommended variables available right now.');
+      return;
+    }
+    setActionKey('add-recommended-variables');
+    try {
+      await addVariableColumnsByKeys(recommendedVariableKeys, 'Recommended: added');
+      await loadReport();
+      await loadSyncStatus();
+      await loadVariableOptions();
+      setSelectedVariableKeys((prev) => prev.filter((key) => !recommendedVariableKeys.includes(key)));
+    } catch (e: any) {
+      showMessage(e.message || 'Failed to add recommended variables.');
+    } finally {
+      setActionKey(null);
+    }
   };
 
   const addColumn = async () => {
     if (!newColumnLabel.trim()) return;
-    await liveApiService.addDriverExcelColumn(newColumnLabel.trim());
-    setNewColumnLabel('');
-    await loadReport();
-    await loadSyncStatus();
+    setActionKey('add-column');
+    try {
+      await liveApiService.addDriverExcelColumn(newColumnLabel.trim());
+      setNewColumnLabel('');
+      await loadReport();
+      await loadSyncStatus();
+    } catch (e: any) {
+      showMessage(e.message || 'Failed to add column');
+    } finally {
+      setActionKey(null);
+    }
   };
 
   const renameColumn = async (col: DriverExcelColumn) => {
     if (col.isCore) return;
     const newLabel = prompt('Rename column', col.label);
     if (!newLabel || newLabel.trim() === col.label) return;
-    await liveApiService.renameDriverExcelColumn(col.key, newLabel.trim());
-    await loadReport();
-    await loadSyncStatus();
+    setActionKey(`rename-${col.key}`);
+    try {
+      await liveApiService.renameDriverExcelColumn(col.key, newLabel.trim());
+      await loadReport();
+      await loadSyncStatus();
+    } catch (e: any) {
+      showMessage(e.message || 'Failed to rename column');
+    } finally {
+      setActionKey(null);
+    }
   };
 
   const deleteColumn = async (col: DriverExcelColumn) => {
     if (col.isCore) return;
     if (!confirm(`Delete column "${col.label}" from all customers?`)) return;
-    await liveApiService.deleteDriverExcelColumn(col.key);
+    setActionKey(`delete-${col.key}`);
+    try {
+      await liveApiService.deleteDriverExcelColumn(col.key);
+      setManuallyRemovedVariableKeys((prev) => (prev.includes(col.key) ? prev : [...prev, col.key]));
+      setSelectedVariableKeys((prev) => prev.filter((key) => key !== col.key));
+      await loadReport();
+      await loadSyncStatus();
+      await loadVariableOptions();
+    } catch (e: any) {
+      showMessage(e.message || 'Failed to delete column');
+    } finally {
+      setActionKey(null);
+    }
+  };
+
+  const reorderColumns = async (sourceKey: string, targetKey: string) => {
+    if (!sourceKey || !targetKey || sourceKey === targetKey) return;
+    const next = [...columns];
+    const from = next.findIndex((c) => c.key === sourceKey);
+    const to = next.findIndex((c) => c.key === targetKey);
+    if (from < 0 || to < 0) return;
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setColumns(next);
+    await liveApiService.reorderDriverExcelColumns(next.map((c) => c.key));
+    await loadSyncStatus();
+    showMessage('Column order saved.');
+  };
+
+  const resetColumnOrder = async () => {
+    setActionKey('reset-order');
+    try {
+      await liveApiService.reorderDriverExcelColumns([]);
+      await loadReport();
+      await loadSyncStatus();
+      showMessage('Column order reset to default.');
+    } catch (e: any) {
+      showMessage(e.message || 'Failed to reset column order.');
+    } finally {
+      setActionKey(null);
+    }
+  };
+
+  const toggleVariableSelection = (key: string, checked: boolean) => {
+    if (checked) {
+      setSelectedVariableKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
+    } else {
+      setSelectedVariableKeys((prev) => prev.filter((k) => k !== key));
+    }
+  };
+
+  const selectAllFilteredVariables = () => {
+    setSelectedVariableKeys(filteredVariableOptions.map((option) => option.key));
+  };
+
+  const clearSelectedVariables = () => setSelectedVariableKeys([]);
+
+  const persistSavedViews = (views: SavedColumnView[]) => {
+    setSavedViews(views);
+    localStorage.setItem(getColumnViewsStorageKey(), JSON.stringify(views));
+  };
+
+  const saveCurrentView = () => {
+    const name = prompt('View name', `View ${savedViews.length + 1}`);
+    if (!name?.trim()) return;
+    const customKeys = columns.filter((c) => !c.isCore).map((c) => c.key);
+    const next: SavedColumnView[] = [
+      ...savedViews,
+      {
+        id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        name: name.trim(),
+        keys: customKeys
+      }
+    ];
+    persistSavedViews(next);
+    showMessage('Saved current view.');
+  };
+
+  const applySavedView = async (viewId: string) => {
+    setSelectedViewId(viewId);
+    if (!viewId) return;
+    const view = savedViews.find((item) => item.id === viewId);
+    if (!view) return;
+
+    setActionKey('apply-view');
+    try {
+      const existingCustomKeys = columns.filter((c) => !c.isCore).map((c) => c.key);
+      const keysToDelete = existingCustomKeys.filter((key) => !view.keys.includes(key));
+      for (const key of keysToDelete) {
+        await liveApiService.deleteDriverExcelColumn(key);
+      }
+
+      await addVariableColumnsByKeys(view.keys, 'View: added');
+      await liveApiService.reorderDriverExcelColumns(view.keys);
+      await loadReport();
+      await loadVariableOptions();
+      await loadSyncStatus();
+      showMessage(`Applied view: ${view.name}`);
+    } catch (e: any) {
+      showMessage(e.message || 'Failed to apply view.');
+    } finally {
+      setActionKey(null);
+    }
+  };
+
+  const deleteSavedView = () => {
+    if (!selectedViewId) return;
+    const target = savedViews.find((v) => v.id === selectedViewId);
+    if (!target) return;
+    if (!confirm(`Delete saved view "${target.name}"?`)) return;
+    const next = savedViews.filter((v) => v.id !== selectedViewId);
+    persistSavedViews(next);
+    setSelectedViewId('');
+    showMessage('Saved view deleted.');
+  };
+
+  useEffect(() => {
+    localStorage.setItem(getAutoAddStorageKey(), autoAddNewVariables ? '1' : '0');
+  }, [autoAddNewVariables]);
+
+  useEffect(() => {
+    const autoAddMissingVariables = async () => {
+      if (!isLiveMode || !autoAddNewVariables || actionKey) return;
+      const missing = variableOptions
+        .map((v) => v.key)
+        .filter((key) => !columnKeySet.has(key) && !manuallyRemovedVariableKeys.includes(key));
+      if (missing.length === 0) return;
+
+      setActionKey('auto-add-variables');
+      try {
+        await addVariableColumnsByKeys(missing, 'Auto-added');
+        await loadReport();
+        await loadVariableOptions();
+        await loadSyncStatus();
+      } catch (e: any) {
+        showMessage(e.message || 'Auto-add variables failed.');
+      } finally {
+        setActionKey(null);
+      }
+    };
+
+    autoAddMissingVariables();
+  }, [isLiveMode, autoAddNewVariables, variableOptions, columnKeySet, manuallyRemovedVariableKeys, actionKey]);
+
+  const moveColumn = async (col: DriverExcelColumn, direction: 'up' | 'down') => {
+    if (col.isCore) return;
+    const customCols = columns.filter((c) => !c.isCore);
+    const currentIndex = customCols.findIndex((c) => c.key === col.key);
+    if (currentIndex < 0) return;
+    const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    if (targetIndex < 0 || targetIndex >= customCols.length) return;
+
+    const next = [...customCols];
+    const [current] = next.splice(currentIndex, 1);
+    next.splice(targetIndex, 0, current);
+    await liveApiService.reorderDriverExcelColumns(next.map((c) => c.key));
     await loadReport();
     await loadSyncStatus();
     await loadVariableOptions();
@@ -243,7 +558,24 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
           {uiMessage && <div className="mt-2 text-xs text-blue-700">{uiMessage}</div>}
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={resetColumnOrder} className="px-3 py-2 border rounded-lg text-sm flex items-center gap-1"><RotateCcw size={13} /> Reset Order</button>
+          <button disabled={actionKey === 'apply-view'} onClick={saveCurrentView} className="px-3 py-2 border rounded-lg text-sm disabled:opacity-50">Save View</button>
+          <select
+            className="px-3 py-2 border rounded-lg text-sm"
+            value={selectedViewId}
+            onChange={(e) => applySavedView(e.target.value)}
+            disabled={actionKey === 'apply-view'}
+          >
+            <option value="">Saved Views</option>
+            {savedViews.map((view) => (
+              <option key={view.id} value={view.id}>{view.name}</option>
+            ))}
+          </select>
+          <button disabled={!selectedViewId || actionKey === 'apply-view'} onClick={deleteSavedView} className="px-3 py-2 border rounded-lg text-sm text-red-600 disabled:opacity-50">Delete View</button>
+          <label className="inline-flex items-center gap-1 text-xs text-gray-600 border rounded-lg px-2 py-2">
+            <input type="checkbox" checked={autoAddNewVariables} onChange={(e) => setAutoAddNewVariables(e.target.checked)} />
+            Auto-add new variables
+          </label>
+          <button disabled={actionKey === 'reset-order'} onClick={resetColumnOrder} className="px-3 py-2 border rounded-lg text-sm flex items-center gap-1 disabled:opacity-50"><RotateCcw size={13} /> {actionKey === 'reset-order' ? 'Resetting...' : 'Reset Order'}</button>
           <button onClick={loadReport} className="px-4 py-2 bg-gray-900 text-white rounded-lg text-sm">Refresh</button>
         </div>
       </div>
@@ -267,13 +599,16 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
               value={newColumnLabel}
               onChange={(e) => setNewColumnLabel(e.target.value)}
             />
-            <button onClick={addColumn} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm flex items-center gap-1"><Plus size={14} /> Add Column</button>
+            <button disabled={actionKey === 'add-column'} onClick={addColumn} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm flex items-center gap-1 disabled:opacity-50"><Plus size={14} /> {actionKey === 'add-column' ? 'Adding...' : 'Add Column'}</button>
           </div>
 
           <div className="min-w-[340px] border rounded-lg p-2 bg-gray-50">
             <div className="flex items-center justify-between mb-2">
               <div className="text-xs font-medium text-gray-700">Variable Columns</div>
-              <button onClick={addSelectedVariables} className="px-2 py-1 bg-emerald-600 text-white rounded text-xs flex items-center gap-1"><CheckSquare size={12} /> Add Selected</button>
+              <div className="flex items-center gap-1">
+                <button disabled={actionKey === 'add-recommended-variables'} onClick={addRecommendedVariables} className="px-2 py-1 bg-indigo-600 text-white rounded text-xs disabled:opacity-50">{actionKey === 'add-recommended-variables' ? 'Adding...' : 'Add Recommended'}</button>
+                <button disabled={actionKey === 'add-selected-variables'} onClick={addSelectedVariables} className="px-2 py-1 bg-emerald-600 text-white rounded text-xs flex items-center gap-1 disabled:opacity-50"><CheckSquare size={12} /> {actionKey === 'add-selected-variables' ? 'Adding...' : 'Add Selected'}</button>
+              </div>
             </div>
             <input
               className="w-full px-2 py-1.5 border rounded text-sm mb-2"
@@ -282,22 +617,26 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
               onChange={(e) => setVariableFilter(e.target.value)}
             />
             <div className="max-h-36 overflow-auto bg-white border rounded p-1 space-y-1">
+              <div className="flex items-center justify-between px-2 py-1 border-b mb-1">
+                <button className="text-[11px] text-blue-600" onClick={selectAllFilteredVariables}>Select all</button>
+                <button className="text-[11px] text-gray-500" onClick={clearSelectedVariables}>Clear</button>
+              </div>
               {filteredVariableOptions.length === 0 ? (
                 <div className="text-xs text-gray-500 px-2 py-1">No variables found</div>
               ) : (
                 filteredVariableOptions.map((option) => {
-                  const alreadyAdded = columnKeySet.has(option.key);
+                  const stat = variableStats.get(option.key);
                   return (
-                    <label key={option.key} className={`flex items-start gap-2 px-2 py-1 rounded text-xs ${alreadyAdded ? 'text-gray-400' : 'text-gray-700 hover:bg-gray-50'}`}>
+                    <label key={option.key} className="flex items-start gap-2 px-2 py-1 rounded text-xs text-gray-700 hover:bg-gray-50">
                       <input
                         type="checkbox"
-                        disabled={alreadyAdded}
                         checked={selectedVariableKeys.includes(option.key)}
                         onChange={(e) => toggleVariableSelection(option.key, e.target.checked)}
                       />
-                      <span className="leading-4">
-                        <b>{option.label}</b>
-                        <span className="block text-[10px]">{option.key}{alreadyAdded ? ' (already added)' : ''}</span>
+                      <span className="leading-4 flex-1">
+                        <b>{option.label || option.key}</b>
+                        <span className="block text-[11px] text-gray-500">{option.key} • Fill {stat?.fillRate ?? 0}% ({stat?.filledCount ?? 0}/{rows.length})</span>
+                        {stat?.sampleValue && <span className="block text-[11px] text-gray-400 truncate">Sample: {stat.sampleValue}</span>}
                       </span>
                     </label>
                   );
@@ -316,8 +655,6 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                 <th
                   key={col.key}
                   className="px-3 py-2 text-left border-b whitespace-nowrap"
-                  draggable
-                  onDragStart={() => setDraggingColKey(col.key)}
                   onDragOver={(e) => e.preventDefault()}
                   onDrop={async () => {
                     if (!draggingColKey) return;
@@ -327,12 +664,25 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                   onDragEnd={() => setDraggingColKey(null)}
                 >
                   <div className="flex items-center gap-2">
-                    <GripVertical size={13} className="text-gray-400" />
+                    <button
+                      type="button"
+                      className="text-gray-400 cursor-grab active:cursor-grabbing"
+                      title="Drag to reorder"
+                      draggable
+                      onDragStart={(e) => {
+                        e.stopPropagation();
+                        setDraggingColKey(col.key);
+                      }}
+                    >
+                      <GripVertical size={13} className="text-gray-400" />
+                    </button>
                     <span>{col.label}</span>
                     {!col.isCore && (
                       <>
-                        <button onClick={() => renameColumn(col)} className="text-gray-500 hover:text-gray-900"><Pencil size={13} /></button>
-                        <button onClick={() => deleteColumn(col)} className="text-red-500 hover:text-red-700"><X size={13} /></button>
+                        <button onClick={() => moveColumn(col, 'up')} className="text-gray-500 hover:text-gray-900 disabled:opacity-50" title="Move column up" disabled={actionKey !== null}><ArrowUp size={13} /></button>
+                        <button onClick={() => moveColumn(col, 'down')} className="text-gray-500 hover:text-gray-900 disabled:opacity-50" title="Move column down" disabled={actionKey !== null}><ArrowDown size={13} /></button>
+                        <button onClick={() => renameColumn(col)} disabled={actionKey === `rename-${col.key}` || actionKey !== null} className="text-gray-500 hover:text-gray-900 disabled:opacity-50"><Pencil size={13} /></button>
+                        <button onClick={() => deleteColumn(col)} disabled={actionKey === `delete-${col.key}` || actionKey !== null} className="text-red-500 hover:text-red-700 disabled:opacity-50"><X size={13} /></button>
                       </>
                     )}
                   </div>
@@ -362,7 +712,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                           </div>
                         ) : (
                           <button onClick={() => beginEdit(row.id, col, value)} className="text-left w-full">
-                            <span className="whitespace-pre-wrap break-words">{value || <span className="text-gray-300">—</span>}</span>
+                            <span className="whitespace-pre-wrap break-words">{value === '' ? '-' : value}</span>
                           </button>
                         )}
                       </td>
