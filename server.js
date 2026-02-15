@@ -1049,6 +1049,17 @@ const parseVariableCaptureMessage = (text) => {
     }
 };
 
+const parseIncomingMediaPayload = (text) => {
+    if (!text || typeof text !== 'string') return null;
+    try {
+        const parsed = JSON.parse(text);
+        if (!parsed || typeof parsed !== 'object' || !parsed.mediaKey) return null;
+        return parsed;
+    } catch (e) {
+        return null;
+    }
+};
+
 const buildVariableResponseLookup = ({ captureRows = [], candidateRows = [] }) => {
     const responseLookup = new Map();
     const discoveredKeys = new Set();
@@ -1249,20 +1260,32 @@ const getFileExtensionFromMime = (mimeType = '', fallback = 'bin') => {
     if (mime.includes('png')) return 'png';
     if (mime.includes('pdf')) return 'pdf';
     if (mime.includes('webp')) return 'webp';
+    if (mime.includes('mp4')) return 'mp4';
+    if (mime.includes('quicktime')) return 'mov';
+    if (mime.includes('3gpp')) return '3gp';
     return fallback;
 };
 
-const ALLOWED_LICENSE_MIME_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'application/pdf', 'image/webp']);
-const MAX_LICENSE_FILE_BYTES = 8 * 1024 * 1024;
+const ALLOWED_LICENSE_MIME_TYPES = new Set([
+    'image/jpeg',
+    'image/jpg',
+    'image/png',
+    'application/pdf',
+    'image/webp',
+    'video/mp4',
+    'video/quicktime',
+    'video/3gpp'
+]);
+const MAX_LICENSE_FILE_BYTES = 16 * 1024 * 1024;
 
 const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candidateVariables, client }) => {
     if (!candidateId) throw new Error('Candidate id is required for media upload');
-    const mediaId = msg?.image?.id || msg?.document?.id;
+    const mediaId = msg?.image?.id || msg?.document?.id || msg?.video?.id;
     if (!mediaId) return null;
 
     const metaResponse = await getMetaClient().get(`https://graph.facebook.com/v18.0/${mediaId}`);
     const mediaUrl = metaResponse.data?.url;
-    const mimeType = String(metaResponse.data?.mime_type || (msg.type === 'document' ? 'application/octet-stream' : `image/${msg.type}`)).toLowerCase();
+    const mimeType = String(metaResponse.data?.mime_type || (msg.type === 'document' ? 'application/octet-stream' : `${msg.type === 'video' ? 'video' : 'image'}/${msg.type}`)).toLowerCase();
     if (!mediaUrl) throw new Error('WhatsApp media URL not found');
     if (!ALLOWED_LICENSE_MIME_TYPES.has(mimeType)) {
         throw new Error(`Unsupported licence file type: ${mimeType}`);
@@ -1275,10 +1298,10 @@ const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candid
     });
 
     if ((mediaFile.data?.byteLength || 0) > MAX_LICENSE_FILE_BYTES) {
-        throw new Error('Licence file exceeds 8MB limit');
+        throw new Error('Licence file exceeds 16MB limit');
     }
 
-    const ext = getFileExtensionFromMime(mimeType, msg.type === 'document' ? 'pdf' : 'jpg');
+    const ext = getFileExtensionFromMime(mimeType, msg.type === 'document' ? 'pdf' : (msg.type === 'video' ? 'mp4' : 'jpg'));
     const prefix = buildDriverDataPrefix(phoneNumber);
     const timestampTag = new Date().toISOString().replace(/[:.]/g, '-');
     const key = `${prefix}/${timestampTag}_${msg.id}.${ext}`;
@@ -1313,7 +1336,7 @@ const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candid
         );
         await client.query('UPDATE candidates SET variables = $1::jsonb WHERE id = $2', [JSON.stringify(mergedVariables), candidateId]);
         await client.query('COMMIT');
-        return { key, mergedVariables };
+        return { key, mergedVariables, mimeType };
     } catch (e) {
         await client.query('ROLLBACK').catch(() => null);
         await deleteFromS3(key).catch(() => null);
@@ -1724,6 +1747,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         let nextNodeId = null;
         let shouldReplyInvalid = false;
         const cleanInput = (incomingText || '').trim().toLowerCase();
+        const incomingMediaPayload = parseIncomingMediaPayload(incomingText);
 
         // 1. Global Resets
         if (['start', 'restart', 'hi', 'hello', 'menu'].includes(cleanInput)) {
@@ -1910,18 +1934,39 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     } 
                     // Fallback for simple text input (Only if we haven't already captured a button click value)
                     else if (!isManualTrigger && !valueToSave && (currentNode.data.type === 'input' || cleanInput.length > 0)) {
-                        valueToSave = incomingText;
+                        const expectsMediaInput = currentNode.data.type === 'input' && currentNode.data.validationType === 'media';
+                        if (expectsMediaInput) {
+                            if (incomingMediaPayload?.mediaKey) valueToSave = incomingText;
+                        } else {
+                            valueToSave = incomingText;
+                        }
                     }
 
                     if (valueToSave) {
+                        const expectsMediaInput = currentNode.data.type === 'input' && currentNode.data.validationType === 'media';
                         const newVars = { ...candidate.variables, [varName]: valueToSave };
+                        let valueForLog = valueToSave;
+
+                        if (expectsMediaInput && incomingMediaPayload?.mediaKey) {
+                            const mediaFolderPrefix = String(incomingMediaPayload.folder || buildDriverDataPrefix(candidate.phone_number));
+                            const mediaFolderUrl = getS3ConsoleFolderUrl(mediaFolderPrefix.endsWith('/') ? mediaFolderPrefix : `${mediaFolderPrefix}/`);
+                            const mediaUrl = incomingMediaPayload.mediaUrl || getPublicS3Url(incomingMediaPayload.mediaKey);
+
+                            newVars[varName] = mediaUrl;
+                            newVars[`${varName}_s3_key`] = incomingMediaPayload.mediaKey;
+                            newVars[`${varName}_mime_type`] = incomingMediaPayload.mimeType || '';
+                            newVars[`${varName}_folder`] = mediaFolderPrefix;
+                            newVars[`${varName}_folder_url`] = mediaFolderUrl;
+                            valueForLog = mediaUrl;
+                        }
+
                         await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
                         candidate.variables = newVars;
                         await logCapturedVariableResponse({
                             client,
                             candidateId: candidate.id,
                             key: varName,
-                            value: valueToSave
+                            value: valueForLog
                         });
                     } else if (isManualTrigger && currentNode.data.type === 'datetime_picker') {
                         await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "Sure, please type your preferred time below (e.g., 11:25 PM):" } });
@@ -2010,7 +2055,13 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         // Explicitly ignore DatePicker from invalid checks because it handles its own loops via Checkpoint Logic
                         const isInteractive = ['interactive_button', 'interactive_list', 'rich_card'].includes(currentNode.data.type);
                         const isNotSpecial = currentNode.data.type !== 'datetime_picker';
-                        
+                        const expectsMediaInput = currentNode.data.type === 'input' && currentNode.data.validationType === 'media';
+
+                        if (expectsMediaInput && !incomingMediaPayload?.mediaKey) {
+                            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: currentNode.data.retryMessage || 'Please upload a valid licence file (image, PDF, or video) to continue.' } });
+                            return;
+                        }
+
                         if (isInteractive && !isManualClick && isNotSpecial) {
                             shouldReplyInvalid = true;
                         }
@@ -2154,7 +2205,10 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
                     }
                 } 
                 else if (data.type === 'input') {
-                    payload = { type: 'text', text: { body: validBody || "Please enter your response below:" } };
+                    const fallbackPrompt = data.validationType === 'media'
+                        ? 'Please upload your licence file (image, PDF, or video) below.'
+                        : 'Please enter your response below:';
+                    payload = { type: 'text', text: { body: validBody || fallbackPrompt } };
                     autoAdvance = false; 
                 } 
                 
@@ -2599,7 +2653,7 @@ apiRouter.post('/webhook', async (req, res) => {
                     // Extract structured location data
                     text = JSON.stringify(msg.location);
                 }
-                else if (msg.type === 'image' || msg.type === 'document') {
+                else if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video') {
                     text = `[${msg.type.toUpperCase()}]`;
                 } else text = `[${msg.type.toUpperCase()}]`;
 
@@ -2614,7 +2668,7 @@ apiRouter.post('/webhook', async (req, res) => {
                     await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
                 }
 
-                if (msg.type === 'image' || msg.type === 'document') {
+                if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video') {
                     const mediaInfo = await fetchAndStoreLicenseMedia({
                         msg,
                         phoneNumber: from,
@@ -2627,7 +2681,7 @@ apiRouter.post('/webhook', async (req, res) => {
                     });
 
                     if (mediaInfo?.key) {
-                        text = JSON.stringify({ mediaKey: mediaInfo.key, type: msg.type, folder: buildDriverDataPrefix(from) });
+                        text = JSON.stringify({ mediaKey: mediaInfo.key, type: msg.type, mimeType: mediaInfo.mimeType, mediaUrl: getPublicS3Url(mediaInfo.key), folder: buildDriverDataPrefix(from) });
                         candidate.variables = mediaInfo.mergedVariables;
                         await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
                     }

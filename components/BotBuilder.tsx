@@ -13,7 +13,6 @@ import {
   Edge,
   useNodesState,
   useEdgesState,
-  MarkerType,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useFlowStore } from '../services/flowStore';
@@ -988,6 +987,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                     <option value="phone">Phone Number</option>
                                     <option value="number">Number</option>
                                     <option value="location">Live Location</option>
+                                    <option value="media">Media (Image / Video / Document)</option>
                                 </select>
                             </div>
                         </div>
@@ -1122,105 +1122,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
       addNode(newNode);
   };
 
-  const handleApplyLicenseCollectionTemplate = (mode: 'replace' | 'append' = 'replace') => {
-      if (mode === 'replace' && !confirm('Replace current flow with a Driving Licence Collection template?')) return;
 
-      const suffix = Date.now();
-      const ids = {
-          start: `license_start_${suffix}`,
-          intro: `license_intro_${suffix}`,
-          capture: `license_capture_${suffix}`,
-          done: `license_done_${suffix}`
-      };
-
-      const templateNodes: Node<FlowNodeData>[] = [
-          {
-              id: ids.start,
-              type: 'custom',
-              position: { x: 80, y: 240 },
-              data: { id: ids.start, type: 'start', label: 'Start Flow' }
-          },
-          {
-              id: ids.intro,
-              type: 'custom',
-              position: { x: 420, y: 160 },
-              data: {
-                  id: ids.intro,
-                  type: 'text',
-                  label: 'Ask for Licence',
-                  content: 'Hi 👋 Please upload your valid driving licence as a clear image or PDF.\n\nYou can send it directly in this chat.'
-              }
-          },
-          {
-              id: ids.capture,
-              type: 'custom',
-              position: { x: 420, y: 360 },
-              data: {
-                  id: ids.capture,
-                  type: 'input',
-                  label: 'Collect Licence Upload',
-                  content: 'Waiting for your licence upload…',
-                  variable: 'license_upload_reference',
-                  retryMessage: 'Please upload a valid driving licence image or PDF so we can continue.'
-              }
-          },
-          {
-              id: ids.done,
-              type: 'custom',
-              position: { x: 760, y: 260 },
-              data: {
-                  id: ids.done,
-                  type: 'text',
-                  label: 'Acknowledgement',
-                  content: '✅ Thanks! Your driving licence was received and saved. Our team will review it shortly.'
-              }
-          }
-      ];
-
-      const templateEdges: Edge[] = [
-          {
-              id: `e_${ids.start}_${ids.intro}`,
-              source: ids.start,
-              target: ids.intro,
-              type: 'smoothstep',
-              animated: true,
-              style: { stroke: '#64748b', strokeWidth: 2 },
-              markerEnd: { type: MarkerType.ArrowClosed }
-          },
-          {
-              id: `e_${ids.intro}_${ids.capture}`,
-              source: ids.intro,
-              target: ids.capture,
-              type: 'smoothstep',
-              animated: true,
-              style: { stroke: '#64748b', strokeWidth: 2 },
-              markerEnd: { type: MarkerType.ArrowClosed }
-          },
-          {
-              id: `e_${ids.capture}_${ids.done}`,
-              source: ids.capture,
-              target: ids.done,
-              type: 'smoothstep',
-              animated: true,
-              style: { stroke: '#64748b', strokeWidth: 2 },
-              markerEnd: { type: MarkerType.ArrowClosed }
-          }
-      ];
-
-      if (mode === 'append') {
-          const xBase = 180 + (nodes.length * 35);
-          const shiftedNodes = templateNodes.map((node, idx) => ({
-              ...node,
-              position: { x: node.position.x + xBase, y: node.position.y + idx * 8 }
-          }));
-          setNodes([...nodes, ...shiftedNodes]);
-          setEdges([...edges, ...templateEdges]);
-      } else {
-          setNodes(templateNodes);
-          setEdges(templateEdges);
-      }
-      setSelectedNodeId(null);
-  };
 
   if (activeView === 'ai') {
       return (
@@ -1250,25 +1152,6 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
          </div>
          
          <div className="flex-1 overflow-y-auto p-4 space-y-6">
-             <div className="rounded-xl border border-blue-200 bg-blue-50/60 p-3 space-y-2">
-                 <div className="text-[10px] font-bold text-blue-700 uppercase tracking-wider">Quick Template</div>
-                 <p className="text-[11px] text-blue-900 leading-relaxed">One-click demo flow to collect driving licence files in chatbot via Bot Studio nodes.</p>
-                 <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => handleApplyLicenseCollectionTemplate('replace')}
-                      className="px-3 py-2 rounded-lg bg-blue-600 text-white text-xs font-bold hover:bg-blue-700"
-                    >
-                      Replace Flow
-                    </button>
-                    <button
-                      onClick={() => handleApplyLicenseCollectionTemplate('append')}
-                      className="px-3 py-2 rounded-lg border border-blue-300 text-blue-700 text-xs font-bold hover:bg-blue-100"
-                    >
-                      Append Template
-                    </button>
-                 </div>
-             </div>
-
              {/* Node Palette */}
              <div>
                  <h3 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-3">Add Elements</h3>
