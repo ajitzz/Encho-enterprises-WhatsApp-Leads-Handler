@@ -232,11 +232,15 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     if (col.key === 'source') return row.source || '';
     if (col.key === 'createdAt') return row.createdAt || '';
     if (col.key === 'lastMessageAt') return row.lastMessageAt || '';
+    if (col.key === 'licenseStatus') return row.licenseStatus || row.variables?.license_status || 'missing';
+    if (col.key === 'licenseUploadedAt') return row.licenseUploadedAt || row.variables?.license_uploaded_at || '';
+    if (col.key === 'latestLicenseUrl') return row.latestLicenseUrl || row.variables?.license_url || '';
+    if (col.key === 'licenseFolderUrl') return row.licenseFolderUrl || row.variables?.license_folder_url || '';
     return String(row.variables?.[col.key] ?? '');
   };
 
   const beginEdit = (rowId: string, col: DriverExcelColumn, currentValue: string) => {
-    if (col.key === 'createdAt' || col.key === 'lastMessageAt') return;
+    if (['createdAt', 'lastMessageAt', 'licenseStatus', 'licenseUploadedAt', 'latestLicenseUrl', 'licenseFolderUrl'].includes(col.key)) return;
     setEditingCell({ rowId, colKey: col.key });
     setDraftValue(currentValue);
   };
@@ -683,6 +687,22 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                             <button onClick={saveCell} className="text-green-600"><Save size={14} /></button>
                             <button onClick={() => setEditingCell(null)} className="text-gray-500"><X size={14} /></button>
                           </div>
+                        ) : (col.key === 'licenseStatus') ? (
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${
+                            value === 'approved' ? 'bg-emerald-100 text-emerald-700' :
+                            value === 'rejected' ? 'bg-red-100 text-red-700' :
+                            value === 'under_review' ? 'bg-amber-100 text-amber-700' :
+                            value === 'uploaded' ? 'bg-blue-100 text-blue-700' :
+                            value === 'expired' ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-700'
+                          }`}>{value || 'missing'}</span>
+                        ) : (col.key === 'licenseUploadedAt') ? (
+                          <span className="whitespace-pre-wrap break-words">{value ? new Date(value).toLocaleString() : '-'}</span>
+                        ) : (col.key === 'latestLicenseUrl' || col.key === 'licenseFolderUrl') ? (
+                          value ? (
+                            <a href={value} target="_blank" rel="noreferrer" className="text-blue-600 underline break-all">{value}</a>
+                          ) : (
+                            <span className="text-gray-400">-</span>
+                          )
                         ) : (
                           <button onClick={() => beginEdit(row.id, col, value)} className="text-left w-full">
                             <span className="whitespace-pre-wrap break-words">{value === '' ? '-' : value}</span>
