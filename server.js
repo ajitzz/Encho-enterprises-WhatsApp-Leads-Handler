@@ -476,6 +476,66 @@ const findCandidateRowInGoogleSheet = async ({ accessToken, spreadsheetId, custo
     return matchIndex + 1; // 1-based
 };
 
+const getSystemConfig = async (client) => {
+    const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config' LIMIT 1");
+    const rawConfig = sys.rows[0]?.value || {};
+    return {
+        webhook_ingest_enabled: rawConfig.webhook_ingest_enabled !== false,
+        automation_enabled: rawConfig.automation_enabled !== false,
+        sending_enabled: rawConfig.sending_enabled !== false
+    };
+};
+
+const checkGoogleSheetsOperationalStatus = async () => {
+    const spreadsheetId = SYSTEM_CONFIG.GOOGLE_SHEETS_SPREADSHEET_ID;
+    const customersTabName = SYSTEM_CONFIG.GOOGLE_SHEETS_CUSTOMERS_TAB_NAME;
+    const messagesTabName = SYSTEM_CONFIG.GOOGLE_SHEETS_MESSAGES_TAB_NAME;
+
+    if (!isDriverExcelGoogleSyncEnabled()) {
+        return {
+            state: 'not_configured',
+            configured: false,
+            reason: 'Missing spreadsheet id or service-account credentials',
+            spreadsheetId: spreadsheetId || null,
+            customersTabName,
+            messagesTabName
+        };
+    }
+
+    try {
+        const accessToken = await getGoogleSheetsAccessToken();
+        const metadata = await axios.get(
+            `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=properties.title,sheets.properties.title`,
+            {
+                headers: { Authorization: `Bearer ${accessToken}` },
+                timeout: 8000
+            }
+        );
+
+        const tabNames = (metadata.data?.sheets || []).map((sheet) => sheet?.properties?.title).filter(Boolean);
+        return {
+            state: 'connected',
+            configured: true,
+            spreadsheetId,
+            spreadsheetTitle: metadata.data?.properties?.title || '',
+            customersTabName,
+            messagesTabName,
+            customersTabExists: tabNames.includes(customersTabName),
+            messagesTabExists: tabNames.includes(messagesTabName),
+            tabMode: customersTabName === messagesTabName ? 'single_tab' : 'two_tabs'
+        };
+    } catch (e) {
+        return {
+            state: 'error',
+            configured: true,
+            spreadsheetId,
+            customersTabName,
+            messagesTabName,
+            reason: e.message || 'Google Sheets connection check failed'
+        };
+    }
+};
+
 const upsertCandidateToGoogleSheets = async (candidateId) => {
     if (!isDriverExcelGoogleSyncEnabled() || !candidateId) return;
     const customersTabName = SYSTEM_CONFIG.GOOGLE_SHEETS_CUSTOMERS_TAB_NAME;
@@ -2136,6 +2196,81 @@ app.use((req, res, next) => {
 const apiRouter = express.Router();
 
 apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
+
+apiRouter.get('/system/settings', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const config = await getSystemConfig(client);
+            res.json(config);
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message || 'Failed to load system settings' });
+    }
+});
+
+apiRouter.patch('/system/settings', async (req, res) => {
+    try {
+        const updates = req.body || {};
+        await withDb(async (client) => {
+            const current = await getSystemConfig(client);
+            const next = {
+                ...current,
+                ...(typeof updates.webhook_ingest_enabled === 'boolean' ? { webhook_ingest_enabled: updates.webhook_ingest_enabled } : {}),
+                ...(typeof updates.automation_enabled === 'boolean' ? { automation_enabled: updates.automation_enabled } : {}),
+                ...(typeof updates.sending_enabled === 'boolean' ? { sending_enabled: updates.sending_enabled } : {})
+            };
+
+            await client.query(
+                "INSERT INTO system_settings (key, value) VALUES ('config', $1::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                [JSON.stringify(next)]
+            );
+            res.json({ success: true, settings: next });
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message || 'Failed to update system settings' });
+    }
+});
+
+apiRouter.get('/system/operational-status', async (req, res) => {
+    const status = {
+        timestamp: new Date().toISOString(),
+        postgres: { state: 'unknown', reason: null },
+        runtime: {
+            webhook_ingest_enabled: false,
+            automation_enabled: false,
+            sending_enabled: false
+        },
+        integrations: {
+            googleSheets: {
+                state: 'unknown',
+                configured: false
+            }
+        },
+        driverExcelSync: {
+            state: driverExcelSyncStatus.state,
+            lastSuccessAt: driverExcelSyncStatus.lastSuccessAt,
+            lastError: driverExcelSyncStatus.lastError,
+            inProgress: driverExcelSyncInProgress,
+            hasQueuedSync: Boolean(driverExcelSyncRequested || driverExcelSyncTimer || driverExcelSyncMaxWaitTimer || driverExcelIncrementalTimer || driverExcelIncrementalMaxWaitTimer || driverExcelIncrementalQueue.size > 0),
+            destinations: driverExcelSyncStatus.destinations
+        }
+    };
+
+    try {
+        await withDb(async (client) => {
+            await client.query('SELECT 1');
+            status.postgres.state = 'connected';
+            status.runtime = await getSystemConfig(client);
+        });
+    } catch (e) {
+        status.postgres.state = 'error';
+        status.postgres.reason = e.message || 'Database unavailable';
+    }
+
+    status.integrations.googleSheets = await checkGoogleSheetsOperationalStatus();
+    res.json(status);
+});
+
 
 apiRouter.get('/media', async (req, res) => {
     const requestedPath = typeof req.query.path === 'string' ? req.query.path : '/';
