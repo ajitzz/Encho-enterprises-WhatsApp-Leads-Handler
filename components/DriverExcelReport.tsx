@@ -29,6 +29,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   const [variableOptions, setVariableOptions] = useState<VariableOption[]>([]);
   const [variableFilter, setVariableFilter] = useState('');
   const [selectedVariableKeys, setSelectedVariableKeys] = useState<string[]>([]);
+  const [manuallyRemovedVariableKeys, setManuallyRemovedVariableKeys] = useState<string[]>([]);
   const [savedViews, setSavedViews] = useState<SavedColumnView[]>([]);
   const [selectedViewId, setSelectedViewId] = useState('');
   const [autoAddNewVariables, setAutoAddNewVariables] = useState(false);
@@ -73,7 +74,16 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
       })
     );
 
-    const successCount = results.filter((r) => r.status === 'fulfilled').length;
+    const successfulKeys = results
+      .map((result, index) => ({ result, key: keysToAdd[index] }))
+      .filter((item) => item.result.status === 'fulfilled')
+      .map((item) => item.key);
+
+    if (successfulKeys.length > 0) {
+      setManuallyRemovedVariableKeys((prev) => prev.filter((k) => !successfulKeys.includes(k)));
+    }
+
+    const successCount = successfulKeys.length;
     const failedCount = results.length - successCount;
     showMessage(`${messagePrefix} ${successCount} variable column(s)${failedCount > 0 ? `, ${failedCount} failed` : ''}.`);
     return { successCount, failedCount };
@@ -121,6 +131,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
       const vars = data.variables || [];
       setVariableOptions(vars);
       setSelectedVariableKeys((prev) => prev.filter((k) => vars.some((v) => v.key === k)));
+      setManuallyRemovedVariableKeys((prev) => prev.filter((k) => vars.some((v) => v.key === k)));
     } catch (e) {
       // ignore variable-list load failures to keep page functional
     }
@@ -329,6 +340,8 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     setActionKey(`delete-${col.key}`);
     try {
       await liveApiService.deleteDriverExcelColumn(col.key);
+      setManuallyRemovedVariableKeys((prev) => (prev.includes(col.key) ? prev : [...prev, col.key]));
+      setSelectedVariableKeys((prev) => prev.filter((key) => key !== col.key));
       await loadReport();
       await loadSyncStatus();
       await loadVariableOptions();
@@ -447,7 +460,9 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   useEffect(() => {
     const autoAddMissingVariables = async () => {
       if (!isLiveMode || !autoAddNewVariables || actionKey) return;
-      const missing = variableOptions.map((v) => v.key).filter((key) => !columnKeySet.has(key));
+      const missing = variableOptions
+        .map((v) => v.key)
+        .filter((key) => !columnKeySet.has(key) && !manuallyRemovedVariableKeys.includes(key));
       if (missing.length === 0) return;
 
       setActionKey('auto-add-variables');
@@ -464,7 +479,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     };
 
     autoAddMissingVariables();
-  }, [isLiveMode, autoAddNewVariables, variableOptions, columnKeySet]);
+  }, [isLiveMode, autoAddNewVariables, variableOptions, columnKeySet, manuallyRemovedVariableKeys, actionKey]);
 
   const moveColumn = async (col: DriverExcelColumn, direction: 'up' | 'down') => {
     if (col.isCore) return;

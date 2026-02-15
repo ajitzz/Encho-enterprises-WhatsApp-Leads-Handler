@@ -567,28 +567,79 @@ const getDriverExcelVariableCatalog = async (client) => {
     `);
     const candidateRes = await client.query(`SELECT variables FROM candidates`);
 
-    const keys = new Set();
+    const keys = new Map();
+    const registerVariable = (rawKey, preferredLabel = '') => {
+        const normalizedKey = normalizeColumnKey(rawKey);
+        if (!normalizedKey) return;
+
+        const fallbackLabel = formatColumnLabelFromKey(normalizedKey);
+        const nextLabel = String(preferredLabel || '').trim() || fallbackLabel;
+        const existing = keys.get(normalizedKey);
+        if (!existing) {
+            keys.set(normalizedKey, { key: normalizedKey, label: nextLabel });
+            return;
+        }
+
+        const existingLabel = String(existing.label || '').trim();
+        if (!existingLabel || existingLabel === fallbackLabel) {
+            keys.set(normalizedKey, { key: normalizedKey, label: nextLabel });
+        }
+    };
+
+    const botSettingsRes = await client.query(`
+        SELECT settings
+        FROM bot_versions
+        WHERE status = 'published'
+        ORDER BY created_at DESC
+        LIMIT 1
+    `);
+    const publishedSettings = botSettingsRes.rows[0]?.settings || {};
+    const publishedNodes = Array.isArray(publishedSettings?.nodes) ? publishedSettings.nodes : [];
+
+    const captureTypes = new Set(['input', 'interactive_button', 'interactive_list', 'rich_card']);
+    publishedNodes.forEach((node) => {
+        const nodeData = node?.data || {};
+        const nodeType = nodeData?.type;
+        const nodeVariable = String(nodeData?.variable || '').trim();
+
+        if (nodeVariable) registerVariable(nodeVariable, nodeVariable);
+        if (nodeType === 'datetime_picker') {
+            ['pickup_date', 'time_period', nodeVariable || 'time_slot'].forEach((v) => registerVariable(v, v));
+        }
+        if (nodeType === 'pickup_location') registerVariable('pickup_coords', 'pickup_coords');
+        if (nodeType === 'destination_location') registerVariable('dest_coords', 'dest_coords');
+        if (nodeType === 'location_request') registerVariable('location_data', 'location_data');
+        if (captureTypes.has(nodeType) && !nodeVariable) {
+            const fallback = String(nodeData?.label || node?.id || '').trim();
+            if (fallback) registerVariable(fallback, fallback);
+        }
+
+        const summaryFields = Array.isArray(nodeData?.summaryFields) ? nodeData.summaryFields : [];
+        summaryFields.forEach((field) => {
+            const fieldVar = String(field?.variable || '').trim();
+            if (fieldVar) registerVariable(fieldVar, fieldVar);
+        });
+    });
+
     captureRes.rows.forEach((row) => {
         const parsed = parseVariableCaptureMessage(row.text);
-        if (parsed?.key) keys.add(parsed.key);
+        if (parsed?.key) registerVariable(parsed.key, parsed.key);
     });
     candidateRes.rows.forEach((row) => {
         const vars = normalizeVariables(row.variables);
         Object.keys(vars || {}).forEach((key) => {
             const normalized = normalizeColumnKey(key);
-            if (normalized) keys.add(normalized);
+            if (normalized) registerVariable(normalized, key);
         });
     });
 
     const configuredColumns = await getDriverExcelColumnConfig(client);
     configuredColumns.forEach((col) => {
         const normalized = normalizeColumnKey(col.key);
-        if (normalized) keys.add(normalized);
+        if (normalized) registerVariable(normalized, col.label);
     });
 
-    return Array.from(keys)
-        .sort((a, b) => a.localeCompare(b))
-        .map((key) => ({ key, label: key }));
+    return Array.from(keys.values()).sort((a, b) => a.key.localeCompare(b.key));
 };
 
 const getFileExtensionFromMime = (mimeType = '', fallback = 'bin') => {
