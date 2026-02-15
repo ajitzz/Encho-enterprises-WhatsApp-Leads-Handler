@@ -107,7 +107,7 @@ export interface FlowNodeData {
 
   // Input & Validation
   variable?: string; 
-  validationType?: 'text' | 'email' | 'phone' | 'number' | 'regex' | 'location';
+  validationType?: 'text' | 'email' | 'phone' | 'number' | 'regex' | 'location' | 'media';
   validationRegex?: string;
   retryMessage?: string; 
   
