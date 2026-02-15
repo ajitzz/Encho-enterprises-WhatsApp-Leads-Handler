@@ -216,6 +216,7 @@ const getDriverMonthFolder = (date = new Date()) => `${date.getUTCFullYear()}-${
 const buildDriverDataPrefix = (phone, date = new Date()) => `Driver data/${getDriverMonthFolder(date)}/${sanitizePhoneForPath(phone)}`;
 
 const getPublicS3Url = (key) => `https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.${SYSTEM_CONFIG.AWS_REGION}.amazonaws.com/${encodeURIComponent(key).replace(/%2F/g, '/')}`;
+const getS3ConsoleFolderUrl = (prefix = '') => `https://s3.console.aws.amazon.com/s3/buckets/${encodeURIComponent(SYSTEM_CONFIG.AWS_BUCKET)}?region=${encodeURIComponent(SYSTEM_CONFIG.AWS_REGION)}&prefix=${encodeURIComponent(prefix)}&showversions=false`;
 
 const xmlEscape = (value) => String(value ?? '')
     .replace(/&/g, '&amp;')
