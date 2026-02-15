@@ -112,32 +112,3 @@ If you have a VPS (DigitalOcean, Hetzner, AWS Lightsail), use PM2 to manage the 
    pm2 startup
    ```
 4. This ensures the server **Auto-Restarts** if it crashes or if the machine reboots.
-
-
-## 📊 Driver Excel Report Auto-Sync (S3 + Google Sheets)
-
-The Driver Excel Report page now syncs every edit/update to:
-1. `driver excel/driver-data.xls` in your S3 bucket
-2. A Google Spreadsheet tab (if configured)
-
-### Required environment variables
-Add these to your `.env` on the backend server:
-
-```bash
-GOOGLE_SHEETS_ID=your_google_spreadsheet_id
-GOOGLE_SHEETS_TAB_NAME=Driver Report
-GOOGLE_SERVICE_ACCOUNT_EMAIL=service-account@project-id.iam.gserviceaccount.com
-GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-```
-
-### Google Sheets setup steps
-1. Open Google Cloud Console → create/select a project.
-2. Enable **Google Sheets API**.
-3. Create a **Service Account** and generate a JSON key.
-4. Copy `client_email` to `GOOGLE_SERVICE_ACCOUNT_EMAIL`.
-5. Copy `private_key` to `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` (keep `\n` escaped in `.env`).
-6. Open your target Google Spreadsheet and share it with the service account email (Editor access).
-7. Put your spreadsheet ID in `GOOGLE_SHEETS_ID` (from sheet URL).
-8. Restart backend server.
-
-If Google Sheets vars are missing, S3 sync still works and Google sync is marked as disabled in sync status.
