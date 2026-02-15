@@ -495,6 +495,36 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     await liveApiService.reorderDriverExcelColumns(next.map((c) => c.key));
     await loadReport();
     await loadSyncStatus();
+    await loadVariableOptions();
+  };
+
+  const reorderColumns = async (sourceKey: string, targetKey: string) => {
+    if (!sourceKey || !targetKey || sourceKey === targetKey) return;
+    const next = [...columns];
+    const from = next.findIndex((c) => c.key === sourceKey);
+    const to = next.findIndex((c) => c.key === targetKey);
+    if (from < 0 || to < 0) return;
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setColumns(next);
+    await liveApiService.reorderDriverExcelColumns(next.map((c) => c.key));
+    await loadSyncStatus();
+    showMessage('Column order saved.');
+  };
+
+  const resetColumnOrder = async () => {
+    await liveApiService.reorderDriverExcelColumns([]);
+    await loadReport();
+    await loadSyncStatus();
+    showMessage('Column order reset to default.');
+  };
+
+  const toggleVariableSelection = (key: string, checked: boolean) => {
+    if (checked) {
+      setSelectedVariableKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
+    } else {
+      setSelectedVariableKeys((prev) => prev.filter((k) => k !== key));
+    }
   };
 
   const syncLabel = (() => {

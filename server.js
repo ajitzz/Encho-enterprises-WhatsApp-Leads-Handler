@@ -8,7 +8,7 @@ const axios = require('axios');
 const https = require('https');
 const { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-const { OAuth2Client } = require('google-auth-library');
+const { OAuth2Client, JWT } = require('google-auth-library');
 const { GoogleGenAI } = require("@google/genai");
 
 require('dotenv').config();
@@ -199,6 +199,96 @@ const rowsToWorksheetXml = (rows) => rows.map((row) => {
     return `<Row>${cells}</Row>`;
 }).join('');
 
+const resolveGoogleSheetsCredentials = () => {
+    if (process.env.GOOGLE_SHEETS_CREDENTIALS_JSON) {
+        try {
+            const parsed = JSON.parse(process.env.GOOGLE_SHEETS_CREDENTIALS_JSON);
+            return {
+                clientEmail: parsed.client_email,
+                privateKey: parsed.private_key
+            };
+        } catch (e) {
+            console.warn('[Google Sheets Credentials Warning] Invalid GOOGLE_SHEETS_CREDENTIALS_JSON');
+        }
+    }
+
+    if (process.env.GOOGLE_SHEETS_CLIENT_EMAIL && process.env.GOOGLE_SHEETS_PRIVATE_KEY) {
+        return {
+            clientEmail: process.env.GOOGLE_SHEETS_CLIENT_EMAIL,
+            privateKey: process.env.GOOGLE_SHEETS_PRIVATE_KEY.replace(/\\n/g, '\n')
+        };
+    }
+
+    return null;
+};
+
+const syncDriverExcelToGoogleSheets = async ({ customers = [], messages = [], columns = [] }) => {
+    const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+    if (!spreadsheetId) return;
+
+    const credentials = resolveGoogleSheetsCredentials();
+    if (!credentials?.clientEmail || !credentials?.privateKey) {
+        console.warn('[Google Sheets Sync Warning] Missing service account credentials');
+        return;
+    }
+
+    const auth = new JWT({
+        email: credentials.clientEmail,
+        key: credentials.privateKey,
+        scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    });
+
+    const token = await auth.getAccessToken();
+    const authHeader = token?.token || token;
+    if (!authHeader) throw new Error('Unable to acquire Google Sheets access token');
+
+    const customerHeaders = ['Candidate ID', ...columns.map((c) => c.label), 'Latest License Link', 'License Folder Link', 'Variables JSON'];
+    const customerRows = customers.map((c) => [
+        c.id,
+        ...columns.map((col) => getDriverExcelCellValue(c, col)),
+        c.latest_license_url,
+        c.license_folder_url,
+        JSON.stringify(c.variables || {})
+    ]);
+    const messageHeaders = ['Message ID', 'Candidate ID', 'Phone Number', 'Direction', 'Type', 'Status', 'WhatsApp Message ID', 'Created At', 'Text'];
+    const messageRows = messages.map((m) => [
+        m.id,
+        m.candidate_id,
+        m.phone_number,
+        m.direction,
+        m.type,
+        m.status,
+        m.whatsapp_message_id,
+        m.created_at,
+        m.text
+    ]);
+
+    const headers = { Authorization: `Bearer ${authHeader}` };
+    const baseUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`;
+
+    await axios.post(`${baseUrl}:batchUpdate`, {
+        requests: [
+            { addSheet: { properties: { title: 'Customers' } } },
+            { addSheet: { properties: { title: 'Messages' } } }
+        ]
+    }, { headers }).catch((e) => {
+        const msg = e.response?.data?.error?.message || '';
+        if (!msg.includes('already exists')) throw e;
+    });
+
+    await axios.post(`${baseUrl}/values:batchClear`, {
+        ranges: ['Customers!A:ZZ', 'Messages!A:ZZ']
+    }, { headers });
+
+    await axios.post(`${baseUrl}/values:batchUpdate`, {
+        valueInputOption: 'RAW',
+        data: [
+            { range: 'Customers!A1', values: [customerHeaders, ...customerRows] },
+            { range: 'Messages!A1', values: [messageHeaders, ...messageRows] }
+        ]
+    }, { headers });
+};
+
 const getDriverExcelCellValue = (customer, column) => {
     const vars = customer.variables || {};
     if (column.key === 'phoneNumber') return customer.phone_number || '';
@@ -379,6 +469,13 @@ const syncDriverExcelToS3 = async () => {
             body: Buffer.from(workbookXml, 'utf8'),
             contentType: 'application/vnd.ms-excel'
         });
+
+        await syncDriverExcelToGoogleSheets({
+            customers,
+            messages,
+            columns: data.columns
+        });
+
         driverExcelSyncStatus.state = 'success';
         driverExcelSyncStatus.lastSuccessAt = new Date().toISOString();
         driverExcelSyncStatus.lastDurationMs = Date.now() - syncStartedAt;
