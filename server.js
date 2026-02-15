@@ -504,7 +504,6 @@ const fetchDriverExcelCandidateForSync = async (candidateId) => {
         const month = latestLicenseKey.startsWith('Driver data/') ? latestLicenseKey.split('/')[1] : getDriverMonthFolder();
         const licenseFolderKey = `Driver data/${month}/${sanitizePhoneForPath(row.phone_number)}/`;
         const latestLicenseUrl = vars.license_url || (latestLicenseKey ? getPublicS3Url(latestLicenseKey) : '');
-        const licenseFolderUrl = latestLicenseKey ? getS3ConsoleFolderUrl(licenseFolderKey) : '';
         const licenseStatus = vars.license_status || row.latest_license_status || (latestLicenseKey ? 'uploaded' : 'missing');
 
         return {
@@ -517,7 +516,7 @@ const fetchDriverExcelCandidateForSync = async (candidateId) => {
                 created_at: row.created_at ? new Date(row.created_at).toISOString() : '',
                 last_message_at: row.last_message_at ? new Date(Number(row.last_message_at) || row.last_message_at).toISOString() : '',
                 latest_license_url: latestLicenseUrl,
-                license_folder_url: licenseFolderUrl,
+                license_folder_url: getPublicS3Url(licenseFolderKey),
                 license_status: licenseStatus,
                 license_uploaded_at: vars.license_uploaded_at || '',
                 variables: vars
@@ -859,7 +858,6 @@ const syncDriverExcelToS3 = async () => {
             const month = latestLicenseKey.startsWith('Driver data/') ? latestLicenseKey.split('/')[1] : getDriverMonthFolder();
             const licenseFolderKey = `Driver data/${month}/${sanitizePhoneForPath(row.phone_number)}/`;
             const latestLicenseUrl = vars.license_url || (latestLicenseKey ? getPublicS3Url(latestLicenseKey) : '');
-            const licenseFolderUrl = latestLicenseKey ? getS3ConsoleFolderUrl(licenseFolderKey) : '';
             const licenseStatus = vars.license_status || row.latest_license_status || (latestLicenseKey ? 'uploaded' : 'missing');
             return {
                 id: row.id,
@@ -870,7 +868,7 @@ const syncDriverExcelToS3 = async () => {
                 created_at: row.created_at ? new Date(row.created_at).toISOString() : '',
                 last_message_at: row.last_message_at ? new Date(Number(row.last_message_at) || row.last_message_at).toISOString() : '',
                 latest_license_url: latestLicenseUrl,
-                license_folder_url: licenseFolderUrl,
+                license_folder_url: getPublicS3Url(licenseFolderKey),
                 license_status: licenseStatus,
                 license_uploaded_at: vars.license_uploaded_at || '',
                 variables: vars
@@ -1261,12 +1259,6 @@ const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candid
     const key = `${prefix}/${timestampTag}_${msg.id}.${ext}`;
 
     await uploadToS3({
-        key: `${prefix}/.folder`,
-        body: Buffer.from(''),
-        contentType: 'application/octet-stream'
-    }).catch(() => null);
-
-    await uploadToS3({
         key,
         body: Buffer.from(mediaFile.data),
         contentType: mimeType
@@ -1276,7 +1268,7 @@ const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candid
         ...normalizeVariables(candidateVariables),
         license_s3_key: key,
         license_url: getPublicS3Url(key),
-        license_folder_url: getS3ConsoleFolderUrl(`${prefix}/`),
+        license_folder_url: getPublicS3Url(`${prefix}/`),
         license_uploaded_at: new Date().toISOString(),
         license_status: 'uploaded',
         license_rejection_reason: ''
@@ -2832,7 +2824,7 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
                 };
                 const latestLicenseKey = r.latest_license_key || mergedVars.license_s3_key || '';
                 const month = latestLicenseKey.startsWith('Driver data/') ? latestLicenseKey.split('/')[1] : getDriverMonthFolder();
-                const licenseFolderUrl = latestLicenseKey ? getS3ConsoleFolderUrl(`Driver data/${month}/${sanitizePhoneForPath(r.phone_number)}/`) : '';
+                const licenseFolderUrl = getPublicS3Url(`Driver data/${month}/${sanitizePhoneForPath(r.phone_number)}/`);
                 const latestLicenseUrl = mergedVars.license_url || (latestLicenseKey ? getPublicS3Url(latestLicenseKey) : '');
                 const licenseStatus = mergedVars.license_status || r.latest_license_status || (latestLicenseKey ? 'uploaded' : 'missing');
                 const licenseUploadedAt = mergedVars.license_uploaded_at || '';
