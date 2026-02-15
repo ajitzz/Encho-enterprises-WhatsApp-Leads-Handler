@@ -534,6 +534,57 @@ const saveDriverExcelColumnConfig = async (client, columns) => {
     );
 };
 
+const getDriverExcelColumnOrderConfig = async (client) => {
+    const setting = await client.query("SELECT value FROM system_settings WHERE key = 'driver_excel_column_order' LIMIT 1");
+    const value = setting.rows[0]?.value;
+    if (!Array.isArray(value)) return [];
+    return value.map((k) => String(k)).filter(Boolean);
+};
+
+const saveDriverExcelColumnOrderConfig = async (client, orderedKeys = []) => {
+    await client.query(
+        "INSERT INTO system_settings (key, value) VALUES ('driver_excel_column_order', $1::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        [JSON.stringify(orderedKeys.map((k) => String(k)).filter(Boolean))]
+    );
+};
+
+const applyDriverExcelColumnOrder = (columns = [], orderedKeys = []) => {
+    if (!Array.isArray(columns) || columns.length === 0) return [];
+    if (!Array.isArray(orderedKeys) || orderedKeys.length === 0) return columns;
+    const byKey = new Map(columns.map((col) => [col.key, col]));
+    const ordered = orderedKeys.map((key) => byKey.get(key)).filter(Boolean);
+    const seen = new Set(ordered.map((col) => col.key));
+    const remainder = columns.filter((col) => !seen.has(col.key));
+    return [...ordered, ...remainder];
+};
+
+const getDriverExcelVariableCatalog = async (client) => {
+    const captureRes = await client.query(`
+        SELECT DISTINCT text
+        FROM candidate_messages
+        WHERE type = 'variable_capture'
+        ORDER BY text ASC
+    `);
+    const candidateRes = await client.query(`SELECT variables FROM candidates`);
+
+    const keys = new Set();
+    captureRes.rows.forEach((row) => {
+        const parsed = parseVariableCaptureMessage(row.text);
+        if (parsed?.key) keys.add(parsed.key);
+    });
+    candidateRes.rows.forEach((row) => {
+        const vars = normalizeVariables(row.variables);
+        Object.keys(vars || {}).forEach((key) => {
+            const normalized = normalizeColumnKey(key);
+            if (normalized) keys.add(normalized);
+        });
+    });
+
+    return Array.from(keys)
+        .sort((a, b) => a.localeCompare(b))
+        .map((key) => ({ key, label: formatColumnLabelFromKey(key) }));
+};
+
 const getFileExtensionFromMime = (mimeType = '', fallback = 'bin') => {
     const mime = mimeType.toLowerCase();
     if (mime.includes('jpeg') || mime.includes('jpg')) return 'jpg';
@@ -2065,9 +2116,10 @@ apiRouter.delete('/reports/driver-excel/:id', async (req, res) => {
 
 apiRouter.post('/reports/driver-excel/columns', async (req, res) => {
     try {
+        const requestedKey = normalizeColumnKey((req.body?.key || '').toString());
         const label = (req.body?.label || '').toString().trim();
+        const key = requestedKey || normalizeColumnKey(label);
         if (!label) return res.status(400).json({ error: 'Column label is required' });
-        const key = normalizeColumnKey(label);
         if (!key) return res.status(400).json({ error: 'Invalid column label' });
 
         await withDb(async (client) => {
@@ -2079,6 +2131,15 @@ apiRouter.post('/reports/driver-excel/columns', async (req, res) => {
             await saveDriverExcelColumnConfig(client, next);
             scheduleDriverExcelSync();
             res.json({ success: true, key, label });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/reports/driver-excel/variables', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const variables = await getDriverExcelVariableCatalog(client);
+            res.json({ variables });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -2099,6 +2160,11 @@ apiRouter.patch('/reports/driver-excel/columns/:key', async (req, res) => {
 
             const renamed = customCols.map((c) => c.key === key ? { ...c, key: newKey, label: newLabel } : c);
             await saveDriverExcelColumnConfig(client, renamed);
+            const orderedKeys = await getDriverExcelColumnOrderConfig(client);
+            if (orderedKeys.length > 0) {
+                const nextOrder = orderedKeys.map((k) => (k === key ? newKey : k));
+                await saveDriverExcelColumnOrderConfig(client, nextOrder);
+            }
 
             if (newKey !== key) {
                 await client.query(`
@@ -2141,6 +2207,10 @@ apiRouter.delete('/reports/driver-excel/columns/:key', async (req, res) => {
             if (!customCols.some((c) => c.key === key)) return res.status(404).json({ error: 'Column not found' });
             const next = customCols.filter((c) => c.key !== key);
             await saveDriverExcelColumnConfig(client, next);
+            const orderedKeys = await getDriverExcelColumnOrderConfig(client);
+            if (orderedKeys.length > 0) {
+                await saveDriverExcelColumnOrderConfig(client, orderedKeys.filter((k) => k !== key));
+            }
             await client.query('UPDATE candidates SET variables = variables - $1 WHERE variables ? $1', [key]);
             scheduleDriverExcelSync();
             res.json({ success: true });

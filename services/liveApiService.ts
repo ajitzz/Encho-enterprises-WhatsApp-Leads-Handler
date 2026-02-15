@@ -254,6 +254,17 @@ export const liveApiService = {
       });
   },
 
+  getDriverExcelVariables: async (): Promise<{ variables: Array<{ key: string; label: string }> }> => {
+      return apiRequest('/api/reports/driver-excel/variables');
+  },
+
+  addDriverExcelVariableColumn: async (key: string, label: string) => {
+      return apiRequest('/api/reports/driver-excel/columns', {
+          method: 'POST',
+          body: JSON.stringify({ key, label })
+      });
+  },
+
   renameDriverExcelColumn: async (key: string, newLabel: string) => {
       return apiRequest(`/api/reports/driver-excel/columns/${encodeURIComponent(key)}`, {
           method: 'PATCH',
