@@ -184,20 +184,28 @@ export const PublicShowcase = ({ folderName }: { folderName?: string }) => {
     };
 
     const renderDocumentCard = (item: ShowcaseItem) => (
-        <div className="relative w-full max-w-sm mx-auto aspect-[3/4] bg-white/10 backdrop-blur-xl border border-white/20 rounded-2xl p-6 flex flex-col items-center justify-center text-center shadow-2xl">
-            <div className="bg-white/10 p-6 rounded-full mb-6 ring-1 ring-white/20">
-                <FileText size={64} className="text-white drop-shadow-md" />
+        <div className="relative w-full h-full md:max-h-[88vh] md:max-w-5xl mx-auto bg-white/5 backdrop-blur-xl border border-white/20 rounded-2xl p-3 md:p-5 flex flex-col shadow-2xl">
+            <div className="flex items-center justify-between gap-3 mb-3 px-2">
+                <div className="flex items-center gap-2 min-w-0">
+                    <FileText size={18} className="text-white shrink-0" />
+                    <h3 className="text-white font-semibold text-sm md:text-base truncate">{item.filename}</h3>
+                </div>
+                <a 
+                    href={item.url} 
+                    target="_blank" 
+                    rel="noreferrer"
+                    className="bg-white text-black font-bold py-2 px-4 rounded-full flex items-center gap-2 hover:bg-gray-100 transition-colors shadow-lg active:scale-95 text-xs md:text-sm"
+                >
+                    <Download size={16} /> Open
+                </a>
             </div>
-            <h3 className="text-white font-bold text-xl mb-2 line-clamp-2">{item.filename}</h3>
-            <p className="text-gray-300 text-sm mb-8">Document / PDF</p>
-            <a 
-                href={item.url} 
-                target="_blank" 
-                rel="noreferrer"
-                className="bg-white text-black font-bold py-3 px-8 rounded-full flex items-center gap-2 hover:bg-gray-100 transition-colors shadow-lg active:scale-95"
-            >
-                <Download size={18} /> Download / View
-            </a>
+            <div className="flex-1 rounded-xl overflow-hidden border border-white/10 bg-white">
+                <iframe
+                    src={item.url}
+                    title={item.filename}
+                    className="w-full h-full min-h-[65vh]"
+                />
+            </div>
         </div>
     );
 
