@@ -227,8 +227,7 @@ const inferMediaTypeFromKey = (key = '') => {
 const toBase64Url = (value = '') => Buffer.from(String(value)).toString('base64url');
 const fromBase64Url = (value = '') => Buffer.from(String(value), 'base64url').toString('utf8');
 const buildShowcaseToken = (payload = {}) => toBase64Url(JSON.stringify(payload));
-const normalizePublicAppUrl = (value = '') => String(value || '').trim().replace(/\/+$/, '');
-const getPublicShowcaseUrl = (payload = {}) => `${normalizePublicAppUrl(SYSTEM_CONFIG.PUBLIC_APP_URL)}/showcase/${encodeURIComponent(buildShowcaseToken(payload))}`;
+const getPublicShowcaseUrl = (payload = {}) => `/showcase/${encodeURIComponent(buildShowcaseToken(payload))}`;
 
 const getLicenseLinkData = ({ phoneNumber, latestLicenseKey = '', variables = {} }) => {
     const normalizedVars = normalizeVariables(variables);
