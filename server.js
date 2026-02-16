@@ -234,29 +234,6 @@ const getPublicShowcaseUrl = (payload = {}) => {
     return `${safeBase}/showcase/${token}`;
 };
 
-const getLicenseLinkData = ({ phoneNumber, latestLicenseKey = '', variables = {} }) => {
-    const normalizedVars = normalizeVariables(variables);
-    const variableLicenseKey = String(normalizedVars.license_s3_key || '').trim();
-    const resolvedLicenseKey = String(latestLicenseKey || variableLicenseKey).trim();
-    const latestLicenseUrl = resolvedLicenseKey ? getPublicShowcaseUrl({ type: 'file', key: resolvedLicenseKey }) : '';
-
-    if (!resolvedLicenseKey) {
-        return {
-            latestLicenseUrl,
-            licenseFolderUrl: '',
-            hasSharedLicense: false
-        };
-    }
-
-    const month = resolvedLicenseKey.startsWith('Driver data/') ? resolvedLicenseKey.split('/')[1] : getDriverMonthFolder();
-    const licenseFolderKey = `Driver data/${month}/${sanitizePhoneForPath(phoneNumber)}/`;
-    return {
-        latestLicenseUrl,
-        licenseFolderUrl: getPublicShowcaseUrl({ type: 'folder', prefix: licenseFolderKey }),
-        hasSharedLicense: true
-    };
-};
-
 const xmlEscape = (value) => String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -277,10 +254,6 @@ const getDriverExcelCellValue = (customer, column) => {
     if (column.key === 'source') return customer.source || '';
     if (column.key === 'createdAt') return customer.created_at || '';
     if (column.key === 'lastMessageAt') return customer.last_message_at || '';
-    if (column.key === 'licenseStatus') return customer.license_status || customer.licenseStatus || vars.license_status || 'missing';
-    if (column.key === 'licenseUploadedAt') return customer.license_uploaded_at || customer.licenseUploadedAt || vars.license_uploaded_at || '';
-    if (column.key === 'latestLicenseUrl') return customer.latest_license_url || customer.latestLicenseUrl || '';
-    if (column.key === 'licenseFolderUrl') return customer.license_folder_url || customer.licenseFolderUrl || '';
     return vars[column.key] ?? '';
 };
 
@@ -496,24 +469,12 @@ const syncDriverExcelToGoogleSheets = async ({ customerRows, messageRows }) => {
 const fetchDriverExcelCandidateForSync = async (candidateId) => {
     if (!candidateId) return null;
     return withDb(async (client) => {
-        const candidateRes = await client.query(`
-            SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables,
-                (
-                    SELECT d.url FROM driver_documents d
-                    WHERE d.candidate_id = c.id
-                    ORDER BY d.created_at DESC
-                    LIMIT 1
-                ) AS latest_license_key,
-                (
-                    SELECT d.status FROM driver_documents d
-                    WHERE d.candidate_id = c.id
-                    ORDER BY d.created_at DESC
-                    LIMIT 1
-                ) AS latest_license_status
-            FROM candidates c
-            WHERE c.id = $1
-            LIMIT 1
-        `, [candidateId]);
+            const candidateRes = await client.query(`
+                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables
+                FROM candidates c
+                WHERE c.id = $1
+                LIMIT 1
+            `, [candidateId]);
 
         if (candidateRes.rows.length === 0) return null;
 
@@ -539,13 +500,6 @@ const fetchDriverExcelCandidateForSync = async (candidateId) => {
             ...normalizeVariables(row.variables),
             ...(responseLookup.get(row.id) || {})
         };
-        const { latestLicenseUrl, licenseFolderUrl, hasSharedLicense } = getLicenseLinkData({
-            phoneNumber: row.phone_number,
-            latestLicenseKey: row.latest_license_key,
-            variables: vars
-        });
-        const licenseStatus = vars.license_status || row.latest_license_status || (hasSharedLicense ? 'uploaded' : 'missing');
-
         return {
             customer: {
                 id: row.id,
@@ -555,10 +509,6 @@ const fetchDriverExcelCandidateForSync = async (candidateId) => {
                 source: row.source || '',
                 created_at: row.created_at ? new Date(row.created_at).toISOString() : '',
                 last_message_at: row.last_message_at ? new Date(Number(row.last_message_at) || row.last_message_at).toISOString() : '',
-                latest_license_url: latestLicenseUrl,
-                license_folder_url: licenseFolderUrl,
-                license_status: licenseStatus,
-                license_uploaded_at: vars.license_uploaded_at || '',
                 variables: vars
             },
             columns: [...DRIVER_EXCEL_CORE_COLUMNS, ...mergedCustomCols]
@@ -682,8 +632,6 @@ const upsertCandidateToGoogleSheets = async (candidateId) => {
     const rowValues = [
         candidateData.customer.id,
         ...candidateData.columns.map((col) => getDriverExcelCellValue(candidateData.customer, col)),
-        candidateData.customer.latest_license_url,
-        candidateData.customer.license_folder_url,
         JSON.stringify(candidateData.customer.variables || {})
     ];
 
@@ -851,19 +799,7 @@ const syncDriverExcelToS3 = async () => {
     try {
         const data = await withDb(async (client) => {
             const candidatesRes = await client.query(`
-                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables,
-                    (
-                        SELECT d.url FROM driver_documents d
-                        WHERE d.candidate_id = c.id
-                        ORDER BY d.created_at DESC
-                        LIMIT 1
-                    ) AS latest_license_key,
-                (
-                    SELECT d.status FROM driver_documents d
-                    WHERE d.candidate_id = c.id
-                    ORDER BY d.created_at DESC
-                    LIMIT 1
-                ) AS latest_license_status
+                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables
                 FROM candidates c
                 ORDER BY c.created_at ASC
             `);
@@ -905,12 +841,6 @@ const syncDriverExcelToS3 = async () => {
                 ...normalizeVariables(row.variables),
                 ...(data.responseLookup.get(row.id) || {})
             };
-            const { latestLicenseUrl, licenseFolderUrl, hasSharedLicense } = getLicenseLinkData({
-                phoneNumber: row.phone_number,
-                latestLicenseKey: row.latest_license_key,
-                variables: vars
-            });
-            const licenseStatus = vars.license_status || row.latest_license_status || (hasSharedLicense ? 'uploaded' : 'missing');
             return {
                 id: row.id,
                 phone_number: row.phone_number,
@@ -919,10 +849,6 @@ const syncDriverExcelToS3 = async () => {
                 source: row.source || '',
                 created_at: row.created_at ? new Date(row.created_at).toISOString() : '',
                 last_message_at: row.last_message_at ? new Date(Number(row.last_message_at) || row.last_message_at).toISOString() : '',
-                latest_license_url: latestLicenseUrl,
-                license_folder_url: licenseFolderUrl,
-                license_status: licenseStatus,
-                license_uploaded_at: vars.license_uploaded_at || '',
                 variables: vars
             };
         });
@@ -1043,11 +969,7 @@ const DRIVER_EXCEL_CORE_COLUMNS = [
     { key: 'status', label: 'Stage', isCore: true },
     { key: 'source', label: 'Source', isCore: true },
     { key: 'createdAt', label: 'Created At', isCore: true },
-    { key: 'lastMessageAt', label: 'Last Message At', isCore: true },
-    { key: 'licenseStatus', label: 'License Status', isCore: true },
-    { key: 'licenseUploadedAt', label: 'License Uploaded At', isCore: true },
-    { key: 'latestLicenseUrl', label: 'Latest License Link', isCore: true },
-    { key: 'licenseFolderUrl', label: 'License Folder Link', isCore: true }
+    { key: 'lastMessageAt', label: 'Last Message At', isCore: true }
 ];
 
 const normalizeColumnKey = (label = '') => String(label)
@@ -1293,7 +1215,7 @@ const getFileExtensionFromMime = (mimeType = '', fallback = 'bin') => {
     return fallback;
 };
 
-const ALLOWED_LICENSE_MIME_TYPES = new Set([
+const ALLOWED_MEDIA_MIME_TYPES = new Set([
     'image/jpeg',
     'image/jpg',
     'image/png',
@@ -1303,9 +1225,9 @@ const ALLOWED_LICENSE_MIME_TYPES = new Set([
     'video/quicktime',
     'video/3gpp'
 ]);
-const MAX_LICENSE_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_MEDIA_FILE_BYTES = 16 * 1024 * 1024;
 
-const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candidateVariables, client }) => {
+const fetchAndStoreIncomingMedia = async ({ msg, phoneNumber, candidateId, client }) => {
     if (!candidateId) throw new Error('Candidate id is required for media upload');
     const mediaId = msg?.image?.id || msg?.document?.id || msg?.video?.id;
     if (!mediaId) return null;
@@ -1314,8 +1236,8 @@ const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candid
     const mediaUrl = metaResponse.data?.url;
     const mimeType = String(metaResponse.data?.mime_type || (msg.type === 'document' ? 'application/octet-stream' : `${msg.type === 'video' ? 'video' : 'image'}/${msg.type}`)).toLowerCase();
     if (!mediaUrl) throw new Error('WhatsApp media URL not found');
-    if (!ALLOWED_LICENSE_MIME_TYPES.has(mimeType)) {
-        throw new Error(`Unsupported licence file type: ${mimeType}`);
+    if (!ALLOWED_MEDIA_MIME_TYPES.has(mimeType)) {
+        throw new Error(`Unsupported media file type: ${mimeType}`);
     }
 
     const mediaFile = await axios.get(mediaUrl, {
@@ -1324,8 +1246,8 @@ const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candid
         headers: { Authorization: `Bearer ${process.env.META_API_TOKEN}` }
     });
 
-    if ((mediaFile.data?.byteLength || 0) > MAX_LICENSE_FILE_BYTES) {
-        throw new Error('Licence file exceeds 16MB limit');
+    if ((mediaFile.data?.byteLength || 0) > MAX_MEDIA_FILE_BYTES) {
+        throw new Error('Media file exceeds 16MB limit');
     }
 
     const ext = getFileExtensionFromMime(mimeType, msg.type === 'document' ? 'pdf' : (msg.type === 'video' ? 'mp4' : 'jpg'));
@@ -1344,28 +1266,15 @@ const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candid
         contentType: mimeType
     });
 
-    const mergedVariables = {
-        ...normalizeVariables(candidateVariables),
-        license_s3_key: key,
-        license_url: getPublicShowcaseUrl({ type: 'file', key }),
-        license_public_url: getPublicS3Url(key),
-        license_showcase_url: getPublicShowcaseUrl({ type: 'file', key }),
-        license_folder_url: getPublicShowcaseUrl({ type: 'folder', prefix: `${prefix}/` }),
-        license_uploaded_at: new Date().toISOString(),
-        license_status: 'uploaded',
-        license_rejection_reason: ''
-    };
-
     try {
         await client.query('BEGIN');
         await client.query(
             `INSERT INTO driver_documents (id, candidate_id, type, url, status, created_at)
             VALUES ($1, $2, $3, $4, 'pending', NOW())`,
-            [crypto.randomUUID(), candidateId, 'license', key]
+            [crypto.randomUUID(), candidateId, 'media', key]
         );
-        await client.query('UPDATE candidates SET variables = $1::jsonb WHERE id = $2', [JSON.stringify(mergedVariables), candidateId]);
         await client.query('COMMIT');
-        return { key, mergedVariables, mimeType };
+        return { key, mimeType };
     } catch (e) {
         await client.query('ROLLBACK').catch(() => null);
         await deleteFromS3(key).catch(() => null);
@@ -1977,15 +1886,16 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         let valueForLog = valueToSave;
 
                         if (expectsMediaInput && incomingMediaPayload?.mediaKey) {
-                            const mediaFolderPrefix = String(incomingMediaPayload.folder || buildDriverDataPrefix(candidate.phone_number));
+                            const baseDriverPrefix = buildDriverDataPrefix(candidate.phone_number);
+                            const normalizedVarName = normalizeColumnKey(varName) || 'uploaded_file';
+                            const mediaFolderPrefix = `${baseDriverPrefix}/${normalizedVarName}`;
                             let mediaKey = String(incomingMediaPayload.mediaKey || '').trim();
                             const keySegments = mediaKey.split('/');
                             const originalFileName = keySegments[keySegments.length - 1] || '';
                             const extFromName = originalFileName.includes('.') ? originalFileName.split('.').pop() : '';
                             const extFromMime = getFileExtensionFromMime(String(incomingMediaPayload.mimeType || ''), extFromName || 'bin');
-                            const normalizedVarName = normalizeColumnKey(varName) || 'uploaded_file';
                             const targetFileName = `${normalizedVarName}_${new Date().toISOString().replace(/[:.]/g, '-')}.${extFromMime}`;
-                            const targetKey = `${mediaFolderPrefix.replace(/\/+$/, '')}/${targetFileName}`;
+                            const targetKey = `${mediaFolderPrefix}/${targetFileName}`;
 
                             if (mediaKey && targetKey && mediaKey !== targetKey) {
                                 mediaKey = await copyObjectInS3({ sourceKey: mediaKey, destinationKey: targetKey }).catch((e) => {
@@ -1996,19 +1906,16 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
                             const mediaUrl = mediaKey ? getPublicS3Url(mediaKey) : (incomingMediaPayload.mediaUrl || '');
                             const showcaseFileUrl = mediaKey ? getPublicShowcaseUrl({ type: 'file', key: mediaKey }) : '';
+                            const folderUrl = getPublicShowcaseUrl({ type: 'folder', prefix: `${mediaFolderPrefix}/` });
+                            const uploadedAt = new Date().toISOString();
 
                             newVars[varName] = showcaseFileUrl || mediaUrl;
-                            newVars[`${varName}_s3_key`] = mediaKey;
-                            newVars[`${varName}_mime_type`] = incomingMediaPayload.mimeType || '';
-                            newVars[`${varName}_folder`] = mediaFolderPrefix;
-                            newVars[`${varName}_folder_url`] = getPublicShowcaseUrl({ type: 'folder', prefix: mediaFolderPrefix.endsWith('/') ? mediaFolderPrefix : `${mediaFolderPrefix}/` });
-                            newVars[`${varName}_showcase_url`] = showcaseFileUrl;
-                            newVars[`${varName}_public_url`] = mediaUrl;
-                            newVars.license_s3_key = mediaKey || newVars.license_s3_key;
-                            newVars.license_url = showcaseFileUrl || mediaUrl || newVars.license_url;
-                            newVars.license_public_url = mediaUrl || newVars.license_public_url;
-                            newVars.license_folder_url = getPublicShowcaseUrl({ type: 'folder', prefix: mediaFolderPrefix.endsWith('/') ? mediaFolderPrefix : `${mediaFolderPrefix}/` });
-                            valueForLog = mediaUrl;
+                            newVars[`${varName}_file_url`] = showcaseFileUrl || mediaUrl;
+                            newVars[`${varName}_folder_url`] = folderUrl;
+                            newVars[`${varName}_status`] = 'uploaded';
+                            newVars[`${varName}_uploaded_at`] = uploadedAt;
+                            newVars[`${varName}_rejection_reason`] = '';
+                            valueForLog = showcaseFileUrl || mediaUrl;
 
                             if (mediaKey) {
                                 await client.query(
@@ -2828,20 +2735,18 @@ apiRouter.post('/webhook', async (req, res) => {
                 }
 
                 if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video') {
-                    const mediaInfo = await fetchAndStoreLicenseMedia({
+                    const mediaInfo = await fetchAndStoreIncomingMedia({
                         msg,
                         phoneNumber: from,
                         candidateId: candidate.id,
-                        candidateVariables: candidate.variables,
-                        client
+                                                client
                     }).catch((e) => {
-                        console.error('[License Upload Error]', e.message);
+                        console.error('[Media Upload Error]', e.message);
                         return null;
                     });
 
                     if (mediaInfo?.key) {
                         text = JSON.stringify({ mediaKey: mediaInfo.key, type: msg.type, mimeType: mediaInfo.mimeType, mediaUrl: getPublicS3Url(mediaInfo.key), folder: buildDriverDataPrefix(from) });
-                        candidate.variables = mediaInfo.mergedVariables;
                         await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
                     }
                 }
@@ -2967,24 +2872,18 @@ apiRouter.get('/drivers/:id/documents', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.patch('/drivers/:id/license-status', async (req, res) => {
+apiRouter.patch('/drivers/:id/document-status', async (req, res) => {
     try {
         const status = String(req.body?.status || '').trim().toLowerCase();
         const reason = String(req.body?.reason || '').trim();
         const allowed = new Set(['uploaded', 'under_review', 'approved', 'rejected', 'expired', 'missing']);
-        if (!allowed.has(status)) return res.status(400).json({ error: 'Invalid license status' });
+        if (!allowed.has(status)) return res.status(400).json({ error: 'Invalid document status' });
 
         await withDb(async (client) => {
-            const candidateRes = await client.query('SELECT variables FROM candidates WHERE id = $1 LIMIT 1', [req.params.id]);
+            const candidateRes = await client.query('SELECT id FROM candidates WHERE id = $1 LIMIT 1', [req.params.id]);
             if (candidateRes.rows.length === 0) return res.status(404).json({ error: 'Candidate not found' });
 
-            const vars = normalizeVariables(candidateRes.rows[0].variables);
-            vars.license_status = status;
-            vars.license_rejection_reason = status === 'rejected' ? reason : '';
-            vars.license_reviewed_at = new Date().toISOString();
-
-            await client.query('UPDATE candidates SET variables = $1::jsonb WHERE id = $2', [JSON.stringify(vars), req.params.id]);
-            if (['approved', 'rejected', 'under_review'].includes(status)) {
+            if (['approved', 'rejected', 'under_review', 'expired', 'missing', 'uploaded'].includes(status)) {
                 await client.query(
                     `UPDATE driver_documents SET status = $1
                      WHERE candidate_id = $2
@@ -3000,7 +2899,7 @@ apiRouter.patch('/drivers/:id/license-status', async (req, res) => {
 
             scheduleDriverExcelSync();
             scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'upsert' });
-            res.json({ success: true, status, reason: vars.license_rejection_reason });
+            res.json({ success: true, status, reason });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -3018,19 +2917,7 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
                 where = `WHERE c.name ILIKE $1 OR c.phone_number ILIKE $1 OR c.stage ILIKE $1`;
             }
             const q = `
-                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables,
-                    (
-                        SELECT d.url FROM driver_documents d
-                        WHERE d.candidate_id = c.id
-                        ORDER BY d.created_at DESC
-                        LIMIT 1
-                    ) AS latest_license_key,
-                (
-                    SELECT d.status FROM driver_documents d
-                    WHERE d.candidate_id = c.id
-                    ORDER BY d.created_at DESC
-                    LIMIT 1
-                ) AS latest_license_status
+                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables
                 FROM candidates c
                 ${where}
                 ORDER BY c.created_at DESC
@@ -3065,14 +2952,6 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
                     ...normalizeVariables(r.variables),
                     ...(responseLookup.get(r.id) || {})
                 };
-                const { latestLicenseUrl, licenseFolderUrl, hasSharedLicense } = getLicenseLinkData({
-                    phoneNumber: r.phone_number,
-                    latestLicenseKey: r.latest_license_key,
-                    variables: mergedVars
-                });
-                const licenseStatus = mergedVars.license_status || r.latest_license_status || (hasSharedLicense ? 'uploaded' : 'missing');
-                const licenseUploadedAt = mergedVars.license_uploaded_at || '';
-
                 return {
                     id: r.id,
                     phoneNumber: r.phone_number || '',
@@ -3081,17 +2960,7 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
                     source: r.source || '',
                     createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
                     lastMessageAt: r.last_message_at ? new Date(Number(r.last_message_at) || r.last_message_at).toISOString() : '',
-                    licenseStatus,
-                    licenseUploadedAt,
-                    latestLicenseUrl,
-                    licenseFolderUrl,
-                    variables: {
-                        ...mergedVars,
-                        license_status: licenseStatus,
-                        license_uploaded_at: licenseUploadedAt,
-                        license_url: latestLicenseUrl || mergedVars.license_url || '',
-                        license_folder_url: hasSharedLicense ? licenseFolderUrl : ''
-                    }
+                    variables: mergedVars
                 };
             });
             res.json({ columns: cols, rows });
