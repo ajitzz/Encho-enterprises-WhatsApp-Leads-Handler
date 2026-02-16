@@ -216,6 +216,15 @@ const getDriverMonthFolder = (date = new Date()) => `${date.getUTCFullYear()}-${
 
 const buildDriverDataPrefix = (phone, date = new Date()) => `Driver data/${getDriverMonthFolder(date)}/${sanitizePhoneForPath(phone)}`;
 
+const buildDriverVariableMediaPrefix = ({ phone, variableName = '', date = new Date() }) => {
+    const safeVariableName = String(variableName || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '') || 'uploaded_file';
+    return `${buildDriverDataPrefix(phone, date)}/${safeVariableName}`;
+};
+
 const getPublicS3Url = (key) => `https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.${SYSTEM_CONFIG.AWS_REGION}.amazonaws.com/${encodeURIComponent(key).replace(/%2F/g, '/')}`;
 const getS3ConsoleFolderUrl = (prefix = '') => `https://s3.console.aws.amazon.com/s3/buckets/${encodeURIComponent(SYSTEM_CONFIG.AWS_BUCKET)}?region=${encodeURIComponent(SYSTEM_CONFIG.AWS_REGION)}&prefix=${encodeURIComponent(prefix)}&showversions=false`;
 const inferMediaTypeFromKey = (key = '') => {
@@ -1043,12 +1052,43 @@ const DRIVER_EXCEL_CORE_COLUMNS = [
     { key: 'status', label: 'Stage', isCore: true },
     { key: 'source', label: 'Source', isCore: true },
     { key: 'createdAt', label: 'Created At', isCore: true },
-    { key: 'lastMessageAt', label: 'Last Message At', isCore: true },
-    { key: 'licenseStatus', label: 'License Status', isCore: true },
-    { key: 'licenseUploadedAt', label: 'License Uploaded At', isCore: true },
-    { key: 'latestLicenseUrl', label: 'Latest License Link', isCore: true },
-    { key: 'licenseFolderUrl', label: 'License Folder Link', isCore: true }
+    { key: 'lastMessageAt', label: 'Last Message At', isCore: true }
 ];
+
+const DRIVER_EXCEL_HIDDEN_VARIABLE_KEYS = new Set([
+    'license_status',
+    'license_uploaded_at',
+    'license_url',
+    'license_s3_key',
+    'license_folder_url',
+    'license_folder',
+    'license_rejection_reason',
+    'license_public_url',
+    'license_showcase_url',
+    'latest_license_link',
+    'latest_license_link_folder',
+    'latest_license_link_s3_key',
+    'latest_license_link_mime_type',
+    'latest_license_link_folder_url',
+    'latest_license_link_public_url',
+    'latest_license_link_showcase_url'
+]);
+const DRIVER_EXCEL_HIDDEN_VARIABLE_SUFFIXES = [
+    '_s3_key',
+    '_mime_type',
+    '_public_url',
+    '_showcase_url',
+    '_folder_url',
+    '_folder'
+];
+
+const isDriverExcelVisibleVariableKey = (key = '') => {
+    const normalizedKey = normalizeColumnKey(key);
+    if (!normalizedKey) return false;
+    if (DRIVER_EXCEL_CORE_COLUMNS.some((core) => core.key === normalizedKey)) return false;
+    if (DRIVER_EXCEL_HIDDEN_VARIABLE_KEYS.has(normalizedKey)) return false;
+    return !DRIVER_EXCEL_HIDDEN_VARIABLE_SUFFIXES.some((suffix) => normalizedKey.endsWith(suffix));
+};
 
 const normalizeColumnKey = (label = '') => String(label)
     .trim()
@@ -1094,7 +1134,7 @@ const buildVariableResponseLookup = ({ captureRows = [], candidateRows = [] }) =
     const registerValue = (candidateId, key, value) => {
         if (!candidateId || !key) return;
         const normalizedKey = normalizeColumnKey(key);
-        if (!normalizedKey) return;
+        if (!isDriverExcelVisibleVariableKey(normalizedKey)) return;
         const safeValue = value == null ? '' : String(value);
         if (!responseLookup.has(candidateId)) responseLookup.set(candidateId, {});
         const candidateVars = responseLookup.get(candidateId);
@@ -1135,10 +1175,10 @@ const buildVariableResponseLookup = ({ captureRows = [], candidateRows = [] }) =
 };
 
 const mergeDriverExcelColumns = (customCols = [], dynamicKeys = []) => {
-    const uniqueCustom = customCols.filter((c) => c && typeof c.key === 'string' && typeof c.label === 'string');
+    const uniqueCustom = customCols.filter((c) => c && typeof c.key === 'string' && typeof c.label === 'string' && isDriverExcelVisibleVariableKey(c.key));
     const seen = new Set(uniqueCustom.map((c) => c.key));
     const appended = dynamicKeys
-        .filter((key) => !seen.has(key) && !DRIVER_EXCEL_CORE_COLUMNS.some((core) => core.key === key))
+        .filter((key) => isDriverExcelVisibleVariableKey(key) && !seen.has(key))
         .map((key) => ({ key, label: formatColumnLabelFromKey(key), isCore: false }));
     return [...uniqueCustom, ...appended];
 };
@@ -1162,7 +1202,7 @@ const getDriverExcelColumnConfig = async (client) => {
     const value = setting.rows[0]?.value;
     if (!Array.isArray(value)) return [];
     return value
-        .filter((c) => c && typeof c.key === 'string' && typeof c.label === 'string')
+        .filter((c) => c && typeof c.key === 'string' && typeof c.label === 'string' && isDriverExcelVisibleVariableKey(c.key))
         .map((c) => ({ key: c.key, label: c.label, isCore: false }));
 };
 
@@ -1977,7 +2017,10 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         let valueForLog = valueToSave;
 
                         if (expectsMediaInput && incomingMediaPayload?.mediaKey) {
-                            const mediaFolderPrefix = String(incomingMediaPayload.folder || buildDriverDataPrefix(candidate.phone_number));
+                            const mediaFolderPrefix = buildDriverVariableMediaPrefix({
+                                phone: candidate.phone_number,
+                                variableName: varName
+                            });
                             let mediaKey = String(incomingMediaPayload.mediaKey || '').trim();
                             const keySegments = mediaKey.split('/');
                             const originalFileName = keySegments[keySegments.length - 1] || '';
@@ -1996,19 +2039,18 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
                             const mediaUrl = mediaKey ? getPublicS3Url(mediaKey) : (incomingMediaPayload.mediaUrl || '');
                             const showcaseFileUrl = mediaKey ? getPublicShowcaseUrl({ type: 'file', key: mediaKey }) : '';
+                            const showcaseFolderUrl = getPublicShowcaseUrl({
+                                type: 'folder',
+                                prefix: mediaFolderPrefix.endsWith('/') ? mediaFolderPrefix : `${mediaFolderPrefix}/`
+                            });
 
-                            newVars[varName] = showcaseFileUrl || mediaUrl;
-                            newVars[`${varName}_s3_key`] = mediaKey;
-                            newVars[`${varName}_mime_type`] = incomingMediaPayload.mimeType || '';
-                            newVars[`${varName}_folder`] = mediaFolderPrefix;
-                            newVars[`${varName}_folder_url`] = getPublicShowcaseUrl({ type: 'folder', prefix: mediaFolderPrefix.endsWith('/') ? mediaFolderPrefix : `${mediaFolderPrefix}/` });
-                            newVars[`${varName}_showcase_url`] = showcaseFileUrl;
-                            newVars[`${varName}_public_url`] = mediaUrl;
+                            // Keep the primary variable clean and report-friendly by storing only the variable folder link.
+                            newVars[varName] = showcaseFolderUrl;
                             newVars.license_s3_key = mediaKey || newVars.license_s3_key;
                             newVars.license_url = showcaseFileUrl || mediaUrl || newVars.license_url;
                             newVars.license_public_url = mediaUrl || newVars.license_public_url;
-                            newVars.license_folder_url = getPublicShowcaseUrl({ type: 'folder', prefix: mediaFolderPrefix.endsWith('/') ? mediaFolderPrefix : `${mediaFolderPrefix}/` });
-                            valueForLog = mediaUrl;
+                            newVars.license_folder_url = showcaseFolderUrl;
+                            valueForLog = showcaseFolderUrl;
 
                             if (mediaKey) {
                                 await client.query(
