@@ -24,7 +24,8 @@ const SYSTEM_CONFIG = {
     GOOGLE_SHEETS_MESSAGES_TAB_NAME: process.env.GOOGLE_SHEETS_MESSAGES_TAB_NAME || process.env.GOOGLE_SHEETS_MESSAGES_SHEET || 'Messages',
     GOOGLE_SERVICE_ACCOUNT_EMAIL: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || '',
     GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || '',
-    CACHE_TTL: 60 * 1000 // 60 Seconds Cache for Bot Settings
+    CACHE_TTL: 60 * 1000, // 60 Seconds Cache for Bot Settings
+    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
 };
 
 const applyRuntimeGoogleSheetsConfig = (rawConfig = {}) => {
