@@ -257,10 +257,6 @@ export interface DriverExcelRow {
   source: string;
   createdAt: string;
   lastMessageAt: string;
-  licenseStatus?: string;
-  licenseUploadedAt?: string;
-  latestLicenseUrl?: string;
-  licenseFolderUrl?: string;
   variables: Record<string, any>;
 }
 
