@@ -227,7 +227,12 @@ const inferMediaTypeFromKey = (key = '') => {
 const toBase64Url = (value = '') => Buffer.from(String(value)).toString('base64url');
 const fromBase64Url = (value = '') => Buffer.from(String(value), 'base64url').toString('utf8');
 const buildShowcaseToken = (payload = {}) => toBase64Url(JSON.stringify(payload));
-const getPublicShowcaseUrl = (payload = {}) => `/showcase/${encodeURIComponent(buildShowcaseToken(payload))}`;
+const getPublicShowcaseUrl = (payload = {}) => {
+    const token = encodeURIComponent(buildShowcaseToken(payload));
+    const normalizedBase = String(SYSTEM_CONFIG.PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
+    const safeBase = normalizedBase || 'https://encho-whatsapp-lead-handler.vercel.app';
+    return `${safeBase}/showcase/${token}`;
+};
 
 const getLicenseLinkData = ({ phoneNumber, latestLicenseKey = '', variables = {} }) => {
     const normalizedVars = normalizeVariables(variables);
