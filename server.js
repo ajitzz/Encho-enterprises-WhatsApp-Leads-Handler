@@ -248,11 +248,15 @@ const getLicenseLinkData = ({ phoneNumber, latestLicenseKey = '', variables = {}
         };
     }
 
+    const keySegments = resolvedLicenseKey.split('/').filter(Boolean);
+    keySegments.pop();
+    const variableFolderPrefix = keySegments.join('/');
     const month = resolvedLicenseKey.startsWith('Driver data/') ? resolvedLicenseKey.split('/')[1] : getDriverMonthFolder();
-    const licenseFolderKey = `Driver data/${month}/${sanitizePhoneForPath(phoneNumber)}/`;
+    const fallbackFolderPrefix = `Driver data/${month}/${sanitizePhoneForPath(phoneNumber)}`;
+    const licenseFolderKey = variableFolderPrefix || fallbackFolderPrefix;
     return {
         latestLicenseUrl,
-        licenseFolderUrl: getPublicShowcaseUrl({ type: 'folder', prefix: licenseFolderKey }),
+        licenseFolderUrl: getPublicShowcaseUrl({ type: 'folder', prefix: licenseFolderKey.endsWith('/') ? licenseFolderKey : `${licenseFolderKey}/` }),
         hasSharedLicense: true
     };
 };
@@ -1044,11 +1048,40 @@ const DRIVER_EXCEL_CORE_COLUMNS = [
     { key: 'source', label: 'Source', isCore: true },
     { key: 'createdAt', label: 'Created At', isCore: true },
     { key: 'lastMessageAt', label: 'Last Message At', isCore: true },
-    { key: 'licenseStatus', label: 'License Status', isCore: true },
-    { key: 'licenseUploadedAt', label: 'License Uploaded At', isCore: true },
-    { key: 'latestLicenseUrl', label: 'Latest License Link', isCore: true },
     { key: 'licenseFolderUrl', label: 'License Folder Link', isCore: true }
 ];
+
+const DRIVER_EXCEL_HIDDEN_VARIABLE_EXACT_KEYS = new Set([
+    'license_url',
+    'license_s3_key',
+    'license_status',
+    'license_uploaded_at',
+    'license_rejection_reason',
+    'license_folder',
+    'license_folder_url',
+    'license_public_url',
+    'license_showcase_url',
+    'latest_license_url',
+    'latest_license_status',
+    'latest_license_key'
+]);
+
+const DRIVER_EXCEL_HIDDEN_VARIABLE_SUFFIXES = [
+    '_s3_key',
+    '_mime_type',
+    '_public_url',
+    '_showcase_url',
+    '_uploaded_at',
+    '_rejection_reason',
+    '_folder_url'
+];
+
+const isHiddenDriverExcelVariableKey = (key = '') => {
+    const normalizedKey = normalizeColumnKey(key);
+    if (!normalizedKey) return true;
+    if (DRIVER_EXCEL_HIDDEN_VARIABLE_EXACT_KEYS.has(normalizedKey)) return true;
+    return DRIVER_EXCEL_HIDDEN_VARIABLE_SUFFIXES.some((suffix) => normalizedKey.endsWith(suffix));
+};
 
 const normalizeColumnKey = (label = '') => String(label)
     .trim()
@@ -1135,9 +1168,12 @@ const buildVariableResponseLookup = ({ captureRows = [], candidateRows = [] }) =
 };
 
 const mergeDriverExcelColumns = (customCols = [], dynamicKeys = []) => {
-    const uniqueCustom = customCols.filter((c) => c && typeof c.key === 'string' && typeof c.label === 'string');
+    const uniqueCustom = customCols
+        .filter((c) => c && typeof c.key === 'string' && typeof c.label === 'string')
+        .filter((c) => !isHiddenDriverExcelVariableKey(c.key));
     const seen = new Set(uniqueCustom.map((c) => c.key));
     const appended = dynamicKeys
+        .filter((key) => !isHiddenDriverExcelVariableKey(key))
         .filter((key) => !seen.has(key) && !DRIVER_EXCEL_CORE_COLUMNS.some((core) => core.key === key))
         .map((key) => ({ key, label: formatColumnLabelFromKey(key), isCore: false }));
     return [...uniqueCustom, ...appended];
@@ -1209,7 +1245,7 @@ const getDriverExcelVariableCatalog = async (client) => {
     const keys = new Map();
     const registerVariable = (rawKey, preferredLabel = '') => {
         const normalizedKey = normalizeColumnKey(rawKey);
-        if (!normalizedKey) return;
+        if (!normalizedKey || isHiddenDriverExcelVariableKey(normalizedKey)) return;
 
         const fallbackLabel = formatColumnLabelFromKey(normalizedKey);
         const nextLabel = String(preferredLabel || '').trim() || fallbackLabel;
@@ -1268,14 +1304,14 @@ const getDriverExcelVariableCatalog = async (client) => {
         const vars = normalizeVariables(row.variables);
         Object.keys(vars || {}).forEach((key) => {
             const normalized = normalizeColumnKey(key);
-            if (normalized) registerVariable(normalized, key);
+            if (normalized && !isHiddenDriverExcelVariableKey(normalized)) registerVariable(normalized, key);
         });
     });
 
     const configuredColumns = await getDriverExcelColumnConfig(client);
     configuredColumns.forEach((col) => {
         const normalized = normalizeColumnKey(col.key);
-        if (normalized) registerVariable(normalized, col.label);
+        if (normalized && !isHiddenDriverExcelVariableKey(normalized)) registerVariable(normalized, col.label);
     });
 
     return Array.from(keys.values()).sort((a, b) => a.key.localeCompare(b.key));
@@ -1977,13 +2013,14 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         let valueForLog = valueToSave;
 
                         if (expectsMediaInput && incomingMediaPayload?.mediaKey) {
-                            const mediaFolderPrefix = String(incomingMediaPayload.folder || buildDriverDataPrefix(candidate.phone_number));
+                            const mediaBaseFolderPrefix = String(incomingMediaPayload.folder || buildDriverDataPrefix(candidate.phone_number)).replace(/\/+$/, '');
                             let mediaKey = String(incomingMediaPayload.mediaKey || '').trim();
                             const keySegments = mediaKey.split('/');
                             const originalFileName = keySegments[keySegments.length - 1] || '';
                             const extFromName = originalFileName.includes('.') ? originalFileName.split('.').pop() : '';
                             const extFromMime = getFileExtensionFromMime(String(incomingMediaPayload.mimeType || ''), extFromName || 'bin');
                             const normalizedVarName = normalizeColumnKey(varName) || 'uploaded_file';
+                            const mediaFolderPrefix = `${mediaBaseFolderPrefix}/${normalizedVarName}`;
                             const targetFileName = `${normalizedVarName}_${new Date().toISOString().replace(/[:.]/g, '-')}.${extFromMime}`;
                             const targetKey = `${mediaFolderPrefix.replace(/\/+$/, '')}/${targetFileName}`;
 
@@ -1996,19 +2033,20 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
                             const mediaUrl = mediaKey ? getPublicS3Url(mediaKey) : (incomingMediaPayload.mediaUrl || '');
                             const showcaseFileUrl = mediaKey ? getPublicShowcaseUrl({ type: 'file', key: mediaKey }) : '';
+                            const showcaseFolderUrl = getPublicShowcaseUrl({ type: 'folder', prefix: `${mediaFolderPrefix.replace(/\/+$/, '')}/` });
 
-                            newVars[varName] = showcaseFileUrl || mediaUrl;
+                            newVars[varName] = showcaseFolderUrl;
                             newVars[`${varName}_s3_key`] = mediaKey;
                             newVars[`${varName}_mime_type`] = incomingMediaPayload.mimeType || '';
                             newVars[`${varName}_folder`] = mediaFolderPrefix;
-                            newVars[`${varName}_folder_url`] = getPublicShowcaseUrl({ type: 'folder', prefix: mediaFolderPrefix.endsWith('/') ? mediaFolderPrefix : `${mediaFolderPrefix}/` });
+                            newVars[`${varName}_folder_url`] = showcaseFolderUrl;
                             newVars[`${varName}_showcase_url`] = showcaseFileUrl;
                             newVars[`${varName}_public_url`] = mediaUrl;
                             newVars.license_s3_key = mediaKey || newVars.license_s3_key;
-                            newVars.license_url = showcaseFileUrl || mediaUrl || newVars.license_url;
+                            newVars.license_url = '';
                             newVars.license_public_url = mediaUrl || newVars.license_public_url;
-                            newVars.license_folder_url = getPublicShowcaseUrl({ type: 'folder', prefix: mediaFolderPrefix.endsWith('/') ? mediaFolderPrefix : `${mediaFolderPrefix}/` });
-                            valueForLog = mediaUrl;
+                            newVars.license_folder_url = showcaseFolderUrl;
+                            valueForLog = showcaseFolderUrl;
 
                             if (mediaKey) {
                                 await client.query(
