@@ -679,6 +679,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                   {columns.map((col) => {
                     const isEditing = editingCell?.rowId === row.id && editingCell?.colKey === col.key;
                     const value = getCellValue(row, col);
+                    const looksLikeLink = typeof value === 'string' && /^(https?:\/\/|\/showcase\/)/.test(value.trim());
                     return (
                       <td key={col.key} className="px-3 py-2 border-b align-top min-w-[160px]">
                         {isEditing ? (
@@ -697,7 +698,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                           }`}>{value || 'missing'}</span>
                         ) : (col.key === 'licenseUploadedAt') ? (
                           <span className="whitespace-pre-wrap break-words">{value ? new Date(value).toLocaleString() : '-'}</span>
-                        ) : (col.key === 'latestLicenseUrl' || col.key === 'licenseFolderUrl') ? (
+                        ) : (col.key === 'latestLicenseUrl' || col.key === 'licenseFolderUrl' || looksLikeLink) ? (
                           value ? (
                             <a href={value} target="_blank" rel="noreferrer" className="text-blue-600 underline break-all">{value}</a>
                           ) : (

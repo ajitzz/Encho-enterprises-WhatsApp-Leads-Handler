@@ -6,7 +6,7 @@ const { Pool } = require('pg');
 const multer = require('multer');
 const axios = require('axios');
 const https = require('https');
-const { S3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand, PutObjectCommand, CopyObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { OAuth2Client, JWT } = require('google-auth-library');
 
@@ -217,12 +217,22 @@ const buildDriverDataPrefix = (phone, date = new Date()) => `Driver data/${getDr
 
 const getPublicS3Url = (key) => `https://${SYSTEM_CONFIG.AWS_BUCKET}.s3.${SYSTEM_CONFIG.AWS_REGION}.amazonaws.com/${encodeURIComponent(key).replace(/%2F/g, '/')}`;
 const getS3ConsoleFolderUrl = (prefix = '') => `https://s3.console.aws.amazon.com/s3/buckets/${encodeURIComponent(SYSTEM_CONFIG.AWS_BUCKET)}?region=${encodeURIComponent(SYSTEM_CONFIG.AWS_REGION)}&prefix=${encodeURIComponent(prefix)}&showversions=false`;
+const inferMediaTypeFromKey = (key = '') => {
+    const extension = String(key).split('.').pop()?.toLowerCase() || '';
+    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(extension)) return 'image';
+    if (['mp4', 'mov', 'avi', 'webm', 'mkv', '3gp'].includes(extension)) return 'video';
+    return 'document';
+};
+const toBase64Url = (value = '') => Buffer.from(String(value)).toString('base64url');
+const fromBase64Url = (value = '') => Buffer.from(String(value), 'base64url').toString('utf8');
+const buildShowcaseToken = (payload = {}) => toBase64Url(JSON.stringify(payload));
+const getPublicShowcaseUrl = (payload = {}) => `/showcase/${encodeURIComponent(buildShowcaseToken(payload))}`;
 
 const getLicenseLinkData = ({ phoneNumber, latestLicenseKey = '', variables = {} }) => {
     const normalizedVars = normalizeVariables(variables);
     const variableLicenseKey = String(normalizedVars.license_s3_key || '').trim();
     const resolvedLicenseKey = String(latestLicenseKey || variableLicenseKey).trim();
-    const latestLicenseUrl = normalizedVars.license_url || (resolvedLicenseKey ? getPublicS3Url(resolvedLicenseKey) : '');
+    const latestLicenseUrl = resolvedLicenseKey ? getPublicShowcaseUrl({ type: 'file', key: resolvedLicenseKey }) : '';
 
     if (!resolvedLicenseKey) {
         return {
@@ -236,7 +246,7 @@ const getLicenseLinkData = ({ phoneNumber, latestLicenseKey = '', variables = {}
     const licenseFolderKey = `Driver data/${month}/${sanitizePhoneForPath(phoneNumber)}/`;
     return {
         latestLicenseUrl,
-        licenseFolderUrl: getS3ConsoleFolderUrl(licenseFolderKey),
+        licenseFolderUrl: getPublicShowcaseUrl({ type: 'folder', prefix: licenseFolderKey }),
         hasSharedLicense: true
     };
 };
@@ -792,6 +802,17 @@ const deleteFromS3 = async (key) => {
     }));
 };
 
+const copyObjectInS3 = async ({ sourceKey, destinationKey }) => {
+    if (!sourceKey || !destinationKey || sourceKey === destinationKey) return destinationKey;
+    await s3Client.send(new CopyObjectCommand({
+        Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+        CopySource: `${SYSTEM_CONFIG.AWS_BUCKET}/${encodeURI(sourceKey).replace(/#/g, '%23')}`,
+        Key: destinationKey
+    }));
+    await deleteFromS3(sourceKey).catch(() => null);
+    return destinationKey;
+};
+
 const normalizeVariables = (variables) => {
     if (!variables) return {};
     if (typeof variables === 'object') return variables;
@@ -1320,8 +1341,10 @@ const fetchAndStoreLicenseMedia = async ({ msg, phoneNumber, candidateId, candid
     const mergedVariables = {
         ...normalizeVariables(candidateVariables),
         license_s3_key: key,
-        license_url: getPublicS3Url(key),
-        license_folder_url: getS3ConsoleFolderUrl(`${prefix}/`),
+        license_url: getPublicShowcaseUrl({ type: 'file', key }),
+        license_public_url: getPublicS3Url(key),
+        license_showcase_url: getPublicShowcaseUrl({ type: 'file', key }),
+        license_folder_url: getPublicShowcaseUrl({ type: 'folder', prefix: `${prefix}/` }),
         license_uploaded_at: new Date().toISOString(),
         license_status: 'uploaded',
         license_rejection_reason: ''
@@ -1949,15 +1972,51 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
                         if (expectsMediaInput && incomingMediaPayload?.mediaKey) {
                             const mediaFolderPrefix = String(incomingMediaPayload.folder || buildDriverDataPrefix(candidate.phone_number));
-                            const mediaFolderUrl = getS3ConsoleFolderUrl(mediaFolderPrefix.endsWith('/') ? mediaFolderPrefix : `${mediaFolderPrefix}/`);
-                            const mediaUrl = incomingMediaPayload.mediaUrl || getPublicS3Url(incomingMediaPayload.mediaKey);
+                            let mediaKey = String(incomingMediaPayload.mediaKey || '').trim();
+                            const keySegments = mediaKey.split('/');
+                            const originalFileName = keySegments[keySegments.length - 1] || '';
+                            const extFromName = originalFileName.includes('.') ? originalFileName.split('.').pop() : '';
+                            const extFromMime = getFileExtensionFromMime(String(incomingMediaPayload.mimeType || ''), extFromName || 'bin');
+                            const normalizedVarName = normalizeColumnKey(varName) || 'uploaded_file';
+                            const targetFileName = `${normalizedVarName}_${new Date().toISOString().replace(/[:.]/g, '-')}.${extFromMime}`;
+                            const targetKey = `${mediaFolderPrefix.replace(/\/+$/, '')}/${targetFileName}`;
 
-                            newVars[varName] = mediaUrl;
-                            newVars[`${varName}_s3_key`] = incomingMediaPayload.mediaKey;
+                            if (mediaKey && targetKey && mediaKey !== targetKey) {
+                                mediaKey = await copyObjectInS3({ sourceKey: mediaKey, destinationKey: targetKey }).catch((e) => {
+                                    console.warn('[MEDIA KEY RENAME WARNING]', e.message);
+                                    return mediaKey;
+                                });
+                            }
+
+                            const mediaUrl = mediaKey ? getPublicS3Url(mediaKey) : (incomingMediaPayload.mediaUrl || '');
+                            const showcaseFileUrl = mediaKey ? getPublicShowcaseUrl({ type: 'file', key: mediaKey }) : '';
+
+                            newVars[varName] = showcaseFileUrl || mediaUrl;
+                            newVars[`${varName}_s3_key`] = mediaKey;
                             newVars[`${varName}_mime_type`] = incomingMediaPayload.mimeType || '';
                             newVars[`${varName}_folder`] = mediaFolderPrefix;
-                            newVars[`${varName}_folder_url`] = mediaFolderUrl;
+                            newVars[`${varName}_folder_url`] = getPublicShowcaseUrl({ type: 'folder', prefix: mediaFolderPrefix.endsWith('/') ? mediaFolderPrefix : `${mediaFolderPrefix}/` });
+                            newVars[`${varName}_showcase_url`] = showcaseFileUrl;
+                            newVars[`${varName}_public_url`] = mediaUrl;
+                            newVars.license_s3_key = mediaKey || newVars.license_s3_key;
+                            newVars.license_url = showcaseFileUrl || mediaUrl || newVars.license_url;
+                            newVars.license_public_url = mediaUrl || newVars.license_public_url;
+                            newVars.license_folder_url = getPublicShowcaseUrl({ type: 'folder', prefix: mediaFolderPrefix.endsWith('/') ? mediaFolderPrefix : `${mediaFolderPrefix}/` });
                             valueForLog = mediaUrl;
+
+                            if (mediaKey) {
+                                await client.query(
+                                    `UPDATE driver_documents SET url = $1
+                                     WHERE candidate_id = $2
+                                     AND id = (
+                                        SELECT id FROM driver_documents
+                                        WHERE candidate_id = $2
+                                        ORDER BY created_at DESC
+                                        LIMIT 1
+                                     )`,
+                                    [mediaKey, candidate.id]
+                                ).catch(() => null);
+                            }
                         }
 
                         await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
@@ -2564,8 +2623,102 @@ apiRouter.post('/media/sync-s3', async (req, res) => {
     }
 });
 
+
+const listShowcaseItemsByPrefix = async (prefix = '') => {
+    const normalizedPrefix = String(prefix || '').replace(/^\/+/, '');
+    const allItems = [];
+    let continuationToken;
+
+    do {
+        const listRes = await s3Client.send(new ListObjectsV2Command({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Prefix: normalizedPrefix,
+            ContinuationToken: continuationToken
+        }));
+        allItems.push(...(listRes.Contents || []));
+        continuationToken = listRes.IsTruncated ? listRes.NextContinuationToken : undefined;
+    } while (continuationToken);
+
+    return allItems
+        .filter((item) => item.Key && item.Key !== normalizedPrefix && !String(item.Key).endsWith('/'))
+        .map((item) => ({
+            id: item.Key,
+            url: getPublicS3Url(item.Key),
+            type: inferMediaTypeFromKey(item.Key),
+            filename: item.Key.replace(normalizedPrefix, '') || item.Key
+        }));
+};
+
+apiRouter.get('/showcase', async (req, res) => {
+    try {
+        const listRes = await s3Client.send(new ListObjectsV2Command({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Prefix: 'Driver data/',
+            Delimiter: '/'
+        }));
+        const folders = (listRes.CommonPrefixes || [])
+            .map((entry) => String(entry.Prefix || '').replace(/\/$/, ''))
+            .filter(Boolean);
+
+        const items = folders.map((prefix) => ({
+            id: prefix,
+            url: getPublicShowcaseUrl({ type: 'folder', prefix: `${prefix}/` }),
+            type: 'document',
+            filename: prefix.split('/').pop() || prefix
+        }));
+
+        res.json({
+            title: 'Driver Files Showcase',
+            items
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message || 'Failed to load showcase root' });
+    }
+});
+
+apiRouter.get('/showcase/:token', async (req, res) => {
+    try {
+        const rawToken = decodeURIComponent(String(req.params.token || ''));
+        let payload = null;
+
+        try {
+            payload = JSON.parse(fromBase64Url(rawToken));
+        } catch (e) {
+            const maybePrefix = rawToken.startsWith('Driver data/') ? rawToken : '';
+            if (maybePrefix) payload = { type: 'folder', prefix: maybePrefix.endsWith('/') ? maybePrefix : `${maybePrefix}/` };
+        }
+
+        const type = String(payload?.type || '').toLowerCase();
+        if (type === 'file' && payload?.key) {
+            const key = String(payload.key);
+            return res.json({
+                title: key.split('/').pop() || 'Driver File',
+                items: [{
+                    id: key,
+                    url: getPublicS3Url(key),
+                    type: inferMediaTypeFromKey(key),
+                    filename: key.split('/').pop() || key
+                }]
+            });
+        }
+
+        if (type === 'folder' && payload?.prefix) {
+            const prefix = String(payload.prefix);
+            const items = await listShowcaseItemsByPrefix(prefix);
+            return res.json({
+                title: prefix.replace(/\/$/, '').split('/').pop() || 'Driver Folder',
+                items
+            });
+        }
+
+        return res.status(404).json({ error: 'Showcase link is invalid or expired' });
+    } catch (e) {
+        return res.status(500).json({ error: e.message || 'Failed to load showcase' });
+    }
+});
+
 apiRouter.get('/showcase/status', (req, res) => {
-    res.json({ active: false });
+    res.json({ active: true, alwaysOn: true });
 });
 
 // --- DEEP WAKE PING ---
@@ -2930,7 +3083,7 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
                         ...mergedVars,
                         license_status: licenseStatus,
                         license_uploaded_at: licenseUploadedAt,
-                        license_url: mergedVars.license_url || latestLicenseUrl,
+                        license_url: latestLicenseUrl || mergedVars.license_url || '',
                         license_folder_url: hasSharedLicense ? licenseFolderUrl : ''
                     }
                 };
