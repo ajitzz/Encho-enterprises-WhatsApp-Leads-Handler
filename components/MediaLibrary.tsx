@@ -16,12 +16,14 @@ interface MediaFolder {
     name: string;
     parent_path: string;
     is_public_showcase: boolean;
+    public_showcase_url?: string | null;
 }
 
 interface ShowcaseStatus {
     active: boolean;
     folderName?: string;
     folderId?: string;
+    shareUrl?: string | null;
 }
 
 export const MediaLibrary = () => {
@@ -167,11 +169,10 @@ export const MediaLibrary = () => {
             const confirm = window.confirm(`Enable public link for "${folder.name}"?`);
             if (!confirm) return;
             try {
-                await liveApiService.setPublicFolder(folder.id);
+                const result = await liveApiService.setPublicFolder(folder.id);
                 await loadMedia(currentPath);
                 checkGlobalStatus();
-                // Generate deep link with NAME for better readability
-                setShareUrl(`${window.location.origin}/showcase/${encodeURIComponent(folder.name)}`); 
+                setShareUrl(result?.shareUrl || `${window.location.origin}/showcase/${encodeURIComponent(folder.name)}`); 
             } catch(e) { alert("Failed to start showcase"); }
         }
     };
@@ -190,8 +191,8 @@ export const MediaLibrary = () => {
         }
     };
 
-    const handleOpenShare = (folderName: string) => {
-        setShareUrl(`${window.location.origin}/showcase/${encodeURIComponent(folderName)}`);
+    const handleOpenShare = (folder: MediaFolder) => {
+        setShareUrl(folder.public_showcase_url || `${window.location.origin}/showcase/${encodeURIComponent(folder.name)}`);
     };
 
     // Shared handler for Create and Rename
@@ -470,7 +471,7 @@ export const MediaLibrary = () => {
                                             
                                             {folder.is_public_showcase && (
                                                 <button
-                                                    onClick={(e) => { e.stopPropagation(); handleOpenShare(folder.name); }}
+                                                    onClick={(e) => { e.stopPropagation(); handleOpenShare(folder); }}
                                                     className="p-1.5 rounded-full transition-colors text-blue-500 bg-blue-50 hover:bg-blue-100"
                                                     title="Get Share Link"
                                                 >

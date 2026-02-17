@@ -153,6 +153,44 @@ const resolveFolderPrefixFromId = (rawId = '') => {
     return `${parentPrefix}${sanitizedFolderName}/`;
 };
 
+
+const PUBLIC_SHOWCASE_SETTINGS_KEY = 'public_showcase_folders';
+
+const normalizeShowcasePrefix = (prefix = '') => {
+    const cleaned = String(prefix || '').trim().replace(/^\/+/, '');
+    if (!cleaned) return '';
+    return cleaned.endsWith('/') ? cleaned : `${cleaned}/`;
+};
+
+const getPublicShowcaseFolders = async () => {
+    return withDb(async (client) => {
+        const setting = await client.query('SELECT value FROM system_settings WHERE key = $1 LIMIT 1', [PUBLIC_SHOWCASE_SETTINGS_KEY]);
+        const value = setting.rows?.[0]?.value;
+        if (!Array.isArray(value)) return [];
+
+        return value
+            .map((item) => {
+                const folderId = typeof item?.folderId === 'string' ? item.folderId : '';
+                const prefix = normalizeShowcasePrefix(item?.prefix || '');
+                const folderName = typeof item?.folderName === 'string' ? item.folderName : '';
+                const enabledAt = item?.enabledAt ? String(item.enabledAt) : null;
+                if (!folderId || !prefix) return null;
+                return { folderId, prefix, folderName: folderName || prefix.replace(/\/$/, '').split('/').pop() || folderId, enabledAt };
+            })
+            .filter(Boolean);
+    });
+};
+
+const savePublicShowcaseFolders = async (entries = []) => {
+    return withDb(async (client) => {
+        await client.query(
+            'INSERT INTO system_settings (key, value) VALUES ($1, $2::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+            [PUBLIC_SHOWCASE_SETTINGS_KEY, JSON.stringify(entries)]
+        );
+        return entries;
+    });
+};
+
 const withDb = async (operation) => {
     if (!pgPool) throw new Error("Database not initialized");
     let client;
@@ -2663,14 +2701,19 @@ apiRouter.get('/media', async (req, res) => {
 
     try {
         const { listRes, prefix } = await listMediaObjects(requestedPath);
+        const publicShowcaseFolders = await getPublicShowcaseFolders();
+        const publicByFolderId = new Map(publicShowcaseFolders.map((item) => [item.folderId, item]));
 
         const folders = (listRes.CommonPrefixes || []).map((entry) => {
             const folderPrefix = (entry.Prefix || '').replace(prefix, '').replace(/\/$/, '');
+            const id = `${requestedPath}:${folderPrefix}`;
+            const publicEntry = publicByFolderId.get(id);
             return {
-                id: `${requestedPath}:${folderPrefix}`,
+                id,
                 name: folderPrefix,
                 parent_path: requestedPath,
-                is_public_showcase: false
+                is_public_showcase: Boolean(publicEntry),
+                public_showcase_url: publicEntry ? getPublicShowcaseUrl({ type: 'folder', prefix: publicEntry.prefix }) : null
             };
         }).filter((folder) => folder.name);
 
@@ -2761,9 +2804,57 @@ apiRouter.delete('/media/files/:id', async (req, res) => {
     }
 });
 
+apiRouter.post('/media/folders/:id/public', async (req, res) => {
+    try {
+        const folderId = decodeURIComponent(String(req.params.id || '').trim());
+        if (!folderId) return res.status(400).json({ error: 'Invalid folder id' });
+
+        const prefix = resolveFolderPrefixFromId(folderId);
+        const folderName = prefix.replace(/\/$/, '').split('/').pop() || folderId;
+        const current = await getPublicShowcaseFolders();
+        const remaining = current.filter((item) => item.folderId !== folderId);
+        const next = [...remaining, {
+            folderId,
+            folderName,
+            prefix,
+            enabledAt: new Date().toISOString()
+        }];
+        await savePublicShowcaseFolders(next);
+
+        return res.json({
+            success: true,
+            folderId,
+            folderName,
+            prefix,
+            shareUrl: getPublicShowcaseUrl({ type: 'folder', prefix }),
+            activeCount: next.length
+        });
+    } catch (e) {
+        console.error('[MEDIA PUBLIC FOLDER SET ERROR]', e.message);
+        return res.status(500).json({ error: e.message || 'Failed to enable public showcase for folder' });
+    }
+});
+
+apiRouter.delete('/media/folders/:id/public', async (req, res) => {
+    try {
+        const folderId = decodeURIComponent(String(req.params.id || '').trim());
+        if (!folderId) return res.status(400).json({ error: 'Invalid folder id' });
+
+        const current = await getPublicShowcaseFolders();
+        const next = current.filter((item) => item.folderId !== folderId);
+        await savePublicShowcaseFolders(next);
+
+        return res.json({ success: true, folderId, activeCount: next.length });
+    } catch (e) {
+        console.error('[MEDIA PUBLIC FOLDER UNSET ERROR]', e.message);
+        return res.status(500).json({ error: e.message || 'Failed to disable public showcase for folder' });
+    }
+});
+
 apiRouter.delete('/media/folders/:id', async (req, res) => {
     try {
-        const prefix = resolveFolderPrefixFromId(req.params.id);
+        const folderId = decodeURIComponent(String(req.params.id || '').trim());
+        const prefix = resolveFolderPrefixFromId(folderId);
         const keys = await listAllS3KeysByPrefix(prefix);
 
         for (const key of keys) {
@@ -2772,6 +2863,12 @@ apiRouter.delete('/media/folders/:id', async (req, res) => {
 
         if (prefix.endsWith('/')) {
             await deleteFromS3(prefix).catch(() => null);
+        }
+
+        const current = await getPublicShowcaseFolders();
+        const next = current.filter((item) => item.folderId !== folderId);
+        if (next.length !== current.length) {
+            await savePublicShowcaseFolders(next);
         }
 
         const syncResult = await markDriverExcelMediaReferencesAsDeleted({ deletedKeys: keys });
@@ -2810,24 +2907,19 @@ const listShowcaseItemsByPrefix = async (prefix = '') => {
 
 apiRouter.get('/showcase', async (req, res) => {
     try {
-        const listRes = await s3Client.send(new ListObjectsV2Command({
-            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
-            Prefix: 'Driver data/',
-            Delimiter: '/'
-        }));
-        const folders = (listRes.CommonPrefixes || [])
-            .map((entry) => String(entry.Prefix || '').replace(/\/$/, ''))
-            .filter(Boolean);
-
-        const items = folders.map((prefix) => ({
-            id: prefix,
-            url: getPublicShowcaseUrl({ type: 'folder', prefix: `${prefix}/` }),
-            type: 'document',
-            filename: prefix.split('/').pop() || prefix
-        }));
+        const publicFolders = await getPublicShowcaseFolders();
+        const items = publicFolders
+            .slice()
+            .sort((a, b) => new Date(b.enabledAt || 0).getTime() - new Date(a.enabledAt || 0).getTime())
+            .map((entry) => ({
+                id: entry.prefix,
+                url: getPublicShowcaseUrl({ type: 'folder', prefix: entry.prefix }),
+                type: 'document',
+                filename: entry.folderName || entry.prefix.replace(/\/$/, '').split('/').pop() || entry.prefix
+            }));
 
         res.json({
-            title: 'Driver Files Showcase',
+            title: 'Public Folder Showcase',
             items
         });
     } catch (e) {
@@ -2876,8 +2968,24 @@ apiRouter.get('/showcase/:token', async (req, res) => {
     }
 });
 
-apiRouter.get('/showcase/status', (req, res) => {
-    res.json({ active: true, alwaysOn: true });
+apiRouter.get('/showcase/status', async (req, res) => {
+    try {
+        const folders = await getPublicShowcaseFolders();
+        const latest = folders
+            .slice()
+            .sort((a, b) => new Date(b.enabledAt || 0).getTime() - new Date(a.enabledAt || 0).getTime())[0] || null;
+
+        res.json({
+            active: folders.length > 0,
+            alwaysOn: true,
+            activeCount: folders.length,
+            folderId: latest?.folderId || null,
+            folderName: latest?.folderName || null,
+            shareUrl: latest ? getPublicShowcaseUrl({ type: 'folder', prefix: latest.prefix }) : null
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message || 'Failed to load showcase status' });
+    }
 });
 
 // --- DEEP WAKE PING ---
