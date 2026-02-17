@@ -84,6 +84,8 @@ export interface SummaryFieldConfig {
 }
 
 export type SummaryTextStyle = 'plain' | 'bold' | 'italic' | 'uppercase' | 'code';
+export type MessageFontSize = 'small' | 'medium' | 'large';
+export type MessageFontWeight = 'regular' | 'semibold' | 'bold';
 
 export interface FlowNodeData {
   id: string;
@@ -137,6 +139,10 @@ export interface FlowNodeData {
   summaryHeaderStyle?: SummaryTextStyle;
   summaryDescriptionStyle?: SummaryTextStyle;
   summaryFooterStyle?: SummaryTextStyle;
+
+  // Text presentation (Bot Studio preview + renderer-ready metadata)
+  messageFontSize?: MessageFontSize;
+  messageFontWeight?: MessageFontWeight;
 
   [key: string]: any;
 }
