@@ -1343,6 +1343,46 @@ const sendToMeta = async (phoneNumber, payload) => {
     }
 };
 
+const applyWhatsAppMarker = (rawValue, marker) => {
+    const value = String(rawValue || '');
+    if (!value) return '';
+
+    // WhatsApp doesn't render markdown if spaces are immediately inside markers.
+    const leading = value.match(/^\s*/)?.[0] || '';
+    const trailing = value.match(/\s*$/)?.[0] || '';
+    const core = value.slice(leading.length, value.length - trailing.length);
+    if (!core) return value;
+
+    return `${leading}${marker}${core}${marker}${trailing}`;
+};
+
+const convertInlineStyleTokensForWhatsApp = (text) => {
+    if (!text || typeof text !== 'string') return '';
+
+    let formatted = String(text);
+
+    // Keep replacing while nested style tokens exist.
+    let prev = null;
+    while (formatted !== prev) {
+        prev = formatted;
+        formatted = formatted
+            .replace(/\[b\]([\s\S]*?)\[\/b\]/gi, (_m, value) => applyWhatsAppMarker(value, '*'))
+            .replace(/\[i\]([\s\S]*?)\[\/i\]/gi, (_m, value) => applyWhatsAppMarker(value, '_'))
+            .replace(/\[u\]([\s\S]*?)\[\/u\]/gi, '$1')
+            .replace(/\[size=(small|medium|large)\]([\s\S]*?)\[\/size\]/gi, '$2');
+    }
+
+    // Clean up any leftover malformed tags so users never see raw markup.
+    formatted = formatted
+        .replace(/\[\/?b\]/gi, '')
+        .replace(/\[\/?i\]/gi, '')
+        .replace(/\[\/?u\]/gi, '')
+        .replace(/\[size=(small|medium|large)\]/gi, '')
+        .replace(/\[\/size\]/gi, '');
+
+    return formatted;
+};
+
 const processText = (text, candidate) => {
     if (!text) return '';
     let processed = text;
@@ -1356,7 +1396,7 @@ const processText = (text, candidate) => {
         const regex = new RegExp(`{{${key}}}`, 'gi');
         processed = processed.replace(regex, val || '');
     }
-    return processed;
+    return convertInlineStyleTokensForWhatsApp(processed);
 };
 
 const isValidContent = (text) => {
