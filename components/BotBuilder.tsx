@@ -27,7 +27,7 @@ import {
   LocateFixed, AlertTriangle, Bot, CalendarClock, Calendar, FileCheck,
   Sparkles, TimerReset
 } from 'lucide-react';
-import { FlowNodeData, NodeType, ListSection, LocationPreset, SummaryFieldConfig, SummaryTextStyle } from '../types';
+import { FlowNodeData, NodeType, ListSection, LocationPreset, SummaryFieldConfig, SummaryTextStyle, MessageFontSize, MessageFontWeight } from '../types';
 
 const inferCapturedVariableNames = (data: FlowNodeData, nodeId?: string): string[] => {
     const variables = new Set<string>();
@@ -42,16 +42,22 @@ const inferCapturedVariableNames = (data: FlowNodeData, nodeId?: string): string
     if (data.type === 'destination_location') variables.add('dest_coords');
     if (data.type === 'location_request') variables.add('location_data');
 
-    const captureTypes: NodeType[] = ['input', 'interactive_button', 'interactive_list', 'rich_card'];
-    if (captureTypes.includes(data.type) && !data.variable) {
-        const fallback = (data.label || nodeId || '').toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/^_+|_+$/g, '');
-        if (fallback) variables.add(fallback);
-    }
-
     return Array.from(variables).filter(Boolean);
 };
 
 const labelFromVariable = (variable: string) => variable.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+
+const messageFontSizeClassMap: Record<MessageFontSize, string> = {
+    small: 'text-xs',
+    medium: 'text-sm',
+    large: 'text-base'
+};
+
+const messageFontWeightClassMap: Record<MessageFontWeight, string> = {
+    regular: 'font-normal',
+    semibold: 'font-semibold',
+    bold: 'font-bold'
+};
 
 // --- 1. ADVANCED NODE COMPONENT (VISUALIZER) ---
 
@@ -70,6 +76,8 @@ const NodeHeader = ({ color, icon, label, selected, subtitle }: any) => (
 
 const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boolean, id: string }) => {
     let config = { color: 'bg-slate-600', icon: <MessageSquare size={14} />, label: 'Message', subtitle: '' };
+    const contentSizeClass = messageFontSizeClassMap[data.messageFontSize || 'medium'];
+    const contentWeightClass = messageFontWeightClassMap[data.messageFontWeight || 'semibold'];
     
     switch(data.type) {
         case 'start': config = { color: 'bg-emerald-500', icon: <Zap size={14} />, label: 'Start Flow', subtitle: 'Entry Point' }; break;
@@ -122,12 +130,18 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
 
                 {/* 2. Text Content */}
                 {data.type !== 'delay' && data.type !== 'set_variable' && data.type !== 'summary' && data.type !== 'datetime_picker' && (
-                    <div className="text-xs mb-3 text-gray-800 leading-relaxed font-medium">
+                    <div className={`mb-3 text-gray-800 leading-relaxed ${contentSizeClass} ${contentWeightClass}`}>
                         {data.content ? (
                             <div className="whitespace-pre-wrap">{data.content}</div>
                         ) : (
                             <span className="text-gray-400 italic">Click to configure message...</span>
                         )}
+                    </div>
+                )}
+
+                {data.variable && ['input', 'interactive_button', 'interactive_list', 'rich_card', 'datetime_picker'].includes(data.type) && (
+                    <div className="mb-3 text-[10px] text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1 font-mono">
+                        Saves response to: {data.variable}
                     </div>
                 )}
 
@@ -417,6 +431,33 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                     ))}
                                 </div>
                             )}
+                        </div>
+                    )}
+
+                    {['text', 'image', 'input', 'interactive_button', 'interactive_list', 'handoff', 'rich_card', 'location_request', 'pickup_location', 'destination_location', 'summary', 'datetime_picker'].includes(local.type) && (
+                        <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
+                            <label className="block text-xs font-bold text-gray-700 uppercase mb-2">Message Typography</label>
+                            <div className="grid grid-cols-2 gap-2">
+                                <select
+                                    className="w-full border border-gray-200 p-2 rounded text-sm bg-white"
+                                    value={(local.messageFontSize || 'medium') as MessageFontSize}
+                                    onChange={e => update('messageFontSize', e.target.value as MessageFontSize)}
+                                >
+                                    <option value="small">Small</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="large">Large</option>
+                                </select>
+                                <select
+                                    className="w-full border border-gray-200 p-2 rounded text-sm bg-white"
+                                    value={(local.messageFontWeight || 'semibold') as MessageFontWeight}
+                                    onChange={e => update('messageFontWeight', e.target.value as MessageFontWeight)}
+                                >
+                                    <option value="regular">Regular</option>
+                                    <option value="semibold">Semi Bold</option>
+                                    <option value="bold">Bold</option>
+                                </select>
+                            </div>
+                            <p className="text-[10px] text-gray-500 mt-2">Applies to the message preview for this node and is saved as node metadata.</p>
                         </div>
                     )}
 
@@ -990,6 +1031,20 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                     <option value="media">Media (Image / Video / Document)</option>
                                 </select>
                             </div>
+                        </div>
+                    )}
+
+                    {/* Optional Response Capture (Interactive Nodes) */}
+                    {['interactive_button', 'interactive_list', 'rich_card'].includes(local.type) && (
+                        <div className="bg-rose-50 p-4 rounded-xl border border-rose-100 space-y-2">
+                            <label className="block text-[10px] font-bold text-rose-800 uppercase mb-1">Save Customer Selection (Optional)</label>
+                            <input
+                                className="w-full border border-rose-200 p-2 rounded text-sm bg-white"
+                                value={local.variable || ''}
+                                onChange={e => update('variable', e.target.value.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase())}
+                                placeholder="selected_option"
+                            />
+                            <p className="text-[10px] text-rose-700">Leave empty to skip saving. If set, the selected button/list option id is stored in this variable.</p>
                         </div>
                     )}
 

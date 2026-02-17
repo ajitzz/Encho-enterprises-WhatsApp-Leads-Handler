@@ -126,19 +126,32 @@ class MockBackendService {
     let nextNodeId = null;
 
     if (currentNodeId) {
-        // Mocking Button/List Logic: 
-        // In simulation, we assume if the user types something similar to a button title, they clicked it.
-        // Or if they type 'btn_...' (debug id).
-        
+        // Mocking Button/List Logic:
+        // In simulation, we assume if the user types an option title, they selected it.
         let matchedEdge = null;
-        
+        let selectedValue: string | null = null;
+
         if (currentNode.data.type === 'interactive_button' && currentNode.data.buttons) {
              const matchedBtn = currentNode.data.buttons.find((b: any) => b.title.toLowerCase() === text.toLowerCase());
              if (matchedBtn) {
                  matchedEdge = edges.find(e => e.source === currentNodeId && e.sourceHandle === matchedBtn.id);
+                 selectedValue = matchedBtn.id;
              }
         }
-        
+
+        if (currentNode.data.type === 'interactive_list' && currentNode.data.sections) {
+            const allRows = currentNode.data.sections.flatMap((section: any) => section.rows || []);
+            const matchedRow = allRows.find((row: any) => row.title?.toLowerCase() === text.toLowerCase());
+            if (matchedRow) {
+                matchedEdge = edges.find(e => e.source === currentNodeId && e.sourceHandle === matchedRow.id);
+                selectedValue = matchedRow.id;
+            }
+        }
+
+        if (currentNode.data.variable) {
+            driver.variables[currentNode.data.variable] = selectedValue || text;
+        }
+
         if (matchedEdge) {
             nextNodeId = matchedEdge.target;
         } else {
