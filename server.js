@@ -6,7 +6,7 @@ const { Pool } = require('pg');
 const multer = require('multer');
 const axios = require('axios');
 const https = require('https');
-const { S3Client, GetObjectCommand, PutObjectCommand, CopyObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
+const { S3Client, GetObjectCommand, PutObjectCommand, CopyObjectCommand, DeleteObjectCommand, ListObjectsV2Command, HeadObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { OAuth2Client, JWT } = require('google-auth-library');
 
@@ -128,17 +128,92 @@ const listMediaObjects = async (requestedPath = '/') => {
     return { listRes: primary, prefix: primaryPrefix };
 };
 
-const resolveMediaDeleteKey = (rawId = '') => {
+const keyExistsInS3 = async (key = '') => {
+    const normalizedKey = String(key || '').trim().replace(/^\/+/, '');
+    if (!normalizedKey) return false;
+
+    try {
+        await s3Client.send(new HeadObjectCommand({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Key: normalizedKey
+        }));
+        return true;
+    } catch (e) {
+        const statusCode = e?.$metadata?.httpStatusCode;
+        const errorCode = String(e?.name || e?.Code || '');
+        if (statusCode === 404 || errorCode === 'NotFound' || errorCode === 'NoSuchKey') {
+            return false;
+        }
+        throw e;
+    }
+};
+
+
+const prefixHasObjectsInS3 = async (prefix = '') => {
+    const normalizedPrefix = String(prefix || '').trim().replace(/^\/+/, '');
+    if (!normalizedPrefix) return false;
+
+    const listRes = await s3Client.send(new ListObjectsV2Command({
+        Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+        Prefix: normalizedPrefix,
+        MaxKeys: 1
+    }));
+
+    return (listRes.Contents || []).some((item) => {
+        const key = String(item?.Key || '');
+        return key && key.startsWith(normalizedPrefix);
+    });
+};
+
+const resolveMediaUploadKey = async ({ rawPath = '/', rawFileName = '' }) => {
+    const safeFileName = String(rawFileName || '').replace(/\s+/g, '_');
+    if (!safeFileName) throw new Error('File name is missing');
+
+    const primaryPrefix = toMediaPrefix(rawPath);
+    if (!MEDIA_ROOT_PREFIX) return `${primaryPrefix}${safeFileName}`;
+
+    const normalizedPath = normalizeMediaPath(rawPath);
+    const fallbackPrefix = normalizedPath ? `${normalizedPath}/` : '';
+
+    const [primaryList, fallbackList] = await Promise.all([
+        s3Client.send(new ListObjectsV2Command({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Prefix: primaryPrefix,
+            Delimiter: '/'
+        })),
+        s3Client.send(new ListObjectsV2Command({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Prefix: fallbackPrefix,
+            Delimiter: '/'
+        }))
+    ]);
+
+    const hasPrimaryContent = hasAnyObjects(primaryList);
+    const hasFallbackContent = hasAnyObjects(fallbackList);
+    const selectedPrefix = !hasPrimaryContent && hasFallbackContent ? fallbackPrefix : primaryPrefix;
+    return `${selectedPrefix}${safeFileName}`;
+};
+
+const resolveMediaDeleteKey = async (rawId = '') => {
     const decoded = decodeURIComponent(String(rawId || '').trim());
     if (!decoded) throw new Error('Invalid media id');
 
     const normalized = decoded.replace(/^\/+/, '');
-    if (!MEDIA_ROOT_PREFIX) return normalized;
-    if (normalized.startsWith(MEDIA_ROOT_PREFIX)) return normalized;
-    return `${MEDIA_ROOT_PREFIX}${normalized}`;
+    if (!normalized) throw new Error('Invalid media id');
+
+    const candidates = [normalized];
+    if (MEDIA_ROOT_PREFIX && !normalized.startsWith(MEDIA_ROOT_PREFIX)) {
+        candidates.push(`${MEDIA_ROOT_PREFIX}${normalized}`);
+    }
+
+    for (const candidate of [...new Set(candidates)]) {
+        if (await keyExistsInS3(candidate)) return candidate;
+    }
+
+    return candidates[candidates.length - 1];
 };
 
-const resolveFolderPrefixFromId = (rawId = '') => {
+const resolveFolderPrefixFromId = async (rawId = '') => {
     const decoded = decodeURIComponent(String(rawId || '').trim());
     if (!decoded) throw new Error('Invalid folder id');
 
@@ -149,8 +224,21 @@ const resolveFolderPrefixFromId = (rawId = '') => {
     const sanitizedFolderName = String(folderName || '').trim().replace(/^\/+|\/+$/g, '');
     if (!sanitizedFolderName) throw new Error('Folder name is missing');
 
-    const parentPrefix = toMediaPrefix(parentPath || '/');
-    return `${parentPrefix}${sanitizedFolderName}/`;
+    const primaryParentPrefix = toMediaPrefix(parentPath || '/');
+    const primaryPrefix = `${primaryParentPrefix}${sanitizedFolderName}/`;
+    if (!MEDIA_ROOT_PREFIX) return primaryPrefix;
+
+    const normalizedParentPath = normalizeMediaPath(parentPath || '/');
+    const fallbackParentPrefix = normalizedParentPath ? `${normalizedParentPath}/` : '';
+    const fallbackPrefix = `${fallbackParentPrefix}${sanitizedFolderName}/`;
+
+    const [hasPrimaryContent, hasFallbackContent] = await Promise.all([
+        prefixHasObjectsInS3(primaryPrefix),
+        prefixHasObjectsInS3(fallbackPrefix)
+    ]);
+
+    if (!hasPrimaryContent && hasFallbackContent) return fallbackPrefix;
+    return primaryPrefix;
 };
 
 
@@ -2792,11 +2880,9 @@ apiRouter.post('/media/upload', upload.single('file'), async (req, res) => {
     }
 
     const path = typeof req.body.path === 'string' ? req.body.path : '/';
-    const prefix = toMediaPrefix(path);
-    const safeFileName = req.file.originalname.replace(/\s+/g, '_');
-    const key = `${prefix}${safeFileName}`;
 
     try {
+        const key = await resolveMediaUploadKey({ rawPath: path, rawFileName: req.file.originalname });
         await uploadToS3({
             key,
             body: req.file.buffer,
@@ -2835,7 +2921,7 @@ apiRouter.post('/media/sync-s3', async (req, res) => {
 
 apiRouter.delete('/media/files/:id', async (req, res) => {
     try {
-        const key = resolveMediaDeleteKey(req.params.id);
+        const key = await resolveMediaDeleteKey(req.params.id);
         await deleteFromS3(key);
         const syncResult = await markDriverExcelMediaReferencesAsDeleted({ deletedKeys: [key] });
         res.json({ success: true, key, driverExcelUpdatedRows: syncResult.updatedCandidates });
@@ -2850,7 +2936,7 @@ apiRouter.post('/media/folders/:id/public', async (req, res) => {
         const folderId = decodeURIComponent(String(req.params.id || '').trim());
         if (!folderId) return res.status(400).json({ error: 'Invalid folder id' });
 
-        const requestedPrefix = resolveFolderPrefixFromId(folderId);
+        const requestedPrefix = await resolveFolderPrefixFromId(folderId);
         const { prefix, hasObjects, usedFallback } = await resolveShowcasePrefix(requestedPrefix, `folderId=${folderId}`);
         const folderName = prefix.replace(/\/$/, '').split('/').pop() || folderId;
         const current = await getPublicShowcaseFolders();
@@ -2898,7 +2984,7 @@ apiRouter.delete('/media/folders/:id/public', async (req, res) => {
 apiRouter.delete('/media/folders/:id', async (req, res) => {
     try {
         const folderId = decodeURIComponent(String(req.params.id || '').trim());
-        const prefix = resolveFolderPrefixFromId(folderId);
+        const prefix = await resolveFolderPrefixFromId(folderId);
         const keys = await listAllS3KeysByPrefix(prefix);
 
         for (const key of keys) {
