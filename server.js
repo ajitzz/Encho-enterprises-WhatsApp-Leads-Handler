@@ -162,6 +162,47 @@ const normalizeShowcasePrefix = (prefix = '') => {
     return cleaned.endsWith('/') ? cleaned : `${cleaned}/`;
 };
 
+const prefixHasObjects = async (prefix = '') => {
+    const normalizedPrefix = normalizeShowcasePrefix(prefix);
+    if (!normalizedPrefix) return false;
+
+    const listRes = await s3Client.send(new ListObjectsV2Command({
+        Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+        Prefix: normalizedPrefix,
+        MaxKeys: 25
+    }));
+
+    return (listRes.Contents || []).some((item) => {
+        const key = String(item?.Key || '');
+        return key && key !== normalizedPrefix && !key.endsWith('/');
+    });
+};
+
+const resolveShowcasePrefix = async (prefix = '', context = '') => {
+    const normalizedPrefix = normalizeShowcasePrefix(prefix);
+    if (!normalizedPrefix) return { prefix: normalizedPrefix, hasObjects: false, usedFallback: false };
+
+    if (await prefixHasObjects(normalizedPrefix)) {
+        return { prefix: normalizedPrefix, hasObjects: true, usedFallback: false };
+    }
+
+    if (!MEDIA_ROOT_PREFIX || !normalizedPrefix.startsWith(MEDIA_ROOT_PREFIX)) {
+        return { prefix: normalizedPrefix, hasObjects: false, usedFallback: false };
+    }
+
+    const fallbackPrefix = normalizeShowcasePrefix(normalizedPrefix.slice(MEDIA_ROOT_PREFIX.length));
+    if (!fallbackPrefix) {
+        return { prefix: normalizedPrefix, hasObjects: false, usedFallback: false };
+    }
+
+    if (await prefixHasObjects(fallbackPrefix)) {
+        console.warn(`[SHOWCASE PREFIX FALLBACK] Using fallback prefix "${fallbackPrefix}" instead of "${normalizedPrefix}"${context ? ` (${context})` : ''}.`);
+        return { prefix: fallbackPrefix, hasObjects: true, usedFallback: true };
+    }
+
+    return { prefix: normalizedPrefix, hasObjects: false, usedFallback: false };
+};
+
 const getPublicShowcaseFolders = async () => {
     return withDb(async (client) => {
         const setting = await client.query('SELECT value FROM system_settings WHERE key = $1 LIMIT 1', [PUBLIC_SHOWCASE_SETTINGS_KEY]);
@@ -2809,7 +2850,8 @@ apiRouter.post('/media/folders/:id/public', async (req, res) => {
         const folderId = decodeURIComponent(String(req.params.id || '').trim());
         if (!folderId) return res.status(400).json({ error: 'Invalid folder id' });
 
-        const prefix = resolveFolderPrefixFromId(folderId);
+        const requestedPrefix = resolveFolderPrefixFromId(folderId);
+        const { prefix, hasObjects, usedFallback } = await resolveShowcasePrefix(requestedPrefix, `folderId=${folderId}`);
         const folderName = prefix.replace(/\/$/, '').split('/').pop() || folderId;
         const current = await getPublicShowcaseFolders();
         const remaining = current.filter((item) => item.folderId !== folderId);
@@ -2826,6 +2868,8 @@ apiRouter.post('/media/folders/:id/public', async (req, res) => {
             folderId,
             folderName,
             prefix,
+            hasObjects,
+            usedFallback,
             shareUrl: getPublicShowcaseUrl({ type: 'folder', prefix }),
             activeCount: next.length
         });
@@ -2954,7 +2998,8 @@ apiRouter.get('/showcase/:token', async (req, res) => {
         }
 
         if (type === 'folder' && payload?.prefix) {
-            const prefix = String(payload.prefix);
+            const requestedPrefix = String(payload.prefix);
+            const { prefix } = await resolveShowcasePrefix(requestedPrefix, `token=${rawToken}`);
             const items = await listShowcaseItemsByPrefix(prefix);
             return res.json({
                 title: prefix.replace(/\/$/, '').split('/').pop() || 'Driver Folder',
