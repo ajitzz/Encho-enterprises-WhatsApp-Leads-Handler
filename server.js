@@ -984,6 +984,33 @@ const formatColumnLabelFromKey = (key = '') => String(key)
     .trim()
     .replace(/\b\w/g, (c) => c.toUpperCase()) || 'Custom Field';
 
+const DRIVER_EXCEL_MEDIA_SUFFIX_ALLOWLIST = new Set([
+    '_file_url',
+    '_folder_url',
+    '_status',
+    '_uploaded_at',
+    '_rejection_reason',
+    '_link_mime_type'
+]);
+
+const DRIVER_EXCEL_LICENSE_PREFIXES = ['license', 'licence', 'latest_license_link'];
+
+const shouldIncludeDriverExcelVariableKey = (rawKey = '') => {
+    const key = normalizeColumnKey(rawKey);
+    if (!key) return false;
+
+    if (DRIVER_EXCEL_LICENSE_PREFIXES.includes(key)) return true;
+
+    for (const prefix of DRIVER_EXCEL_LICENSE_PREFIXES) {
+        const withSeparator = `${prefix}_`;
+        if (!key.startsWith(withSeparator)) continue;
+        const suffix = key.substring(prefix.length);
+        return DRIVER_EXCEL_MEDIA_SUFFIX_ALLOWLIST.has(suffix);
+    }
+
+    return true;
+};
+
 const parseVariableCaptureMessage = (text) => {
     if (!text || typeof text !== 'string') return null;
     try {
@@ -1017,6 +1044,7 @@ const buildVariableResponseLookup = ({ captureRows = [], candidateRows = [] }) =
         if (!candidateId || !key) return;
         const normalizedKey = normalizeColumnKey(key);
         if (!normalizedKey) return;
+        if (!shouldIncludeDriverExcelVariableKey(normalizedKey)) return;
         const safeValue = value == null ? '' : String(value);
         if (!responseLookup.has(candidateId)) responseLookup.set(candidateId, {});
         const candidateVars = responseLookup.get(candidateId);
@@ -1085,6 +1113,7 @@ const getDriverExcelColumnConfig = async (client) => {
     if (!Array.isArray(value)) return [];
     return value
         .filter((c) => c && typeof c.key === 'string' && typeof c.label === 'string')
+        .filter((c) => shouldIncludeDriverExcelVariableKey(c.key))
         .map((c) => ({ key: c.key, label: c.label, isCore: false }));
 };
 
@@ -1132,6 +1161,7 @@ const getDriverExcelVariableCatalog = async (client) => {
     const registerVariable = (rawKey, preferredLabel = '') => {
         const normalizedKey = normalizeColumnKey(rawKey);
         if (!normalizedKey) return;
+        if (!shouldIncludeDriverExcelVariableKey(normalizedKey)) return;
 
         const fallbackLabel = formatColumnLabelFromKey(normalizedKey);
         const nextLabel = String(preferredLabel || '').trim() || fallbackLabel;
@@ -3050,6 +3080,9 @@ apiRouter.post('/reports/driver-excel/columns', async (req, res) => {
         const key = requestedKey || normalizeColumnKey(label);
         if (!label) return res.status(400).json({ error: 'Column label is required' });
         if (!key) return res.status(400).json({ error: 'Invalid column label' });
+        if (!shouldIncludeDriverExcelVariableKey(key)) {
+            return res.status(400).json({ error: 'Unsupported legacy license column. Use file/folder/status/upload metadata keys only.' });
+        }
 
         await withDb(async (client) => {
             const customCols = await getDriverExcelColumnConfig(client);
