@@ -781,6 +781,29 @@ const deleteFromS3 = async (key) => {
     }));
 };
 
+const listAllS3KeysByPrefix = async (prefix = '') => {
+    const keys = [];
+    let continuationToken;
+
+    do {
+        const listRes = await s3Client.send(new ListObjectsV2Command({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Prefix: prefix,
+            ContinuationToken: continuationToken
+        }));
+
+        (listRes.Contents || []).forEach((item) => {
+            if (!item.Key) return;
+            if (item.Key === prefix && String(item.Key).endsWith('/')) return;
+            keys.push(item.Key);
+        });
+
+        continuationToken = listRes.IsTruncated ? listRes.NextContinuationToken : undefined;
+    } while (continuationToken);
+
+    return keys;
+};
+
 const copyObjectInS3 = async ({ sourceKey, destinationKey }) => {
     if (!sourceKey || !destinationKey || sourceKey === destinationKey) return destinationKey;
     await s3Client.send(new CopyObjectCommand({
@@ -1018,6 +1041,8 @@ const DRIVER_EXCEL_MEDIA_SUFFIX_ALLOWLIST = new Set([
     '_link_mime_type'
 ]);
 
+const DRIVER_EXCEL_MEDIA_STATUS_SUFFIX = '_status';
+
 const DRIVER_EXCEL_LICENSE_PREFIXES = ['license', 'licence', 'latest_license_link'];
 
 const shouldIncludeDriverExcelVariableKey = (rawKey = '') => {
@@ -1034,6 +1059,97 @@ const shouldIncludeDriverExcelVariableKey = (rawKey = '') => {
     }
 
     return true;
+};
+
+const deriveDriverExcelVariableBaseKey = (rawKey = '') => {
+    const key = normalizeColumnKey(rawKey);
+    if (!key) return '';
+
+    for (const suffix of DRIVER_EXCEL_MEDIA_SUFFIX_ALLOWLIST) {
+        if (!key.endsWith(suffix)) continue;
+        const candidateBase = key.slice(0, -suffix.length);
+        return candidateBase || key;
+    }
+
+    return key;
+};
+
+const doesVariableValueReferenceS3Key = (rawValue, targetKeys = []) => {
+    const value = String(rawValue ?? '').trim();
+    if (!value) return false;
+    const keys = targetKeys.filter(Boolean);
+    if (keys.length === 0) return false;
+
+    let decodedValue = value;
+    try {
+        decodedValue = decodeURIComponent(value);
+    } catch (_) {
+        decodedValue = value;
+    }
+
+    const referencesPlainKey = keys.some((key) => value.includes(key) || decodedValue.includes(key));
+    if (referencesPlainKey) return true;
+
+    try {
+        const url = new URL(value);
+        const pathname = decodeURIComponent(url.pathname || '').replace(/^\/+/, '');
+        if (keys.some((key) => pathname === key || pathname.endsWith(`/${key}`))) return true;
+
+        const token = decodeURIComponent(pathname.split('/').pop() || '');
+        const payload = JSON.parse(fromBase64Url(token));
+        if (payload?.type === 'file' && payload?.key && keys.includes(String(payload.key))) return true;
+        if (payload?.type === 'folder' && payload?.prefix && keys.some((key) => String(payload.prefix).startsWith(String(key).replace(/[^/]+$/, '')))) {
+            return true;
+        }
+    } catch (_) {
+        return false;
+    }
+
+    return false;
+};
+
+const markDriverExcelMediaReferencesAsDeleted = async ({ deletedKeys = [] }) => {
+    const normalizedKeys = Array.from(new Set(deletedKeys.map((key) => String(key || '').trim()).filter(Boolean)));
+    if (normalizedKeys.length === 0) return { updatedCandidates: 0 };
+
+    let updatedCandidates = 0;
+    await withDb(async (client) => {
+        const res = await client.query('SELECT id, variables FROM candidates WHERE variables IS NOT NULL');
+
+        for (const row of res.rows) {
+            const vars = normalizeVariables(row.variables);
+            const nextVars = { ...vars };
+            let changed = false;
+            const touchedBases = new Set();
+
+            Object.entries(vars).forEach(([rawKey, rawValue]) => {
+                const key = normalizeColumnKey(rawKey);
+                if (!key) return;
+                if (!doesVariableValueReferenceS3Key(rawValue, normalizedKeys)) return;
+
+                nextVars[rawKey] = 'deleted';
+                touchedBases.add(deriveDriverExcelVariableBaseKey(rawKey));
+                changed = true;
+            });
+
+            touchedBases.forEach((baseKey) => {
+                if (!baseKey) return;
+                nextVars[`${baseKey}${DRIVER_EXCEL_MEDIA_STATUS_SUFFIX}`] = 'deleted';
+            });
+
+            if (!changed) continue;
+
+            await client.query('UPDATE candidates SET variables = $1::jsonb WHERE id = $2', [JSON.stringify(nextVars), row.id]);
+            scheduleDriverExcelIncrementalSync({ candidateId: row.id, action: 'upsert' });
+            updatedCandidates += 1;
+        }
+    });
+
+    if (updatedCandidates > 0) {
+        scheduleDriverExcelSync();
+    }
+
+    return { updatedCandidates };
 };
 
 const parseVariableCaptureMessage = (text) => {
@@ -2637,7 +2753,8 @@ apiRouter.delete('/media/files/:id', async (req, res) => {
     try {
         const key = resolveMediaDeleteKey(req.params.id);
         await deleteFromS3(key);
-        res.json({ success: true, key });
+        const syncResult = await markDriverExcelMediaReferencesAsDeleted({ deletedKeys: [key] });
+        res.json({ success: true, key, driverExcelUpdatedRows: syncResult.updatedCandidates });
     } catch (e) {
         console.error('[MEDIA DELETE FILE ERROR]', e.message);
         res.status(500).json({ error: e.message || 'Failed to delete file from S3' });
@@ -2647,17 +2764,18 @@ apiRouter.delete('/media/files/:id', async (req, res) => {
 apiRouter.delete('/media/folders/:id', async (req, res) => {
     try {
         const prefix = resolveFolderPrefixFromId(req.params.id);
-        const listRes = await s3Client.send(new ListObjectsV2Command({
-            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
-            Prefix: prefix,
-            MaxKeys: 1
-        }));
+        const keys = await listAllS3KeysByPrefix(prefix);
 
-        if ((listRes.Contents || []).length > 0) {
-            return res.status(400).json({ error: 'Folder is not empty. Delete files first.' });
+        for (const key of keys) {
+            await deleteFromS3(key);
         }
 
-        res.json({ success: true, prefix });
+        if (prefix.endsWith('/')) {
+            await deleteFromS3(prefix).catch(() => null);
+        }
+
+        const syncResult = await markDriverExcelMediaReferencesAsDeleted({ deletedKeys: keys });
+        res.json({ success: true, prefix, deletedObjects: keys.length, driverExcelUpdatedRows: syncResult.updatedCandidates });
     } catch (e) {
         console.error('[MEDIA DELETE FOLDER ERROR]', e.message);
         res.status(500).json({ error: e.message || 'Failed to delete folder' });
