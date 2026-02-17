@@ -205,11 +205,11 @@ export const liveApiService = {
   },
 
   deleteMediaFile: async (id: string) => {
-      return apiRequest(`/api/media/files/${id}`, { method: 'DELETE' });
+      return apiRequest(`/api/media/files/${encodeURIComponent(id)}`, { method: 'DELETE' });
   },
 
   deleteFolder: async (id: string) => {
-      return apiRequest(`/api/media/folders/${id}`, { method: 'DELETE' });
+      return apiRequest(`/api/media/folders/${encodeURIComponent(id)}`, { method: 'DELETE' });
   },
 
   getPublicShowcase: async (folderName?: string) => {
