@@ -1938,13 +1938,15 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             const showcaseFileUrl = mediaKey ? getPublicShowcaseUrl({ type: 'file', key: mediaKey }) : '';
                             const folderUrl = getPublicShowcaseUrl({ type: 'folder', prefix: `${mediaFolderPrefix}/` });
                             const uploadedAt = new Date().toISOString();
+                            const mediaMimeType = String(incomingMediaPayload.mimeType || '').trim();
 
                             newVars[varName] = showcaseFileUrl || mediaUrl;
-                            newVars[`${varName}_file_url`] = showcaseFileUrl || mediaUrl;
+                            newVars[`${varName}_file_url`] = showcaseFileUrl;
                             newVars[`${varName}_folder_url`] = folderUrl;
                             newVars[`${varName}_status`] = 'uploaded';
                             newVars[`${varName}_uploaded_at`] = uploadedAt;
                             newVars[`${varName}_rejection_reason`] = '';
+                            newVars[`${varName}_link_mime_type`] = mediaMimeType;
                             valueForLog = showcaseFileUrl || mediaUrl;
 
                             if (mediaKey) {
