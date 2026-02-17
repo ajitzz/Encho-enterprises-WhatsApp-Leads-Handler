@@ -128,6 +128,31 @@ const listMediaObjects = async (requestedPath = '/') => {
     return { listRes: primary, prefix: primaryPrefix };
 };
 
+const resolveMediaDeleteKey = (rawId = '') => {
+    const decoded = decodeURIComponent(String(rawId || '').trim());
+    if (!decoded) throw new Error('Invalid media id');
+
+    const normalized = decoded.replace(/^\/+/, '');
+    if (!MEDIA_ROOT_PREFIX) return normalized;
+    if (normalized.startsWith(MEDIA_ROOT_PREFIX)) return normalized;
+    return `${MEDIA_ROOT_PREFIX}${normalized}`;
+};
+
+const resolveFolderPrefixFromId = (rawId = '') => {
+    const decoded = decodeURIComponent(String(rawId || '').trim());
+    if (!decoded) throw new Error('Invalid folder id');
+
+    const separatorIndex = decoded.lastIndexOf(':');
+    const parentPath = separatorIndex >= 0 ? decoded.slice(0, separatorIndex) : '/';
+    const folderName = separatorIndex >= 0 ? decoded.slice(separatorIndex + 1) : decoded;
+
+    const sanitizedFolderName = String(folderName || '').trim().replace(/^\/+|\/+$/g, '');
+    if (!sanitizedFolderName) throw new Error('Folder name is missing');
+
+    const parentPrefix = toMediaPrefix(parentPath || '/');
+    return `${parentPrefix}${sanitizedFolderName}/`;
+};
+
 const withDb = async (operation) => {
     if (!pgPool) throw new Error("Database not initialized");
     let client;
@@ -2605,6 +2630,37 @@ apiRouter.post('/media/sync-s3', async (req, res) => {
     } catch (e) {
         console.error('[MEDIA SYNC ERROR]', e.message);
         res.status(500).json({ error: 'S3 sync failed', details: e.message });
+    }
+});
+
+apiRouter.delete('/media/files/:id', async (req, res) => {
+    try {
+        const key = resolveMediaDeleteKey(req.params.id);
+        await deleteFromS3(key);
+        res.json({ success: true, key });
+    } catch (e) {
+        console.error('[MEDIA DELETE FILE ERROR]', e.message);
+        res.status(500).json({ error: e.message || 'Failed to delete file from S3' });
+    }
+});
+
+apiRouter.delete('/media/folders/:id', async (req, res) => {
+    try {
+        const prefix = resolveFolderPrefixFromId(req.params.id);
+        const listRes = await s3Client.send(new ListObjectsV2Command({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Prefix: prefix,
+            MaxKeys: 1
+        }));
+
+        if ((listRes.Contents || []).length > 0) {
+            return res.status(400).json({ error: 'Folder is not empty. Delete files first.' });
+        }
+
+        res.json({ success: true, prefix });
+    } catch (e) {
+        console.error('[MEDIA DELETE FOLDER ERROR]', e.message);
+        res.status(500).json({ error: e.message || 'Failed to delete folder' });
     }
 });
 
