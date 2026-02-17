@@ -27,7 +27,7 @@ import {
   LocateFixed, AlertTriangle, Bot, CalendarClock, Calendar, FileCheck,
   Sparkles, TimerReset
 } from 'lucide-react';
-import { FlowNodeData, NodeType, ListSection, LocationPreset, SummaryFieldConfig, SummaryTextStyle, MessageFontSize, MessageFontWeight } from '../types';
+import { FlowNodeData, NodeType, ListSection, LocationPreset, SummaryFieldConfig, SummaryTextStyle, MessageFontSize, MessageFontWeight, MessageTextAlign } from '../types';
 
 const inferCapturedVariableNames = (data: FlowNodeData, nodeId?: string): string[] => {
     const variables = new Set<string>();
@@ -59,6 +59,38 @@ const messageFontWeightClassMap: Record<MessageFontWeight, string> = {
     bold: 'font-bold'
 };
 
+const messageTextAlignClassMap: Record<MessageTextAlign, string> = {
+    left: 'text-left',
+    center: 'text-center',
+    right: 'text-right'
+};
+
+const applyStyleTokensToContent = (content: string) => {
+    if (!content) return '';
+
+    const escaped = content
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+    return escaped
+        .replace(/\[b\]([\s\S]*?)\[\/b\]/gi, '<strong>$1</strong>')
+        .replace(/\[i\]([\s\S]*?)\[\/i\]/gi, '<em>$1</em>')
+        .replace(/\[u\]([\s\S]*?)\[\/u\]/gi, '<u>$1</u>')
+        .replace(/\[size=(small|medium|large)\]([\s\S]*?)\[\/size\]/gi, (_m, size, text) => {
+            const sizeClass = messageFontSizeClassMap[size as MessageFontSize] || messageFontSizeClassMap.medium;
+            return `<span class="${sizeClass}">${text}</span>`;
+        })
+        .replace(/\n/g, '<br />');
+};
+
+const messageTemplates = [
+    '👋 Hi {{name}}, welcome to Encho! We are excited to help you today.',
+    '🚗 Quick update: we have received your request. Please choose an option below to continue.',
+    '⏰ Friendly reminder: please complete the pending step so we can move your application forward faster.',
+    '✅ Great news {{name}}! Your profile is looking good. Tap below to continue to the next step.'
+];
+
 // --- 1. ADVANCED NODE COMPONENT (VISUALIZER) ---
 
 const NodeHeader = ({ color, icon, label, selected, subtitle }: any) => (
@@ -78,6 +110,7 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
     let config = { color: 'bg-slate-600', icon: <MessageSquare size={14} />, label: 'Message', subtitle: '' };
     const contentSizeClass = messageFontSizeClassMap[data.messageFontSize || 'medium'];
     const contentWeightClass = messageFontWeightClassMap[data.messageFontWeight || 'semibold'];
+    const contentAlignClass = messageTextAlignClassMap[data.messageTextAlign || 'left'];
     
     switch(data.type) {
         case 'start': config = { color: 'bg-emerald-500', icon: <Zap size={14} />, label: 'Start Flow', subtitle: 'Entry Point' }; break;
@@ -130,9 +163,9 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
 
                 {/* 2. Text Content */}
                 {data.type !== 'delay' && data.type !== 'set_variable' && data.type !== 'summary' && data.type !== 'datetime_picker' && (
-                    <div className={`mb-3 text-gray-800 leading-relaxed ${contentSizeClass} ${contentWeightClass}`}>
+                    <div className={`mb-3 text-gray-800 leading-relaxed ${contentSizeClass} ${contentWeightClass} ${contentAlignClass}`}>
                         {data.content ? (
-                            <div className="whitespace-pre-wrap">{data.content}</div>
+                            <div dangerouslySetInnerHTML={{ __html: applyStyleTokensToContent(data.content) }} />
                         ) : (
                             <span className="text-gray-400 italic">Click to configure message...</span>
                         )}
@@ -331,7 +364,9 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
 const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>, onChange: (id: string, d: any) => void, onClose: () => void }) => {
     const [local, setLocal] = useState(node.data);
     const [activeTab, setActiveTab] = useState<'content' | 'settings'>('content');
+    const [selectionError, setSelectionError] = useState<string>('');
     const allNodes = useFlowStore((state) => state.nodes);
+    const messageTextareaRef = React.useRef<HTMLTextAreaElement | null>(null);
 
     const detectedVariables = useMemo(() => {
         const vars = new Set<string>();
@@ -352,6 +387,35 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
     };
 
     const updateSummaryFields = (fields: SummaryFieldConfig[]) => update('summaryFields', fields);
+
+    const applyStyleToken = (openToken: string, closeToken: string) => {
+        const textarea = messageTextareaRef.current;
+        if (!textarea) return;
+
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+
+        if (start === end) {
+            setSelectionError('Select text inside the message body first to apply style.');
+            return;
+        }
+
+        const currentContent = local.content || '';
+        const selectedText = currentContent.slice(start, end);
+        const updatedContent = `${currentContent.slice(0, start)}${openToken}${selectedText}${closeToken}${currentContent.slice(end)}`;
+
+        setSelectionError('');
+        update('content', updatedContent);
+
+        requestAnimationFrame(() => {
+            const refreshedTextarea = messageTextareaRef.current;
+            if (!refreshedTextarea) return;
+            const nextStart = start + openToken.length;
+            const nextEnd = nextStart + selectedText.length;
+            refreshedTextarea.focus();
+            refreshedTextarea.setSelectionRange(nextStart, nextEnd);
+        });
+    };
 
     return (
         <div className="w-[420px] bg-white border-l border-gray-200 h-full flex flex-col shadow-2xl z-30 animate-in slide-in-from-right duration-300 absolute right-0 top-0 bottom-0">
@@ -412,10 +476,22 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                             <label className="block text-xs font-bold text-gray-700 uppercase mb-2">
                                 {local.type === 'summary' ? 'Summary Header Text' : local.type === 'datetime_picker' ? 'Greeting Message' : 'Message Body'}
                             </label>
+                            <div className="mb-2 flex flex-wrap items-center gap-2">
+                                <button type="button" onClick={() => applyStyleToken('[b]', '[/b]')} className="px-2 py-1 text-[11px] font-bold border border-gray-200 rounded bg-white hover:bg-gray-50">Bold</button>
+                                <button type="button" onClick={() => applyStyleToken('[i]', '[/i]')} className="px-2 py-1 text-[11px] border border-gray-200 rounded bg-white hover:bg-gray-50 italic">Italic</button>
+                                <button type="button" onClick={() => applyStyleToken('[u]', '[/u]')} className="px-2 py-1 text-[11px] border border-gray-200 rounded bg-white hover:bg-gray-50 underline">Underline</button>
+                                <button type="button" onClick={() => applyStyleToken('[size=small]', '[/size]')} className="px-2 py-1 text-[11px] border border-gray-200 rounded bg-white hover:bg-gray-50">Small</button>
+                                <button type="button" onClick={() => applyStyleToken('[size=medium]', '[/size]')} className="px-2 py-1 text-[11px] border border-gray-200 rounded bg-white hover:bg-gray-50">Medium</button>
+                                <button type="button" onClick={() => applyStyleToken('[size=large]', '[/size]')} className="px-2 py-1 text-[11px] border border-gray-200 rounded bg-white hover:bg-gray-50">Large</button>
+                            </div>
                             <textarea 
-                                className="w-full border border-gray-200 p-3 rounded-lg text-sm h-32 resize-none outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50 focus:bg-white transition-all"
+                                ref={messageTextareaRef}
+                                className="w-full border border-gray-200 p-3 rounded-lg text-sm h-36 resize-y outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50 focus:bg-white transition-all"
                                 value={local.content || ''} 
-                                onChange={e => update('content', e.target.value)} 
+                                onChange={e => {
+                                    setSelectionError('');
+                                    update('content', e.target.value);
+                                }} 
                                 placeholder={
                                     local.type === 'pickup_location' ? "Select your pickup location below:" :
                                     local.type === 'destination_location' ? "Select your destination below:" :
@@ -424,10 +500,23 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                     "Type your message here..."
                                 }
                             />
+                            {selectionError && <p className="mt-2 text-[11px] text-amber-600">{selectionError}</p>}
+                            <p className="mt-2 text-[10px] text-gray-500">Tip: select part of the text then click style buttons. You can mix multiple styles in one message.</p>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                                {messageTemplates.map((template, index) => (
+                                    <button
+                                        key={`template_${index}`}
+                                        onClick={() => update('content', template)}
+                                        className="text-[10px] bg-blue-50 text-blue-700 px-2 py-1 rounded border border-blue-100 hover:bg-blue-100 transition-colors"
+                                    >
+                                        Template {index + 1}
+                                    </button>
+                                ))}
+                            </div>
                             {local.type !== 'summary' && local.type !== 'datetime_picker' && (
                                 <div className="mt-2 flex gap-2 overflow-x-auto pb-1">
                                     {['{{name}}', '{{phone}}', '{{email}}'].map(tag => (
-                                        <button key={tag} onClick={() => update('content', (local.content || '') + ' ' + tag)} className="text-[10px] bg-gray-100 px-2 py-1 rounded border border-gray-200 hover:bg-gray-200 transition-colors">{tag}</button>
+                                        <button key={tag} onClick={() => update('content', `${local.content || ''} ${tag}`.trim())} className="text-[10px] bg-gray-100 px-2 py-1 rounded border border-gray-200 hover:bg-gray-200 transition-colors">{tag}</button>
                                     ))}
                                 </div>
                             )}
@@ -437,7 +526,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                     {['text', 'image', 'input', 'interactive_button', 'interactive_list', 'handoff', 'rich_card', 'location_request', 'pickup_location', 'destination_location', 'summary', 'datetime_picker'].includes(local.type) && (
                         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
                             <label className="block text-xs font-bold text-gray-700 uppercase mb-2">Message Typography</label>
-                            <div className="grid grid-cols-2 gap-2">
+                            <div className="grid grid-cols-3 gap-2">
                                 <select
                                     className="w-full border border-gray-200 p-2 rounded text-sm bg-white"
                                     value={(local.messageFontSize || 'medium') as MessageFontSize}
@@ -456,8 +545,17 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                                     <option value="semibold">Semi Bold</option>
                                     <option value="bold">Bold</option>
                                 </select>
+                                <select
+                                    className="w-full border border-gray-200 p-2 rounded text-sm bg-white"
+                                    value={(local.messageTextAlign || 'left') as MessageTextAlign}
+                                    onChange={e => update('messageTextAlign', e.target.value as MessageTextAlign)}
+                                >
+                                    <option value="left">Align Left</option>
+                                    <option value="center">Align Center</option>
+                                    <option value="right">Align Right</option>
+                                </select>
                             </div>
-                            <p className="text-[10px] text-gray-500 mt-2">Applies to the message preview for this node and is saved as node metadata.</p>
+                            <p className="text-[10px] text-gray-500 mt-2">Defaults apply to unstyled text. Selected text styles can override these values using inline style tokens.</p>
                         </div>
                     )}
 
