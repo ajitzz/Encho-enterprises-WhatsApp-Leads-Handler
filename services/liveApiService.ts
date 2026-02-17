@@ -183,11 +183,11 @@ export const liveApiService = {
   },
 
   unsetPublicFolder: async (id: string) => {
-      return apiRequest(`/api/media/folders/${id}/public`, { method: 'DELETE' });
+      return apiRequest(`/api/media/folders/${encodeURIComponent(id)}/public`, { method: 'DELETE' });
   },
 
   setPublicFolder: async (id: string) => {
-      return apiRequest(`/api/media/folders/${id}/public`, { method: 'POST' });
+      return apiRequest(`/api/media/folders/${encodeURIComponent(id)}/public`, { method: 'POST' });
   },
 
   renameFolder: async (id: string, name: string) => {
