@@ -243,6 +243,7 @@ const resolveFolderPrefixFromId = async (rawId = '') => {
 
 
 const PUBLIC_SHOWCASE_SETTINGS_KEY = 'public_showcase_folders';
+const SHOWCASE_SHORT_LINKS_KEY = 'showcase_short_links';
 
 const normalizeShowcasePrefix = (prefix = '') => {
     const cleaned = String(prefix || '').trim().replace(/^\/+/, '');
@@ -318,6 +319,73 @@ const savePublicShowcaseFolders = async (entries = []) => {
         );
         return entries;
     });
+};
+
+const getShowcaseShortLinkMap = async () => {
+    return withDb(async (client) => {
+        const setting = await client.query('SELECT value FROM system_settings WHERE key = $1 LIMIT 1', [SHOWCASE_SHORT_LINKS_KEY]);
+        const value = setting.rows?.[0]?.value;
+        return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    });
+};
+
+const saveShowcaseShortLinkMap = async (map = {}) => {
+    const safeMap = map && typeof map === 'object' && !Array.isArray(map) ? map : {};
+    return withDb(async (client) => {
+        await client.query(
+            'INSERT INTO system_settings (key, value) VALUES ($1, $2::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+            [SHOWCASE_SHORT_LINKS_KEY, JSON.stringify(safeMap)]
+        );
+        return safeMap;
+    });
+};
+
+const getShowcasePayloadFingerprint = (payload = {}) => {
+    const normalized = JSON.stringify(payload || {});
+    return crypto.createHash('sha256').update(normalized).digest('hex');
+};
+
+const getOrCreateShowcaseShortToken = async (payload = {}) => {
+    const safePayload = payload && typeof payload === 'object' ? payload : {};
+    const payloadFingerprint = getShowcasePayloadFingerprint(safePayload);
+
+    const map = await getShowcaseShortLinkMap();
+    const existingToken = Object.entries(map).find(([, entry]) => {
+        if (!entry || typeof entry !== 'object') return false;
+        if (typeof entry.fingerprint === 'string') return entry.fingerprint === payloadFingerprint;
+        return getShowcasePayloadFingerprint(entry.payload || {}) === payloadFingerprint;
+    })?.[0];
+
+    if (existingToken) return existingToken;
+
+    let token = '';
+    for (let i = 0; i < 8; i += 1) {
+        const candidate = crypto.randomBytes(5).toString('base64url');
+        if (!map[candidate]) {
+            token = candidate;
+            break;
+        }
+    }
+    if (!token) token = `${Date.now().toString(36)}${crypto.randomBytes(2).toString('hex')}`;
+
+    map[token] = {
+        payload: safePayload,
+        fingerprint: payloadFingerprint,
+        createdAt: new Date().toISOString()
+    };
+
+    await saveShowcaseShortLinkMap(map);
+    return token;
+};
+
+const getShowcasePayloadFromShortToken = async (token = '') => {
+    const trimmed = String(token || '').trim();
+    if (!trimmed) return null;
+    const map = await getShowcaseShortLinkMap();
+    const entry = map[trimmed];
+    if (!entry || typeof entry !== 'object') return null;
+    const payload = entry.payload;
+    return payload && typeof payload === 'object' ? payload : null;
 };
 
 const withDb = async (operation) => {
@@ -419,8 +487,8 @@ const inferMediaTypeFromKey = (key = '') => {
 const toBase64Url = (value = '') => Buffer.from(String(value)).toString('base64url');
 const fromBase64Url = (value = '') => Buffer.from(String(value), 'base64url').toString('utf8');
 const buildShowcaseToken = (payload = {}) => toBase64Url(JSON.stringify(payload));
-const getPublicShowcaseUrl = (payload = {}) => {
-    const token = encodeURIComponent(buildShowcaseToken(payload));
+const getPublicShowcaseUrl = async (payload = {}) => {
+    const token = encodeURIComponent(await getOrCreateShowcaseShortToken(payload));
     const normalizedBase = String(SYSTEM_CONFIG.PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
     const safeBase = normalizedBase || 'https://encho-whatsapp-lead-handler.vercel.app';
     return `${safeBase}/showcase/${token}`;
@@ -2283,8 +2351,8 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             }
 
                             const mediaUrl = mediaKey ? getPublicS3Url(mediaKey) : (incomingMediaPayload.mediaUrl || '');
-                            const showcaseFileUrl = mediaKey ? getPublicShowcaseUrl({ type: 'file', key: mediaKey }) : '';
-                            const folderUrl = getPublicShowcaseUrl({ type: 'folder', prefix: `${mediaFolderPrefix}/` });
+                            const showcaseFileUrl = mediaKey ? await getPublicShowcaseUrl({ type: 'file', key: mediaKey }) : '';
+                            const folderUrl = await getPublicShowcaseUrl({ type: 'folder', prefix: `${mediaFolderPrefix}/` });
                             const uploadedAt = new Date().toISOString();
                             const mediaMimeType = String(incomingMediaPayload.mimeType || '').trim();
 
@@ -2833,7 +2901,7 @@ apiRouter.get('/media', async (req, res) => {
         const publicShowcaseFolders = await getPublicShowcaseFolders();
         const publicByFolderId = new Map(publicShowcaseFolders.map((item) => [item.folderId, item]));
 
-        const folders = (listRes.CommonPrefixes || []).map((entry) => {
+        const folders = (await Promise.all((listRes.CommonPrefixes || []).map(async (entry) => {
             const folderPrefix = (entry.Prefix || '').replace(prefix, '').replace(/\/$/, '');
             const id = `${requestedPath}:${folderPrefix}`;
             const publicEntry = publicByFolderId.get(id);
@@ -2842,9 +2910,9 @@ apiRouter.get('/media', async (req, res) => {
                 name: folderPrefix,
                 parent_path: requestedPath,
                 is_public_showcase: Boolean(publicEntry),
-                public_showcase_url: publicEntry ? getPublicShowcaseUrl({ type: 'folder', prefix: publicEntry.prefix }) : null
+                public_showcase_url: publicEntry ? await getPublicShowcaseUrl({ type: 'folder', prefix: publicEntry.prefix }) : null
             };
-        }).filter((folder) => folder.name);
+        }))).filter((folder) => folder.name);
 
         const files = (listRes.Contents || [])
             .filter((item) => item.Key && item.Key !== prefix)
@@ -2956,7 +3024,7 @@ apiRouter.post('/media/folders/:id/public', async (req, res) => {
             prefix,
             hasObjects,
             usedFallback,
-            shareUrl: getPublicShowcaseUrl({ type: 'folder', prefix }),
+            shareUrl: await getPublicShowcaseUrl({ type: 'folder', prefix }),
             activeCount: next.length
         });
     } catch (e) {
@@ -3038,15 +3106,15 @@ const listShowcaseItemsByPrefix = async (prefix = '') => {
 apiRouter.get('/showcase', async (req, res) => {
     try {
         const publicFolders = await getPublicShowcaseFolders();
-        const items = publicFolders
+        const sortedFolders = publicFolders
             .slice()
-            .sort((a, b) => new Date(b.enabledAt || 0).getTime() - new Date(a.enabledAt || 0).getTime())
-            .map((entry) => ({
+            .sort((a, b) => new Date(b.enabledAt || 0).getTime() - new Date(a.enabledAt || 0).getTime());
+        const items = await Promise.all(sortedFolders.map(async (entry) => ({
                 id: entry.prefix,
-                url: getPublicShowcaseUrl({ type: 'folder', prefix: entry.prefix }),
+                url: await getPublicShowcaseUrl({ type: 'folder', prefix: entry.prefix }),
                 type: 'document',
                 filename: entry.folderName || entry.prefix.replace(/\/$/, '').split('/').pop() || entry.prefix
-            }));
+            })));
 
         res.json({
             title: 'Public Folder Showcase',
@@ -3062,11 +3130,15 @@ apiRouter.get('/showcase/:token', async (req, res) => {
         const rawToken = decodeURIComponent(String(req.params.token || ''));
         let payload = null;
 
-        try {
-            payload = JSON.parse(fromBase64Url(rawToken));
-        } catch (e) {
-            const maybePrefix = rawToken.startsWith('Driver data/') ? rawToken : '';
-            if (maybePrefix) payload = { type: 'folder', prefix: maybePrefix.endsWith('/') ? maybePrefix : `${maybePrefix}/` };
+        payload = await getShowcasePayloadFromShortToken(rawToken);
+
+        if (!payload) {
+            try {
+                payload = JSON.parse(fromBase64Url(rawToken));
+            } catch (e) {
+                const maybePrefix = rawToken.startsWith('Driver data/') ? rawToken : '';
+                if (maybePrefix) payload = { type: 'folder', prefix: maybePrefix.endsWith('/') ? maybePrefix : `${maybePrefix}/` };
+            }
         }
 
         const type = String(payload?.type || '').toLowerCase();
@@ -3112,7 +3184,7 @@ apiRouter.get('/showcase/status', async (req, res) => {
             activeCount: folders.length,
             folderId: latest?.folderId || null,
             folderName: latest?.folderName || null,
-            shareUrl: latest ? getPublicShowcaseUrl({ type: 'folder', prefix: latest.prefix }) : null
+            shareUrl: latest ? await getPublicShowcaseUrl({ type: 'folder', prefix: latest.prefix }) : null
         });
     } catch (e) {
         res.status(500).json({ error: e.message || 'Failed to load showcase status' });
