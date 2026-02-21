@@ -155,6 +155,8 @@ export const liveApiService = {
   },
 
   uploadMedia: async (file: File, path: string) => {
+      const isLocalDev = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+
       try {
           const init = await apiRequest<any>('/api/media/upload/init', {
               method: 'POST',
@@ -178,7 +180,15 @@ export const liveApiService = {
 
           return { success: true, key: init.key, url: init.url };
       } catch (directUploadError) {
-          // Fallback for local/dev environments where presigned upload may be blocked.
+          const directUploadMessage = String((directUploadError as Error)?.message || directUploadError || 'Upload failed');
+
+          // Vercel serverless functions have request payload limits, so never fallback to proxy upload
+          // in non-local environments (it triggers FUNCTION_PAYLOAD_TOO_LARGE for larger files).
+          if (!isLocalDev) {
+              throw new Error(`Direct S3 upload failed. ${directUploadMessage}. Check S3 CORS for PUT and allowed headers.`);
+          }
+
+          // Local/dev fallback where pre-signed upload may be blocked by local networking/CORS.
           const formData = new FormData();
           formData.append('file', file);
           formData.append('path', path);
@@ -196,7 +206,7 @@ export const liveApiService = {
 
           if (!response.ok) {
               const errorBody = await response.text();
-              throw new Error(errorBody || String(directUploadError) || 'Upload failed');
+              throw new Error(errorBody || directUploadMessage || 'Upload failed');
           }
 
           return response.json();

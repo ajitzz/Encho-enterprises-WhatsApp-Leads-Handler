@@ -120,6 +120,8 @@ export const MediaLibrary = () => {
             const msg = e.message || "Failed to upload file";
             if (msg.includes('409') || msg.includes('already exists')) {
                  setUploadError("File already exists (Backend Check).");
+            } else if (msg.includes('FUNCTION_PAYLOAD_TOO_LARGE') || msg.includes('413')) {
+                 setUploadError('Upload failed: file is too large for proxy upload. S3 direct upload must be enabled via bucket CORS.');
             } else if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('CORS')) {
                  setUploadError("AWS CORS Error: Bucket permissions missing");
                  setShowCorsHelp(true);
