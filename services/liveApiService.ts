@@ -155,26 +155,52 @@ export const liveApiService = {
   },
 
   uploadMedia: async (file: File, path: string) => {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('path', path);
+      try {
+          const init = await apiRequest<any>('/api/media/upload/init', {
+              method: 'POST',
+              body: JSON.stringify({
+                  path,
+                  fileName: file.name,
+                  contentType: file.type || 'application/octet-stream'
+              })
+          });
 
-      const headers: Record<string, string> = {};
-      if (authToken) {
-          headers['Authorization'] = `Bearer ${authToken}`;
+          const uploadResponse = await fetch(init.uploadUrl, {
+              method: 'PUT',
+              headers: init.headers || { 'Content-Type': file.type || 'application/octet-stream' },
+              body: file
+          });
+
+          if (!uploadResponse.ok) {
+              const errorBody = await uploadResponse.text();
+              throw new Error(errorBody || 'Upload to S3 failed');
+          }
+
+          return { success: true, key: init.key, url: init.url };
+      } catch (directUploadError) {
+          // Fallback for local/dev environments where presigned upload may be blocked.
+          const formData = new FormData();
+          formData.append('file', file);
+          formData.append('path', path);
+
+          const headers: Record<string, string> = {};
+          if (authToken) {
+              headers['Authorization'] = `Bearer ${authToken}`;
+          }
+
+          const response = await fetch(`${API_BASE_URL}/api/media/upload`, {
+              method: 'POST',
+              headers,
+              body: formData
+          });
+
+          if (!response.ok) {
+              const errorBody = await response.text();
+              throw new Error(errorBody || String(directUploadError) || 'Upload failed');
+          }
+
+          return response.json();
       }
-      
-      const response = await fetch(`${API_BASE_URL}/api/media/upload`, {
-          method: 'POST',
-          headers,
-          body: formData
-      });
-      
-      if (!response.ok) {
-           const errorBody = await response.text();
-           throw new Error(errorBody || 'Upload failed');
-      }
-      return response.json();
   },
 
   syncFileToWhatsApp: async (id: string) => {
