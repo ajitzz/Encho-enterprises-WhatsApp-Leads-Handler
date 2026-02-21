@@ -3,6 +3,13 @@ import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMes
 
 // Use relative path so the Vercel proxy/rewrite handles the domain automatically.
 const API_BASE_URL = ''; 
+const DEFAULT_PROXY_UPLOAD_MAX_BYTES = 4 * 1024 * 1024; // Keep below common serverless payload limits (e.g. Vercel ~4.5MB)
+
+const resolveProxyUploadMaxBytes = () => {
+    const raw = (import.meta as any)?.env?.VITE_PROXY_UPLOAD_MAX_BYTES;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_PROXY_UPLOAD_MAX_BYTES;
+};
 
 let authToken: string | null = localStorage.getItem('uber_fleet_auth_token');
 
