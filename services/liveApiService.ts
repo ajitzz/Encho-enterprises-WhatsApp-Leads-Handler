@@ -158,12 +158,15 @@ export const liveApiService = {
       const formData = new FormData();
       formData.append('file', file);
       formData.append('path', path);
+
+      const headers: Record<string, string> = {};
+      if (authToken) {
+          headers['Authorization'] = `Bearer ${authToken}`;
+      }
       
       const response = await fetch(`${API_BASE_URL}/api/media/upload`, {
           method: 'POST',
-          headers: {
-              'Authorization': `Bearer ${authToken}`
-          },
+          headers,
           body: formData
       });
       
@@ -191,7 +194,7 @@ export const liveApiService = {
   },
 
   renameFolder: async (id: string, name: string) => {
-      return apiRequest(`/api/media/folders/${id}`, {
+      return apiRequest(`/api/media/folders/${encodeURIComponent(id)}`, {
           method: 'PATCH',
           body: JSON.stringify({ name })
       });

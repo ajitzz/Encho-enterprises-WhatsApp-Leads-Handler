@@ -241,6 +241,25 @@ const resolveFolderPrefixFromId = async (rawId = '') => {
     return primaryPrefix;
 };
 
+const resolveFolderCreatePrefix = async ({ rawParentPath = '/', rawFolderName = '' }) => {
+    const sanitizedFolderName = String(rawFolderName || '').trim().replace(/^\/+|\/+$/g, '');
+    if (!sanitizedFolderName) throw new Error('Folder name is required');
+
+    const primaryParentPrefix = toMediaPrefix(rawParentPath);
+    if (!MEDIA_ROOT_PREFIX) return `${primaryParentPrefix}${sanitizedFolderName}/`;
+
+    const normalizedParentPath = normalizeMediaPath(rawParentPath);
+    const fallbackParentPrefix = normalizedParentPath ? `${normalizedParentPath}/` : '';
+
+    const [hasPrimaryContent, hasFallbackContent] = await Promise.all([
+        prefixHasObjectsInS3(primaryParentPrefix),
+        prefixHasObjectsInS3(fallbackParentPrefix)
+    ]);
+
+    const parentPrefix = !hasPrimaryContent && hasFallbackContent ? fallbackParentPrefix : primaryParentPrefix;
+    return `${parentPrefix}${sanitizedFolderName}/`;
+};
+
 
 const PUBLIC_SHOWCASE_SETTINGS_KEY = 'public_showcase_folders';
 const SHOWCASE_SHORT_LINKS_KEY = 'showcase_short_links';
@@ -2963,6 +2982,100 @@ apiRouter.post('/media/upload', upload.single('file'), async (req, res) => {
         res.status(500).json({ error: 'Failed to upload file to S3', details: e.message });
     }
 });
+
+apiRouter.post('/media/folders', async (req, res) => {
+    try {
+        const name = String(req.body?.name || '').trim();
+        const parentPath = typeof req.body?.parentPath === 'string' ? req.body.parentPath : '/';
+        if (!name) return res.status(400).json({ error: 'Folder name is required' });
+
+        const targetPrefix = await resolveFolderCreatePrefix({ rawParentPath: parentPath, rawFolderName: name });
+        const normalizedParentPath = normalizeMediaPath(parentPath);
+        const fallbackPrefix = `${normalizedParentPath ? `${normalizedParentPath}/` : ''}${name.replace(/^\/+|\/+$/g, '')}/`;
+
+        const [targetExists, fallbackExists] = await Promise.all([
+            prefixHasObjectsInS3(targetPrefix).then((exists) => exists || keyExistsInS3(targetPrefix)),
+            targetPrefix === fallbackPrefix
+                ? Promise.resolve(false)
+                : prefixHasObjectsInS3(fallbackPrefix).then((exists) => exists || keyExistsInS3(fallbackPrefix))
+        ]);
+
+        if (targetExists || fallbackExists) {
+            return res.status(409).json({ error: 'Folder already exists' });
+        }
+
+        await uploadToS3({
+            key: targetPrefix,
+            body: '',
+            contentType: 'application/x-directory'
+        });
+
+        const id = `${parentPath}:${name}`;
+        return res.json({ success: true, id, name, parent_path: parentPath });
+    } catch (e) {
+        console.error('[MEDIA CREATE FOLDER ERROR]', e.message);
+        return res.status(500).json({ error: e.message || 'Failed to create folder' });
+    }
+});
+
+apiRouter.patch('/media/folders/:id', async (req, res) => {
+    try {
+        const folderId = decodeURIComponent(String(req.params.id || '').trim());
+        const newName = String(req.body?.name || '').trim().replace(/^\/+|\/+$/g, '');
+        if (!folderId) return res.status(400).json({ error: 'Invalid folder id' });
+        if (!newName) return res.status(400).json({ error: 'New folder name is required' });
+
+        const oldPrefix = await resolveFolderPrefixFromId(folderId);
+        const oldPrefixTrimmed = oldPrefix.replace(/\/+$/, '');
+        const oldName = oldPrefixTrimmed.split('/').pop() || '';
+        const parentPrefix = oldPrefixTrimmed.slice(0, -(oldName.length)).replace(/\/+$/, '');
+        const newPrefix = `${parentPrefix ? `${parentPrefix}/` : ''}${newName}/`;
+
+        if (oldPrefix === newPrefix) {
+            return res.json({ success: true, prefix: oldPrefix, unchanged: true });
+        }
+
+        const destinationExists = await prefixHasObjectsInS3(newPrefix).then((exists) => exists || keyExistsInS3(newPrefix));
+        if (destinationExists) {
+            return res.status(409).json({ error: 'Folder name already exists' });
+        }
+
+        const keys = await listAllS3KeysByPrefix(oldPrefix);
+        await Promise.all(keys.map((key) => {
+            const targetKey = `${newPrefix}${key.slice(oldPrefix.length)}`;
+            return s3Client.send(new CopyObjectCommand({
+                Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+                CopySource: `${SYSTEM_CONFIG.AWS_BUCKET}/${encodeURI(key).replace(/#/g, '%23')}`,
+                Key: targetKey
+            }));
+        }));
+
+        await Promise.all(keys.map((key) => deleteFromS3(key)));
+        if (oldPrefix.endsWith('/')) {
+            await deleteFromS3(oldPrefix).catch(() => null);
+        }
+        await uploadToS3({ key: newPrefix, body: '', contentType: 'application/x-directory' }).catch(() => null);
+
+        const separatorIndex = folderId.lastIndexOf(':');
+        const parentPath = separatorIndex >= 0 ? folderId.slice(0, separatorIndex) : '/';
+        const newFolderId = `${parentPath}:${newName}`;
+
+        const currentShowcases = await getPublicShowcaseFolders();
+        const nextShowcases = currentShowcases.map((item) => {
+            if (item.folderId !== folderId) return item;
+            return { ...item, folderId: newFolderId, folderName: newName, prefix: newPrefix };
+        });
+        if (JSON.stringify(nextShowcases) !== JSON.stringify(currentShowcases)) {
+            await savePublicShowcaseFolders(nextShowcases);
+        }
+
+        return res.json({ success: true, oldPrefix, newPrefix, id: newFolderId, name: newName, movedObjects: keys.length });
+    } catch (e) {
+        console.error('[MEDIA RENAME FOLDER ERROR]', e.message);
+        return res.status(500).json({ error: e.message || 'Failed to rename folder' });
+    }
+});
+
 
 apiRouter.post('/media/sync-s3', async (req, res) => {
     try {
