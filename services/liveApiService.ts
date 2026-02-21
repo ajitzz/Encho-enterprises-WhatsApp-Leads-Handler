@@ -3,6 +3,13 @@ import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMes
 
 // Use relative path so the Vercel proxy/rewrite handles the domain automatically.
 const API_BASE_URL = ''; 
+const DEFAULT_PROXY_UPLOAD_MAX_BYTES = 4 * 1024 * 1024; // Keep below common serverless payload limits (e.g. Vercel ~4.5MB)
+
+const resolveProxyUploadMaxBytes = () => {
+    const raw = (import.meta as any)?.env?.VITE_PROXY_UPLOAD_MAX_BYTES;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_PROXY_UPLOAD_MAX_BYTES;
+};
 
 let authToken: string | null = localStorage.getItem('uber_fleet_auth_token');
 
@@ -155,6 +162,10 @@ export const liveApiService = {
   },
 
   uploadMedia: async (file: File, path: string) => {
+      const isLocalDev = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+      const proxyUploadMaxBytes = resolveProxyUploadMaxBytes();
+      const canUseProxyFallback = isLocalDev || file.size <= proxyUploadMaxBytes;
+
       try {
           const init = await apiRequest<any>('/api/media/upload/init', {
               method: 'POST',
@@ -178,7 +189,17 @@ export const liveApiService = {
 
           return { success: true, key: init.key, url: init.url };
       } catch (directUploadError) {
-          // Fallback for local/dev environments where presigned upload may be blocked.
+          const directUploadMessage = String((directUploadError as Error)?.message || directUploadError || 'Upload failed');
+
+          // Keep proxy fallback available for local dev and small files only.
+          // For larger files in serverless environments, proxy uploads can trigger 413.
+          if (!canUseProxyFallback) {
+              const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
+              const maxMb = (proxyUploadMaxBytes / (1024 * 1024)).toFixed(2);
+              throw new Error(`Direct S3 upload failed. ${directUploadMessage}. File size ${sizeMb}MB exceeds proxy fallback limit ${maxMb}MB. Configure S3 CORS for direct PUT upload.`);
+          }
+
+          // Local/dev fallback where pre-signed upload may be blocked by local networking/CORS.
           const formData = new FormData();
           formData.append('file', file);
           formData.append('path', path);
@@ -196,7 +217,7 @@ export const liveApiService = {
 
           if (!response.ok) {
               const errorBody = await response.text();
-              throw new Error(errorBody || String(directUploadError) || 'Upload failed');
+              throw new Error(errorBody || directUploadMessage || 'Upload failed');
           }
 
           return response.json();
