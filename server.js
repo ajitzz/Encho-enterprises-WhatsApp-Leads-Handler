@@ -2983,6 +2983,37 @@ apiRouter.post('/media/upload', upload.single('file'), async (req, res) => {
     }
 });
 
+apiRouter.post('/media/upload/init', async (req, res) => {
+    try {
+        const fileName = String(req.body?.fileName || '').trim();
+        if (!fileName) {
+            return res.status(400).json({ error: 'File name is required' });
+        }
+
+        const path = typeof req.body?.path === 'string' ? req.body.path : '/';
+        const contentType = String(req.body?.contentType || 'application/octet-stream').trim() || 'application/octet-stream';
+        const key = await resolveMediaUploadKey({ rawPath: path, rawFileName: fileName });
+
+        const command = new PutObjectCommand({
+            Bucket: SYSTEM_CONFIG.AWS_BUCKET,
+            Key: key,
+            ContentType: contentType
+        });
+        const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
+
+        return res.json({
+            success: true,
+            key,
+            uploadUrl,
+            headers: { 'Content-Type': contentType },
+            url: getPublicS3Url(key)
+        });
+    } catch (e) {
+        console.error('[MEDIA UPLOAD INIT ERROR]', e.message);
+        return res.status(500).json({ error: 'Failed to initialize media upload', details: e.message });
+    }
+});
+
 apiRouter.post('/media/folders', async (req, res) => {
     try {
         const name = String(req.body?.name || '').trim();
