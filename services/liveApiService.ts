@@ -163,8 +163,6 @@ export const liveApiService = {
 
   uploadMedia: async (file: File, path: string) => {
       const isLocalDev = ['localhost', '127.0.0.1'].includes(window.location.hostname);
-      const proxyUploadMaxBytes = resolveProxyUploadMaxBytes();
-      const canUseProxyFallback = isLocalDev || file.size <= proxyUploadMaxBytes;
 
       try {
           const init = await apiRequest<any>('/api/media/upload/init', {
@@ -191,12 +189,10 @@ export const liveApiService = {
       } catch (directUploadError) {
           const directUploadMessage = String((directUploadError as Error)?.message || directUploadError || 'Upload failed');
 
-          // Keep proxy fallback available for local dev and small files only.
-          // For larger files in serverless environments, proxy uploads can trigger 413.
-          if (!canUseProxyFallback) {
-              const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
-              const maxMb = (proxyUploadMaxBytes / (1024 * 1024)).toFixed(2);
-              throw new Error(`Direct S3 upload failed. ${directUploadMessage}. File size ${sizeMb}MB exceeds proxy fallback limit ${maxMb}MB. Configure S3 CORS for direct PUT upload.`);
+          // Vercel serverless functions have request payload limits, so never fallback to proxy upload
+          // in non-local environments (it triggers FUNCTION_PAYLOAD_TOO_LARGE for larger files).
+          if (!isLocalDev) {
+              throw new Error(`Direct S3 upload failed. ${directUploadMessage}. Check S3 CORS for PUT and allowed headers.`);
           }
 
           // Local/dev fallback where pre-signed upload may be blocked by local networking/CORS.
