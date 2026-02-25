@@ -183,7 +183,17 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const renderMediaPreview = (url?: string, type?: string) => {
       if (!url) return null;
       if (type === 'video') return <div className="w-full aspect-video bg-black rounded mb-2"><video src={url} controls className="w-full h-full object-contain" /></div>;
+      if (type === 'audio') return <div className="w-full bg-gray-100 rounded mb-2 p-2"><audio src={url} controls className="w-full" /></div>;
+      if (type === 'document') return <div className="w-full rounded mb-2 p-3 border border-gray-200 bg-gray-50 text-xs text-gray-600">Document attached</div>;
       return <div className="w-full aspect-video bg-gray-100 rounded mb-2"><img src={url} className="w-full h-full object-cover rounded" alt="media" /></div>;
+  };
+
+  const getMessageMedia = (msg: Message): { url?: string; type?: string } => {
+      if (msg.audioUrl) return { url: msg.audioUrl, type: 'audio' };
+      if (msg.videoUrl) return { url: msg.videoUrl, type: 'video' };
+      if (msg.documentUrl) return { url: msg.documentUrl, type: 'document' };
+      if (msg.imageUrl) return { url: msg.imageUrl, type: 'image' };
+      return {};
   };
 
   return (
@@ -213,8 +223,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
           <div className="flex-1 flex overflow-hidden">
             <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px] relative">
               <div className="flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4">
-                {localMessages.map((msg) => (
-                    msg.type === 'system_error' ? (
+                {localMessages.map((msg) => {
+                    const media = getMessageMedia(msg);
+                    return msg.type === 'system_error' ? (
                         <div key={msg.id} className="flex justify-center my-4 animate-pulse">
                             <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center gap-2 text-sm max-w-[90%] shadow-sm">
                                 <AlertTriangle size={18} />
@@ -225,7 +236,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     ) : (
                         <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
                             <div className={`max-w-[80%] rounded-2xl shadow-sm overflow-hidden ${msg.sender === 'driver' ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' : 'bg-blue-600 text-white rounded-tr-none'}`}>
-                                {renderMediaPreview(msg.imageUrl || msg.videoUrl, msg.videoUrl ? 'video' : 'image')}
+                                {renderMediaPreview(media.url, media.type)}
                                 <div className="px-4 py-3">
                                     {renderMessageText(msg.text)}
                                     <div className="text-[10px] mt-1 text-right opacity-60 flex justify-end gap-1 items-center">
@@ -235,8 +246,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                                 </div>
                             </div>
                         </div>
-                    )
-                ))}
+                    );
+                })}
                 
                 {scheduledMessages.length > 0 && (
                     <div className="flex flex-col gap-4 mt-6">

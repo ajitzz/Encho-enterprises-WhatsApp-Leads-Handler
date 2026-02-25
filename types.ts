@@ -174,6 +174,7 @@ export interface Message {
   imageUrl?: string;
   videoUrl?: string;
   documentUrl?: string;
+  audioUrl?: string;
   timestamp: number;
   type: 'text' | 'image' | 'video' | 'document' | 'audio' | 'location' | 'template' | 'interactive' | 'options' | 'video_link' | 'system_error';
   status?: 'sent' | 'delivered' | 'read' | 'failed' | 'processing' | 'sending';

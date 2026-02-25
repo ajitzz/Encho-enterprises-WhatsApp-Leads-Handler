@@ -1637,6 +1637,11 @@ const getFileExtensionFromMime = (mimeType = '', fallback = 'bin') => {
     if (mime.includes('mp4')) return 'mp4';
     if (mime.includes('quicktime')) return 'mov';
     if (mime.includes('3gpp')) return '3gp';
+    if (mime.includes('ogg')) return 'ogg';
+    if (mime.includes('mpeg')) return 'mp3';
+    if (mime.includes('aac')) return 'aac';
+    if (mime.includes('amr')) return 'amr';
+    if (mime.includes('wav')) return 'wav';
     return fallback;
 };
 
@@ -1648,20 +1653,30 @@ const ALLOWED_MEDIA_MIME_TYPES = new Set([
     'image/webp',
     'video/mp4',
     'video/quicktime',
-    'video/3gpp'
+    'video/3gpp',
+    'audio/ogg',
+    'audio/mpeg',
+    'audio/mp4',
+    'audio/aac',
+    'audio/amr',
+    'audio/3gpp',
+    'audio/wav'
 ]);
+
+const normalizeMimeType = (mimeType = '') => String(mimeType || '').toLowerCase().split(';')[0].trim();
+const isAllowedMediaMimeType = (mimeType = '') => ALLOWED_MEDIA_MIME_TYPES.has(normalizeMimeType(mimeType));
 const MAX_MEDIA_FILE_BYTES = 16 * 1024 * 1024;
 
 const fetchAndStoreIncomingMedia = async ({ msg, phoneNumber, candidateId, client }) => {
     if (!candidateId) throw new Error('Candidate id is required for media upload');
-    const mediaId = msg?.image?.id || msg?.document?.id || msg?.video?.id;
+    const mediaId = msg?.image?.id || msg?.document?.id || msg?.video?.id || msg?.audio?.id;
     if (!mediaId) return null;
 
     const metaResponse = await getMetaClient().get(`https://graph.facebook.com/v18.0/${mediaId}`);
     const mediaUrl = metaResponse.data?.url;
-    const mimeType = String(metaResponse.data?.mime_type || (msg.type === 'document' ? 'application/octet-stream' : `${msg.type === 'video' ? 'video' : 'image'}/${msg.type}`)).toLowerCase();
+    const mimeType = String(metaResponse.data?.mime_type || (msg.type === 'document' ? 'application/octet-stream' : (msg.type === 'audio' ? 'audio/ogg' : `${msg.type === 'video' ? 'video' : 'image'}/${msg.type}`))).toLowerCase();
     if (!mediaUrl) throw new Error('WhatsApp media URL not found');
-    if (!ALLOWED_MEDIA_MIME_TYPES.has(mimeType)) {
+    if (!isAllowedMediaMimeType(mimeType)) {
         throw new Error(`Unsupported media file type: ${mimeType}`);
     }
 
@@ -1675,7 +1690,7 @@ const fetchAndStoreIncomingMedia = async ({ msg, phoneNumber, candidateId, clien
         throw new Error('Media file exceeds 16MB limit');
     }
 
-    const ext = getFileExtensionFromMime(mimeType, msg.type === 'document' ? 'pdf' : (msg.type === 'video' ? 'mp4' : 'jpg'));
+    const ext = getFileExtensionFromMime(mimeType, msg.type === 'document' ? 'pdf' : (msg.type === 'video' ? 'mp4' : (msg.type === 'audio' ? 'ogg' : 'jpg')));
     const prefix = buildDriverDataPrefix(phoneNumber);
     const timestampTag = new Date().toISOString().replace(/[:.]/g, '-');
     const key = `${prefix}/${timestampTag}_${msg.id}.${ext}`;
@@ -3420,7 +3435,7 @@ apiRouter.post('/webhook', async (req, res) => {
                     // Extract structured location data
                     text = JSON.stringify(msg.location);
                 }
-                else if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video') {
+                else if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video' || msg.type === 'audio') {
                     text = `[${msg.type.toUpperCase()}]`;
                 } else text = `[${msg.type.toUpperCase()}]`;
 
@@ -3435,7 +3450,7 @@ apiRouter.post('/webhook', async (req, res) => {
                     await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
                 }
 
-                if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video') {
+                if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video' || msg.type === 'audio') {
                     const mediaInfo = await fetchAndStoreIncomingMedia({
                         msg,
                         phoneNumber: from,
@@ -3525,12 +3540,33 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
         await withDb(async (client) => {
             const r = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [req.params.id]);
             const msgs = await Promise.all(r.rows.map(async row => {
-                let text = row.text, imageUrl = null;
-                if (['image','video','document'].includes(row.type) && row.text.startsWith('{')) {
-                    try { const p = JSON.parse(row.text); text = p.caption; if(p.url) imageUrl = await refreshMediaUrl(p.url); } catch(e){}
+                let text = row.text;
+                let imageUrl = null;
+                let videoUrl = null;
+                let documentUrl = null;
+                let audioUrl = null;
+
+                if (['image','video','document','audio'].includes(row.type) && row.text?.startsWith('{')) {
+                    try {
+                        const p = JSON.parse(row.text);
+                        text = p.caption || text;
+                        const rawMediaUrl = p.mediaUrl || p.url || (p.mediaKey ? getPublicS3Url(p.mediaKey) : null);
+                        const resolvedMediaUrl = rawMediaUrl ? await refreshMediaUrl(rawMediaUrl) : null;
+
+                        if (row.type === 'video') videoUrl = resolvedMediaUrl;
+                        else if (row.type === 'document') documentUrl = resolvedMediaUrl;
+                        else if (row.type === 'audio') audioUrl = resolvedMediaUrl;
+                        else imageUrl = resolvedMediaUrl;
+                    } catch(e){}
                 }
                 return { 
-                    id: row.id, sender: row.direction === 'in' ? 'driver' : 'agent', text, imageUrl, 
+                    id: row.id,
+                    sender: row.direction === 'in' ? 'driver' : 'agent',
+                    text,
+                    imageUrl,
+                    videoUrl,
+                    documentUrl,
+                    audioUrl,
                     timestamp: new Date(row.created_at).getTime(), type: row.type || 'text', status: row.status 
                 };
             }));
