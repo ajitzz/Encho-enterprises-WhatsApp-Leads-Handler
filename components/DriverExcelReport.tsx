@@ -16,10 +16,9 @@ interface SavedColumnView {
 
 interface DriverExcelReportProps {
   isLiveMode: boolean;
-  isReadOnly?: boolean;
 }
 
-export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode, isReadOnly = false }) => {
+export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode }) => {
   const [columns, setColumns] = useState<DriverExcelColumn[]>([]);
   const [rows, setRows] = useState<DriverExcelRow[]>([]);
   const [search, setSearch] = useState('');
@@ -239,13 +238,13 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   const isReadOnlyColumn = (key: string) => key === 'createdAt' || key === 'lastMessageAt' || key.endsWith('_status') || key.endsWith('_uploaded_at');
 
   const beginEdit = (rowId: string, col: DriverExcelColumn, currentValue: string) => {
-    if (isReadOnly || isReadOnlyColumn(col.key)) return;
+    if (isReadOnlyColumn(col.key)) return;
     setEditingCell({ rowId, colKey: col.key });
     setDraftValue(currentValue);
   };
 
   const saveCell = async () => {
-    if (isReadOnly || !editingCell) return;
+    if (!editingCell) return;
     try {
       await liveApiService.updateDriverExcelRow(editingCell.rowId, { [editingCell.colKey]: draftValue });
       setEditingCell(null);
@@ -258,7 +257,6 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   };
 
   const deleteRow = async (id: string) => {
-    if (isReadOnly) return;
     if (!confirm('Delete this customer and related messages/documents?')) return;
     await liveApiService.deleteDriverExcelRow(id);
     await loadReport();
@@ -267,7 +265,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   };
 
   const addSelectedVariables = async () => {
-    if (isReadOnly || selectedVariableKeys.length === 0) return;
+    if (selectedVariableKeys.length === 0) return;
     setActionKey('add-selected-variables');
     if (selectedVariableKeys.every((key) => columnKeySet.has(key))) {
       showMessage('Selected variables are already added.');
@@ -289,7 +287,6 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   };
 
   const addRecommendedVariables = async () => {
-    if (isReadOnly) return;
     if (recommendedVariableKeys.length === 0) {
       showMessage('No recommended variables available right now.');
       return;
@@ -309,7 +306,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   };
 
   const addColumn = async () => {
-    if (isReadOnly || !newColumnLabel.trim()) return;
+    if (!newColumnLabel.trim()) return;
     setActionKey('add-column');
     try {
       await liveApiService.addDriverExcelColumn(newColumnLabel.trim());
@@ -324,7 +321,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   };
 
   const renameColumn = async (col: DriverExcelColumn) => {
-    if (isReadOnly || col.isCore) return;
+    if (col.isCore) return;
     const newLabel = prompt('Rename column', col.label);
     if (!newLabel || newLabel.trim() === col.label) return;
     setActionKey(`rename-${col.key}`);
@@ -340,7 +337,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   };
 
   const deleteColumn = async (col: DriverExcelColumn) => {
-    if (isReadOnly || col.isCore) return;
+    if (col.isCore) return;
     if (!confirm(`Delete column "${col.label}" from all customers?`)) return;
     setActionKey(`delete-${col.key}`);
     try {
@@ -358,7 +355,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   };
 
   const reorderColumns = async (sourceKey: string, targetKey: string) => {
-    if (isReadOnly || !sourceKey || !targetKey || sourceKey === targetKey) return;
+    if (!sourceKey || !targetKey || sourceKey === targetKey) return;
     const next = [...columns];
     const from = next.findIndex((c) => c.key === sourceKey);
     const to = next.findIndex((c) => c.key === targetKey);
@@ -372,7 +369,6 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   };
 
   const resetColumnOrder = async () => {
-    if (isReadOnly) return;
     setActionKey('reset-order');
     try {
       await liveApiService.reorderDriverExcelColumns([]);
@@ -406,7 +402,6 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   };
 
   const saveCurrentView = () => {
-    if (isReadOnly) return;
     const name = prompt('View name', `View ${savedViews.length + 1}`);
     if (!name?.trim()) return;
     const customKeys = columns.filter((c) => !c.isCore).map((c) => c.key);
@@ -423,7 +418,6 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   };
 
   const applySavedView = async (viewId: string) => {
-    if (isReadOnly) return;
     setSelectedViewId(viewId);
     if (!viewId) return;
     const view = savedViews.find((item) => item.id === viewId);
@@ -451,7 +445,6 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   };
 
   const deleteSavedView = () => {
-    if (isReadOnly) return;
     if (!selectedViewId) return;
     const target = savedViews.find((v) => v.id === selectedViewId);
     if (!target) return;
@@ -491,7 +484,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   }, [isLiveMode, autoAddNewVariables, variableOptions, columnKeySet, manuallyRemovedVariableKeys, actionKey]);
 
   const moveColumn = async (col: DriverExcelColumn, direction: 'up' | 'down') => {
-    if (isReadOnly || col.isCore) return;
+    if (col.isCore) return;
     const customCols = columns.filter((c) => !c.isCore);
     const currentIndex = customCols.findIndex((c) => c.key === col.key);
     if (currentIndex < 0) return;
@@ -532,14 +525,14 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     <div className="p-6 space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900">Driver Excel Report {isReadOnly && <span className="ml-2 text-xs font-semibold text-amber-700 bg-amber-100 px-2 py-1 rounded-full">View only</span>}</h2>
+          <h2 className="text-2xl font-bold text-gray-900">Driver Excel Report</h2>
           <p className="text-sm text-gray-500">Edit, update, delete customer rows and keep S3 + Google Sheets synchronized.</p>
           <div className={`mt-2 inline-flex items-center px-2.5 py-1 text-xs rounded-full border ${syncBadgeClass}`}>
             {syncLabel}
           </div>
           {uiMessage && <div className="mt-2 text-xs text-blue-700">{uiMessage}</div>}
         </div>
-        {!isReadOnly && <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2">
           <button disabled={actionKey === 'apply-view'} onClick={saveCurrentView} className="px-3 py-2 border rounded-lg text-sm disabled:opacity-50">Save View</button>
           <select
             className="px-3 py-2 border rounded-lg text-sm"
@@ -559,11 +552,10 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
           </label>
           <button disabled={actionKey === 'reset-order'} onClick={resetColumnOrder} className="px-3 py-2 border rounded-lg text-sm flex items-center gap-1 disabled:opacity-50"><RotateCcw size={13} /> {actionKey === 'reset-order' ? 'Resetting...' : 'Reset Order'}</button>
           <button onClick={loadReport} className="px-4 py-2 bg-gray-900 text-white rounded-lg text-sm">Refresh</button>
-        </div>}
+        </div>
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl p-3 flex flex-wrap items-start gap-3">
-        {isReadOnly && <div className="w-full text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">Editing is disabled for Gmail users with viewer access.</div>}
         <div className="flex items-center gap-2">
           <input
             className="px-3 py-2 border rounded-lg text-sm min-w-[260px]"
@@ -575,7 +567,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
         </div>
 
         <div className="ml-auto flex flex-wrap items-start gap-3">
-          {!isReadOnly && <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2">
             <input
               className="px-3 py-2 border rounded-lg text-sm"
               placeholder="New column label"
@@ -583,9 +575,9 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
               onChange={(e) => setNewColumnLabel(e.target.value)}
             />
             <button disabled={actionKey === 'add-column'} onClick={addColumn} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm flex items-center gap-1 disabled:opacity-50"><Plus size={14} /> {actionKey === 'add-column' ? 'Adding...' : 'Add Column'}</button>
-          </div>}
+          </div>
 
-          {!isReadOnly && <div className="min-w-[340px] border rounded-lg p-2 bg-gray-50">
+          <div className="min-w-[340px] border rounded-lg p-2 bg-gray-50">
             <div className="flex items-center justify-between mb-2">
               <div className="text-xs font-medium text-gray-700">Variable Columns</div>
               <div className="flex items-center gap-1">
@@ -626,7 +618,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                 })
               )}
             </div>
-          </div>}
+          </div>
         </div>
       </div>
 
@@ -647,7 +639,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                   onDragEnd={() => setDraggingColKey(null)}
                 >
                   <div className="flex items-center gap-2">
-                    {!isReadOnly && <button
+                    <button
                       type="button"
                       className="text-gray-400 cursor-grab active:cursor-grabbing"
                       title="Drag to reorder"
@@ -656,11 +648,11 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                         e.stopPropagation();
                         setDraggingColKey(col.key);
                       }}
->
+                    >
                       <GripVertical size={13} className="text-gray-400" />
-                    </button>}
+                    </button>
                     <span>{col.label}</span>
-                    {!isReadOnly && !col.isCore && (
+                    {!col.isCore && (
                       <>
                         <button onClick={() => moveColumn(col, 'up')} className="text-gray-500 hover:text-gray-900 disabled:opacity-50" title="Move column up" disabled={actionKey !== null}><ArrowUp size={13} /></button>
                         <button onClick={() => moveColumn(col, 'down')} className="text-gray-500 hover:text-gray-900 disabled:opacity-50" title="Move column down" disabled={actionKey !== null}><ArrowDown size={13} /></button>
@@ -671,14 +663,14 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                   </div>
                 </th>
               ))}
-              {!isReadOnly && <th className="px-3 py-2 text-left border-b">Actions</th>}
+              <th className="px-3 py-2 text-left border-b">Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td className="p-4" colSpan={columns.length + (isReadOnly ? 0 : 1)}>Loading...</td></tr>
+              <tr><td className="p-4" colSpan={columns.length + 1}>Loading...</td></tr>
             ) : filteredRows.length === 0 ? (
-              <tr><td className="p-4" colSpan={columns.length + (isReadOnly ? 0 : 1)}>No records</td></tr>
+              <tr><td className="p-4" colSpan={columns.length + 1}>No records</td></tr>
             ) : (
               filteredRows.map((row) => (
                 <tr key={row.id} className="hover:bg-gray-50">
@@ -711,16 +703,16 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                             <span className="text-gray-400">-</span>
                           )
                         ) : (
-                          <button disabled={isReadOnly} onClick={() => beginEdit(row.id, col, value)} className="text-left w-full disabled:cursor-default">
+                          <button onClick={() => beginEdit(row.id, col, value)} className="text-left w-full">
                             <span className="whitespace-pre-wrap break-words">{value === '' ? '-' : value}</span>
                           </button>
                         )}
                       </td>
                     );
                   })}
-                  {!isReadOnly && <td className="px-3 py-2 border-b">
+                  <td className="px-3 py-2 border-b">
                     <button onClick={() => deleteRow(row.id)} className="text-red-600 hover:text-red-800"><Trash2 size={16} /></button>
-                  </td>}
+                  </td>
                 </tr>
               ))
             )}
