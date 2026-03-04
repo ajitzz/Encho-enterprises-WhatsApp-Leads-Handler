@@ -823,6 +823,20 @@ const getSystemConfig = async (client) => {
     const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config' LIMIT 1");
     const rawConfig = sys.rows[0]?.value || {};
     applyRuntimeGoogleSheetsConfig(rawConfig);
+
+    const normalizeEmail = (email = '') => String(email || '').trim().toLowerCase();
+    const parseEmailList = (value) => {
+        if (Array.isArray(value)) return value.map(normalizeEmail).filter(Boolean);
+        if (typeof value !== 'string') return [];
+        return value
+            .split(/[\n,;]+/)
+            .map(normalizeEmail)
+            .filter(Boolean);
+    };
+
+    const adminEmails = parseEmailList(process.env.AUTHORIZED_ADMIN_EMAILS || rawConfig.authorized_admin_emails);
+    const driverExcelViewerEmails = parseEmailList(rawConfig.driver_excel_viewer_emails);
+
     return {
         webhook_ingest_enabled: rawConfig.webhook_ingest_enabled !== false,
         automation_enabled: rawConfig.automation_enabled !== false,
@@ -831,8 +845,30 @@ const getSystemConfig = async (client) => {
         google_sheets_customers_tab_name: SYSTEM_CONFIG.GOOGLE_SHEETS_CUSTOMERS_TAB_NAME,
         google_sheets_messages_tab_name: SYSTEM_CONFIG.GOOGLE_SHEETS_MESSAGES_TAB_NAME,
         google_service_account_email: SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        google_service_account_configured: Boolean(SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY)
+        google_service_account_configured: Boolean(SYSTEM_CONFIG.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY),
+        authorized_admin_emails: adminEmails,
+        driver_excel_viewer_emails: driverExcelViewerEmails
     };
+};
+
+const resolveAccessProfile = ({ email = '', systemConfig }) => {
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    const adminEmails = new Set(systemConfig?.authorized_admin_emails || []);
+    const viewerEmails = new Set(systemConfig?.driver_excel_viewer_emails || []);
+
+    if (adminEmails.size === 0 && viewerEmails.size === 0) {
+        return { allowed: true, accessRole: 'admin' };
+    }
+
+    if (adminEmails.has(normalizedEmail)) {
+        return { allowed: true, accessRole: 'admin' };
+    }
+
+    if (viewerEmails.has(normalizedEmail)) {
+        return { allowed: true, accessRole: 'driver_excel_viewer' };
+    }
+
+    return { allowed: false, accessRole: null };
 };
 
 const checkGoogleSheetsOperationalStatus = async () => {
@@ -2845,6 +2881,50 @@ const apiRouter = express.Router();
 
 apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
+apiRouter.use(async (req, res, next) => {
+    if (req.path === '/auth/google') return next();
+
+    try {
+        const authHeader = req.headers.authorization || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+        if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+        const ticket = await googleClient.verifyIdToken({ idToken: token, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
+        const userPayload = ticket.getPayload() || {};
+        const email = String(userPayload.email || '').trim().toLowerCase();
+
+        await withDb(async (client) => {
+            const systemConfig = await getSystemConfig(client);
+            const accessProfile = resolveAccessProfile({ email, systemConfig });
+            if (!accessProfile.allowed) {
+                res.status(403).json({ error: 'Access denied' });
+                return;
+            }
+
+            req.authUser = userPayload;
+            req.authAccessRole = accessProfile.accessRole;
+            next();
+        });
+    } catch (e) {
+        res.status(401).json({ error: 'Unauthorized' });
+    }
+});
+
+const allowDriverExcelViewerReadOnly = (req, res, next) => {
+    const role = req.authAccessRole;
+    const isReadMethod = req.method === 'GET';
+    const isDriverExcelReadEndpoint =
+        req.path === '/reports/driver-excel' ||
+        req.path === '/reports/driver-excel/sync-status';
+
+    if (role === 'admin') return next();
+    if (role === 'driver_excel_viewer' && isReadMethod && isDriverExcelReadEndpoint) return next();
+
+    return res.status(403).json({ error: 'Insufficient permissions' });
+};
+
+apiRouter.use(allowDriverExcelViewerReadOnly);
+
 apiRouter.get('/system/settings', async (req, res) => {
     try {
         await withDb(async (client) => {
@@ -2870,7 +2950,14 @@ apiRouter.patch('/system/settings', async (req, res) => {
                 ...(typeof updates.google_sheets_customers_tab_name === 'string' ? { google_sheets_customers_tab_name: updates.google_sheets_customers_tab_name.trim() || 'Customers' } : {}),
                 ...(typeof updates.google_sheets_messages_tab_name === 'string' ? { google_sheets_messages_tab_name: updates.google_sheets_messages_tab_name.trim() || 'Messages' } : {}),
                 ...(typeof updates.google_service_account_email === 'string' ? { google_service_account_email: updates.google_service_account_email.trim() } : {}),
-                ...(typeof updates.google_service_account_private_key === 'string' ? { google_service_account_private_key: updates.google_service_account_private_key.trim() } : {})
+                ...(typeof updates.google_service_account_private_key === 'string' ? { google_service_account_private_key: updates.google_service_account_private_key.trim() } : {}),
+                ...(Array.isArray(updates.driver_excel_viewer_emails)
+                    ? {
+                        driver_excel_viewer_emails: updates.driver_excel_viewer_emails
+                            .map((email) => String(email || '').trim().toLowerCase())
+                            .filter(Boolean)
+                    }
+                    : {})
             };
 
             applyRuntimeGoogleSheetsConfig(next);
@@ -3484,7 +3571,25 @@ apiRouter.post('/auth/google', async (req, res) => {
     try {
         const { credential } = req.body;
         const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
-        res.json({ success: true, user: ticket.getPayload() });
+        const userPayload = ticket.getPayload() || {};
+        const email = String(userPayload.email || '').trim().toLowerCase();
+
+        await withDb(async (client) => {
+            const systemConfig = await getSystemConfig(client);
+            const accessProfile = resolveAccessProfile({ email, systemConfig });
+            if (!accessProfile.allowed) {
+                res.status(403).json({ success: false, error: 'Access denied: this Gmail is not authorized.' });
+                return;
+            }
+
+            res.json({
+                success: true,
+                user: {
+                    ...userPayload,
+                    accessRole: accessProfile.accessRole
+                }
+            });
+        });
     } catch (e) { res.status(401).json({ success: false, error: e.message }); }
 });
 

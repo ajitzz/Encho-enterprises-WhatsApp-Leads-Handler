@@ -39,6 +39,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
     scheduler: true
   });
   const [operationalStatus, setOperationalStatus] = useState<OperationalStatus | null>(null);
+  const [driverExcelViewerEmailsInput, setDriverExcelViewerEmailsInput] = useState('');
 
   useEffect(() => {
     loadSettings();
@@ -60,6 +61,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
         scheduler: settingsData.sending_enabled
       });
       setOperationalStatus(statusData);
+      setDriverExcelViewerEmailsInput((settingsData.driver_excel_viewer_emails || []).join('\n'));
     } catch (e) {
       console.error(e);
     } finally {
@@ -91,6 +93,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
       setOperationalStatus(refreshedStatus);
     } catch (e) {
       alert('Failed to update system state. Check connection.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+
+  const handleSaveViewerEmails = async () => {
+    const emails = driverExcelViewerEmailsInput
+      .split(/\n|,|;/)
+      .map((email) => email.trim().toLowerCase())
+      .filter(Boolean);
+
+    setLoading(true);
+    try {
+      await liveApiService.updateSystemSettings({ driver_excel_viewer_emails: emails });
+      await loadSettings();
+      alert('Driver Excel viewer access updated.');
+    } catch (e) {
+      alert('Failed to update viewer emails.');
     } finally {
       setLoading(false);
     }
@@ -226,6 +247,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
                 {(googleSheets?.reason || driverExcelSync?.lastError) && (
                   <div className="text-red-600"><b>Issue:</b> {googleSheets?.reason || driverExcelSync?.lastError}</div>
                 )}
+              </div>
+            </div>
+
+            <div className="mt-5 p-4 rounded-xl border border-gray-200 bg-white">
+              <h3 className="text-sm font-bold text-gray-900">Driver Excel viewer access (Gmail)</h3>
+              <p className="text-xs text-gray-500 mt-1">Add one Gmail per line. These accounts can sign in and view only the Driver Excel Report page.</p>
+              <textarea
+                value={driverExcelViewerEmailsInput}
+                onChange={(e) => setDriverExcelViewerEmailsInput(e.target.value)}
+                placeholder="assistant1@gmail.com\nassistant2@gmail.com"
+                className="mt-3 w-full min-h-[110px] border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200"
+              />
+              <div className="mt-3 flex justify-end">
+                <button
+                  onClick={handleSaveViewerEmails}
+                  disabled={loading}
+                  className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 disabled:opacity-50"
+                >
+                  Save viewer access
+                </button>
               </div>
             </div>
           </div>
