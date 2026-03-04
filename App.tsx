@@ -49,7 +49,14 @@ export default function App() {
           return;
       }
       const token = localStorage.getItem('uber_fleet_auth_token');
-      if (token) { setAuthToken(token); setIsAuthenticated(true); }
+      if (token) {
+          setAuthToken(token);
+          const savedProfile = localStorage.getItem('uber_fleet_user_profile');
+          if (savedProfile) {
+              try { setUserProfile(JSON.parse(savedProfile)); } catch {}
+          }
+          setIsAuthenticated(true);
+      }
   }, []);
 
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -148,9 +155,19 @@ export default function App() {
   const handleLoginSuccess = (token: string, user: any) => {
       setAuthToken(token);
       setUserProfile(user);
+      localStorage.setItem('uber_fleet_user_profile', JSON.stringify(user || {}));
       setIsAuthenticated(true);
       if ("Notification" in window) Notification.requestPermission();
   };
+
+  const accessRole = userProfile?.accessRole || 'admin';
+  const isDriverExcelViewer = accessRole === 'driver_excel_viewer';
+
+  useEffect(() => {
+    if (isDriverExcelViewer && activeTab !== 'excel-report') {
+      setActiveTab('excel-report');
+    }
+  }, [isDriverExcelViewer, activeTab]);
 
   if (activePublicPage === 'privacy') return <PrivacyPolicy />;
   if (activePublicPage === 'terms') return <TermsOfService />;
@@ -319,7 +336,7 @@ export default function App() {
 
   return (
     <>
-      <Layout activeTab={activeTab} onTabChange={setActiveTab} onOpenSettings={() => setShowSettingsModal(true)}>
+      <Layout activeTab={activeTab} onTabChange={setActiveTab} onOpenSettings={() => setShowSettingsModal(true)} canAccessAllTabs={!isDriverExcelViewer}>
         {activeTab === 'dashboard' && (
         <div className="p-8 max-w-7xl mx-auto space-y-8">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -372,18 +389,25 @@ export default function App() {
         </div>
         )}
         
-        {activeTab === 'leads' && <div className="p-4 h-screen bg-gray-50"><LeadManager drivers={drivers} onSelectDriver={handleSelectDriver} onBulkSend={handleBulkSendDirect} onUpdateDriverStatus={handleBulkStatusUpdate} /></div>}
-        {activeTab === 'excel-report' && <DriverExcelReport isLiveMode={dataSource === 'live'} />}
-        {activeTab === 'media-library' && <MediaLibrary />}
-        {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
+        {!isDriverExcelViewer && activeTab === 'leads' && <div className="p-4 h-screen bg-gray-50"><LeadManager drivers={drivers} onSelectDriver={handleSelectDriver} onBulkSend={handleBulkSendDirect} onUpdateDriverStatus={handleBulkStatusUpdate} /></div>}
+        {activeTab === 'excel-report' && <DriverExcelReport isLiveMode={dataSource === 'live'} isReadOnly={isDriverExcelViewer} />}
+        {!isDriverExcelViewer && activeTab === 'media-library' && <MediaLibrary />}
+        {!isDriverExcelViewer && activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
+
+        {isDriverExcelViewer && activeTab !== 'excel-report' && (
+          <div className="p-8 text-gray-700">
+            <h2 className="text-xl font-bold mb-2">Limited Access</h2>
+            <p>You have view-only access to the Driver Excel Report page.</p>
+          </div>
+        )}
 
         {showWebhookModal && <WebhookConfigModal onClose={() => setShowWebhookModal(false)} onSuccess={() => { addNotification({ type: 'success', title: 'Webhook Configured', message: 'Meta App settings updated successfully.' }); }} />}
-        {showSettingsModal && <SettingsModal onClose={() => setShowSettingsModal(false)} />}
+        {!isDriverExcelViewer && showSettingsModal && <SettingsModal onClose={() => setShowSettingsModal(false)} />}
         {showBulkModal && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"><div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md m-4"><h3 className="text-lg font-bold mb-4">Send Bulk Message</h3><div className="flex gap-3"><button onClick={() => setShowBulkModal(false)} className="flex-1 px-4 py-2 border rounded-lg">Cancel</button><button onClick={handleBulkSendLegacy} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg">Send</button></div></div></div>}
 
         <ChatDrawer driver={selectedDriver} onClose={() => setSelectedDriver(null)} onSendMessage={handleSendMessage} onUpdateDriver={handleUpdateDriver} />
-        {dataSource === 'live' && <AssistantChat />}
-        {dataSource === 'live' && <SystemMonitor />}
+        {dataSource === 'live' && !isDriverExcelViewer && <AssistantChat />}
+        {dataSource === 'live' && !isDriverExcelViewer && <SystemMonitor />}
         <NotificationToast notifications={notifications} onDismiss={removeNotification} />
       </Layout>
       {dataSource === 'mock' && <Simulator onNotify={addNotification} />}
