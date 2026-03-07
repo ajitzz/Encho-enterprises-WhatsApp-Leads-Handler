@@ -25,9 +25,7 @@ const SYSTEM_CONFIG = {
     GOOGLE_SERVICE_ACCOUNT_EMAIL: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || '',
     GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || '',
     CACHE_TTL: 60 * 1000, // 60 Seconds Cache for Bot Settings
-    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app'),
-    ADMIN_EMAILS: process.env.ADMIN_EMAILS || '',
-    STAFF_EMAILS: process.env.STAFF_EMAILS || ''
+    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
 };
 
 const applyRuntimeGoogleSheetsConfig = (rawConfig = {}) => {
@@ -43,73 +41,6 @@ const applyRuntimeGoogleSheetsConfig = (rawConfig = {}) => {
     assignString('GOOGLE_SHEETS_MESSAGES_TAB_NAME', rawConfig.google_sheets_messages_tab_name);
     assignString('GOOGLE_SERVICE_ACCOUNT_EMAIL', rawConfig.google_service_account_email);
     assignString('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY', rawConfig.google_service_account_private_key);
-};
-
-
-
-const parseEmailList = (raw = '') => new Set(
-    String(raw || '')
-        .split(',')
-        .map((item) => item.trim().toLowerCase())
-        .filter(Boolean)
-);
-
-const ADMIN_EMAIL_SET = parseEmailList(SYSTEM_CONFIG.ADMIN_EMAILS);
-const STAFF_EMAIL_SET = parseEmailList(SYSTEM_CONFIG.STAFF_EMAILS);
-
-const authTokenCache = new Map();
-const AUTH_CACHE_TTL_MS = 5 * 60 * 1000;
-
-const resolveUserRole = (email = '') => {
-    const normalized = String(email || '').trim().toLowerCase();
-    if (!normalized) return 'staff';
-    if (ADMIN_EMAIL_SET.has(normalized)) return 'admin';
-    if (STAFF_EMAIL_SET.has(normalized)) return 'staff';
-    if (ADMIN_EMAIL_SET.size === 0 && STAFF_EMAIL_SET.size === 0) return 'admin';
-    return null;
-};
-
-const getBearerToken = (req) => {
-    const authHeader = String(req.headers?.authorization || '');
-    if (!authHeader.startsWith('Bearer ')) return null;
-    return authHeader.slice('Bearer '.length).trim();
-};
-
-const getAuthUserFromRequest = async (req) => {
-    const token = getBearerToken(req);
-    if (!token) return null;
-
-    const cached = authTokenCache.get(token);
-    if (cached && (Date.now() - cached.timestamp) < AUTH_CACHE_TTL_MS) return cached.user;
-
-    const ticket = await googleClient.verifyIdToken({ idToken: token, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
-    const payload = ticket.getPayload() || {};
-    const email = String(payload.email || '').trim().toLowerCase();
-    const role = resolveUserRole(email);
-    if (!role) return null;
-
-    const user = {
-        email,
-        name: payload.name || payload.given_name || email,
-        role,
-        sub: payload.sub || ''
-    };
-    authTokenCache.set(token, { user, timestamp: Date.now() });
-    return user;
-};
-
-const requireAuthUser = async (req, res) => {
-    try {
-        const user = await getAuthUserFromRequest(req);
-        if (!user) {
-            res.status(401).json({ success: false, error: 'Unauthorized user' });
-            return null;
-        }
-        return user;
-    } catch (e) {
-        res.status(401).json({ success: false, error: 'Invalid auth token' });
-        return null;
-    }
 };
 
 // --- IN-MEMORY CACHE (Performance Boost) ---
@@ -2173,14 +2104,6 @@ const initDatabase = async (client) => {
     await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
-
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_to_email VARCHAR(255);`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_to_name VARCHAR(255);`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMP WITH TIME ZONE;`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assignment_state VARCHAR(50) DEFAULT 'unassigned';`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS next_followup_at BIGINT;`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_activity_at BIGINT;`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_version INTEGER DEFAULT 0;`);
     
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
 
@@ -3561,17 +3484,7 @@ apiRouter.post('/auth/google', async (req, res) => {
     try {
         const { credential } = req.body;
         const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
-        const payload = ticket.getPayload() || {};
-        const email = String(payload.email || '').trim().toLowerCase();
-        const role = resolveUserRole(email);
-        if (!role) return res.status(403).json({ success: false, error: 'Access denied for this account' });
-        const user = {
-            ...payload,
-            email,
-            role,
-            name: payload.name || payload.given_name || email
-        };
-        res.json({ success: true, user });
+        res.json({ success: true, user: ticket.getPayload() });
     } catch (e) { res.status(401).json({ success: false, error: e.message }); }
 });
 
@@ -3599,16 +3512,12 @@ apiRouter.post('/bot/publish', async (req, res) => res.json({ success: true }));
 
 apiRouter.get('/drivers', async (req, res) => {
     try {
-        const authUser = await requireAuthUser(req, res);
-        if (!authUser) return;
         await withDb(async (client) => {
             const r = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC NULLS LAST LIMIT 50');
             res.json(r.rows.map(row => ({
                 id: row.id, phoneNumber: row.phone_number, name: row.name, status: row.stage, 
                 lastMessage: row.last_message, lastMessageTime: parseInt(row.last_message_at || '0'), 
-                source: row.source, isHumanMode: row.is_human_mode,
-                assignedToEmail: row.assigned_to_email || null,
-                assignedToName: row.assigned_to_name || null
+                source: row.source, isHumanMode: row.is_human_mode
             })));
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3616,8 +3525,6 @@ apiRouter.get('/drivers', async (req, res) => {
 
 apiRouter.patch('/drivers/:id', async (req, res) => {
     try {
-        const authUser = await requireAuthUser(req, res);
-        if (!authUser) return;
         const { status, isHumanMode, name } = req.body;
         await withDb(async (client) => {
             if (status) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [status, req.params.id]);
@@ -3737,41 +3644,17 @@ apiRouter.patch('/drivers/:id/document-status', async (req, res) => {
 
 apiRouter.get('/reports/driver-excel', async (req, res) => {
     try {
-        const authUser = await requireAuthUser(req, res);
-        if (!authUser) return;
-
         const search = (req.query.search || '').toString().trim();
-        const requestedScope = (req.query.scope || '').toString().trim().toLowerCase();
         await withDb(async (client) => {
             const customCols = await getDriverExcelColumnConfig(client);
             const params = [];
-            const whereParts = [];
-
+            let where = '';
             if (search) {
                 params.push(`%${search}%`);
-                const idx = params.length;
-                whereParts.push(`(c.name ILIKE $${idx} OR c.phone_number ILIKE $${idx} OR c.stage ILIKE $${idx})`);
+                where = `WHERE c.name ILIKE $1 OR c.phone_number ILIKE $1 OR c.stage ILIKE $1`;
             }
-
-            const scope = authUser.role === 'admin' ? (['all', 'unassigned', 'assigned'].includes(requestedScope) ? requestedScope : 'all') : (requestedScope === 'my' ? 'my' : 'pool');
-
-            if (authUser.role !== 'admin') {
-                if (scope === 'my') {
-                    params.push(authUser.email);
-                    whereParts.push(`c.assigned_to_email = $${params.length}`);
-                } else {
-                    whereParts.push(`(c.assigned_to_email IS NULL OR c.assigned_to_email = '')`);
-                }
-            } else if (scope === 'unassigned') {
-                whereParts.push(`(c.assigned_to_email IS NULL OR c.assigned_to_email = '')`);
-            } else if (scope === 'assigned') {
-                whereParts.push(`(c.assigned_to_email IS NOT NULL AND c.assigned_to_email <> '')`);
-            }
-
-            const where = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : '';
             const q = `
-                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables,
-                       c.assigned_to_email, c.assigned_to_name, c.assigned_at, c.assignment_state, c.next_followup_at, c.last_activity_at, c.lead_version
+                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables
                 FROM candidates c
                 ${where}
                 ORDER BY c.created_at DESC
@@ -3814,13 +3697,6 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
                     source: r.source || '',
                     createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
                     lastMessageAt: r.last_message_at ? new Date(Number(r.last_message_at) || r.last_message_at).toISOString() : '',
-                    assignedToEmail: r.assigned_to_email || '',
-                    assignedToName: r.assigned_to_name || '',
-                    assignedAt: r.assigned_at ? new Date(r.assigned_at).toISOString() : '',
-                    assignmentState: r.assignment_state || 'unassigned',
-                    nextFollowupAt: r.next_followup_at ? String(r.next_followup_at) : '',
-                    lastActivityAt: r.last_activity_at ? String(r.last_activity_at) : '',
-                    leadVersion: Number(r.lead_version || 0),
                     variables: mergedVars
                 };
             });
@@ -3831,8 +3707,6 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
 
 apiRouter.get('/reports/driver-excel/sync-status', async (req, res) => {
     try {
-        const authUser = await requireAuthUser(req, res);
-        if (!authUser) return;
         let persisted = {};
         await withDb(async (client) => {
             const r = await client.query("SELECT value FROM system_settings WHERE key = 'driver_excel_sync_status' LIMIT 1");
@@ -3855,9 +3729,6 @@ apiRouter.get('/reports/driver-excel/sync-status', async (req, res) => {
 
 apiRouter.post('/reports/driver-excel/sync', async (req, res) => {
     try {
-        const authUser = await requireAuthUser(req, res);
-        if (!authUser) return;
-        if (authUser.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
         const mode = String(req.body?.mode || 'queued').toLowerCase();
         if (mode === 'immediate') {
             triggerDriverExcelSyncNow();
@@ -3872,22 +3743,16 @@ apiRouter.post('/reports/driver-excel/sync', async (req, res) => {
 
 apiRouter.patch('/reports/driver-excel/:id', async (req, res) => {
     try {
-        const authUser = await requireAuthUser(req, res);
-        if (!authUser) return;
         const updates = req.body?.updates || {};
         const id = req.params.id;
         await withDb(async (client) => {
-            const existingRes = await client.query('SELECT variables, assigned_to_email, lead_version FROM candidates WHERE id = $1 LIMIT 1', [id]);
+            const existingRes = await client.query('SELECT variables FROM candidates WHERE id = $1 LIMIT 1', [id]);
             if (existingRes.rows.length === 0) return res.status(404).json({ error: 'Candidate not found' });
 
-            const isAdmin = authUser.role === 'admin';
-            const existingOwner = String(existingRes.rows[0].assigned_to_email || '').toLowerCase();
-            if (!isAdmin && existingOwner && existingOwner !== authUser.email) return res.status(403).json({ error: 'Lead is assigned to another staff member' });
-
-            const coreFieldMap = { phoneNumber: 'phone_number', name: 'name', status: 'stage', source: 'source', nextFollowupAt: 'next_followup_at' };
+            const coreFieldMap = { phoneNumber: 'phone_number', name: 'name', status: 'stage', source: 'source' };
             for (const [k, v] of Object.entries(updates)) {
                 if (coreFieldMap[k]) {
-                    await client.query(`UPDATE candidates SET ${coreFieldMap[k]} = $1, last_activity_at = $3, lead_version = COALESCE(lead_version, 0) + 1 WHERE id = $2`, [v, id, Date.now()]);
+                    await client.query(`UPDATE candidates SET ${coreFieldMap[k]} = $1 WHERE id = $2`, [v, id]);
                 }
             }
 
@@ -3895,7 +3760,7 @@ apiRouter.patch('/reports/driver-excel/:id', async (req, res) => {
             const variableUpdates = Object.entries(updates).filter(([k]) => !['phoneNumber', 'name', 'status', 'source', 'createdAt', 'lastMessageAt'].includes(k));
             if (variableUpdates.length > 0) {
                 for (const [k, v] of variableUpdates) vars[k] = v;
-                await client.query('UPDATE candidates SET variables = $1::jsonb, last_activity_at = $3, lead_version = COALESCE(lead_version, 0) + 1 WHERE id = $2', [JSON.stringify(vars), id, Date.now()]);
+                await client.query('UPDATE candidates SET variables = $1::jsonb WHERE id = $2', [JSON.stringify(vars), id]);
             }
             scheduleDriverExcelSync();
             scheduleDriverExcelIncrementalSync({ candidateId: id, action: 'upsert' });
@@ -3906,104 +3771,10 @@ apiRouter.patch('/reports/driver-excel/:id', async (req, res) => {
 
 apiRouter.delete('/reports/driver-excel/:id', async (req, res) => {
     try {
-        const authUser = await requireAuthUser(req, res);
-        if (!authUser) return;
-        if (authUser.role !== 'admin') return res.status(403).json({ error: 'Admin access required' }); 
         await withDb(async (client) => {
             await client.query('DELETE FROM candidates WHERE id = $1', [req.params.id]);
             scheduleDriverExcelSync();
             scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'delete' });
-            res.json({ success: true });
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-
-apiRouter.post('/reports/driver-excel/:id/claim', async (req, res) => {
-    try {
-        const authUser = await requireAuthUser(req, res);
-        if (!authUser) return;
-        const id = req.params.id;
-
-        await withDb(async (client) => {
-            const result = await client.query(
-                `UPDATE candidates
-                 SET assigned_to_email = $1,
-                     assigned_to_name = $2,
-                     assigned_at = NOW(),
-                     assignment_state = 'assigned',
-                     last_activity_at = $3,
-                     lead_version = COALESCE(lead_version, 0) + 1
-                 WHERE id = $4
-                   AND (assigned_to_email IS NULL OR assigned_to_email = '' OR lower(assigned_to_email) = $1)
-                 RETURNING id, assigned_to_email, assigned_to_name, assigned_at, assignment_state`,
-                [authUser.email, authUser.name || authUser.email, Date.now(), id]
-            );
-            if (result.rows.length === 0) return res.status(409).json({ error: 'Lead already claimed by another staff member' });
-            scheduleDriverExcelSync();
-            scheduleDriverExcelIncrementalSync({ candidateId: id, action: 'upsert' });
-            res.json({ success: true, lead: result.rows[0] });
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/reports/driver-excel/:id/release', async (req, res) => {
-    try {
-        const authUser = await requireAuthUser(req, res);
-        if (!authUser) return;
-        const id = req.params.id;
-
-        await withDb(async (client) => {
-            const where = authUser.role === 'admin'
-                ? 'id = $1'
-                : "id = $1 AND lower(COALESCE(assigned_to_email, '')) = $2";
-            const params = authUser.role === 'admin' ? [id] : [id, authUser.email];
-            const result = await client.query(
-                `UPDATE candidates
-                 SET assigned_to_email = NULL,
-                     assigned_to_name = NULL,
-                     assigned_at = NULL,
-                     assignment_state = 'unassigned',
-                     last_activity_at = $${params.length + 1},
-                     lead_version = COALESCE(lead_version, 0) + 1
-                 WHERE ${where}
-                 RETURNING id`,
-                [...params, Date.now()]
-            );
-            if (result.rows.length === 0) return res.status(403).json({ error: 'Not allowed to release this lead' });
-            scheduleDriverExcelSync();
-            scheduleDriverExcelIncrementalSync({ candidateId: id, action: 'upsert' });
-            res.json({ success: true });
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/reports/driver-excel/:id/assign', async (req, res) => {
-    try {
-        const authUser = await requireAuthUser(req, res);
-        if (!authUser) return;
-        if (authUser.role !== 'admin') return res.status(403).json({ error: 'Admin access required' });
-
-        const id = req.params.id;
-        const assigneeEmail = String(req.body?.email || '').trim().toLowerCase();
-        const assigneeName = String(req.body?.name || assigneeEmail).trim();
-
-        await withDb(async (client) => {
-            const result = await client.query(
-                `UPDATE candidates
-                 SET assigned_to_email = $1,
-                     assigned_to_name = $2,
-                     assigned_at = NOW(),
-                     assignment_state = 'assigned',
-                     last_activity_at = $3,
-                     lead_version = COALESCE(lead_version, 0) + 1
-                 WHERE id = $4
-                 RETURNING id`,
-                [assigneeEmail || null, assigneeEmail ? assigneeName : null, Date.now(), id]
-            );
-            if (result.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
-            scheduleDriverExcelSync();
-            scheduleDriverExcelIncrementalSync({ candidateId: id, action: 'upsert' });
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4304,9 +4075,12 @@ if (require.main === module) {
                 if (pgPool) {
                     const client = await pgPool.connect();
                     try {
-                        console.log("[Auto-Init] Ensuring database schema and lead-portal columns...");
-                        await initDatabase(client);
-                        console.log("[Auto-Init] Database ready.");
+                        const res = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'candidates'`);
+                        if (res.rows.length === 0) {
+                            console.log("[Auto-Init] Database schema missing. Initializing...");
+                            await initDatabase(client);
+                            console.log("[Auto-Init] Database ready.");
+                        }
                     } finally {
                         client.release();
                     }
