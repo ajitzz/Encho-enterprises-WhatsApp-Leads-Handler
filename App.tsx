@@ -21,7 +21,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { Login } from './components/Login'; 
 import { mockBackend } from './services/mockBackend';
 import { liveApiService, setAuthToken } from './services/liveApiService';
-import { Driver, LeadStatus, AppNotification, BotSettings, Message, AuthUserProfile } from './types';
+import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle } from 'lucide-react';
 
 const FALLBACK_CLIENT_ID = "764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.googleusercontent.com";
@@ -33,7 +33,7 @@ export default function App() {
   const [activePublicPage, setActivePublicPage] = useState<'none' | 'privacy' | 'terms' | 'deletion'>('none');
   const [showcaseToken, setShowcaseToken] = useState<string | undefined>(undefined);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [userProfile, setUserProfile] = useState<AuthUserProfile | null>(null);
+  const [userProfile, setUserProfile] = useState<any>(null);
   
   const [isEmergencyMode, setIsEmergencyMode] = useState(false); // NEW: Recovery State
 
@@ -49,10 +49,6 @@ export default function App() {
           return;
       }
       const token = localStorage.getItem('uber_fleet_auth_token');
-      const savedProfile = localStorage.getItem('uber_fleet_user_profile');
-      if (savedProfile) {
-          try { setUserProfile(JSON.parse(savedProfile)); } catch (e) {}
-      }
       if (token) { setAuthToken(token); setIsAuthenticated(true); }
   }, []);
 
@@ -149,10 +145,9 @@ export default function App() {
     return () => unsubscribe();
   }, [dataSource, activeTab, isShowcaseMode, activePublicPage, isAuthenticated, isEmergencyMode]); 
 
-  const handleLoginSuccess = (token: string, user: AuthUserProfile) => {
+  const handleLoginSuccess = (token: string, user: any) => {
       setAuthToken(token);
       setUserProfile(user);
-      localStorage.setItem('uber_fleet_user_profile', JSON.stringify(user));
       setIsAuthenticated(true);
       if ("Notification" in window) Notification.requestPermission();
   };
@@ -378,7 +373,7 @@ export default function App() {
         )}
         
         {activeTab === 'leads' && <div className="p-4 h-screen bg-gray-50"><LeadManager drivers={drivers} onSelectDriver={handleSelectDriver} onBulkSend={handleBulkSendDirect} onUpdateDriverStatus={handleBulkStatusUpdate} /></div>}
-        {activeTab === 'excel-report' && <DriverExcelReport isLiveMode={dataSource === 'live'} currentUser={userProfile} />}
+        {activeTab === 'excel-report' && <DriverExcelReport isLiveMode={dataSource === 'live'} />}
         {activeTab === 'media-library' && <MediaLibrary />}
         {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
 

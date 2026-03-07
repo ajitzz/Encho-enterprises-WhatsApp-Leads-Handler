@@ -31,13 +31,6 @@ CREATE TABLE candidates (
     is_human_mode BOOLEAN DEFAULT FALSE,
     current_bot_step_id VARCHAR(100),
     variables JSONB DEFAULT '{}'::jsonb,
-    assigned_to_email VARCHAR(255),
-    assigned_to_name VARCHAR(255),
-    assigned_at TIMESTAMP WITH TIME ZONE,
-    assignment_state VARCHAR(50) DEFAULT 'unassigned',
-    next_followup_at BIGINT,
-    last_activity_at BIGINT,
-    lead_version INTEGER DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 

@@ -278,10 +278,8 @@ export const liveApiService = {
       });
   },
 
-  getDriverExcelReport: async (search: string = '', scope: string = ''): Promise<{ columns: DriverExcelColumn[]; rows: DriverExcelRow[] }> => {
-      const params = new URLSearchParams({ search });
-      if (scope) params.set('scope', scope);
-      return apiRequest(`/api/reports/driver-excel?${params.toString()}`);
+  getDriverExcelReport: async (search: string = ''): Promise<{ columns: DriverExcelColumn[]; rows: DriverExcelRow[] }> => {
+      return apiRequest(`/api/reports/driver-excel?search=${encodeURIComponent(search)}`);
   },
 
   getDriverExcelSyncStatus: async (): Promise<{ state: string; lastTriggeredAt?: string; lastRunAt?: string; lastSuccessAt?: string; lastError?: string; inProgress?: boolean; hasQueuedSync?: boolean; lastDurationMs?: number }> => {
@@ -304,19 +302,6 @@ export const liveApiService = {
 
   deleteDriverExcelRow: async (id: string) => {
       return apiRequest(`/api/reports/driver-excel/${id}`, { method: 'DELETE' });
-  },
-
-
-  claimDriverExcelLead: async (id: string) => {
-      return apiRequest(`/api/reports/driver-excel/${id}/claim`, {
-          method: 'POST'
-      });
-  },
-
-  releaseDriverExcelLead: async (id: string) => {
-      return apiRequest(`/api/reports/driver-excel/${id}/release`, {
-          method: 'POST'
-      });
   },
 
   addDriverExcelColumn: async (label: string) => {
