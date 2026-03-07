@@ -3,9 +3,10 @@ import React, { useState } from 'react';
 import { GoogleLogin, CredentialResponse } from '@react-oauth/google';
 import { ShieldCheck, AlertCircle, Loader2 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
+import { AuthUserProfile } from '../types';
 
 interface LoginProps {
-  onLoginSuccess: (token: string, user: any) => void;
+  onLoginSuccess: (token: string, user: AuthUserProfile) => void;
 }
 
 export const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {

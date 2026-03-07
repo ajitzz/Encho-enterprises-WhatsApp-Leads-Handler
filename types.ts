@@ -204,6 +204,8 @@ export interface Driver extends Candidate {
   source: LeadSource;
   status: LeadStatus;
   isBotActive: boolean;
+  assignedToEmail?: string | null;
+  assignedToName?: string | null;
   notes?: string;
   onboardingStep?: OnboardingStep;
   qualificationChecks?: {
@@ -266,6 +268,13 @@ export interface DriverExcelRow {
   source: string;
   createdAt: string;
   lastMessageAt: string;
+  assignedToEmail?: string;
+  assignedToName?: string;
+  assignedAt?: string;
+  assignmentState?: string;
+  nextFollowupAt?: string;
+  lastActivityAt?: string;
+  leadVersion?: number;
   variables: Record<string, any>;
 }
 
@@ -280,4 +289,10 @@ export interface AuditIssue {
 export interface AuditReport {
   isValid: boolean;
   issues: AuditIssue[];
+}
+
+export interface AuthUserProfile {
+  email: string;
+  name?: string;
+  role: 'admin' | 'staff';
 }
