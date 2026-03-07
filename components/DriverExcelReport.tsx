@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { liveApiService } from '../services/liveApiService';
-import { DriverExcelColumn, DriverExcelRow } from '../types';
+import { AuthUserProfile, DriverExcelColumn, DriverExcelRow } from '../types';
 import { ArrowDown, ArrowUp, CheckSquare, GripVertical, Pencil, Plus, RotateCcw, Save, Trash2, X } from 'lucide-react';
 
 interface VariableOption {
@@ -16,9 +16,10 @@ interface SavedColumnView {
 
 interface DriverExcelReportProps {
   isLiveMode: boolean;
+  currentUser?: AuthUserProfile | null;
 }
 
-export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode }) => {
+export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode, currentUser }) => {
   const [columns, setColumns] = useState<DriverExcelColumn[]>([]);
   const [rows, setRows] = useState<DriverExcelRow[]>([]);
   const [search, setSearch] = useState('');
@@ -37,6 +38,16 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   const [syncStatus, setSyncStatus] = useState<any>(null);
   const [uiMessage, setUiMessage] = useState('');
   const [actionKey, setActionKey] = useState<string | null>(null);
+  const [leadScope, setLeadScope] = useState<string>('');
+
+
+  useEffect(() => {
+    if (currentUser?.role === 'admin') {
+      setLeadScope('all');
+    } else {
+      setLeadScope('pool');
+    }
+  }, [currentUser?.role]);
 
   const getCurrentUserScope = () => {
     try {
@@ -103,7 +114,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     if (!isLiveMode) return;
     setLoading(true);
     try {
-      const data = await liveApiService.getDriverExcelReport(search);
+      const data = await liveApiService.getDriverExcelReport(search, leadScope);
       const rawColumns = data.columns || [];
       const prefKey = getColumnPrefsStorageKey();
       const savedKeys = JSON.parse(localStorage.getItem(prefKey) || 'null') as string[] | null;
@@ -154,7 +165,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
 
     const autoAddRaw = localStorage.getItem(getAutoAddStorageKey());
     setAutoAddNewVariables(autoAddRaw === '1');
-  }, [isLiveMode]);
+  }, [isLiveMode, leadScope]);
 
   useEffect(() => {
     if (!isLiveMode) return;
@@ -262,6 +273,35 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     await loadReport();
     await loadSyncStatus();
     await loadVariableOptions();
+  };
+
+
+  const claimLead = async (id: string) => {
+    setActionKey(`claim-${id}`);
+    try {
+      await liveApiService.claimDriverExcelLead(id);
+      await loadReport();
+      await loadSyncStatus();
+      showMessage('Lead added to your portal.');
+    } catch (e: any) {
+      alert(e.message || 'Failed to claim lead');
+    } finally {
+      setActionKey(null);
+    }
+  };
+
+  const releaseLead = async (id: string) => {
+    setActionKey(`release-${id}`);
+    try {
+      await liveApiService.releaseDriverExcelLead(id);
+      await loadReport();
+      await loadSyncStatus();
+      showMessage('Lead returned to shared pool.');
+    } catch (e: any) {
+      alert(e.message || 'Failed to release lead');
+    } finally {
+      setActionKey(null);
+    }
   };
 
   const addSelectedVariables = async () => {
@@ -566,6 +606,21 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
           <button onClick={loadReport} className="px-3 py-2 border rounded-lg text-sm">Search</button>
         </div>
 
+        <div className="flex items-center gap-2">
+          {currentUser?.role === 'admin' ? (
+            <>
+              <button onClick={() => setLeadScope('all')} className={`px-2 py-1 text-xs rounded ${leadScope === 'all' ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-700'}`}>All Leads</button>
+              <button onClick={() => setLeadScope('unassigned')} className={`px-2 py-1 text-xs rounded ${leadScope === 'unassigned' ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-700'}`}>Unassigned</button>
+              <button onClick={() => setLeadScope('assigned')} className={`px-2 py-1 text-xs rounded ${leadScope === 'assigned' ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-700'}`}>Assigned</button>
+            </>
+          ) : (
+            <>
+              <button onClick={() => setLeadScope('pool')} className={`px-2 py-1 text-xs rounded ${leadScope === 'pool' ? 'bg-blue-600 text-white' : 'bg-blue-50 text-blue-700'}`}>Shared Pool</button>
+              <button onClick={() => setLeadScope('my')} className={`px-2 py-1 text-xs rounded ${leadScope === 'my' ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700'}`}>My Portal</button>
+            </>
+          )}
+        </div>
+
         <div className="ml-auto flex flex-wrap items-start gap-3">
           <div className="flex items-center gap-2">
             <input
@@ -663,14 +718,15 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                   </div>
                 </th>
               ))}
+              <th className="px-3 py-2 text-left border-b">Owner</th>
               <th className="px-3 py-2 text-left border-b">Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td className="p-4" colSpan={columns.length + 1}>Loading...</td></tr>
+              <tr><td className="p-4" colSpan={columns.length + 2}>Loading...</td></tr>
             ) : filteredRows.length === 0 ? (
-              <tr><td className="p-4" colSpan={columns.length + 1}>No records</td></tr>
+              <tr><td className="p-4" colSpan={columns.length + 2}>No records</td></tr>
             ) : (
               filteredRows.map((row) => (
                 <tr key={row.id} className="hover:bg-gray-50">
@@ -710,8 +766,28 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                       </td>
                     );
                   })}
+                  <td className="px-3 py-2 border-b text-xs text-gray-700 min-w-[180px]">
+                    {row.assignedToEmail ? (
+                      <div>
+                        <div className="font-medium">{row.assignedToName || row.assignedToEmail}</div>
+                        <div className="text-[11px] text-gray-500">{row.assignedToEmail}</div>
+                      </div>
+                    ) : (
+                      <span className="text-gray-400">Unassigned</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 border-b">
-                    <button onClick={() => deleteRow(row.id)} className="text-red-600 hover:text-red-800"><Trash2 size={16} /></button>
+                    <div className="flex items-center gap-2">
+                      {!row.assignedToEmail && currentUser?.role !== 'admin' && (
+                        <button onClick={() => claimLead(row.id)} disabled={actionKey === `claim-${row.id}`} className="px-2 py-1 text-xs rounded bg-blue-600 text-white disabled:opacity-50">Claim</button>
+                      )}
+                      {(currentUser?.role === 'admin' || row.assignedToEmail === currentUser?.email) && row.assignedToEmail && (
+                        <button onClick={() => releaseLead(row.id)} disabled={actionKey === `release-${row.id}`} className="px-2 py-1 text-xs rounded bg-amber-500 text-white disabled:opacity-50">Release</button>
+                      )}
+                      {currentUser?.role === 'admin' && (
+                        <button onClick={() => deleteRow(row.id)} className="text-red-600 hover:text-red-800"><Trash2 size={16} /></button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))
