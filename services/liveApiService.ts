@@ -278,7 +278,7 @@ export const liveApiService = {
       });
   },
 
-  getDriverExcelReport: async (search: string = ''): Promise<{ columns: DriverExcelColumn[]; rows: DriverExcelRow[] }> => {
+  getDriverExcelReport: async (search: string = ''): Promise<{ columns: DriverExcelColumn[]; rows: DriverExcelRow[]; actor?: { email: string; role: 'admin' | 'staff' } }> => {
       return apiRequest(`/api/reports/driver-excel?search=${encodeURIComponent(search)}`);
   },
 
@@ -297,6 +297,18 @@ export const liveApiService = {
       return apiRequest(`/api/reports/driver-excel/${id}`, {
           method: 'PATCH',
           body: JSON.stringify({ updates })
+      });
+  },
+
+  claimDriverExcelLead: async (id: string) => {
+      return apiRequest(`/api/reports/driver-excel/${id}/claim`, {
+          method: 'POST'
+      });
+  },
+
+  releaseDriverExcelLead: async (id: string) => {
+      return apiRequest(`/api/reports/driver-excel/${id}/release`, {
+          method: 'POST'
       });
   },
 
