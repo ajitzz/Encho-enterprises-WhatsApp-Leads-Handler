@@ -166,6 +166,9 @@ export interface Candidate {
   messages?: Message[];
   currentBotStepId?: string; 
   isHumanMode?: boolean;
+  assignedManagerId?: string;
+  assignedStaffId?: string;
+  nextFollowupAt?: number;
 }
 
 export interface Driver extends Candidate {
@@ -233,4 +236,23 @@ export interface AuditIssue {
 export interface AuditReport {
   isValid: boolean;
   issues: AuditIssue[];
+}
+
+export interface LmsUser {
+  id: string;
+  email: string;
+  name: string;
+  role: 'admin' | 'manager' | 'staff';
+  managerId?: string;
+  createdAt: string;
+}
+
+export interface LeadLog {
+  id: string;
+  candidateId: string;
+  userId: string;
+  action: string;
+  details: string;
+  createdAt: string;
+  userName?: string;
 }

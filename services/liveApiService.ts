@@ -342,5 +342,39 @@ export const liveApiService = {
           method: 'POST',
           body: JSON.stringify({ orderedKeys })
       });
+  },
+
+  // --- LMS API CALLS ---
+  getLmsUsers: async (): Promise<any[]> => {
+    return apiRequest<any[]>('/api/lms/users');
+  },
+
+  createLmsUser: async (userData: any) => {
+    return apiRequest('/api/lms/users', {
+      method: 'POST',
+      body: JSON.stringify(userData)
+    });
+  },
+
+  deleteLmsUser: async (id: string) => {
+    return apiRequest(`/api/lms/users/${id}`, { method: 'DELETE' });
+  },
+
+  assignLeads: async (leadIds: string[], managerId: string | null, staffId: string | null, userId: string) => {
+    return apiRequest('/api/lms/leads/assign', {
+      method: 'POST',
+      body: JSON.stringify({ leadIds, managerId, staffId, userId })
+    });
+  },
+
+  getLeadLogs: async (id: string): Promise<any[]> => {
+    return apiRequest<any[]>(`/api/lms/leads/${id}/logs`);
+  },
+
+  addLeadRemark: async (id: string, userId: string, remark: string, nextFollowupAt?: number) => {
+    return apiRequest(`/api/lms/leads/${id}/remarks`, {
+      method: 'POST',
+      body: JSON.stringify({ userId, remark, nextFollowupAt })
+    });
   }
 };

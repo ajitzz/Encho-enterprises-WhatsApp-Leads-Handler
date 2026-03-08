@@ -2156,6 +2156,30 @@ const initDatabase = async (client) => {
     await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
     
+    // --- LMS EXTENSIONS ---
+    await client.query(`CREATE TABLE IF NOT EXISTS lms_users (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        email VARCHAR(255) UNIQUE NOT NULL,
+        name VARCHAR(255),
+        role VARCHAR(20) CHECK (role IN ('admin', 'manager', 'staff')),
+        manager_id UUID REFERENCES lms_users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+    );`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS lead_logs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+        user_id UUID REFERENCES lms_users(id) ON DELETE SET NULL,
+        action VARCHAR(100),
+        details TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+    );`);
+
+    // Add columns to candidates if they don't exist
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_manager_id UUID REFERENCES lms_users(id) ON DELETE SET NULL;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_staff_id UUID REFERENCES lms_users(id) ON DELETE SET NULL;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS next_followup_at BIGINT;`);
+    
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
 
     const botCheck = await client.query("SELECT id FROM bot_versions WHERE status = 'published' LIMIT 1");
@@ -3625,13 +3649,149 @@ apiRouter.post('/auth/google', async (req, res) => {
         const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
         const payload = ticket.getPayload();
 
-        const ADMIN_EMAILS = ['enchoenterprises@gmail.com', 'ajithsabzz@gmail.com'];
-        if (!payload || !payload.email || !ADMIN_EMAILS.includes(payload.email.toLowerCase())) {
-            return res.status(403).json({ success: false, error: "Access Denied: Unauthorized email." });
+        if (!payload || !payload.email) {
+            return res.status(403).json({ success: false, error: "Access Denied: Invalid payload." });
         }
 
-        res.json({ success: true, user: payload });
+        const email = payload.email.toLowerCase();
+        const ADMIN_EMAILS = ['enchoenterprises@gmail.com', 'ajithsabzz@gmail.com'];
+
+        await withDb(async (client) => {
+            // Check if user exists in lms_users
+            let userRes = await client.query("SELECT * FROM lms_users WHERE email = $1", [email]);
+            
+            if (userRes.rows.length === 0) {
+                // If not in DB, check if it's a hardcoded admin
+                if (ADMIN_EMAILS.includes(email)) {
+                    // Auto-create admin in DB
+                    const newUser = await client.query(
+                        "INSERT INTO lms_users (email, name, role) VALUES ($1, $2, 'admin') RETURNING *",
+                        [email, payload.name || 'Admin']
+                    );
+                    userRes = newUser;
+                } else {
+                    return res.status(403).json({ success: false, error: "Access Denied: Unauthorized email." });
+                }
+            }
+
+            const user = userRes.rows[0];
+            res.json({ success: true, user: { ...payload, role: user.role, id: user.id, manager_id: user.manager_id } });
+        });
     } catch (e) { res.status(401).json({ success: false, error: e.message }); }
+});
+
+// --- LMS USER MANAGEMENT ---
+apiRouter.get('/lms/users', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query("SELECT * FROM lms_users ORDER BY role, name");
+            res.json(r.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/lms/users', async (req, res) => {
+    const { email, name, role, manager_id } = req.body;
+    try {
+        await withDb(async (client) => {
+            const r = await client.query(
+                "INSERT INTO lms_users (email, name, role, manager_id) VALUES ($1, $2, $3, $4) RETURNING *",
+                [email.toLowerCase(), name, role, manager_id]
+            );
+            res.json(r.rows[0]);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.delete('/lms/users/:id', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query("DELETE FROM lms_users WHERE id = $1", [req.params.id]);
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- LMS LEAD ASSIGNMENT ---
+apiRouter.post('/lms/leads/assign', async (req, res) => {
+    const { leadIds, managerId, staffId, userId } = req.body;
+    try {
+        await withDb(async (client) => {
+            for (const id of leadIds) {
+                const updates = [];
+                const params = [];
+                if (managerId !== undefined) {
+                    updates.push(`assigned_manager_id = $${params.length + 1}`);
+                    params.push(managerId);
+                }
+                if (staffId !== undefined) {
+                    updates.push(`assigned_staff_id = $${params.length + 1}`);
+                    params.push(staffId);
+                }
+                params.push(id);
+                
+                await client.query(
+                    `UPDATE candidates SET ${updates.join(', ')} WHERE id = $${params.length} RETURNING *`,
+                    params
+                );
+
+                // Log the assignment
+                let details = "";
+                if (managerId) details += `Assigned to Manager ${managerId}. `;
+                if (staffId) details += `Assigned to Staff ${staffId}. `;
+                if (managerId === null && staffId === null) details = "Unassigned from all.";
+
+                await client.query(
+                    "INSERT INTO lead_logs (candidate_id, user_id, action, details) VALUES ($1, $2, 'Assignment', $3)",
+                    [id, userId, details]
+                );
+            }
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- LMS LEAD LOGS & REMARKS ---
+apiRouter.get('/lms/leads/:id/logs', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query(
+                `SELECT l.*, u.name as user_name 
+                 FROM lead_logs l 
+                 LEFT JOIN lms_users u ON l.user_id = u.id 
+                 WHERE l.candidate_id = $1 
+                 ORDER BY l.created_at DESC`,
+                [req.params.id]
+            );
+            res.json(r.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/lms/leads/:id/remarks', async (req, res) => {
+    const { userId, remark, nextFollowupAt } = req.body;
+    try {
+        await withDb(async (client) => {
+            // Add remark to logs
+            await client.query(
+                "INSERT INTO lead_logs (candidate_id, user_id, action, details) VALUES ($1, $2, 'Remark', $3)",
+                [req.params.id, userId, remark]
+            );
+
+            // Update next followup if provided
+            if (nextFollowupAt) {
+                await client.query(
+                    "UPDATE candidates SET next_followup_at = $1 WHERE id = $2",
+                    [nextFollowupAt, req.params.id]
+                );
+                await client.query(
+                    "INSERT INTO lead_logs (candidate_id, user_id, action, details) VALUES ($1, $2, 'Follow-up Scheduled', $3)",
+                    [req.params.id, userId, `Scheduled for ${new Date(nextFollowupAt).toLocaleString()}`]
+                );
+            }
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 apiRouter.get('/bot/settings', async (req, res) => {

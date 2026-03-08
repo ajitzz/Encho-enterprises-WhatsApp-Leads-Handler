@@ -18,9 +18,10 @@ interface LayoutProps {
   activeTab: string;
   onTabChange: (tab: string) => void;
   onOpenSettings?: () => void;
+  userRole?: 'admin' | 'manager' | 'staff';
 }
 
-export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange, onOpenSettings }) => {
+export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange, onOpenSettings, userRole = 'staff' }) => {
   const [isCollapsed, setIsCollapsed] = useState(false);
 
   return (
@@ -50,7 +51,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
           </div>
           <div className={`transition-opacity duration-300 ${isCollapsed ? 'opacity-0 w-0 hidden' : 'opacity-100'}`}>
             <h1 className="font-bold text-lg tracking-tight whitespace-nowrap">Encho WhatsApp</h1>
-            <p className="text-xs text-gray-400 whitespace-nowrap">Handler</p>
+            <p className="text-xs text-gray-400 whitespace-nowrap">Handler ({userRole})</p>
           </div>
         </div>
 
@@ -81,66 +82,84 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
             <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Leads & Campaigns</span>
           </button>
 
+          {userRole === 'admin' && (
+            <>
+              <button
+                onClick={() => onTabChange('excel-report')}
+                title={isCollapsed ? "Driver Excel Report" : ""}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                  activeTab === 'excel-report' 
+                    ? 'bg-white text-black font-medium' 
+                    : 'text-gray-400 hover:bg-gray-900 hover:text-white'
+                } ${isCollapsed ? 'justify-center px-2' : ''}`}
+              >
+                <Table size={20} className="shrink-0" />
+                <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Driver Excel Report</span>
+              </button>
+              <button
+                onClick={() => onTabChange('media-library')}
+                title={isCollapsed ? "Media Library" : ""}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                  activeTab === 'media-library' 
+                    ? 'bg-white text-black font-medium' 
+                    : 'text-gray-400 hover:bg-gray-900 hover:text-white'
+                } ${isCollapsed ? 'justify-center px-2' : ''}`}
+              >
+                <Cloud size={20} className="shrink-0" />
+                <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Media Library (S3)</span>
+              </button>
+              
+              <div className={`pt-4 pb-2 transition-all duration-200 ${isCollapsed ? 'border-t border-gray-800 mt-2 pt-2' : ''}`}>
+                {!isCollapsed ? (
+                  <p className="px-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider whitespace-nowrap">Automation</p>
+                ) : (
+                  <div className="h-px w-8 mx-auto bg-gray-800" />
+                )}
+              </div>
 
+              <button
+                onClick={() => onTabChange('bot-studio')}
+                title={isCollapsed ? "Bot Studio" : ""}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                  activeTab === 'bot-studio' 
+                    ? 'bg-white text-black font-medium' 
+                    : 'text-gray-400 hover:bg-gray-900 hover:text-white'
+                } ${isCollapsed ? 'justify-center px-2' : ''}`}
+              >
+                <Bot size={20} className="shrink-0" />
+                <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Bot Studio</span>
+              </button>
 
-          <button
-            onClick={() => onTabChange('excel-report')}
-            title={isCollapsed ? "Driver Excel Report" : ""}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'excel-report' 
-                ? 'bg-white text-black font-medium' 
-                : 'text-gray-400 hover:bg-gray-900 hover:text-white'
-            } ${isCollapsed ? 'justify-center px-2' : ''}`}
-          >
-            <Table size={20} className="shrink-0" />
-            <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Driver Excel Report</span>
-          </button>
-          <button
-            onClick={() => onTabChange('media-library')}
-            title={isCollapsed ? "Media Library" : ""}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'media-library' 
-                ? 'bg-white text-black font-medium' 
-                : 'text-gray-400 hover:bg-gray-900 hover:text-white'
-            } ${isCollapsed ? 'justify-center px-2' : ''}`}
-          >
-            <Cloud size={20} className="shrink-0" />
-            <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Media Library (S3)</span>
-          </button>
-          
-          <div className={`pt-4 pb-2 transition-all duration-200 ${isCollapsed ? 'border-t border-gray-800 mt-2 pt-2' : ''}`}>
-            {!isCollapsed ? (
-              <p className="px-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider whitespace-nowrap">Automation</p>
-            ) : (
-              <div className="h-px w-8 mx-auto bg-gray-800" />
-            )}
-          </div>
-
-          <button
-            onClick={() => onTabChange('bot-studio')}
-            title={isCollapsed ? "Bot Studio" : ""}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'bot-studio' 
-                ? 'bg-white text-black font-medium' 
-                : 'text-gray-400 hover:bg-gray-900 hover:text-white'
-            } ${isCollapsed ? 'justify-center px-2' : ''}`}
-          >
-            <Bot size={20} className="shrink-0" />
-            <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Bot Studio</span>
-          </button>
+              <button
+                onClick={() => onTabChange('team')}
+                title={isCollapsed ? "Team Management" : ""}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                  activeTab === 'team' 
+                    ? 'bg-white text-black font-medium' 
+                    : 'text-gray-400 hover:bg-gray-900 hover:text-white'
+                } ${isCollapsed ? 'justify-center px-2' : ''}`}
+              >
+                <Users size={20} className="shrink-0" />
+                <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Team Management</span>
+              </button>
+            </>
+          )}
         </nav>
 
         <div className="p-4 border-t border-gray-800">
-          <button 
-            onClick={onOpenSettings}
-            title={isCollapsed ? "Settings" : ""}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-gray-400 hover:bg-gray-900 hover:text-white transition-all ${isCollapsed ? 'justify-center px-2' : ''}`}
-          >
-            <Settings size={20} className="shrink-0" />
-            <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Settings</span>
-          </button>
+          {userRole === 'admin' && (
+            <button 
+              onClick={onOpenSettings}
+              title={isCollapsed ? "Settings" : ""}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-gray-400 hover:bg-gray-900 hover:text-white transition-all ${isCollapsed ? 'justify-center px-2' : ''}`}
+            >
+              <Settings size={20} className="shrink-0" />
+              <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Settings</span>
+            </button>
+          )}
           <button 
             title={isCollapsed ? "Logout" : ""}
+            onClick={() => { localStorage.removeItem('uber_fleet_auth_token'); window.location.reload(); }}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-red-400 hover:bg-gray-900 hover:text-red-300 transition-all mt-2 ${isCollapsed ? 'justify-center px-2' : ''}`}
           >
             <LogOut size={20} className="shrink-0" />

@@ -6,15 +6,17 @@ import {
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 import { MediaSelectorModal } from './MediaSelectorModal';
+import { LmsUser, LeadLog } from '../types';
 
 interface ChatDrawerProps {
   driver: Driver | null;
   onClose: () => void;
   onSendMessage: (text: string) => void;
   onUpdateDriver: (id: string, updates: Partial<Driver>) => void;
+  userProfile?: any;
 }
 
-export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver }) => {
+export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver, userProfile }) => {
   const [replyText, setReplyText] = useState('');
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
@@ -27,6 +29,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>([]);
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
   
+  const [leadLogs, setLeadLogs] = useState<LeadLog[]>([]);
+  const [newRemark, setNewRemark] = useState('');
+  const [nextFollowup, setNextFollowup] = useState('');
+  const [isSubmittingRemark, setIsSubmittingRemark] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState<'timeline' | 'docs'>('timeline');
+
   // EDIT STATE
   const [editingMessage, setEditingMessage] = useState<ScheduledMessage | null>(null);
   const [editTime, setEditTime] = useState('');
@@ -39,8 +47,38 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
         setLocalMessages(driver.messages || []);
         loadDocuments(driver.id);
         loadScheduledMessages(driver.id);
+        loadLeadLogs(driver.id);
     }
   }, [driver]);
+
+  const loadLeadLogs = async (id: string) => {
+    try {
+      const logs = await liveApiService.getLeadLogs(id);
+      setLeadLogs(logs);
+    } catch (e) {}
+  };
+
+  const handleAddRemark = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!driver || !newRemark.trim()) return;
+    setIsSubmittingRemark(true);
+    try {
+      await liveApiService.addLeadRemark(
+        driver.id,
+        userProfile?.id,
+        newRemark,
+        nextFollowup ? new Date(nextFollowup).toISOString() : undefined
+      );
+      setNewRemark('');
+      setNextFollowup('');
+      loadLeadLogs(driver.id);
+      // Also update local driver state if needed, but reload is safer for now
+    } catch (e) {
+      alert("Failed to add remark");
+    } finally {
+      setIsSubmittingRemark(false);
+    }
+  };
 
   useEffect(() => {
       if (!driver) return;
@@ -311,29 +349,95 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
               </div>
             </div>
 
-            <div className="w-[400px] bg-white border-l border-gray-200 p-6">
-                <h3 className="text-xs font-bold text-gray-500 uppercase mb-3">Documents</h3>
-                {documents.length === 0 ? (
-                    <div className="text-center p-6 border-2 border-dashed border-gray-100 rounded-xl bg-gray-50">
-                        <FileText size={24} className="mx-auto text-gray-300 mb-2" />
-                        <p className="text-xs text-gray-400">No documents uploaded yet.</p>
-                    </div>
-                ) : (
-                    <div className="space-y-3">
-                        {documents.map(doc => (
-                            <div key={doc.id} className="bg-white p-3 rounded-xl border border-gray-200 shadow-sm flex justify-between items-center group hover:border-blue-200 transition-colors">
-                                <div className="flex items-center gap-2">
-                                    <div className="bg-blue-50 p-2 rounded-lg text-blue-600"><FileText size={16} /></div>
-                                    <div className="flex flex-col">
-                                        <span className="text-xs font-bold capitalize text-gray-800">{doc.docType.replace('_', ' ')}</span>
-                                        <span className="text-[9px] text-gray-400">{new Date(doc.timestamp).toLocaleDateString()}</span>
-                                    </div>
+            <div className="w-[400px] bg-white border-l border-gray-200 flex flex-col">
+                <div className="flex border-b border-gray-200">
+                    <button 
+                        onClick={() => setSidebarTab('timeline')}
+                        className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-all ${sidebarTab === 'timeline' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-400 hover:text-gray-600'}`}
+                    >
+                        Timeline
+                    </button>
+                    <button 
+                        onClick={() => setSidebarTab('docs')}
+                        className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider transition-all ${sidebarTab === 'docs' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-400 hover:text-gray-600'}`}
+                    >
+                        Documents
+                    </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-4">
+                    {sidebarTab === 'timeline' ? (
+                        <div className="space-y-6">
+                            <form onSubmit={handleAddRemark} className="bg-gray-50 p-4 rounded-xl border border-gray-200 space-y-3">
+                                <h4 className="text-xs font-bold text-gray-700 uppercase">Add Remark / Follow-up</h4>
+                                <textarea 
+                                    value={newRemark}
+                                    onChange={e => setNewRemark(e.target.value)}
+                                    placeholder="Enter status update or remark..."
+                                    className="w-full p-2 text-sm border rounded-lg resize-none h-20 outline-none focus:ring-2 focus:ring-blue-500"
+                                />
+                                <div>
+                                    <label className="text-[10px] font-bold text-gray-500 uppercase block mb-1">Next Follow-up</label>
+                                    <input 
+                                        type="datetime-local"
+                                        value={nextFollowup}
+                                        onChange={e => setNextFollowup(e.target.value)}
+                                        className="w-full p-2 text-xs border rounded-lg outline-none"
+                                    />
                                 </div>
-                                <a href={doc.url} target="_blank" rel="noreferrer" className="text-gray-400 hover:text-blue-600 p-1"><Download size={14}/></a>
+                                <button 
+                                    disabled={isSubmittingRemark || !newRemark.trim()}
+                                    className="w-full py-2 bg-black text-white rounded-lg text-xs font-bold hover:bg-gray-800 disabled:opacity-50 transition-all"
+                                >
+                                    {isSubmittingRemark ? 'Saving...' : 'Save Update'}
+                                </button>
+                            </form>
+
+                            <div className="space-y-4">
+                                {leadLogs.map((log, idx) => (
+                                    <div key={log.id} className="relative pl-6 border-l-2 border-gray-100 pb-2">
+                                        <div className="absolute -left-[9px] top-0 w-4 h-4 rounded-full bg-white border-2 border-blue-500 flex items-center justify-center">
+                                            <div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div>
+                                        </div>
+                                        <div className="text-[10px] font-bold text-gray-400 uppercase mb-1">
+                                            {new Date(log.createdAt).toLocaleString()}
+                                        </div>
+                                        <div className="bg-white p-3 rounded-xl border border-gray-100 shadow-sm">
+                                            <p className="text-xs text-gray-800 font-medium">{log.action.replace(/_/g, ' ').toUpperCase()}</p>
+                                            {log.details && <p className="text-xs text-gray-600 mt-1">{log.details}</p>}
+                                            <p className="text-[9px] text-gray-400 mt-2 font-bold">By: {log.performedByName || 'System'}</p>
+                                        </div>
+                                    </div>
+                                ))}
+                                {leadLogs.length === 0 && (
+                                    <div className="text-center py-8 text-gray-400 text-xs italic">No activity logged yet.</div>
+                                )}
                             </div>
-                        ))}
-                    </div>
-                )}
+                        </div>
+                    ) : (
+                        <div className="space-y-3">
+                            {documents.length === 0 ? (
+                                <div className="text-center p-6 border-2 border-dashed border-gray-100 rounded-xl bg-gray-50">
+                                    <FileText size={24} className="mx-auto text-gray-300 mb-2" />
+                                    <p className="text-xs text-gray-400">No documents uploaded yet.</p>
+                                </div>
+                            ) : (
+                                documents.map(doc => (
+                                    <div key={doc.id} className="bg-white p-3 rounded-xl border border-gray-200 shadow-sm flex justify-between items-center group hover:border-blue-200 transition-colors">
+                                        <div className="flex items-center gap-2">
+                                            <div className="bg-blue-50 p-2 rounded-lg text-blue-600"><FileText size={16} /></div>
+                                            <div className="flex flex-col">
+                                                <span className="text-xs font-bold capitalize text-gray-800">{doc.docType.replace('_', ' ')}</span>
+                                                <span className="text-[9px] text-gray-400">{new Date(doc.timestamp).toLocaleDateString()}</span>
+                                            </div>
+                                        </div>
+                                        <a href={doc.url} target="_blank" rel="noreferrer" className="text-gray-400 hover:text-blue-600 p-1"><Download size={14}/></a>
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                    )}
+                </div>
             </div>
           </div>
         </div>
