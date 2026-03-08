@@ -19,7 +19,6 @@ import { SystemMonitor } from './components/SystemMonitor';
 import { IsolatedFeatureBoundary } from './components/IsolatedFeatureBoundary'; 
 import { SettingsModal } from './components/SettingsModal'; 
 import { Login } from './components/Login'; 
-import { TeamManagement } from './components/TeamManagement';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService, setAuthToken } from './services/liveApiService';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
@@ -319,40 +318,31 @@ export default function App() {
     new: drivers.filter(d => d.status === LeadStatus.NEW).length
   };
 
-  const userRole = userProfile?.role || 'staff';
-
   return (
     <>
-      <Layout 
-        activeTab={activeTab} 
-        onTabChange={setActiveTab} 
-        onOpenSettings={() => setShowSettingsModal(true)}
-        userRole={userRole}
-      >
+      <Layout activeTab={activeTab} onTabChange={setActiveTab} onOpenSettings={() => setShowSettingsModal(true)}>
         {activeTab === 'dashboard' && (
         <div className="p-8 max-w-7xl mx-auto space-y-8">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                  <div>
                     <h2 className="text-2xl font-bold text-gray-900">Dashboard</h2>
-                    <p className="text-gray-500">Welcome back, {userProfile?.name || 'User'}. Here is your fleet recruitment overview.</p>
+                    <p className="text-gray-500">Welcome back. Here is your fleet recruitment overview.</p>
                  </div>
-                 {userRole === 'admin' && (
-                   <div className="flex items-center gap-2">
-                     {botSettings && (
-                         <button onClick={handleToggleRepeat} disabled={isRepeatToggling} className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-bold transition-all shadow-sm ${botSettings.shouldRepeat ? 'bg-purple-100 text-purple-700 border-purple-200 hover:bg-purple-200' : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'}`} title="Restart bot flow automatically">
-                             <Repeat size={18} className={isRepeatToggling ? 'animate-spin' : ''} />
-                             Bot Repeat: {botSettings.shouldRepeat ? 'ON' : 'OFF'}
-                         </button>
-                     )}
-                     {dataSource === 'live' && (
-                       <button onClick={() => setShowWebhookModal(true)} className="bg-white border border-gray-200 text-gray-700 p-2 rounded-lg hover:bg-gray-50 transition-colors shadow-sm"><SettingsIcon size={20} /></button>
-                     )}
-                     <div className="flex items-center bg-white border border-gray-200 rounded-lg p-1 shadow-sm">
-                        <button onClick={() => changeDataSource('mock')} className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${dataSource === 'mock' ? 'bg-gray-100 text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}><Database size={16} /> Simulator</button>
-                        <button onClick={() => changeDataSource('live')} className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${dataSource === 'live' ? 'bg-green-100 text-green-800 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}><Radio size={16} className={dataSource === 'live' ? 'animate-pulse' : ''} /> Live API</button>
-                     </div>
+                 <div className="flex items-center gap-2">
+                   {botSettings && (
+                       <button onClick={handleToggleRepeat} disabled={isRepeatToggling} className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-bold transition-all shadow-sm ${botSettings.shouldRepeat ? 'bg-purple-100 text-purple-700 border-purple-200 hover:bg-purple-200' : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'}`} title="Restart bot flow automatically">
+                           <Repeat size={18} className={isRepeatToggling ? 'animate-spin' : ''} />
+                           Bot Repeat: {botSettings.shouldRepeat ? 'ON' : 'OFF'}
+                       </button>
+                   )}
+                   {dataSource === 'live' && (
+                     <button onClick={() => setShowWebhookModal(true)} className="bg-white border border-gray-200 text-gray-700 p-2 rounded-lg hover:bg-gray-50 transition-colors shadow-sm"><SettingsIcon size={20} /></button>
+                   )}
+                   <div className="flex items-center bg-white border border-gray-200 rounded-lg p-1 shadow-sm">
+                      <button onClick={() => changeDataSource('mock')} className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${dataSource === 'mock' ? 'bg-gray-100 text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}><Database size={16} /> Simulator</button>
+                      <button onClick={() => changeDataSource('live')} className={`px-3 py-1.5 rounded-md text-sm font-medium transition-all flex items-center gap-2 ${dataSource === 'live' ? 'bg-green-100 text-green-800 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}><Radio size={16} className={dataSource === 'live' ? 'animate-pulse' : ''} /> Live API</button>
                    </div>
-                 )}
+                 </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
@@ -378,22 +368,21 @@ export default function App() {
           <div className="h-[600px] flex flex-col">
             <div className="flex justify-between items-center mb-4"><h3 className="text-lg font-bold text-gray-900">Recent Activity</h3></div>
             {dataSource === 'live' && drivers.length === 0 && <div className="bg-amber-50 text-amber-800 p-4 rounded-lg mb-4 border border-amber-200 text-sm"><strong>Note:</strong> Waiting for new leads via Live API.</div>}
-            <LeadTable drivers={drivers} onSelectDriver={handleSelectDriver} onSendWelcome={handleSendWelcome} selectedIds={selectedBulkIds} onBulkSelect={setSelectedBulkIds} userRole={userRole} />
+            <LeadTable drivers={drivers} onSelectDriver={handleSelectDriver} onSendWelcome={handleSendWelcome} selectedIds={selectedBulkIds} onBulkSelect={setSelectedBulkIds} />
           </div>
         </div>
         )}
         
-        {activeTab === 'leads' && <div className="p-4 h-screen bg-gray-50"><LeadManager drivers={drivers} onSelectDriver={handleSelectDriver} onBulkSend={handleBulkSendDirect} onUpdateDriverStatus={handleBulkStatusUpdate} userProfile={userProfile} /></div>}
-        {activeTab === 'excel-report' && userRole === 'admin' && (
+        {activeTab === 'leads' && <div className="p-4 h-screen bg-gray-50"><LeadManager drivers={drivers} onSelectDriver={handleSelectDriver} onBulkSend={handleBulkSendDirect} onUpdateDriverStatus={handleBulkStatusUpdate} /></div>}
+        {activeTab === 'excel-report' && (
           <IsolatedFeatureBoundary featureName="Driver Excel Report">
             <Suspense fallback={<div className="p-8 text-gray-500">Loading Driver Excel Report...</div>}>
               <DriverExcelReport isLiveMode={dataSource === 'live'} />
             </Suspense>
           </IsolatedFeatureBoundary>
         )}
-        {activeTab === 'media-library' && userRole === 'admin' && <MediaLibrary />}
-        {activeTab === 'bot-studio' && userRole === 'admin' && <BotBuilder isLiveMode={dataSource === 'live'} />}
-        {activeTab === 'team' && userRole === 'admin' && <TeamManagement />}
+        {activeTab === 'media-library' && <MediaLibrary />}
+        {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
 
         {showWebhookModal && <WebhookConfigModal onClose={() => setShowWebhookModal(false)} onSuccess={() => { addNotification({ type: 'success', title: 'Webhook Configured', message: 'Meta App settings updated successfully.' }); }} />}
         {showSettingsModal && <SettingsModal onClose={() => setShowSettingsModal(false)} />}

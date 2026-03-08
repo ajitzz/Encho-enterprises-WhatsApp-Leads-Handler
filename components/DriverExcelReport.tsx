@@ -232,20 +232,10 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     if (col.key === 'source') return row.source || '';
     if (col.key === 'createdAt') return row.createdAt || '';
     if (col.key === 'lastMessageAt') return row.lastMessageAt || '';
-    if (col.key === 'assignedManagerId') return row.assignedManagerId || '';
-    if (col.key === 'assignedStaffId') return row.assignedStaffId || '';
-    if (col.key === 'nextFollowupAt') return row.nextFollowupAt ? new Date(row.nextFollowupAt).toLocaleString() : '';
     return String(row.variables?.[col.key] ?? '');
   };
 
-  const isReadOnlyColumn = (key: string) => 
-    key === 'createdAt' || 
-    key === 'lastMessageAt' || 
-    key === 'assignedManagerId' || 
-    key === 'assignedStaffId' || 
-    key === 'nextFollowupAt' ||
-    key.endsWith('_status') || 
-    key.endsWith('_uploaded_at');
+  const isReadOnlyColumn = (key: string) => key === 'createdAt' || key === 'lastMessageAt' || key.endsWith('_status') || key.endsWith('_uploaded_at');
 
   const beginEdit = (rowId: string, col: DriverExcelColumn, currentValue: string) => {
     if (isReadOnlyColumn(col.key)) return;

@@ -1,5 +1,5 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { Driver, LeadStatus, LmsUser } from '../types';
+import React, { useState, useMemo } from 'react';
+import { Driver, LeadStatus } from '../types';
 import {
   Search,
   Send,
@@ -16,8 +16,7 @@ import {
   Flame,
   ListFilter,
   Timer,
-  CircleDot,
-  UserPlus
+  CircleDot
 } from 'lucide-react';
 import { MediaSelectorModal } from './MediaSelectorModal';
 import { liveApiService } from '../services/liveApiService';
@@ -27,8 +26,6 @@ interface LeadManagerProps {
   onSelectDriver: (driver: Driver) => void;
   onBulkSend: (ids: string[], message: string, mediaUrl?: string, mediaType?: string, options?: string[], templateName?: string, scheduledTime?: number) => void;
   onUpdateDriverStatus: (ids: string[], status: LeadStatus) => void;
-  userRole?: 'admin' | 'manager' | 'staff';
-  userProfile?: any;
 }
 
 type PriorityBand = 'hot' | 'warm' | 'cold';
@@ -122,14 +119,13 @@ const formatFollowupLabel = (value: number | null) => {
 };
 
 export const LeadManager: React.FC<LeadManagerProps> = ({
-  drivers, onSelectDriver, onBulkSend, userRole = 'staff', userProfile
+  drivers, onSelectDriver, onBulkSend
 }) => {
   const [activeSection, setActiveSection] = useState<string>('All');
   const [searchTerm, setSearchTerm] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [showBulkCompose, setShowBulkCompose] = useState(false);
-  const [showAssignModal, setShowAssignModal] = useState(false);
   const [queueFilter, setQueueFilter] = useState<QueueFilter>('all');
 
   const [bulkMessage, setBulkMessage] = useState('');
@@ -139,15 +135,6 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
   const [isScheduled, setIsScheduled] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
 
-  const [lmsUsers, setLmsUsers] = useState<LmsUser[]>([]);
-  const [assignTarget, setAssignTarget] = useState({ managerId: '', staffId: '' });
-
-  useEffect(() => {
-    if (userRole === 'admin' || userRole === 'manager') {
-      liveApiService.getLmsUsers().then(setLmsUsers).catch(console.error);
-    }
-  }, [userRole]);
-
   const sections = [
     { id: 'All', label: 'All Leads', icon: Users, color: 'text-gray-600' },
     { id: LeadStatus.NEW, label: 'New Inquiries', icon: Zap, color: 'text-blue-600' },
@@ -156,38 +143,10 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
     { id: LeadStatus.REJECTED, label: 'Rejected', icon: X, color: 'text-red-600' }
   ];
 
-  const enrichedDrivers = useMemo(() => {
-    // Role-based filtering
-    let filtered = drivers;
-    if (userRole === 'manager') {
-      filtered = drivers.filter(d => d.assignedManagerId === userProfile?.id);
-    } else if (userRole === 'staff') {
-      filtered = drivers.filter(d => d.assignedStaffId === userProfile?.id);
-    }
-
-    return filtered.map((driver) => ({
-      ...driver,
-      insight: buildLeadInsight(driver)
-    }));
-  }, [drivers, userRole, userProfile]);
-
-  const handleAssignLeads = async () => {
-    if (!assignTarget.managerId && !assignTarget.staffId) return;
-    try {
-      await liveApiService.assignLeads(
-        selectedIds,
-        assignTarget.managerId || null,
-        assignTarget.staffId || null,
-        userProfile?.id
-      );
-      alert("Leads assigned successfully");
-      setShowAssignModal(false);
-      setSelectedIds([]);
-      window.location.reload(); 
-    } catch (e) {
-      alert("Failed to assign leads");
-    }
-  };
+  const enrichedDrivers = useMemo(() => drivers.map((driver) => ({
+    ...driver,
+    insight: buildLeadInsight(driver)
+  })), [drivers]);
 
   const queueCounters = useMemo(() => ({
     all: enrichedDrivers.length,
@@ -450,12 +409,6 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
               {selectedIds.length} Selected
             </span>
             <div className="flex items-center gap-3">
-              {(userRole === 'admin' || userRole === 'manager') && (
-                <button onClick={() => setShowAssignModal(true)} className="flex items-center gap-2 text-sm font-medium text-white/90 transition-colors hover:text-green-300">
-                  <UserPlus size={16} />
-                  Assign
-                </button>
-              )}
               <button onClick={() => setShowBulkCompose(true)} className="flex items-center gap-2 text-sm font-medium text-white/90 transition-colors hover:text-blue-300">
                 <Send size={16} />
                 Broadcast
@@ -463,60 +416,6 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
               <button onClick={() => setSelectedIds([])} className="rounded-full p-1 transition-colors hover:bg-gray-800">
                 <X size={14} />
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showAssignModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
-            <div className="p-6 bg-gray-50 border-b border-gray-100">
-              <h3 className="text-xl font-bold text-gray-900">Assign {selectedIds.length} Leads</h3>
-            </div>
-            <div className="p-6 space-y-4">
-              {userRole === 'admin' && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Select Manager</label>
-                  <select 
-                    value={assignTarget.managerId}
-                    onChange={e => setAssignTarget({...assignTarget, managerId: e.target.value})}
-                    className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-black outline-none"
-                  >
-                    <option value="">No Manager</option>
-                    {lmsUsers.filter(u => u.role === 'manager').map(m => (
-                      <option key={m.id} value={m.id}>{m.name}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Select Staff</label>
-                <select 
-                  value={assignTarget.staffId}
-                  onChange={e => setAssignTarget({...assignTarget, staffId: e.target.value})}
-                  className="w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-black outline-none"
-                >
-                  <option value="">No Staff</option>
-                  {lmsUsers.filter(u => u.role === 'staff' && (!assignTarget.managerId || u.managerId === assignTarget.managerId)).map(s => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex gap-3 pt-4">
-                <button 
-                  onClick={() => setShowAssignModal(false)}
-                  className="flex-1 px-4 py-2 border rounded-lg hover:bg-gray-50 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button 
-                  onClick={handleAssignLeads}
-                  className="flex-1 px-4 py-2 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors font-bold"
-                >
-                  Confirm Assignment
-                </button>
-              </div>
             </div>
           </div>
         </div>
