@@ -9,8 +9,6 @@ const https = require('https');
 const { S3Client, GetObjectCommand, PutObjectCommand, CopyObjectCommand, DeleteObjectCommand, ListObjectsV2Command, HeadObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { OAuth2Client, JWT } = require('google-auth-library');
-const { createServer: createViteServer } = require('vite');
-const path = require('path');
 
 require('dotenv').config();
 
@@ -28,7 +26,7 @@ const SYSTEM_CONFIG = {
     DB_CONNECTION_TIMEOUT: 20000,
     AWS_REGION: process.env.AWS_REGION || 'us-east-1',
     AWS_BUCKET: process.env.AWS_BUCKET_NAME || 'uber-fleet-assets',
-    GOOGLE_CLIENT_ID: process.env.VITE_GOOGLE_CLIENT_ID || '764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.googleusercontent.com',
+    GOOGLE_CLIENT_ID: process.env.VITE_GOOGLE_CLIENT_ID,
     GOOGLE_SHEETS_SPREADSHEET_ID: process.env.GOOGLE_SHEETS_SPREADSHEET_ID || '',
     GOOGLE_SHEETS_CUSTOMERS_TAB_NAME: process.env.GOOGLE_SHEETS_CUSTOMERS_TAB_NAME || process.env.GOOGLE_SHEETS_CUSTOMERS_SHEET || 'Customers',
     GOOGLE_SHEETS_MESSAGES_TAB_NAME: process.env.GOOGLE_SHEETS_MESSAGES_TAB_NAME || process.env.GOOGLE_SHEETS_MESSAGES_SHEET || 'Messages',
@@ -2896,87 +2894,6 @@ const apiRouter = express.Router();
 
 apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
-apiRouter.get('/auth/google/url', (req, res) => {
-    const host = req.get('host');
-    const protocol = (host.includes('localhost') || host.includes('127.0.0.1')) ? 'http' : 'https';
-    const redirectUri = `${protocol}://${host}/auth/google/callback`;
-
-    console.log(`[OAuth] Generating Auth URL. Host: ${host}, Protocol: ${protocol}, Redirect: ${redirectUri}`);
-
-    const params = new URLSearchParams({
-        client_id: SYSTEM_CONFIG.GOOGLE_CLIENT_ID,
-        redirect_uri: redirectUri,
-        response_type: 'code',
-        scope: 'openid email profile',
-        access_type: 'offline',
-        prompt: 'consent'
-    });
-    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
-    res.json({ url: authUrl, redirectUri });
-});
-
-apiRouter.get('/auth/google/callback', async (req, res) => {
-    const { code } = req.query;
-    try {
-        const host = req.get('host');
-        const protocol = (host.includes('localhost') || host.includes('127.0.0.1')) ? 'http' : 'https';
-        const redirectUri = `${protocol}://${host}/auth/google/callback`;
-
-        console.log(`[OAuth] Callback received. Exchanging code with redirectUri: ${redirectUri}`);
-
-        const { tokens } = await googleClient.getToken({
-            code: code,
-            redirect_uri: redirectUri
-        });
-        const ticket = await googleClient.verifyIdToken({
-            idToken: tokens.id_token,
-            audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID
-        });
-        const payload = ticket.getPayload();
-        
-        const adminEmails = ['enchoenterprises@gmail.com', 'ajithsabzz@gmail.com'];
-        if (!adminEmails.includes(payload.email)) {
-             return res.send(`
-                <html>
-                    <body>
-                        <script>
-                            window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: 'Unauthorized email: ${payload.email}' }, '*');
-                            window.close();
-                        </script>
-                    </body>
-                </html>
-            `);
-        }
-
-        res.send(`
-            <html>
-                <body>
-                    <script>
-                        window.opener.postMessage({ 
-                            type: 'OAUTH_AUTH_SUCCESS', 
-                            token: '${tokens.id_token}',
-                            user: ${JSON.stringify(payload)}
-                        }, '*');
-                        window.close();
-                    </script>
-                </body>
-            </html>
-        `);
-    } catch (e) {
-        console.error("[OAuth] Callback Error:", e);
-        res.send(`
-            <html>
-                <body>
-                    <script>
-                        window.opener.postMessage({ type: 'OAUTH_AUTH_ERROR', error: '${e.message}' }, '*');
-                        window.close();
-                    </script>
-                </body>
-            </html>
-        `);
-    }
-});
-
 apiRouter.get('/system/settings', async (req, res) => {
     try {
         await withDb(async (client) => {
@@ -3623,14 +3540,7 @@ apiRouter.post('/auth/google', async (req, res) => {
     try {
         const { credential } = req.body;
         const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
-        const payload = ticket.getPayload();
-
-        const ADMIN_EMAILS = ['enchoenterprises@gmail.com', 'ajithsabzz@gmail.com'];
-        if (!payload || !payload.email || !ADMIN_EMAILS.includes(payload.email.toLowerCase())) {
-            return res.status(403).json({ success: false, error: "Access Denied: Unauthorized email." });
-        }
-
-        res.json({ success: true, user: payload });
+        res.json({ success: true, user: ticket.getPayload() });
     } catch (e) { res.status(401).json({ success: false, error: e.message }); }
 });
 
@@ -4246,27 +4156,13 @@ apiRouter.post('/system/seed-db', async (req, res) => {
 
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
+app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
-async function startServer() {
-    if (process.env.NODE_ENV !== 'production') {
-        const vite = await createViteServer({
-            server: { middlewareMode: true },
-            appType: 'spa',
-        });
-        app.use(vite.middlewares);
-    } else {
-        app.use(express.static(path.join(__dirname, 'dist')));
-        app.get('*', (req, res, next) => {
-            if (req.path.startsWith('/api')) return next();
-            res.sendFile(path.join(__dirname, 'dist', 'index.html'));
-        });
-    }
-
-    const PORT = 3000;
-    app.listen(PORT, '0.0.0.0', () => {
-        console.log(`Server running on http://0.0.0.0:${PORT}`);
-        
-        // Auto-Init Check on Start
+if (require.main === module) {
+    const PORT = process.env.PORT || 3001;
+    app.listen(PORT, () => {
+        console.log(`Server running on ${PORT}`);
+        // Auto-Init Check on Start (For Local/VPS, NOT Vercel)
         (async () => {
             try {
                 if (pgPool) {
@@ -4285,10 +4181,6 @@ async function startServer() {
             } catch(e) { console.error("[Auto-Init] Failed:", e.message); }
         })();
     });
-}
-
-if (require.main === module) {
-    startServer();
 }
 
 module.exports = app;

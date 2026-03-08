@@ -73,6 +73,21 @@ export interface ConditionRule {
   value: string;
 }
 
+export interface SummaryFieldConfig {
+  id: string;
+  variable: string;
+  label?: string;
+  labelStyle?: 'plain' | 'bold' | 'uppercase';
+  valueStyle?: 'plain' | 'bold' | 'italic' | 'code';
+  prefix?: string;
+  suffix?: string;
+}
+
+export type SummaryTextStyle = 'plain' | 'bold' | 'italic' | 'uppercase' | 'code';
+export type MessageFontSize = 'small' | 'medium' | 'large';
+export type MessageFontWeight = 'regular' | 'semibold' | 'bold';
+export type MessageTextAlign = 'left' | 'center' | 'right';
+
 export interface FlowNodeData {
   id: string;
   label: string;
@@ -95,7 +110,7 @@ export interface FlowNodeData {
 
   // Input & Validation
   variable?: string; 
-  validationType?: 'text' | 'email' | 'phone' | 'number' | 'regex' | 'location';
+  validationType?: 'text' | 'email' | 'phone' | 'number' | 'regex' | 'location' | 'media';
   validationRegex?: string;
   retryMessage?: string; 
   
@@ -116,6 +131,20 @@ export interface FlowNodeData {
   templateName?: string;
   templateLanguage?: string;
   templateVariables?: string[]; 
+
+  // Summary Node Advanced Layout
+  summaryDescription?: string;
+  summaryFields?: SummaryFieldConfig[];
+  summaryUseAutoVariables?: boolean;
+  summaryEmptyText?: string;
+  summaryHeaderStyle?: SummaryTextStyle;
+  summaryDescriptionStyle?: SummaryTextStyle;
+  summaryFooterStyle?: SummaryTextStyle;
+
+  // Text presentation (Bot Studio preview + renderer-ready metadata)
+  messageFontSize?: MessageFontSize;
+  messageFontWeight?: MessageFontWeight;
+  messageTextAlign?: MessageTextAlign;
 
   [key: string]: any;
 }
@@ -145,6 +174,7 @@ export interface Message {
   imageUrl?: string;
   videoUrl?: string;
   documentUrl?: string;
+  audioUrl?: string;
   timestamp: number;
   type: 'text' | 'image' | 'video' | 'document' | 'audio' | 'location' | 'template' | 'interactive' | 'options' | 'video_link' | 'system_error';
   status?: 'sent' | 'delivered' | 'read' | 'failed' | 'processing' | 'sending';
@@ -220,6 +250,23 @@ export interface ScheduledMessage {
     mediaType?: string;
   };
   status: 'pending' | 'processing' | 'failed' | 'sent';
+}
+
+export interface DriverExcelColumn {
+  key: string;
+  label: string;
+  isCore: boolean;
+}
+
+export interface DriverExcelRow {
+  id: string;
+  phoneNumber: string;
+  name: string;
+  status: string;
+  source: string;
+  createdAt: string;
+  lastMessageAt: string;
+  variables: Record<string, any>;
 }
 
 export interface AuditIssue {

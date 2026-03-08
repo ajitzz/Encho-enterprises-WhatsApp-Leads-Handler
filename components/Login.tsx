@@ -1,5 +1,6 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
+import { GoogleLogin, CredentialResponse } from '@react-oauth/google';
 import { ShieldCheck, AlertCircle, Loader2 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
@@ -10,49 +11,27 @@ interface LoginProps {
 export const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [debugUri, setDebugUri] = useState('');
 
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      const origin = event.origin;
-      if (!origin.endsWith('.run.app') && !origin.includes('localhost')) {
-        return;
-      }
+  const handleSuccess = async (credentialResponse: CredentialResponse) => {
+    if (!credentialResponse.credential) {
+      setError("Google Sign-In failed. No credential received.");
+      return;
+    }
 
-      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
-        onLoginSuccess(event.data.token, event.data.user);
-      } else if (event.data?.type === 'OAUTH_AUTH_ERROR') {
-        setError(event.data.error || 'Authentication failed');
-      }
-    };
-
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, [onLoginSuccess]);
-
-  const handleManualLogin = async () => {
     setLoading(true);
     setError('');
-    try {
-      const { url, redirectUri } = await liveApiService.getGoogleAuthUrl();
-      setDebugUri(redirectUri);
-      const width = 600;
-      const height = 700;
-      const left = window.screenX + (window.outerWidth - width) / 2;
-      const top = window.screenY + (window.outerHeight - height) / 2;
-      
-      const authWindow = window.open(
-        url,
-        'google_oauth',
-        `width=${width},height=${height},left=${left},top=${top}`
-      );
 
-      if (!authWindow) {
-        setError("Popup blocked. Please allow popups for this site.");
+    try {
+      // Send token to backend for verification against Super Admin list
+      const response = await liveApiService.verifyLogin(credentialResponse.credential);
+      if (response.success) {
+        onLoginSuccess(credentialResponse.credential, response.user);
+      } else {
+        setError("Access Denied: You are not authorized to access this dashboard.");
       }
     } catch (err: any) {
       console.error(err);
-      setError(err.message || "Failed to initiate login.");
+      setError(err.message || "Server verification failed.");
     } finally {
       setLoading(false);
     }
@@ -81,25 +60,23 @@ export const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
             <p className="text-sm text-gray-500 mt-1">Please sign in with your authorized Google Account.</p>
           </div>
 
-          <div className="flex justify-center">
-            <button
-              onClick={handleManualLogin}
-              disabled={loading}
-              className="flex items-center gap-3 px-6 py-3 bg-white border border-gray-300 rounded-full text-gray-700 font-medium hover:bg-gray-50 transition-colors shadow-sm disabled:opacity-50"
-            >
-              {loading ? (
-                <Loader2 size={20} className="animate-spin text-blue-600" />
-              ) : (
-                <svg width="18" height="18" viewBox="0 0 18 18">
-                  <path fill="#4285F4" d="M17.64 9.2c0-.63-.06-1.25-.16-1.84H9v3.49h4.84c-.21 1.12-.84 2.07-1.79 2.7l2.85 2.2c1.67-1.53 2.63-3.79 2.63-6.55z"/>
-                  <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.85-2.2c-.79.53-1.8.85-3.11.85-2.39 0-4.41-1.61-5.14-3.77H.95v2.35C2.43 15.99 5.48 18 9 18z"/>
-                  <path fill="#FBBC05" d="M3.86 10.7c-.19-.56-.3-1.17-.3-1.8s.11-1.24.3-1.8V4.75H.95C.35 5.97 0 7.35 0 8.8s.35 2.83.95 4.05l2.91-2.15z"/>
-                  <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.47.89 11.43 0 9 0 5.48 0 2.43 2.01.95 4.75L3.86 6.9c.73-2.16 2.75-3.77 5.14-3.77z"/>
-                </svg>
-              )}
-              {loading ? 'Verifying...' : 'Sign in with Google'}
-            </button>
-          </div>
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-8 space-y-4">
+              <Loader2 size={32} className="animate-spin text-blue-600" />
+              <p className="text-sm text-gray-500 font-medium">Verifying Credentials...</p>
+            </div>
+          ) : (
+            <div className="flex justify-center">
+              <GoogleLogin
+                onSuccess={handleSuccess}
+                onError={() => setError('Google Login Failed')}
+                theme="outline"
+                size="large"
+                shape="pill"
+                width="300"
+              />
+            </div>
+          )}
 
           {/* Error Message */}
           {error && (
@@ -108,14 +85,6 @@ export const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
               <div>
                 <h3 className="text-sm font-bold text-red-900">Authentication Failed</h3>
                 <p className="text-xs text-red-700 mt-1 leading-relaxed">{error}</p>
-                {debugUri && (
-                  <div className="mt-3 p-2 bg-white/50 rounded border border-red-200">
-                    <p className="text-[10px] font-mono text-red-800 break-all">
-                      Required Redirect URI:<br/>
-                      {debugUri}
-                    </p>
-                  </div>
-                )}
               </div>
             </div>
           )}
