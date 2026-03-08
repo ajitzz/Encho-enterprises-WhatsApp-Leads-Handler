@@ -76,6 +76,10 @@ export const liveApiService = {
       });
   },
 
+  getGoogleAuthUrl: async (): Promise<{ url: string, redirectUri: string }> => {
+    return apiRequest<{ url: string, redirectUri: string }>('/api/auth/google/url');
+  },
+
   subscribeToUpdates: (callback: (drivers: Driver[]) => void) => {
       const interval = setInterval(async () => {
           try {
