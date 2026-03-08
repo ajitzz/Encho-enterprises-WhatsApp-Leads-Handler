@@ -35,6 +35,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   const [autoAddNewVariables, setAutoAddNewVariables] = useState(false);
   const [draggingColKey, setDraggingColKey] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<any>(null);
+  const [actor, setActor] = useState<{ email: string; role: 'admin' | 'staff' } | null>(null);
   const [uiMessage, setUiMessage] = useState('');
   const [actionKey, setActionKey] = useState<string | null>(null);
 
@@ -117,6 +118,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
       }
       setColumns(nextColumns);
       setRows(data.rows);
+      setActor(data.actor || null);
     } catch (e: any) {
       alert(e.message || 'Failed to load driver excel report');
     } finally {
@@ -232,15 +234,51 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     if (col.key === 'source') return row.source || '';
     if (col.key === 'createdAt') return row.createdAt || '';
     if (col.key === 'lastMessageAt') return row.lastMessageAt || '';
+    if (col.key === 'ownerStaffEmail') return row.ownerStaffEmail || '';
+    if (col.key === 'claimedAt') return row.claimedAt || '';
     return String(row.variables?.[col.key] ?? '');
   };
 
-  const isReadOnlyColumn = (key: string) => key === 'createdAt' || key === 'lastMessageAt' || key.endsWith('_status') || key.endsWith('_uploaded_at');
+  const isReadOnlyColumn = (key: string) => key === 'createdAt' || key === 'lastMessageAt' || key === 'ownerStaffEmail' || key === 'claimedAt' || key.endsWith('_status') || key.endsWith('_uploaded_at');
 
   const beginEdit = (rowId: string, col: DriverExcelColumn, currentValue: string) => {
     if (isReadOnlyColumn(col.key)) return;
     setEditingCell({ rowId, colKey: col.key });
     setDraftValue(currentValue);
+  };
+
+
+  const canEditRow = (row: DriverExcelRow) => {
+    if (!actor) return false;
+    if (actor.role === 'admin') return true;
+    const owner = (row.ownerStaffEmail || '').toLowerCase();
+    return !owner || owner === actor.email;
+  };
+
+  const claimLead = async (id: string) => {
+    setActionKey(`claim-${id}`);
+    try {
+      await liveApiService.claimDriverExcelLead(id);
+      await loadReport();
+      showMessage('Lead collected to your portal.');
+    } catch (e: any) {
+      showMessage(e.message || 'Failed to collect lead');
+    } finally {
+      setActionKey(null);
+    }
+  };
+
+  const releaseLead = async (id: string) => {
+    setActionKey(`release-${id}`);
+    try {
+      await liveApiService.releaseDriverExcelLead(id);
+      await loadReport();
+      showMessage('Lead removed from portal and returned to pool.');
+    } catch (e: any) {
+      showMessage(e.message || 'Failed to release lead');
+    } finally {
+      setActionKey(null);
+    }
   };
 
   const saveCell = async () => {
@@ -694,7 +732,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                             value === 'uploaded' ? 'bg-blue-100 text-blue-700' :
                             value === 'expired' ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-700'
                           }`}>{value || 'missing'}</span>
-                        ) : (col.key.endsWith('_uploaded_at')) ? (
+                        ) : (col.key.endsWith('_uploaded_at') || col.key === 'claimedAt') ? (
                           <span className="whitespace-pre-wrap break-words">{value ? new Date(value).toLocaleString() : '-'}</span>
                         ) : (looksLikeLink) ? (
                           value ? (
@@ -703,7 +741,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                             <span className="text-gray-400">-</span>
                           )
                         ) : (
-                          <button onClick={() => beginEdit(row.id, col, value)} className="text-left w-full">
+                          <button onClick={() => beginEdit(row.id, col, value)} disabled={!canEditRow(row)} className="text-left w-full disabled:opacity-60">
                             <span className="whitespace-pre-wrap break-words">{value === '' ? '-' : value}</span>
                           </button>
                         )}
@@ -711,7 +749,17 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                     );
                   })}
                   <td className="px-3 py-2 border-b">
-                    <button onClick={() => deleteRow(row.id)} className="text-red-600 hover:text-red-800"><Trash2 size={16} /></button>
+                    <div className="flex items-center gap-2">
+                      {actor?.role !== 'admin' && !(row.ownerStaffEmail || '').toLowerCase() && (
+                        <button onClick={() => claimLead(row.id)} disabled={actionKey !== null} className="text-blue-600 hover:text-blue-800 disabled:opacity-50 text-xs font-semibold">Collect</button>
+                      )}
+                      {((row.ownerStaffEmail || '').toLowerCase() === (actor?.email || '').toLowerCase() || actor?.role === 'admin') && row.ownerStaffEmail && (
+                        <button onClick={() => releaseLead(row.id)} disabled={actionKey !== null} className="text-amber-600 hover:text-amber-800 disabled:opacity-50 text-xs font-semibold">Release</button>
+                      )}
+                      {actor?.role === 'admin' && (
+                        <button onClick={() => deleteRow(row.id)} className="text-red-600 hover:text-red-800"><Trash2 size={16} /></button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))

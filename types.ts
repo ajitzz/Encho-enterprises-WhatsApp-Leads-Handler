@@ -266,6 +266,8 @@ export interface DriverExcelRow {
   source: string;
   createdAt: string;
   lastMessageAt: string;
+  ownerStaffEmail?: string;
+  claimedAt?: string;
   variables: Record<string, any>;
 }
 

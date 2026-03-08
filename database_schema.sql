@@ -31,6 +31,8 @@ CREATE TABLE candidates (
     is_human_mode BOOLEAN DEFAULT FALSE,
     current_bot_step_id VARCHAR(100),
     variables JSONB DEFAULT '{}'::jsonb,
+    owner_staff_email VARCHAR(320),
+    claimed_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
