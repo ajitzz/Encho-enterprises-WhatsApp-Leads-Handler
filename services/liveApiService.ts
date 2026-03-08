@@ -1,5 +1,5 @@
 
-import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage, DriverExcelColumn, DriverExcelRow } from '../types';
+import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage, DriverExcelColumn, DriverExcelRow, AuthUser, LeadOpsQueueSummary, UserRole } from '../types';
 
 // Use relative path so the Vercel proxy/rewrite handles the domain automatically.
 const API_BASE_URL = ''; 
@@ -73,6 +73,46 @@ export const liveApiService = {
       return apiRequest('/api/auth/google', {
           method: 'POST',
           body: JSON.stringify({ credential })
+      });
+  },
+
+  getAuthMe: async (): Promise<{ success: boolean; user: AuthUser }> => {
+      return apiRequest('/api/auth/me');
+  },
+
+  getLeadOpsUsers: async (): Promise<{ users: Array<{ email: string; name?: string; role: UserRole; managerEmail?: string; isActive?: boolean }> }> => {
+      return apiRequest('/api/lead-ops/users');
+  },
+
+  upsertLeadOpsUser: async (payload: { email: string; name?: string; role: UserRole; managerEmail?: string; isActive?: boolean }) => {
+      return apiRequest('/api/lead-ops/users', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+      });
+  },
+
+  assignLeadsToManager: async (candidateIds: string[], managerEmail: string, note?: string) => {
+      return apiRequest('/api/lead-ops/assign/admin-to-manager', {
+          method: 'POST',
+          body: JSON.stringify({ candidateIds, managerEmail, note })
+      });
+  },
+
+  assignLeadsToStaff: async (candidateIds: string[], staffEmail: string, managerEmail?: string, note?: string) => {
+      return apiRequest('/api/lead-ops/assign/manager-to-staff', {
+          method: 'POST',
+          body: JSON.stringify({ candidateIds, staffEmail, managerEmail, note })
+      });
+  },
+
+  getMyLeadQueue: async (): Promise<{ leads: Driver[]; summary: LeadOpsQueueSummary }> => {
+      return apiRequest('/api/lead-ops/my-queue');
+  },
+
+  updateLeadFollowup: async (id: string, payload: { nextFollowupAt?: number; outcome?: string; remark?: string }) => {
+      return apiRequest(`/api/lead-ops/leads/${id}/followup`, {
+          method: 'POST',
+          body: JSON.stringify(payload)
       });
   },
 
