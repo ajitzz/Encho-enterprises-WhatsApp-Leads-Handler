@@ -26,7 +26,7 @@ const SYSTEM_CONFIG = {
     DB_CONNECTION_TIMEOUT: 20000,
     AWS_REGION: process.env.AWS_REGION || 'us-east-1',
     AWS_BUCKET: process.env.AWS_BUCKET_NAME || 'uber-fleet-assets',
-    GOOGLE_CLIENT_ID: process.env.VITE_GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_ID: process.env.VITE_GOOGLE_CLIENT_ID || '764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.googleusercontent.com',
     GOOGLE_SHEETS_SPREADSHEET_ID: process.env.GOOGLE_SHEETS_SPREADSHEET_ID || '',
     GOOGLE_SHEETS_CUSTOMERS_TAB_NAME: process.env.GOOGLE_SHEETS_CUSTOMERS_TAB_NAME || process.env.GOOGLE_SHEETS_CUSTOMERS_SHEET || 'Customers',
     GOOGLE_SHEETS_MESSAGES_TAB_NAME: process.env.GOOGLE_SHEETS_MESSAGES_TAB_NAME || process.env.GOOGLE_SHEETS_MESSAGES_SHEET || 'Messages',
@@ -3540,7 +3540,14 @@ apiRouter.post('/auth/google', async (req, res) => {
     try {
         const { credential } = req.body;
         const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
-        res.json({ success: true, user: ticket.getPayload() });
+        const payload = ticket.getPayload();
+
+        const ADMIN_EMAILS = ['enchoenterprises@gmail.com', 'ajithsabzz@gmail.com'];
+        if (!payload || !payload.email || !ADMIN_EMAILS.includes(payload.email.toLowerCase())) {
+            return res.status(403).json({ success: false, error: "Access Denied: Unauthorized email." });
+        }
+
+        res.json({ success: true, user: payload });
     } catch (e) { res.status(401).json({ success: false, error: e.message }); }
 });
 
