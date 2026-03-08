@@ -421,6 +421,75 @@ const withDb = async (operation) => {
     }
 };
 
+const LEAD_PORTAL_ACCESS_KEY = 'lead_portal_access';
+
+const decodeJwtPayloadUnsafe = (token = '') => {
+    try {
+        const parts = String(token || '').split('.');
+        if (parts.length < 2) return null;
+        return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    } catch {
+        return null;
+    }
+};
+
+const getAuthTokenFromRequest = (req) => {
+    const auth = String(req.headers?.authorization || '').trim();
+    if (!auth.toLowerCase().startsWith('bearer ')) return '';
+    return auth.slice(7).trim();
+};
+
+const getRequestUserIdentity = (req) => {
+    const payload = decodeJwtPayloadUnsafe(getAuthTokenFromRequest(req));
+    const email = String(payload?.email || '').trim().toLowerCase();
+    const name = String(payload?.name || payload?.given_name || '').trim();
+    return {
+        email,
+        name,
+        sub: String(payload?.sub || '').trim()
+    };
+};
+
+const normalizePortalAccessList = (raw) => {
+    if (!Array.isArray(raw)) return [];
+    return raw
+        .map((entry) => {
+            const email = String(entry?.email || '').trim().toLowerCase();
+            if (!email) return null;
+            const role = String(entry?.role || 'staff').trim().toLowerCase() === 'admin' ? 'admin' : 'staff';
+            const active = entry?.active !== false;
+            return { email, role, active };
+        })
+        .filter(Boolean);
+};
+
+const getLeadPortalAccessState = async (client) => {
+    const r = await client.query('SELECT value FROM system_settings WHERE key = $1 LIMIT 1', [LEAD_PORTAL_ACCESS_KEY]);
+    return normalizePortalAccessList(r.rows[0]?.value?.users);
+};
+
+const saveLeadPortalAccessState = async (client, users) => {
+    const value = { users: normalizePortalAccessList(users), updatedAt: new Date().toISOString() };
+    await client.query(
+        'INSERT INTO system_settings (key, value) VALUES ($1, $2::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+        [LEAD_PORTAL_ACCESS_KEY, JSON.stringify(value)]
+    );
+    return value;
+};
+
+const resolveLeadPortalUserScope = async (client, req) => {
+    const identity = getRequestUserIdentity(req);
+    const users = await getLeadPortalAccessState(client);
+    if (users.length === 0) {
+        return { identity, role: 'admin', canAccess: true, users };
+    }
+    const matched = users.find((u) => u.email === identity.email);
+    if (!matched || !matched.active) {
+        return { identity, role: 'none', canAccess: false, users };
+    }
+    return { identity, role: matched.role, canAccess: true, users };
+};
+
 const getMetaClient = () => axios.create({
     httpsAgent: new https.Agent({ keepAlive: true }),
     timeout: SYSTEM_CONFIG.META_TIMEOUT,
@@ -2099,11 +2168,14 @@ const initDatabase = async (client) => {
     await client.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";');
 
     await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB);`);
-    await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', lead_owner_email VARCHAR(255), lead_claimed_at TIMESTAMP, lead_released_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_owner_email VARCHAR(255);`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_claimed_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_released_at TIMESTAMP;`);
     
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
 
@@ -3646,15 +3718,43 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
     try {
         const search = (req.query.search || '').toString().trim();
         await withDb(async (client) => {
+            const scope = await resolveLeadPortalUserScope(client, req);
+            if (!scope.canAccess) return res.status(403).json({ error: 'Access denied for lead portal' });
+
+            const view = String(req.query.view || 'queue').toLowerCase();
+            const isAdmin = scope.role === 'admin';
             const customCols = await getDriverExcelColumnConfig(client);
+            const whereClauses = [];
             const params = [];
-            let where = '';
             if (search) {
                 params.push(`%${search}%`);
-                where = `WHERE c.name ILIKE $1 OR c.phone_number ILIKE $1 OR c.stage ILIKE $1`;
+                const idx = params.length;
+                whereClauses.push(`(c.name ILIKE $${idx} OR c.phone_number ILIKE $${idx} OR c.stage ILIKE $${idx})`);
             }
+
+            if (!isAdmin) {
+                const email = scope.identity.email;
+                if (!email) return res.status(401).json({ error: 'Missing Google account email in auth token' });
+
+                if (view === 'mine') {
+                    params.push(email);
+                    whereClauses.push(`c.lead_owner_email = $${params.length}`);
+                } else {
+                    params.push(email);
+                    whereClauses.push(`(c.lead_owner_email IS NULL OR c.lead_owner_email = '' OR c.lead_owner_email = $${params.length})`);
+                }
+            } else if (view === 'mine') {
+                const email = scope.identity.email;
+                if (email) {
+                    params.push(email);
+                    whereClauses.push(`c.lead_owner_email = $${params.length}`);
+                }
+            }
+
+            const where = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
             const q = `
-                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables
+                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables, c.lead_owner_email, c.lead_claimed_at, c.lead_released_at
                 FROM candidates c
                 ${where}
                 ORDER BY c.created_at DESC
@@ -3697,10 +3797,14 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
                     source: r.source || '',
                     createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
                     lastMessageAt: r.last_message_at ? new Date(Number(r.last_message_at) || r.last_message_at).toISOString() : '',
+                    ownerEmail: r.lead_owner_email || '',
+                    claimedAt: r.lead_claimed_at ? new Date(r.lead_claimed_at).toISOString() : '',
+                    releasedAt: r.lead_released_at ? new Date(r.lead_released_at).toISOString() : '',
+                    canEdit: isAdmin || !r.lead_owner_email || r.lead_owner_email === scope.identity.email,
                     variables: mergedVars
                 };
             });
-            res.json({ columns: cols, rows });
+            res.json({ columns: cols, rows, access: { role: scope.role, email: scope.identity.email } });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -3746,8 +3850,16 @@ apiRouter.patch('/reports/driver-excel/:id', async (req, res) => {
         const updates = req.body?.updates || {};
         const id = req.params.id;
         await withDb(async (client) => {
-            const existingRes = await client.query('SELECT variables FROM candidates WHERE id = $1 LIMIT 1', [id]);
+            const scope = await resolveLeadPortalUserScope(client, req);
+            if (!scope.canAccess) return res.status(403).json({ error: 'Access denied for lead portal' });
+
+            const existingRes = await client.query('SELECT variables, lead_owner_email FROM candidates WHERE id = $1 LIMIT 1', [id]);
             if (existingRes.rows.length === 0) return res.status(404).json({ error: 'Candidate not found' });
+            const ownerEmail = String(existingRes.rows[0].lead_owner_email || '').toLowerCase();
+            const isAdmin = scope.role === 'admin';
+            if (ownerEmail && !isAdmin && ownerEmail !== scope.identity.email) {
+                return res.status(409).json({ error: 'Lead is owned by another staff member' });
+            }
 
             const coreFieldMap = { phoneNumber: 'phone_number', name: 'name', status: 'stage', source: 'source' };
             for (const [k, v] of Object.entries(updates)) {
@@ -3772,6 +3884,9 @@ apiRouter.patch('/reports/driver-excel/:id', async (req, res) => {
 apiRouter.delete('/reports/driver-excel/:id', async (req, res) => {
     try {
         await withDb(async (client) => {
+            const scope = await resolveLeadPortalUserScope(client, req);
+            if (!scope.canAccess) return res.status(403).json({ error: 'Access denied for lead portal' });
+            if (scope.role !== 'admin') return res.status(403).json({ error: 'Only admin can delete leads' });
             await client.query('DELETE FROM candidates WHERE id = $1', [req.params.id]);
             scheduleDriverExcelSync();
             scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'delete' });
@@ -3882,6 +3997,106 @@ apiRouter.delete('/reports/driver-excel/columns/:key', async (req, res) => {
             }
             scheduleDriverExcelSync();
             res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/reports/driver-excel/:id/claim', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const scope = await resolveLeadPortalUserScope(client, req);
+            if (!scope.canAccess) return res.status(403).json({ error: 'Access denied for lead portal' });
+            const email = scope.identity.email;
+            if (!email) return res.status(401).json({ error: 'Missing Google account email in auth token' });
+
+            const r = await client.query('SELECT lead_owner_email FROM candidates WHERE id = $1 LIMIT 1', [req.params.id]);
+            if (r.rows.length === 0) return res.status(404).json({ error: 'Candidate not found' });
+            const owner = String(r.rows[0].lead_owner_email || '').toLowerCase();
+            const isAdmin = scope.role === 'admin';
+            if (owner && owner !== email && !isAdmin) return res.status(409).json({ error: 'Lead already claimed by another staff member' });
+
+            await client.query(
+                'UPDATE candidates SET lead_owner_email = $1, lead_claimed_at = NOW(), lead_released_at = NULL WHERE id = $2',
+                [email, req.params.id]
+            );
+
+            scheduleDriverExcelSync();
+            scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'upsert' });
+            res.json({ success: true, ownerEmail: email });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/reports/driver-excel/:id/release', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const scope = await resolveLeadPortalUserScope(client, req);
+            if (!scope.canAccess) return res.status(403).json({ error: 'Access denied for lead portal' });
+
+            const r = await client.query('SELECT lead_owner_email FROM candidates WHERE id = $1 LIMIT 1', [req.params.id]);
+            if (r.rows.length === 0) return res.status(404).json({ error: 'Candidate not found' });
+            const owner = String(r.rows[0].lead_owner_email || '').toLowerCase();
+            const isAdmin = scope.role === 'admin';
+            if (owner && owner !== scope.identity.email && !isAdmin) {
+                return res.status(409).json({ error: 'Only owner/admin can release this lead' });
+            }
+
+            await client.query(
+                'UPDATE candidates SET lead_owner_email = NULL, lead_released_at = NOW() WHERE id = $1',
+                [req.params.id]
+            );
+
+            scheduleDriverExcelSync();
+            scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'upsert' });
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/lead-portal/access', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const scope = await resolveLeadPortalUserScope(client, req);
+            if (!scope.canAccess) return res.status(403).json({ error: 'Access denied for lead portal' });
+            if (scope.role !== 'admin') return res.status(403).json({ error: 'Only admin can manage access' });
+            res.json({ users: scope.users });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/lead-portal/access', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const scope = await resolveLeadPortalUserScope(client, req);
+            if (!scope.canAccess) return res.status(403).json({ error: 'Access denied for lead portal' });
+            if (scope.role !== 'admin') return res.status(403).json({ error: 'Only admin can manage access' });
+
+            const email = String(req.body?.email || '').trim().toLowerCase();
+            const role = String(req.body?.role || 'staff').trim().toLowerCase() === 'admin' ? 'admin' : 'staff';
+            if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email is required' });
+
+            const current = await getLeadPortalAccessState(client);
+            const filtered = current.filter((u) => u.email !== email);
+            const next = [...filtered, { email, role, active: true }];
+            const saved = await saveLeadPortalAccessState(client, next);
+            res.json({ success: true, users: saved.users });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.delete('/lead-portal/access/:email', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const scope = await resolveLeadPortalUserScope(client, req);
+            if (!scope.canAccess) return res.status(403).json({ error: 'Access denied for lead portal' });
+            if (scope.role !== 'admin') return res.status(403).json({ error: 'Only admin can manage access' });
+
+            const email = String(req.params.email || '').trim().toLowerCase();
+            if (!email) return res.status(400).json({ error: 'Email is required' });
+            const current = await getLeadPortalAccessState(client);
+            const next = current.filter((u) => u.email !== email);
+            const saved = await saveLeadPortalAccessState(client, next);
+            res.json({ success: true, users: saved.users });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });

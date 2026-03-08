@@ -37,6 +37,8 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   const [syncStatus, setSyncStatus] = useState<any>(null);
   const [uiMessage, setUiMessage] = useState('');
   const [actionKey, setActionKey] = useState<string | null>(null);
+  const [leadView, setLeadView] = useState<'queue' | 'mine' | 'all'>('queue');
+  const [accessRole, setAccessRole] = useState<'admin' | 'staff' | 'none'>('admin');
 
   const getCurrentUserScope = () => {
     try {
@@ -103,7 +105,10 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     if (!isLiveMode) return;
     setLoading(true);
     try {
-      const data = await liveApiService.getDriverExcelReport(search);
+      const data = await liveApiService.getDriverExcelReport(search, leadView);
+      if (data?.access?.role) {
+        setAccessRole((data.access.role as 'admin' | 'staff' | 'none') || 'staff');
+      }
       const rawColumns = data.columns || [];
       const prefKey = getColumnPrefsStorageKey();
       const savedKeys = JSON.parse(localStorage.getItem(prefKey) || 'null') as string[] | null;
@@ -154,7 +159,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
 
     const autoAddRaw = localStorage.getItem(getAutoAddStorageKey());
     setAutoAddNewVariables(autoAddRaw === '1');
-  }, [isLiveMode]);
+  }, [isLiveMode, leadView]);
 
   useEffect(() => {
     if (!isLiveMode) return;
@@ -237,7 +242,8 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
 
   const isReadOnlyColumn = (key: string) => key === 'createdAt' || key === 'lastMessageAt' || key.endsWith('_status') || key.endsWith('_uploaded_at');
 
-  const beginEdit = (rowId: string, col: DriverExcelColumn, currentValue: string) => {
+  const beginEdit = (rowId: string, col: DriverExcelColumn, currentValue: string, canEdit: boolean = true) => {
+    if (!canEdit) return;
     if (isReadOnlyColumn(col.key)) return;
     setEditingCell({ rowId, colKey: col.key });
     setDraftValue(currentValue);
@@ -262,6 +268,32 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     await loadReport();
     await loadSyncStatus();
     await loadVariableOptions();
+  };
+
+  const claimLead = async (id: string) => {
+    setActionKey(`claim-${id}`);
+    try {
+      await liveApiService.claimDriverExcelLead(id);
+      await loadReport();
+      await loadSyncStatus();
+    } catch (e: any) {
+      showMessage(e.message || 'Failed to claim lead');
+    } finally {
+      setActionKey(null);
+    }
+  };
+
+  const releaseLead = async (id: string) => {
+    setActionKey(`release-${id}`);
+    try {
+      await liveApiService.releaseDriverExcelLead(id);
+      await loadReport();
+      await loadSyncStatus();
+    } catch (e: any) {
+      showMessage(e.message || 'Failed to release lead');
+    } finally {
+      setActionKey(null);
+    }
   };
 
   const addSelectedVariables = async () => {
@@ -557,6 +589,11 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
 
       <div className="bg-white border border-gray-200 rounded-xl p-3 flex flex-wrap items-start gap-3">
         <div className="flex items-center gap-2">
+          <select className="px-3 py-2 border rounded-lg text-sm" value={leadView} onChange={(e) => setLeadView(e.target.value as any)}>
+            <option value="queue">Queue Leads</option>
+            <option value="mine">My Leads</option>
+            {accessRole === 'admin' && <option value="all">All Leads (Admin)</option>}
+          </select>
           <input
             className="px-3 py-2 border rounded-lg text-sm min-w-[260px]"
             value={search}
@@ -703,7 +740,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                             <span className="text-gray-400">-</span>
                           )
                         ) : (
-                          <button onClick={() => beginEdit(row.id, col, value)} className="text-left w-full">
+                          <button onClick={() => beginEdit(row.id, col, value, row.canEdit !== false)} className="text-left w-full disabled:opacity-60" disabled={row.canEdit === false}>
                             <span className="whitespace-pre-wrap break-words">{value === '' ? '-' : value}</span>
                           </button>
                         )}
@@ -711,7 +748,27 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                     );
                   })}
                   <td className="px-3 py-2 border-b">
-                    <button onClick={() => deleteRow(row.id)} className="text-red-600 hover:text-red-800"><Trash2 size={16} /></button>
+                    <div className="flex items-center gap-2">
+                      {row.ownerEmail ? (
+                        <button
+                          disabled={actionKey === `release-${row.id}`}
+                          onClick={() => releaseLead(row.id)}
+                          className="px-2 py-1 rounded border text-xs text-amber-700 border-amber-300 disabled:opacity-50"
+                        >
+                          {actionKey === `release-${row.id}` ? 'Releasing...' : 'Release'}
+                        </button>
+                      ) : (
+                        <button
+                          disabled={actionKey === `claim-${row.id}`}
+                          onClick={() => claimLead(row.id)}
+                          className="px-2 py-1 rounded border text-xs text-emerald-700 border-emerald-300 disabled:opacity-50"
+                        >
+                          {actionKey === `claim-${row.id}` ? 'Claiming...' : 'Claim'}
+                        </button>
+                      )}
+                      <span className="text-[11px] text-gray-500 max-w-[160px] truncate" title={row.ownerEmail || ''}>{row.ownerEmail || 'Unassigned'}</span>
+                      {accessRole === 'admin' && <button onClick={() => deleteRow(row.id)} className="text-red-600 hover:text-red-800"><Trash2 size={16} /></button>}
+                    </div>
                   </td>
                 </tr>
               ))
