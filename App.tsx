@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { lazy, Suspense, useState, useEffect } from 'react';
 import { GoogleOAuthProvider } from '@react-oauth/google';
 import { Layout } from './components/Layout';
 import { LeadTable } from './components/LeadTable';
@@ -16,7 +16,7 @@ import { PrivacyPolicy } from './components/PrivacyPolicy';
 import { TermsOfService } from './components/TermsOfService'; 
 import { DataDeletion } from './components/DataDeletion'; 
 import { SystemMonitor } from './components/SystemMonitor'; 
-import { DriverExcelReport } from './components/DriverExcelReport'; 
+import { IsolatedFeatureBoundary } from './components/IsolatedFeatureBoundary'; 
 import { SettingsModal } from './components/SettingsModal'; 
 import { Login } from './components/Login'; 
 import { mockBackend } from './services/mockBackend';
@@ -27,6 +27,7 @@ import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Set
 const FALLBACK_CLIENT_ID = "764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.googleusercontent.com";
 const ENV_CLIENT_ID = (import.meta as any)?.env?.VITE_GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_ID = (ENV_CLIENT_ID || FALLBACK_CLIENT_ID).replace(/^['"]|['"]$/g, '').trim();
+const DriverExcelReport = lazy(() => import('./components/DriverExcelReport').then((module) => ({ default: module.DriverExcelReport })));
 
 export default function App() {
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
@@ -373,7 +374,13 @@ export default function App() {
         )}
         
         {activeTab === 'leads' && <div className="p-4 h-screen bg-gray-50"><LeadManager drivers={drivers} onSelectDriver={handleSelectDriver} onBulkSend={handleBulkSendDirect} onUpdateDriverStatus={handleBulkStatusUpdate} /></div>}
-        {activeTab === 'excel-report' && <DriverExcelReport isLiveMode={dataSource === 'live'} />}
+        {activeTab === 'excel-report' && (
+          <IsolatedFeatureBoundary featureName="Driver Excel Report">
+            <Suspense fallback={<div className="p-8 text-gray-500">Loading Driver Excel Report...</div>}>
+              <DriverExcelReport isLiveMode={dataSource === 'live'} />
+            </Suspense>
+          </IsolatedFeatureBoundary>
+        )}
         {activeTab === 'media-library' && <MediaLibrary />}
         {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
 
