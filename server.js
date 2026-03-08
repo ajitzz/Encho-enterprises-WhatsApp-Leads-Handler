@@ -12,6 +12,14 @@ const { OAuth2Client, JWT } = require('google-auth-library');
 
 require('dotenv').config();
 
+process.on('unhandledRejection', (reason) => {
+    console.error('[UNHANDLED REJECTION]', reason);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('[UNCAUGHT EXCEPTION]', error);
+});
+
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
     META_TIMEOUT: 15000,
@@ -451,6 +459,16 @@ let driverExcelSyncStatus = {
         googleSheets: { state: 'idle', lastSuccessAt: null, lastError: null }
     }
 };
+
+const DRIVER_EXCEL_SYNC_MAX_CONSECUTIVE_FAILURES = Math.max(1, Number(process.env.DRIVER_EXCEL_SYNC_MAX_CONSECUTIVE_FAILURES || 5));
+let driverExcelIsolationState = {
+    disabled: false,
+    consecutiveFailures: 0,
+    disabledAt: null,
+    reason: null
+};
+
+const isDriverExcelSyncIsolated = () => driverExcelIsolationState.disabled;
 
 let driverExcelIncrementalTimer = null;
 let driverExcelIncrementalMaxWaitTimer = null;
@@ -1080,6 +1098,13 @@ const normalizeVariables = (variables) => {
 };
 
 const syncDriverExcelToS3 = async () => {
+    if (isDriverExcelSyncIsolated()) {
+        driverExcelSyncStatus.state = 'isolated';
+        driverExcelSyncStatus.lastError = driverExcelIsolationState.reason || 'Driver Excel sync is isolated after repeated failures';
+        persistDriverExcelSyncStatus();
+        return;
+    }
+
     if (driverExcelSyncInProgress) {
         driverExcelSyncRequested = true;
         driverExcelSyncStatus.state = 'queued';
@@ -1189,11 +1214,14 @@ const syncDriverExcelToS3 = async () => {
             };
         }
 
+        driverExcelIsolationState.consecutiveFailures = 0;
+        driverExcelIsolationState.reason = null;
         driverExcelSyncStatus.state = driverExcelSyncStatus.destinations.googleSheets.state === 'success' ? 'success' : 'partial_success';
         driverExcelSyncStatus.lastSuccessAt = new Date().toISOString();
         driverExcelSyncStatus.lastDurationMs = Date.now() - syncStartedAt;
         persistDriverExcelSyncStatus();
     } catch (e) {
+        driverExcelIsolationState.consecutiveFailures += 1;
         driverExcelSyncStatus.state = 'error';
         driverExcelSyncStatus.lastError = e.message || 'Driver Excel sync failed';
         if (driverExcelSyncStatus.destinations?.s3?.state === 'running') {
@@ -1210,6 +1238,13 @@ const syncDriverExcelToS3 = async () => {
                 lastError: e.message || 'Google Sheets sync failed'
             };
         }
+        if (driverExcelIsolationState.consecutiveFailures >= DRIVER_EXCEL_SYNC_MAX_CONSECUTIVE_FAILURES) {
+            driverExcelIsolationState.disabled = true;
+            driverExcelIsolationState.disabledAt = new Date().toISOString();
+            driverExcelIsolationState.reason = driverExcelSyncStatus.lastError;
+            driverExcelSyncStatus.state = 'isolated';
+            driverExcelSyncStatus.lastError = `Driver Excel sync isolated after ${driverExcelIsolationState.consecutiveFailures} consecutive failures: ${driverExcelIsolationState.reason}`;
+        }
         driverExcelSyncStatus.lastDurationMs = Date.now() - syncStartedAt;
         persistDriverExcelSyncStatus();
         console.error('[Driver Excel Sync Error]', e.message);
@@ -1225,6 +1260,13 @@ const syncDriverExcelToS3 = async () => {
 };
 
 const triggerDriverExcelSyncNow = () => {
+    if (isDriverExcelSyncIsolated()) {
+        driverExcelSyncStatus.state = 'isolated';
+        driverExcelSyncStatus.lastError = driverExcelIsolationState.reason || 'Driver Excel sync is isolated after repeated failures';
+        persistDriverExcelSyncStatus();
+        return;
+    }
+
     if (driverExcelSyncTimer) {
         clearTimeout(driverExcelSyncTimer);
         driverExcelSyncTimer = null;
@@ -1238,6 +1280,13 @@ const triggerDriverExcelSyncNow = () => {
 };
 
 const scheduleDriverExcelSync = () => {
+    if (isDriverExcelSyncIsolated()) {
+        driverExcelSyncStatus.state = 'isolated';
+        driverExcelSyncStatus.lastError = driverExcelIsolationState.reason || 'Driver Excel sync is isolated after repeated failures';
+        persistDriverExcelSyncStatus();
+        return;
+    }
+
     const now = Date.now();
     if (!driverExcelSyncPendingSince) {
         driverExcelSyncPendingSince = now;
@@ -2906,6 +2955,13 @@ apiRouter.get('/system/operational-status', async (req, res) => {
             lastSuccessAt: driverExcelSyncStatus.lastSuccessAt,
             lastError: driverExcelSyncStatus.lastError,
             inProgress: driverExcelSyncInProgress,
+            isolated: driverExcelIsolationState.disabled,
+            isolation: {
+                disabledAt: driverExcelIsolationState.disabledAt,
+                consecutiveFailures: driverExcelIsolationState.consecutiveFailures,
+                reason: driverExcelIsolationState.reason,
+                maxConsecutiveFailures: DRIVER_EXCEL_SYNC_MAX_CONSECUTIVE_FAILURES
+            },
             hasQueuedSync: Boolean(driverExcelSyncRequested || driverExcelSyncTimer || driverExcelSyncMaxWaitTimer || driverExcelIncrementalTimer || driverExcelIncrementalMaxWaitTimer || driverExcelIncrementalQueue.size > 0),
             destinations: driverExcelSyncStatus.destinations
         }
@@ -3705,6 +3761,29 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+apiRouter.get('/reports/driver-excel/isolation-status', async (req, res) => {
+    res.json({
+        isolated: driverExcelIsolationState.disabled,
+        disabledAt: driverExcelIsolationState.disabledAt,
+        consecutiveFailures: driverExcelIsolationState.consecutiveFailures,
+        reason: driverExcelIsolationState.reason,
+        maxConsecutiveFailures: DRIVER_EXCEL_SYNC_MAX_CONSECUTIVE_FAILURES
+    });
+});
+
+apiRouter.post('/reports/driver-excel/isolation/reset', async (req, res) => {
+    driverExcelIsolationState = {
+        disabled: false,
+        consecutiveFailures: 0,
+        disabledAt: null,
+        reason: null
+    };
+    driverExcelSyncStatus.state = 'idle';
+    driverExcelSyncStatus.lastError = null;
+    persistDriverExcelSyncStatus();
+    res.json({ success: true, isolated: false });
+});
+
 apiRouter.get('/reports/driver-excel/sync-status', async (req, res) => {
     try {
         let persisted = {};
@@ -3716,12 +3795,26 @@ apiRouter.get('/reports/driver-excel/sync-status', async (req, res) => {
             ...persisted,
             ...driverExcelSyncStatus,
             inProgress: driverExcelSyncInProgress,
+            isolated: driverExcelIsolationState.disabled,
+            isolation: {
+                disabledAt: driverExcelIsolationState.disabledAt,
+                consecutiveFailures: driverExcelIsolationState.consecutiveFailures,
+                reason: driverExcelIsolationState.reason,
+                maxConsecutiveFailures: DRIVER_EXCEL_SYNC_MAX_CONSECUTIVE_FAILURES
+            },
             hasQueuedSync: Boolean(driverExcelSyncRequested || driverExcelSyncTimer || driverExcelSyncMaxWaitTimer || driverExcelIncrementalTimer || driverExcelIncrementalMaxWaitTimer || driverExcelIncrementalQueue.size > 0)
         });
     } catch (e) {
         res.json({
             ...driverExcelSyncStatus,
             inProgress: driverExcelSyncInProgress,
+            isolated: driverExcelIsolationState.disabled,
+            isolation: {
+                disabledAt: driverExcelIsolationState.disabledAt,
+                consecutiveFailures: driverExcelIsolationState.consecutiveFailures,
+                reason: driverExcelIsolationState.reason,
+                maxConsecutiveFailures: DRIVER_EXCEL_SYNC_MAX_CONSECUTIVE_FAILURES
+            },
             hasQueuedSync: Boolean(driverExcelSyncRequested || driverExcelSyncTimer || driverExcelSyncMaxWaitTimer || driverExcelIncrementalTimer || driverExcelIncrementalMaxWaitTimer || driverExcelIncrementalQueue.size > 0)
         });
     }
