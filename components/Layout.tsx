@@ -10,17 +10,20 @@ import {
   Cloud,
   ChevronLeft,
   ChevronRight,
-  Table
+  Table,
+  BriefcaseBusiness
 } from 'lucide-react';
+import { UserRole } from '../types';
 
 interface LayoutProps {
   children: React.ReactNode;
   activeTab: string;
   onTabChange: (tab: string) => void;
   onOpenSettings?: () => void;
+  userRole?: UserRole;
 }
 
-export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange, onOpenSettings }) => {
+export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange, onOpenSettings, userRole = 'admin' }) => {
   const [isCollapsed, setIsCollapsed] = useState(false);
 
   return (
@@ -81,20 +84,35 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
             <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Leads & Campaigns</span>
           </button>
 
-
-
           <button
-            onClick={() => onTabChange('excel-report')}
-            title={isCollapsed ? "Driver Excel Report" : ""}
+            onClick={() => onTabChange('staff-workbench')}
+            title={isCollapsed ? "Staff Workbench" : ""}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'excel-report' 
-                ? 'bg-white text-black font-medium' 
+              activeTab === 'staff-workbench'
+                ? 'bg-white text-black font-medium'
                 : 'text-gray-400 hover:bg-gray-900 hover:text-white'
             } ${isCollapsed ? 'justify-center px-2' : ''}`}
           >
-            <Table size={20} className="shrink-0" />
-            <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Driver Excel Report</span>
+            <BriefcaseBusiness size={20} className="shrink-0" />
+            <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Staff Workbench</span>
           </button>
+
+
+
+          {userRole === 'admin' && (
+            <button
+              onClick={() => onTabChange('excel-report')}
+              title={isCollapsed ? "Driver Excel Report" : ""}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                activeTab === 'excel-report' 
+                  ? 'bg-white text-black font-medium' 
+                  : 'text-gray-400 hover:bg-gray-900 hover:text-white'
+              } ${isCollapsed ? 'justify-center px-2' : ''}`}
+            >
+              <Table size={20} className="shrink-0" />
+              <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Driver Excel Report</span>
+            </button>
+          )}
           <button
             onClick={() => onTabChange('media-library')}
             title={isCollapsed ? "Media Library" : ""}

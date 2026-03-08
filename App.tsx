@@ -19,9 +19,10 @@ import { SystemMonitor } from './components/SystemMonitor';
 import { IsolatedFeatureBoundary } from './components/IsolatedFeatureBoundary'; 
 import { SettingsModal } from './components/SettingsModal'; 
 import { Login } from './components/Login'; 
+import { StaffPortal } from './components/StaffPortal';
 import { mockBackend } from './services/mockBackend';
 import { liveApiService, setAuthToken } from './services/liveApiService';
-import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
+import { Driver, LeadStatus, AppNotification, BotSettings, Message, AuthUser } from './types';
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle } from 'lucide-react';
 
 const FALLBACK_CLIENT_ID = "764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.googleusercontent.com";
@@ -34,7 +35,7 @@ export default function App() {
   const [activePublicPage, setActivePublicPage] = useState<'none' | 'privacy' | 'terms' | 'deletion'>('none');
   const [showcaseToken, setShowcaseToken] = useState<string | undefined>(undefined);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [userProfile, setUserProfile] = useState<any>(null);
+  const [userProfile, setUserProfile] = useState<AuthUser | null>(null);
   
   const [isEmergencyMode, setIsEmergencyMode] = useState(false); // NEW: Recovery State
 
@@ -49,9 +50,16 @@ export default function App() {
           if (parts.length > 1 && parts[1].trim() !== '') setShowcaseToken(decodeURIComponent(parts[1]));
           return;
       }
-      const token = localStorage.getItem('uber_fleet_auth_token');
-      if (token) { setAuthToken(token); setIsAuthenticated(true); }
+    const token = localStorage.getItem('uber_fleet_auth_token');
+    if (token) { setAuthToken(token); setIsAuthenticated(true); }
   }, []);
+
+  useEffect(() => {
+      if (!isAuthenticated) return;
+      liveApiService.getAuthMe()
+        .then((res) => setUserProfile(res.user))
+        .catch(() => null);
+  }, [isAuthenticated]);
 
   const [activeTab, setActiveTab] = useState('dashboard');
   const [drivers, setDrivers] = useState<Driver[]>([]);
@@ -146,7 +154,7 @@ export default function App() {
     return () => unsubscribe();
   }, [dataSource, activeTab, isShowcaseMode, activePublicPage, isAuthenticated, isEmergencyMode]); 
 
-  const handleLoginSuccess = (token: string, user: any) => {
+  const handleLoginSuccess = (token: string, user: AuthUser) => {
       setAuthToken(token);
       setUserProfile(user);
       setIsAuthenticated(true);
@@ -320,7 +328,7 @@ export default function App() {
 
   return (
     <>
-      <Layout activeTab={activeTab} onTabChange={setActiveTab} onOpenSettings={() => setShowSettingsModal(true)}>
+      <Layout activeTab={activeTab} onTabChange={setActiveTab} onOpenSettings={() => setShowSettingsModal(true)} userRole={userProfile?.role || 'staff'}>
         {activeTab === 'dashboard' && (
         <div className="p-8 max-w-7xl mx-auto space-y-8">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -374,6 +382,7 @@ export default function App() {
         )}
         
         {activeTab === 'leads' && <div className="p-4 h-screen bg-gray-50"><LeadManager drivers={drivers} onSelectDriver={handleSelectDriver} onBulkSend={handleBulkSendDirect} onUpdateDriverStatus={handleBulkStatusUpdate} /></div>}
+        {activeTab === 'staff-workbench' && <StaffPortal onSelectDriver={handleSelectDriver} />}
         {activeTab === 'excel-report' && (
           <IsolatedFeatureBoundary featureName="Driver Excel Report">
             <Suspense fallback={<div className="p-8 text-gray-500">Loading Driver Excel Report...</div>}>

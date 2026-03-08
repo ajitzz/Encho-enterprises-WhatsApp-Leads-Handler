@@ -429,6 +429,119 @@ const withDb = async (operation) => {
     }
 };
 
+const USER_ROLES = {
+    ADMIN: 'admin',
+    MANAGER: 'manager',
+    STAFF: 'staff'
+};
+
+const authTokenCache = new Map();
+const AUTH_CACHE_TTL_MS = 60 * 1000;
+
+const getBearerToken = (req) => {
+    const auth = String(req.headers.authorization || '').trim();
+    if (!auth.toLowerCase().startsWith('bearer ')) return null;
+    return auth.slice(7).trim() || null;
+};
+
+const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
+
+const getAdminAllowlist = () => {
+    const fromEnv = String(process.env.ADMIN_EMAILS || process.env.SUPER_ADMIN_EMAILS || '').split(',').map(normalizeEmail).filter(Boolean);
+    return new Set(fromEnv);
+};
+
+const verifyGoogleTokenWithCache = async (token) => {
+    const now = Date.now();
+    const cached = authTokenCache.get(token);
+    if (cached && cached.expiresAt > now) return cached.payload;
+
+    const ticket = await googleClient.verifyIdToken({ idToken: token, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
+    const payload = ticket.getPayload();
+    authTokenCache.set(token, { payload, expiresAt: now + AUTH_CACHE_TTL_MS });
+    return payload;
+};
+
+const getOrProvisionUser = async (client, rawPayload) => {
+    const email = normalizeEmail(rawPayload?.email);
+    const name = String(rawPayload?.name || rawPayload?.given_name || email || '').trim();
+    if (!email) throw new Error('Email not present in auth token');
+
+    const existing = await client.query('SELECT email, name, role, manager_email, is_active FROM users WHERE email = $1 LIMIT 1', [email]);
+    const adminAllowlist = getAdminAllowlist();
+
+    if (existing.rows.length > 0) {
+        const row = existing.rows[0];
+        if (!row.is_active) throw new Error('Your account is inactive. Contact admin.');
+        if (name && row.name !== name) {
+            await client.query('UPDATE users SET name = $1 WHERE email = $2', [name, email]);
+        }
+        return { email: row.email, name: name || row.name, role: row.role, manager_email: row.manager_email };
+    }
+
+    const userCountRes = await client.query('SELECT COUNT(*)::int AS count FROM users');
+    const userCount = Number(userCountRes.rows[0]?.count || 0);
+    const role = adminAllowlist.has(email) || userCount === 0 ? USER_ROLES.ADMIN : USER_ROLES.STAFF;
+
+    const inserted = await client.query(
+        `INSERT INTO users (email, name, role, manager_email, is_active)
+         VALUES ($1, $2, $3, NULL, TRUE)
+         RETURNING email, name, role, manager_email`,
+        [email, name || email, role]
+    );
+
+    return inserted.rows[0];
+};
+
+const buildLeadScope = (user, alias = 'c', startingParamIndex = 1) => {
+    if (!user || user.role === USER_ROLES.ADMIN) {
+        return { clause: 'TRUE', params: [], nextParamIndex: startingParamIndex };
+    }
+
+    if (user.role === USER_ROLES.MANAGER) {
+        return {
+            clause: `${alias}.owner_manager_email = $${startingParamIndex}`,
+            params: [user.email],
+            nextParamIndex: startingParamIndex + 1
+        };
+    }
+
+    return {
+        clause: `${alias}.owner_staff_email = $${startingParamIndex}`,
+        params: [user.email],
+        nextParamIndex: startingParamIndex + 1
+    };
+};
+
+const canAccessCandidate = (user, row) => {
+    if (!user || !row) return false;
+    if (user.role === USER_ROLES.ADMIN) return true;
+    if (user.role === USER_ROLES.MANAGER) return normalizeEmail(row.owner_manager_email) === user.email;
+    return normalizeEmail(row.owner_staff_email) === user.email;
+};
+
+const assertRole = (req, res, allowedRoles) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+        res.status(403).json({ error: 'Insufficient permissions' });
+        return false;
+    }
+    return true;
+};
+
+const logLeadActivity = async (client, {
+    candidateId,
+    actorEmail,
+    actorRole,
+    action,
+    details = {}
+}) => {
+    await client.query(
+        `INSERT INTO lead_activity_logs (id, candidate_id, actor_email, actor_role, action, details, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW())`,
+        [crypto.randomUUID(), candidateId, normalizeEmail(actorEmail), actorRole, action, JSON.stringify(details || {})]
+    );
+};
+
 const getMetaClient = () => axios.create({
     httpsAgent: new https.Agent({ keepAlive: true }),
     timeout: SYSTEM_CONFIG.META_TIMEOUT,
@@ -1319,6 +1432,11 @@ const DRIVER_EXCEL_CORE_COLUMNS = [
     { key: 'name', label: 'Name', isCore: true },
     { key: 'status', label: 'Stage', isCore: true },
     { key: 'source', label: 'Source', isCore: true },
+    { key: 'ownerManagerEmail', label: 'Owner Manager', isCore: true },
+    { key: 'ownerStaffEmail', label: 'Owner Staff', isCore: true },
+    { key: 'assignmentStatus', label: 'Assignment Status', isCore: true },
+    { key: 'nextFollowupAt', label: 'Next Follow-up At', isCore: true },
+    { key: 'lastOutcome', label: 'Last Outcome', isCore: true },
     { key: 'createdAt', label: 'Created At', isCore: true },
     { key: 'lastMessageAt', label: 'Last Message At', isCore: true }
 ];
@@ -2149,10 +2267,20 @@ const initDatabase = async (client) => {
 
     await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB);`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS owner_manager_email VARCHAR(255);`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS owner_staff_email VARCHAR(255);`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assignment_status VARCHAR(50) DEFAULT 'unassigned';`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS next_followup_at BIGINT;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_outcome VARCHAR(100);`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_action_at BIGINT;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS row_version INT DEFAULT 0;`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS users (email VARCHAR(255) PRIMARY KEY, name VARCHAR(255), role VARCHAR(50) NOT NULL DEFAULT 'staff', manager_email VARCHAR(255), is_active BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS lead_assignment_history (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, manager_email VARCHAR(255), staff_email VARCHAR(255), assigned_by_email VARCHAR(255), assigned_by_role VARCHAR(50), note TEXT, active BOOLEAN DEFAULT TRUE, assigned_at TIMESTAMP DEFAULT NOW(), unassigned_at TIMESTAMP);`);
+    await client.query(`CREATE TABLE IF NOT EXISTS lead_activity_logs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, actor_email VARCHAR(255), actor_role VARCHAR(50), action VARCHAR(100), details JSONB DEFAULT '{}'::jsonb, created_at TIMESTAMP DEFAULT NOW());`);
     
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
 
@@ -2894,6 +3022,37 @@ const apiRouter = express.Router();
 
 apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
 
+const AUTH_EXEMPT_PATHS = [
+    '/health',
+    '/auth/google',
+    '/webhook',
+    '/ping',
+    '/cron/process-queue'
+];
+
+apiRouter.use(async (req, res, next) => {
+    try {
+        const isAuthExempt = AUTH_EXEMPT_PATHS.some((path) => req.path === path || req.path.startsWith(`${path}/`));
+        const isPublicShowcasePath = req.path === '/showcase' || req.path.startsWith('/showcase/');
+        if (isAuthExempt || isPublicShowcasePath) return next();
+
+        const token = getBearerToken(req);
+        if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+        const payload = await verifyGoogleTokenWithCache(token);
+        const mapped = await withDb(async (client) => getOrProvisionUser(client, payload));
+        req.user = {
+            email: normalizeEmail(mapped.email),
+            name: mapped.name,
+            role: mapped.role,
+            managerEmail: normalizeEmail(mapped.manager_email)
+        };
+        return next();
+    } catch (e) {
+        return res.status(401).json({ error: 'Unauthorized', details: e.message });
+    }
+});
+
 apiRouter.get('/system/settings', async (req, res) => {
     try {
         await withDb(async (client) => {
@@ -3539,9 +3698,286 @@ apiRouter.post('/webhook', async (req, res) => {
 apiRouter.post('/auth/google', async (req, res) => {
     try {
         const { credential } = req.body;
-        const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
-        res.json({ success: true, user: ticket.getPayload() });
+        const payload = await verifyGoogleTokenWithCache(credential);
+        const user = await withDb(async (client) => getOrProvisionUser(client, payload));
+        res.json({
+            success: true,
+            user: {
+                ...payload,
+                email: normalizeEmail(user.email),
+                name: user.name,
+                role: user.role,
+                managerEmail: normalizeEmail(user.manager_email)
+            }
+        });
     } catch (e) { res.status(401).json({ success: false, error: e.message }); }
+});
+
+apiRouter.get('/auth/me', async (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    return res.json({ success: true, user: req.user });
+});
+
+apiRouter.get('/lead-ops/users', async (req, res) => {
+    if (!assertRole(req, res, [USER_ROLES.ADMIN, USER_ROLES.MANAGER])) return;
+    try {
+        await withDb(async (client) => {
+            if (req.user.role === USER_ROLES.ADMIN) {
+                const users = await client.query('SELECT email, name, role, manager_email AS "managerEmail", is_active AS "isActive", created_at AS "createdAt" FROM users ORDER BY role, email');
+                return res.json({ users: users.rows });
+            }
+
+            const users = await client.query(
+                `SELECT email, name, role, manager_email AS "managerEmail", is_active AS "isActive", created_at AS "createdAt"
+                 FROM users
+                 WHERE email = $1 OR manager_email = $1
+                 ORDER BY role, email`,
+                [req.user.email]
+            );
+            return res.json({ users: users.rows });
+        });
+    } catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+apiRouter.post('/lead-ops/users', async (req, res) => {
+    if (!assertRole(req, res, [USER_ROLES.ADMIN])) return;
+    try {
+        const email = normalizeEmail(req.body?.email);
+        const name = String(req.body?.name || '').trim();
+        const role = String(req.body?.role || USER_ROLES.STAFF).trim().toLowerCase();
+        const managerEmail = normalizeEmail(req.body?.managerEmail);
+        const isActive = req.body?.isActive !== false;
+        if (!email) return res.status(400).json({ error: 'email is required' });
+        if (!Object.values(USER_ROLES).includes(role)) return res.status(400).json({ error: 'Invalid role' });
+        if (role === USER_ROLES.STAFF && !managerEmail) return res.status(400).json({ error: 'managerEmail is required for staff role' });
+
+        await withDb(async (client) => {
+            await client.query(
+                `INSERT INTO users (email, name, role, manager_email, is_active, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, NOW())
+                 ON CONFLICT (email)
+                 DO UPDATE SET name = EXCLUDED.name, role = EXCLUDED.role, manager_email = EXCLUDED.manager_email, is_active = EXCLUDED.is_active, updated_at = NOW()`,
+                [email, name || email, role, managerEmail || null, isActive]
+            );
+            res.json({ success: true });
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+apiRouter.post('/lead-ops/assign/admin-to-manager', async (req, res) => {
+    if (!assertRole(req, res, [USER_ROLES.ADMIN])) return;
+    try {
+        const candidateIds = Array.isArray(req.body?.candidateIds) ? req.body.candidateIds.map(String) : [];
+        const managerEmail = normalizeEmail(req.body?.managerEmail);
+        const note = String(req.body?.note || '').trim();
+        if (!managerEmail || candidateIds.length === 0) return res.status(400).json({ error: 'candidateIds and managerEmail are required' });
+
+        await withDb(async (client) => {
+            const managerCheck = await client.query('SELECT email, role, is_active FROM users WHERE email = $1 LIMIT 1', [managerEmail]);
+            if (managerCheck.rows.length === 0 || managerCheck.rows[0].role !== USER_ROLES.MANAGER || !managerCheck.rows[0].is_active) {
+                return res.status(400).json({ error: 'Manager account not found or inactive' });
+            }
+
+            const updateRes = await client.query(
+                `UPDATE candidates
+                 SET owner_manager_email = $1,
+                     owner_staff_email = NULL,
+                     assignment_status = 'manager_assigned',
+                     last_action_at = $3,
+                     row_version = COALESCE(row_version, 0) + 1
+                 WHERE id = ANY($2::uuid[])
+                 RETURNING id`,
+                [managerEmail, candidateIds, Date.now()]
+            );
+
+            for (const row of updateRes.rows) {
+                await client.query('UPDATE lead_assignment_history SET active = FALSE, unassigned_at = NOW() WHERE candidate_id = $1 AND active = TRUE', [row.id]);
+                await client.query(
+                    `INSERT INTO lead_assignment_history (id, candidate_id, manager_email, staff_email, assigned_by_email, assigned_by_role, note, active, assigned_at)
+                     VALUES ($1, $2, $3, NULL, $4, $5, $6, TRUE, NOW())`,
+                    [crypto.randomUUID(), row.id, managerEmail, req.user.email, req.user.role, note || null]
+                );
+                await logLeadActivity(client, {
+                    candidateId: row.id,
+                    actorEmail: req.user.email,
+                    actorRole: req.user.role,
+                    action: 'ASSIGNED_TO_MANAGER',
+                    details: { managerEmail, note }
+                });
+            }
+
+            scheduleDriverExcelSync();
+            res.json({ success: true, updated: updateRes.rowCount });
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+apiRouter.post('/lead-ops/assign/manager-to-staff', async (req, res) => {
+    if (!assertRole(req, res, [USER_ROLES.ADMIN, USER_ROLES.MANAGER])) return;
+    try {
+        const candidateIds = Array.isArray(req.body?.candidateIds) ? req.body.candidateIds.map(String) : [];
+        const staffEmail = normalizeEmail(req.body?.staffEmail);
+        const note = String(req.body?.note || '').trim();
+        if (!staffEmail || candidateIds.length === 0) return res.status(400).json({ error: 'candidateIds and staffEmail are required' });
+
+        await withDb(async (client) => {
+            const staffRes = await client.query('SELECT email, role, manager_email, is_active FROM users WHERE email = $1 LIMIT 1', [staffEmail]);
+            if (staffRes.rows.length === 0 || staffRes.rows[0].role !== USER_ROLES.STAFF || !staffRes.rows[0].is_active) {
+                return res.status(400).json({ error: 'Staff account not found or inactive' });
+            }
+
+            const effectiveManagerEmail = req.user.role === USER_ROLES.ADMIN
+                ? normalizeEmail(req.body?.managerEmail || staffRes.rows[0].manager_email)
+                : req.user.email;
+
+            if (!effectiveManagerEmail) return res.status(400).json({ error: 'Manager context missing' });
+            if (req.user.role === USER_ROLES.MANAGER && normalizeEmail(staffRes.rows[0].manager_email) !== req.user.email) {
+                return res.status(403).json({ error: 'Cannot assign leads to staff outside your team' });
+            }
+
+            const updateRes = await client.query(
+                `UPDATE candidates
+                 SET owner_manager_email = $1,
+                     owner_staff_email = $2,
+                     assignment_status = 'staff_assigned',
+                     last_action_at = $4,
+                     row_version = COALESCE(row_version, 0) + 1
+                 WHERE id = ANY($3::uuid[])
+                   AND ($5::text = 'admin' OR owner_manager_email = $1)
+                 RETURNING id`,
+                [effectiveManagerEmail, staffEmail, candidateIds, Date.now(), req.user.role]
+            );
+
+            for (const row of updateRes.rows) {
+                await client.query('UPDATE lead_assignment_history SET active = FALSE, unassigned_at = NOW() WHERE candidate_id = $1 AND active = TRUE', [row.id]);
+                await client.query(
+                    `INSERT INTO lead_assignment_history (id, candidate_id, manager_email, staff_email, assigned_by_email, assigned_by_role, note, active, assigned_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, NOW())`,
+                    [crypto.randomUUID(), row.id, effectiveManagerEmail, staffEmail, req.user.email, req.user.role, note || null]
+                );
+                await logLeadActivity(client, {
+                    candidateId: row.id,
+                    actorEmail: req.user.email,
+                    actorRole: req.user.role,
+                    action: 'ASSIGNED_TO_STAFF',
+                    details: { managerEmail: effectiveManagerEmail, staffEmail, note }
+                });
+            }
+
+            scheduleDriverExcelSync();
+            res.json({ success: true, updated: updateRes.rowCount });
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+apiRouter.get('/lead-ops/my-queue', async (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+        await withDb(async (client) => {
+            const scope = buildLeadScope(req.user, 'c', 1);
+            const q = await client.query(
+                `SELECT c.id, c.phone_number, c.name, c.stage, c.last_message, c.last_message_at, c.source, c.variables,
+                        c.owner_manager_email, c.owner_staff_email, c.next_followup_at, c.last_outcome, c.assignment_status
+                 FROM candidates c
+                 WHERE ${scope.clause}
+                 ORDER BY COALESCE(c.next_followup_at, c.last_message_at) ASC NULLS LAST, c.created_at DESC
+                 LIMIT 300`,
+                scope.params
+            );
+
+            const now = Date.now();
+            const leads = q.rows.map((row) => ({
+                id: row.id,
+                phoneNumber: row.phone_number,
+                name: row.name || '',
+                status: row.stage || 'New',
+                source: row.source || 'Organic',
+                lastMessage: row.last_message || '',
+                lastMessageTime: parseInt(row.last_message_at || '0') || 0,
+                variables: normalizeVariables(row.variables),
+                ownerManagerEmail: normalizeEmail(row.owner_manager_email),
+                ownerStaffEmail: normalizeEmail(row.owner_staff_email),
+                nextFollowupAt: row.next_followup_at ? Number(row.next_followup_at) : null,
+                lastOutcome: row.last_outcome || '',
+                assignmentStatus: row.assignment_status || 'unassigned',
+                isOverdue: row.next_followup_at ? Number(row.next_followup_at) < now : false
+            }));
+
+            const summary = {
+                total: leads.length,
+                overdue: leads.filter((lead) => lead.isOverdue).length,
+                dueToday: leads.filter((lead) => {
+                    if (!lead.nextFollowupAt) return false;
+                    const d = new Date(lead.nextFollowupAt);
+                    const n = new Date(now);
+                    return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+                }).length,
+                withoutFollowup: leads.filter((lead) => !lead.nextFollowupAt).length
+            };
+
+            return res.json({ leads, summary });
+        });
+    } catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+});
+
+apiRouter.post('/lead-ops/leads/:id/followup', async (req, res) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+        const candidateId = req.params.id;
+        const nextFollowupAt = Number(req.body?.nextFollowupAt || 0);
+        const outcome = String(req.body?.outcome || '').trim();
+        const remark = String(req.body?.remark || '').trim();
+
+        await withDb(async (client) => {
+            const leadRes = await client.query('SELECT id, owner_manager_email, owner_staff_email, variables FROM candidates WHERE id = $1 LIMIT 1', [candidateId]);
+            if (leadRes.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
+            const lead = leadRes.rows[0];
+            if (!canAccessCandidate(req.user, lead)) return res.status(403).json({ error: 'Forbidden' });
+
+            const vars = normalizeVariables(lead.variables);
+            if (remark) vars.latest_staff_remark = remark;
+            if (outcome) vars.latest_call_outcome = outcome;
+
+            await client.query(
+                `UPDATE candidates
+                 SET next_followup_at = $1,
+                     last_outcome = $2,
+                     last_action_at = $3,
+                     variables = $4::jsonb,
+                     row_version = COALESCE(row_version, 0) + 1
+                 WHERE id = $5`,
+                [nextFollowupAt > 0 ? nextFollowupAt : null, outcome || null, Date.now(), JSON.stringify(vars), candidateId]
+            );
+
+            await logLeadActivity(client, {
+                candidateId,
+                actorEmail: req.user.email,
+                actorRole: req.user.role,
+                action: 'FOLLOWUP_UPDATED',
+                details: {
+                    nextFollowupAt: nextFollowupAt > 0 ? nextFollowupAt : null,
+                    outcome,
+                    remark
+                }
+            });
+
+            scheduleDriverExcelSync();
+            scheduleDriverExcelIncrementalSync({ candidateId, action: 'upsert' });
+            return res.json({ success: true });
+        });
+    } catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
 });
 
 apiRouter.get('/bot/settings', async (req, res) => {
@@ -3569,11 +4005,23 @@ apiRouter.post('/bot/publish', async (req, res) => res.json({ success: true }));
 apiRouter.get('/drivers', async (req, res) => {
     try {
         await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC NULLS LAST LIMIT 50');
+            const scope = buildLeadScope(req.user, 'c', 1);
+            const r = await client.query(
+                `SELECT c.* FROM candidates c
+                 WHERE ${scope.clause}
+                 ORDER BY c.last_message_at DESC NULLS LAST
+                 LIMIT 200`,
+                scope.params
+            );
             res.json(r.rows.map(row => ({
                 id: row.id, phoneNumber: row.phone_number, name: row.name, status: row.stage, 
                 lastMessage: row.last_message, lastMessageTime: parseInt(row.last_message_at || '0'), 
-                source: row.source, isHumanMode: row.is_human_mode
+                source: row.source, isHumanMode: row.is_human_mode,
+                ownerManagerEmail: normalizeEmail(row.owner_manager_email),
+                ownerStaffEmail: normalizeEmail(row.owner_staff_email),
+                nextFollowupAt: row.next_followup_at ? Number(row.next_followup_at) : null,
+                lastOutcome: row.last_outcome || '',
+                assignmentStatus: row.assignment_status || 'unassigned'
             })));
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3583,6 +4031,9 @@ apiRouter.patch('/drivers/:id', async (req, res) => {
     try {
         const { status, isHumanMode, name } = req.body;
         await withDb(async (client) => {
+            const leadRes = await client.query('SELECT id, owner_manager_email, owner_staff_email FROM candidates WHERE id = $1 LIMIT 1', [req.params.id]);
+            if (leadRes.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
+            if (!canAccessCandidate(req.user, leadRes.rows[0])) return res.status(403).json({ error: 'Forbidden' });
             if (status) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [status, req.params.id]);
             if (isHumanMode !== undefined) await client.query("UPDATE candidates SET is_human_mode = $1 WHERE id = $2", [isHumanMode, req.params.id]);
             if (name) await client.query("UPDATE candidates SET name = $1 WHERE id = $2", [name, req.params.id]);
@@ -3594,6 +4045,9 @@ apiRouter.patch('/drivers/:id', async (req, res) => {
 apiRouter.get('/drivers/:id/messages', async (req, res) => {
     try {
         await withDb(async (client) => {
+            const access = await client.query('SELECT id, owner_manager_email, owner_staff_email FROM candidates WHERE id = $1 LIMIT 1', [req.params.id]);
+            if (access.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
+            if (!canAccessCandidate(req.user, access.rows[0])) return res.status(403).json({ error: 'Forbidden' });
             const r = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [req.params.id]);
             const msgs = await Promise.all(r.rows.map(async row => {
                 let text = row.text;
@@ -3635,8 +4089,9 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
     try {
         const { text, mediaUrl, mediaType } = req.body;
         await withDb(async (client) => {
-            const c = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
+            const c = await client.query('SELECT phone_number, owner_manager_email, owner_staff_email FROM candidates WHERE id = $1', [req.params.id]);
             if (c.rows.length === 0) throw new Error("Candidate not found");
+            if (!canAccessCandidate(req.user, c.rows[0])) return res.status(403).json({ error: 'Forbidden' });
             let payload = { type: 'text', text: { body: text } };
             let dbText = text;
             if (mediaUrl) {
@@ -3658,6 +4113,9 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
 apiRouter.get('/drivers/:id/documents', async (req, res) => {
     try {
         await withDb(async (client) => {
+            const access = await client.query('SELECT id, owner_manager_email, owner_staff_email FROM candidates WHERE id = $1 LIMIT 1', [req.params.id]);
+            if (access.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
+            if (!canAccessCandidate(req.user, access.rows[0])) return res.status(403).json({ error: 'Forbidden' });
             const r = await client.query('SELECT * FROM driver_documents WHERE candidate_id = $1 ORDER BY created_at DESC', [req.params.id]);
             const docs = await Promise.all(r.rows.map(async d => ({ id: d.id, docType: d.type, url: await refreshMediaUrl(d.url), verificationStatus: d.status, timestamp: new Date(d.created_at).getTime() })));
             res.json(docs);
@@ -3673,8 +4131,9 @@ apiRouter.patch('/drivers/:id/document-status', async (req, res) => {
         if (!allowed.has(status)) return res.status(400).json({ error: 'Invalid document status' });
 
         await withDb(async (client) => {
-            const candidateRes = await client.query('SELECT id FROM candidates WHERE id = $1 LIMIT 1', [req.params.id]);
+            const candidateRes = await client.query('SELECT id, owner_manager_email, owner_staff_email FROM candidates WHERE id = $1 LIMIT 1', [req.params.id]);
             if (candidateRes.rows.length === 0) return res.status(404).json({ error: 'Candidate not found' });
+            if (!canAccessCandidate(req.user, candidateRes.rows[0])) return res.status(403).json({ error: 'Forbidden' });
 
             if (['approved', 'rejected', 'under_review', 'expired', 'missing', 'uploaded'].includes(status)) {
                 await client.query(
@@ -3703,14 +4162,17 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
         const search = (req.query.search || '').toString().trim();
         await withDb(async (client) => {
             const customCols = await getDriverExcelColumnConfig(client);
-            const params = [];
-            let where = '';
+            const scope = buildLeadScope(req.user, 'c', 1);
+            const params = [...scope.params];
+            let where = `WHERE ${scope.clause}`;
             if (search) {
                 params.push(`%${search}%`);
-                where = `WHERE c.name ILIKE $1 OR c.phone_number ILIKE $1 OR c.stage ILIKE $1`;
+                const idx = params.length;
+                where += ` AND (c.name ILIKE $${idx} OR c.phone_number ILIKE $${idx} OR c.stage ILIKE $${idx})`;
             }
             const q = `
-                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables
+                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables,
+                       c.owner_manager_email, c.owner_staff_email, c.next_followup_at, c.last_outcome, c.assignment_status
                 FROM candidates c
                 ${where}
                 ORDER BY c.created_at DESC
@@ -3753,6 +4215,11 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
                     source: r.source || '',
                     createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
                     lastMessageAt: r.last_message_at ? new Date(Number(r.last_message_at) || r.last_message_at).toISOString() : '',
+                    ownerManagerEmail: normalizeEmail(r.owner_manager_email),
+                    ownerStaffEmail: normalizeEmail(r.owner_staff_email),
+                    nextFollowupAt: r.next_followup_at ? Number(r.next_followup_at) : null,
+                    lastOutcome: r.last_outcome || '',
+                    assignmentStatus: r.assignment_status || 'unassigned',
                     variables: mergedVars
                 };
             });
@@ -3839,10 +4306,11 @@ apiRouter.patch('/reports/driver-excel/:id', async (req, res) => {
         const updates = req.body?.updates || {};
         const id = req.params.id;
         await withDb(async (client) => {
-            const existingRes = await client.query('SELECT variables FROM candidates WHERE id = $1 LIMIT 1', [id]);
+            const existingRes = await client.query('SELECT variables, owner_manager_email, owner_staff_email FROM candidates WHERE id = $1 LIMIT 1', [id]);
             if (existingRes.rows.length === 0) return res.status(404).json({ error: 'Candidate not found' });
+            if (!canAccessCandidate(req.user, existingRes.rows[0])) return res.status(403).json({ error: 'Forbidden' });
 
-            const coreFieldMap = { phoneNumber: 'phone_number', name: 'name', status: 'stage', source: 'source' };
+            const coreFieldMap = { phoneNumber: 'phone_number', name: 'name', status: 'stage', source: 'source', nextFollowupAt: 'next_followup_at', lastOutcome: 'last_outcome' };
             for (const [k, v] of Object.entries(updates)) {
                 if (coreFieldMap[k]) {
                     await client.query(`UPDATE candidates SET ${coreFieldMap[k]} = $1 WHERE id = $2`, [v, id]);
@@ -3864,6 +4332,7 @@ apiRouter.patch('/reports/driver-excel/:id', async (req, res) => {
 
 apiRouter.delete('/reports/driver-excel/:id', async (req, res) => {
     try {
+        if (!assertRole(req, res, [USER_ROLES.ADMIN])) return;
         await withDb(async (client) => {
             await client.query('DELETE FROM candidates WHERE id = $1', [req.params.id]);
             scheduleDriverExcelSync();
@@ -3875,6 +4344,7 @@ apiRouter.delete('/reports/driver-excel/:id', async (req, res) => {
 
 apiRouter.post('/reports/driver-excel/columns', async (req, res) => {
     try {
+        if (!assertRole(req, res, [USER_ROLES.ADMIN])) return;
         const requestedKey = normalizeColumnKey((req.body?.key || '').toString());
         const label = (req.body?.label || '').toString().trim();
         const key = requestedKey || normalizeColumnKey(label);
@@ -3908,6 +4378,7 @@ apiRouter.get('/reports/driver-excel/variables', async (req, res) => {
 
 apiRouter.patch('/reports/driver-excel/columns/:key', async (req, res) => {
     try {
+        if (!assertRole(req, res, [USER_ROLES.ADMIN])) return;
         const key = req.params.key;
         const newLabel = (req.body?.newLabel || '').toString().trim();
         if (!newLabel) return res.status(400).json({ error: 'newLabel is required' });
@@ -3944,6 +4415,7 @@ apiRouter.patch('/reports/driver-excel/columns/:key', async (req, res) => {
 
 apiRouter.post('/reports/driver-excel/columns/reorder', async (req, res) => {
     try {
+        if (!assertRole(req, res, [USER_ROLES.ADMIN])) return;
         const orderedKeys = Array.isArray(req.body?.orderedKeys) ? req.body.orderedKeys.map((k) => String(k)) : [];
         await withDb(async (client) => {
             const customCols = await getDriverExcelColumnConfig(client);
@@ -3963,6 +4435,7 @@ apiRouter.post('/reports/driver-excel/columns/reorder', async (req, res) => {
 
 apiRouter.delete('/reports/driver-excel/columns/:key', async (req, res) => {
     try {
+        if (!assertRole(req, res, [USER_ROLES.ADMIN])) return;
         const key = req.params.key;
         await withDb(async (client) => {
             const customCols = await getDriverExcelColumnConfig(client);
@@ -4120,6 +4593,7 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
 
 apiRouter.post('/system/init-db', async (req, res) => {
     try {
+        if (!assertRole(req, res, [USER_ROLES.ADMIN])) return;
         await withDb(async (client) => {
             await initDatabase(client);
         });
@@ -4129,6 +4603,7 @@ apiRouter.post('/system/init-db', async (req, res) => {
 
 apiRouter.post('/system/hard-reset', async (req, res) => {
     try {
+        if (!assertRole(req, res, [USER_ROLES.ADMIN])) return;
         await withDb(async (client) => {
             await client.query('BEGIN');
             try {
@@ -4146,6 +4621,7 @@ apiRouter.post('/system/hard-reset', async (req, res) => {
 
 apiRouter.post('/system/seed-db', async (req, res) => {
     try {
+        if (!assertRole(req, res, [USER_ROLES.ADMIN])) return;
         await withDb(async (client) => {
             const id = crypto.randomUUID();
             await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at) VALUES ($1, '+919999999999', 'Demo Driver', 'New', 'Hello', $2)`, [id, Date.now()]);
