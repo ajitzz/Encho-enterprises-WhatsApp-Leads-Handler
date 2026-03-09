@@ -437,9 +437,6 @@ const USER_ROLES = {
 
 const authTokenCache = new Map();
 const AUTH_CACHE_TTL_MS = 60 * 1000;
-const SESSION_TOKEN_VERSION = 1;
-const SESSION_TOKEN_TTL_MS = Math.max(60 * 60 * 1000, Number(process.env.SESSION_TOKEN_TTL_MS || 7 * 24 * 60 * 60 * 1000));
-const SESSION_TOKEN_SECRET = String(process.env.SESSION_TOKEN_SECRET || process.env.JWT_SECRET || 'encho_session_secret_change_me');
 
 const getBearerToken = (req) => {
     const auth = String(req.headers.authorization || '').trim();
@@ -448,45 +445,6 @@ const getBearerToken = (req) => {
 };
 
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
-
-const encodeSessionBase64Url = (input = '') => Buffer.from(String(input)).toString('base64url');
-
-const createSessionToken = (payload = {}) => {
-    const body = {
-        v: SESSION_TOKEN_VERSION,
-        iat: Date.now(),
-        exp: Date.now() + SESSION_TOKEN_TTL_MS,
-        ...payload
-    };
-    const encoded = encodeSessionBase64Url(JSON.stringify(body));
-    const signature = crypto.createHmac('sha256', SESSION_TOKEN_SECRET).update(encoded).digest('base64url');
-    return `${encoded}.${signature}`;
-};
-
-const verifySessionToken = (token = '') => {
-    const raw = String(token || '').trim();
-    const [encoded, signature] = raw.split('.');
-    if (!encoded || !signature) return null;
-
-    const expected = crypto.createHmac('sha256', SESSION_TOKEN_SECRET).update(encoded).digest('base64url');
-    const actualBuffer = Buffer.from(signature);
-    const expectedBuffer = Buffer.from(expected);
-    if (actualBuffer.length !== expectedBuffer.length) return null;
-    if (!crypto.timingSafeEqual(actualBuffer, expectedBuffer)) return null;
-
-    let parsed;
-    try {
-        parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
-    } catch (e) {
-        return null;
-    }
-
-    if (!parsed || parsed.v !== SESSION_TOKEN_VERSION) return null;
-    if (!parsed.exp || parsed.exp < Date.now()) return null;
-    if (!parsed.email) return null;
-
-    return parsed;
-};
 
 const getAdminAllowlist = () => {
     const fromEnv = String(process.env.ADMIN_EMAILS || process.env.SUPER_ADMIN_EMAILS || '').split(',').map(normalizeEmail).filter(Boolean);
@@ -3081,20 +3039,8 @@ apiRouter.use(async (req, res, next) => {
         const token = getBearerToken(req);
         if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
-        const sessionPayload = verifySessionToken(token);
-        let mapped;
-
-        if (sessionPayload?.email) {
-            mapped = await withDb(async (client) => {
-                const r = await executeWithRetry(client, () => client.query('SELECT email, name, role, manager_email, is_active FROM users WHERE email = $1 LIMIT 1', [normalizeEmail(sessionPayload.email)]));
-                if (r.rows.length === 0 || !r.rows[0].is_active) throw new Error('Session user not found or inactive');
-                return r.rows[0];
-            });
-        } else {
-            const payload = await verifyGoogleTokenWithCache(token);
-            mapped = await withDb(async (client) => executeWithRetry(client, () => getOrProvisionUser(client, payload)));
-        }
-
+        const payload = await verifyGoogleTokenWithCache(token);
+        const mapped = await withDb(async (client) => getOrProvisionUser(client, payload));
         req.user = {
             email: normalizeEmail(mapped.email),
             name: mapped.name,
@@ -3753,15 +3699,9 @@ apiRouter.post('/auth/google', async (req, res) => {
     try {
         const { credential } = req.body;
         const payload = await verifyGoogleTokenWithCache(credential);
-        const user = await withDb(async (client) => executeWithRetry(client, () => getOrProvisionUser(client, payload)));
-        const sessionToken = createSessionToken({
-            email: normalizeEmail(user.email),
-            role: user.role,
-            managerEmail: normalizeEmail(user.manager_email)
-        });
+        const user = await withDb(async (client) => getOrProvisionUser(client, payload));
         res.json({
             success: true,
-            token: sessionToken,
             user: {
                 ...payload,
                 email: normalizeEmail(user.email),
