@@ -193,11 +193,6 @@ export interface Candidate {
   tags: string[];
   lastMessageAt: number;
   assignedAgent?: string;
-  ownerManagerEmail?: string;
-  ownerStaffEmail?: string;
-  assignmentStatus?: string;
-  nextFollowupAt?: number | null;
-  lastOutcome?: string;
   messages?: Message[];
   currentBotStepId?: string; 
   isHumanMode?: boolean;
@@ -271,28 +266,7 @@ export interface DriverExcelRow {
   source: string;
   createdAt: string;
   lastMessageAt: string;
-  ownerManagerEmail?: string;
-  ownerStaffEmail?: string;
-  nextFollowupAt?: number | null;
-  lastOutcome?: string;
-  assignmentStatus?: string;
   variables: Record<string, any>;
-}
-
-export type UserRole = 'admin' | 'manager' | 'staff';
-
-export interface AuthUser {
-  email: string;
-  name?: string;
-  role: UserRole;
-  managerEmail?: string;
-}
-
-export interface LeadOpsQueueSummary {
-  total: number;
-  overdue: number;
-  dueToday: number;
-  withoutFollowup: number;
 }
 
 export interface AuditIssue {
