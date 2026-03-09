@@ -69,7 +69,7 @@ export const liveApiService = {
       return apiRequest<Driver[]>('/api/drivers');
   },
 
-  verifyLogin: async (credential: string): Promise<{success: boolean, user?: any}> => {
+  verifyLogin: async (credential: string): Promise<{success: boolean, user?: any, token?: string}> => {
       return apiRequest('/api/auth/google', {
           method: 'POST',
           body: JSON.stringify({ credential })

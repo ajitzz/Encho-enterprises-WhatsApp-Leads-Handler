@@ -25,7 +25,7 @@ export const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
       // Send token to backend for verification against Super Admin list
       const response = await liveApiService.verifyLogin(credentialResponse.credential);
       if (response.success) {
-        onLoginSuccess(credentialResponse.credential, response.user);
+        onLoginSuccess(response.token || credentialResponse.credential, response.user);
       } else {
         setError("Access Denied: You are not authorized to access this dashboard.");
       }

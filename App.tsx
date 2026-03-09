@@ -71,6 +71,13 @@ export default function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
   const [isRepeatToggling, setIsRepeatToggling] = useState(false);
+
+  const forceLogout = () => {
+      localStorage.removeItem('uber_fleet_auth_token');
+      setAuthToken('');
+      setUserProfile(null);
+      setIsAuthenticated(false);
+  };
   
   const [dataSource, setDataSource] = useState<'mock' | 'live'>(() => {
       const saved = localStorage.getItem('uber_fleet_data_source');
@@ -144,7 +151,9 @@ export default function App() {
          } catch (e: any) {
              if (e.message.includes('relation') && e.message.includes('does not exist')) {
                  setIsEmergencyMode(true); // TRIGGER EMERGENCY MODE
-             } else if (e.message !== "Unauthorized") {
+             } else if (e.message === "Unauthorized" || String(e.message || '').includes('401')) {
+                 forceLogout();
+             } else {
                  addNotification({ type: 'warning', title: 'Connection Failed', message: 'Ensure server is running.' });
              }
          }
