@@ -58,11 +58,7 @@ export default function App() {
       if (!isAuthenticated) return;
       liveApiService.getAuthMe()
         .then((res) => setUserProfile(res.user))
-        .catch((e) => {
-          if (String(e?.message || '').includes('401') || String(e?.message || '').toLowerCase().includes('unauthorized')) {
-            forceLogout();
-          }
-        });
+        .catch(() => null);
   }, [isAuthenticated]);
 
   const [activeTab, setActiveTab] = useState('dashboard');
