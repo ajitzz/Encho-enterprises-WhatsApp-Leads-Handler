@@ -12,6 +12,10 @@ const { OAuth2Client, JWT } = require('google-auth-library');
 
 require('dotenv').config();
 
+const { parsePercent, resolveModuleMode } = require('./backend/shared/infra/flags');
+const { buildLeadIngestionFacade } = require('./backend/modules/lead-ingestion/api');
+const { buildRemindersRouter } = require('./backend/modules/reminders-escalations/api');
+
 process.on('unhandledRejection', (reason) => {
     console.error('[UNHANDLED REJECTION]', reason);
 });
@@ -22,6 +26,13 @@ process.on('uncaughtException', (error) => {
 
 const REQUEST_ID_HEADER = 'x-request-id';
 const REQUEST_CONTEXT_FLAG = String(process.env.FF_REQUEST_CONTEXT || 'true').toLowerCase() !== 'false';
+const LEAD_INGESTION_FLAG = String(process.env.FF_LEAD_INGESTION_MODULE || 'off').toLowerCase();
+const REMINDERS_MODULE_FLAG = String(process.env.FF_REMINDERS_MODULE || 'off').toLowerCase();
+const REMINDERS_CANARY_PERCENT = parsePercent(process.env.FF_REMINDERS_MODULE_PERCENT || 0);
+const MODULE_CANARY_TENANTS = String(process.env.FF_CANARY_TENANTS || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 
 const getRequestId = (req = {}) => {
     const headerValue = req.headers?.[REQUEST_ID_HEADER];
@@ -3541,8 +3552,7 @@ apiRouter.get('/webhook', (req, res) => {
     }
 });
 
-apiRouter.post('/webhook', async (req, res) => {
-    const body = req.body;
+const processWebhookLegacy = async ({ body, req, res }) => {
     if (!body.object) { res.sendStatus(404); return; }
     try {
         const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
@@ -3583,40 +3593,54 @@ apiRouter.post('/webhook', async (req, res) => {
                 if (c.rows.length === 0) {
                     const id = crypto.randomUUID();
                     await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at, is_human_mode, variables) VALUES ($1, $2, $3, 'New', $4, $5, FALSE, '{}')`, [id, from, name, text, Date.now()]);
-                    candidate = { id, phone_number: from, is_human_mode: false, current_bot_step_id: null, variables: {}, name };
+                    candidate = { id, phone_number: from, name, stage: 'New', is_human_mode: false };
                 } else {
                     candidate = c.rows[0];
                     await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
                 }
 
-                if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video' || msg.type === 'audio') {
-                    const mediaInfo = await fetchAndStoreIncomingMedia({
-                        msg,
-                        phoneNumber: from,
-                        candidateId: candidate.id,
-                                                client
-                    }).catch((e) => {
-                        console.error('[Media Upload Error]', e.message);
-                        return null;
-                    });
+                await client.query(
+                    `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
+                     VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW())`,
+                    [crypto.randomUUID(), candidate.id, text, messageType, msg.id]
+                );
 
-                    if (mediaInfo?.key) {
-                        text = JSON.stringify({ mediaKey: mediaInfo.key, type: msg.type, mimeType: mediaInfo.mimeType, mediaUrl: getPublicS3Url(mediaInfo.key), folder: buildDriverDataPrefix(from) });
-                        await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
-                    }
+                if (!candidate.is_human_mode) {
+                    await runBotEngine(client, candidate, text, payloadId);
                 }
 
-                await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, whatsapp_message_id, status, created_at) VALUES ($1, $2, 'in', $3, $4, $5, 'received', NOW())`, [crypto.randomUUID(), candidate.id, text, messageType, msg.id]);
-                await runBotEngine(client, candidate, text, payloadId);
                 scheduleDriverExcelSync();
                 scheduleDriverExcelIncrementalSync({ candidateId: candidate.id, action: 'upsert' });
             });
         });
 
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Webhook Processing Timeout")), 9000));
-        await Promise.race([processPromise, timeoutPromise]).catch(err => console.error("[Webhook Warning]", err.message));
         res.sendStatus(200);
-    } catch(e) { console.error("Webhook Error", e); res.sendStatus(200); }
+        await processPromise;
+    } catch (e) {
+        console.error('Webhook processing error:', e);
+    }
+};
+
+const leadIngestionFacade = buildLeadIngestionFacade({
+    legacyProcessor: processWebhookLegacy,
+});
+
+apiRouter.post('/webhook', async (req, res) => {
+    const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
+    const mode = resolveModuleMode({
+        flagValue: LEAD_INGESTION_FLAG,
+        tenantId,
+        requestId: req.requestId,
+        canaryPercent: 100,
+        tenantAllowList: MODULE_CANARY_TENANTS,
+    });
+
+    if (mode !== 'off') {
+        await leadIngestionFacade({ body: req.body, req, res, context: { requestId: req.requestId || null, tenantId } });
+        return;
+    }
+
+    await processWebhookLegacy({ body: req.body, req, res });
 });
 
 apiRouter.post('/auth/google', async (req, res) => {
@@ -4063,7 +4087,7 @@ apiRouter.delete('/reports/driver-excel/columns/:key', async (req, res) => {
 });
 
 // --- OPTIMIZED BULK SCHEDULER ---
-apiRouter.post('/scheduled-messages', async (req, res) => {
+const handleScheduledMessagesLegacy = async (req, res) => {
     try {
         const { driverIds, message, timestamp } = req.body;
         if (!driverIds || driverIds.length === 0) return res.status(400).json({error: "No recipients"});
@@ -4085,6 +4109,25 @@ apiRouter.post('/scheduled-messages', async (req, res) => {
         console.error("Bulk Schedule Error:", e);
         res.status(500).json({ error: e.message }); 
     }
+};
+
+apiRouter.post('/scheduled-messages', async (req, res) => {
+    const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
+    const mode = resolveModuleMode({
+        flagValue: REMINDERS_MODULE_FLAG,
+        tenantId,
+        requestId: req.requestId,
+        canaryPercent: REMINDERS_CANARY_PERCENT,
+        tenantAllowList: MODULE_CANARY_TENANTS,
+    });
+
+    const remindersRouter = buildRemindersRouter({
+        legacyScheduleHandler: handleScheduledMessagesLegacy,
+        legacyQueueHandler: handleCronProcessQueueLegacy,
+    });
+
+    if (mode !== 'off') return remindersRouter.schedule(req, res);
+    return handleScheduledMessagesLegacy(req, res);
 });
 
 apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => {
@@ -4126,7 +4169,7 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
 });
 
 // --- ADVANCED PARALLEL CRON PROCESSOR ---
-apiRouter.get('/cron/process-queue', async (req, res) => {
+const handleCronProcessQueueLegacy = async (req, res) => {
     let processed = 0, errors = 0;
     try {
         await withDb(async (client) => {
@@ -4199,6 +4242,25 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
         });
         res.json({ status: 'ok', processed, errors, queueSize: processed + errors });
     } catch (e) { res.status(500).json({ error: e.message }); }
+};
+
+apiRouter.get('/cron/process-queue', async (req, res) => {
+    const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
+    const mode = resolveModuleMode({
+        flagValue: REMINDERS_MODULE_FLAG,
+        tenantId,
+        requestId: req.requestId,
+        canaryPercent: REMINDERS_CANARY_PERCENT,
+        tenantAllowList: MODULE_CANARY_TENANTS,
+    });
+
+    const remindersRouter = buildRemindersRouter({
+        legacyScheduleHandler: handleScheduledMessagesLegacy,
+        legacyQueueHandler: handleCronProcessQueueLegacy,
+    });
+
+    if (mode !== 'off') return remindersRouter.processQueue(req, res);
+    return handleCronProcessQueueLegacy(req, res);
 });
 
 apiRouter.post('/system/init-db', async (req, res) => {
