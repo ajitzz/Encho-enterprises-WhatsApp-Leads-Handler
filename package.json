@@ -1,4 +1,3 @@
-
 {
   "name": "uber-fleet-recruiter",
   "version": "1.0.0",
@@ -8,7 +7,9 @@
     "start": "node server.js",
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:critical": "node --test tests/critical-flows.test.js",
+    "release:gate": "node scripts/release-gate.js"
   },
   "dependencies": {
     "express": "^4.18.2",
