@@ -20,6 +20,33 @@ process.on('uncaughtException', (error) => {
     console.error('[UNCAUGHT EXCEPTION]', error);
 });
 
+const REQUEST_ID_HEADER = 'x-request-id';
+const REQUEST_CONTEXT_FLAG = String(process.env.FF_REQUEST_CONTEXT || 'true').toLowerCase() !== 'false';
+
+const getRequestId = (req = {}) => {
+    const headerValue = req.headers?.[REQUEST_ID_HEADER];
+    if (Array.isArray(headerValue)) return headerValue[0] || crypto.randomUUID();
+    return headerValue || crypto.randomUUID();
+};
+
+const structuredLog = ({ level = 'info', message = '', requestId = null, module = 'app', meta = {} } = {}) => {
+    const payload = {
+        timestamp: new Date().toISOString(),
+        level,
+        module,
+        message,
+        requestId,
+        ...meta
+    };
+
+    const output = JSON.stringify(payload);
+    if (level === 'error') {
+        console.error(output);
+        return;
+    }
+    console.log(output);
+};
+
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
     META_TIMEOUT: 15000,
@@ -2885,14 +2912,70 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-app.use((req, res, next) => {
-    console.log(`[${req.method}] ${req.url}`);
-    next();
-});
+if (REQUEST_CONTEXT_FLAG) {
+    app.use((req, res, next) => {
+        const requestId = getRequestId(req);
+        req.requestId = requestId;
+        res.setHeader(REQUEST_ID_HEADER, requestId);
+        const startTime = Date.now();
+
+        structuredLog({
+            level: 'info',
+            module: 'http',
+            message: 'request.started',
+            requestId,
+            meta: {
+                method: req.method,
+                path: req.originalUrl || req.url,
+                remoteIp: req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null
+            }
+        });
+
+        res.on('finish', () => {
+            structuredLog({
+                level: res.statusCode >= 500 ? 'error' : 'info',
+                module: 'http',
+                message: 'request.completed',
+                requestId,
+                meta: {
+                    method: req.method,
+                    path: req.originalUrl || req.url,
+                    statusCode: res.statusCode,
+                    durationMs: Date.now() - startTime
+                }
+            });
+        });
+
+        next();
+    });
+} else {
+    app.use((req, res, next) => {
+        console.log(`[${req.method}] ${req.url}`);
+        next();
+    });
+}
 
 const apiRouter = express.Router();
 
 apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
+
+apiRouter.get('/ready', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query('SELECT 1');
+        });
+        res.json({ status: 'ready', timestamp: Date.now() });
+    } catch (error) {
+        structuredLog({
+            level: 'error',
+            module: 'system-health',
+            message: 'readiness.failed',
+            requestId: req.requestId || null,
+            meta: { error: error.message }
+        });
+        res.status(503).json({ status: 'not_ready', error: error.message });
+    }
+});
 
 apiRouter.get('/system/settings', async (req, res) => {
     try {
@@ -4156,6 +4239,20 @@ apiRouter.post('/system/seed-db', async (req, res) => {
 
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
+app.use((err, req, res, next) => {
+    structuredLog({
+        level: 'error',
+        module: 'http',
+        message: 'request.unhandled_error',
+        requestId: req?.requestId || null,
+        meta: {
+            method: req?.method,
+            path: req?.originalUrl || req?.url,
+            error: err?.message || 'Unknown error'
+        }
+    });
+    res.status(500).json({ error: 'Internal server error' });
+});
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
 if (require.main === module) {
