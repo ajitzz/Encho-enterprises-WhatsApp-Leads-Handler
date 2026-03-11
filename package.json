@@ -9,7 +9,11 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:critical": "node --test tests/critical-flows.test.js",
-    "release:gate": "node scripts/release-gate.js"
+    "release:gate": "node scripts/release-gate.js",
+    "test:governance": "node --test tests/migration-governance.test.js",
+    "check:boundaries": "node scripts/check-import-boundaries.js",
+    "check:contracts": "node scripts/check-contract-versioning.js",
+    "contracts:catalog": "node scripts/generate-contract-catalog.js"
   },
   "dependencies": {
     "express": "^4.18.2",
