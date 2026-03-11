@@ -108,6 +108,49 @@ backend/
 | `/health`, `/ping`, `/debug/status`, `/system/*` repairs | `server.js` + `SystemMonitor` | **System Health Module** |
 | `/auth/google`, runtime settings + config updates | `server.js` + `SettingsModal/Login` | **Auth & Configuration Module** |
 
+### Section 1 completion criteria (micro-level)
+To mark Section 1 as **completed**, all architecture-diff controls below must be true:
+
+#### 1.1 Runtime boundary rules
+- `app/server` must only bootstrap HTTP, middleware, router mounting, and graceful shutdown.
+- Domain logic must not remain in route handlers; handlers only call module `api` surfaces.
+- Shared infra (`db`, `flags`, `logger`, `metrics`) must be imported through `shared/infra/*` only.
+- No module may import another module’s adapter directly (only contracts/service interfaces).
+
+#### 1.2 Module isolation checklist
+For each module, validate:
+- `api.ts` exposes route registration only.
+- `service.ts` contains deterministic business logic.
+- `contracts.ts` contains DTO/domain boundary types.
+- `adapters/*` contains side-effecting integrations (DB, provider, storage).
+- `index.ts` (or equivalent barrel) exports only public module API.
+
+#### 1.3 Import-direction constraints
+- Allowed: `app -> modules -> shared`.
+- Forbidden: `shared -> modules`, `module A adapter -> module B adapter`.
+- Enforce via lint rule or import-graph gate in CI.
+
+#### 1.4 Data ownership map (authoritative)
+- **lead-ingestion** owns dedupe key generation + inbound payload normalization.
+- **bot-conversation** owns conversation state transitions and variable persistence policy.
+- **lead-lifecycle** owns stage transition policy + audit trail.
+- **reminders-escalations** owns job status machine (`pending/processing/sent/failed/cancelled`).
+- **reporting-export** owns projection model for exports (read-optimized, no source-of-truth writes).
+- **media** owns S3 key conventions, tokenized showcase exposure, and media metadata shaping.
+
+#### 1.5 Non-functional budgets (must be codified)
+- Webhook ingest p95 budget: baseline + 5% max during canary.
+- `/cron/process-queue` throughput budget: no regression vs baseline batch execution.
+- Error budget: no increase in 5xx rate on critical routes post-cutover.
+- Resource budget: memory/cpu ceilings defined per deployment environment.
+
+#### 1.6 Section 1 acceptance artifacts
+- Architecture Decision Record (ADR) for modular boundaries.
+- Updated repository tree showing modules and shared infra packages.
+- CI check enforcing import direction.
+- Runbook explaining module ownership and escalation path.
+
+
 ---
 
 ## 2) Module Contract Specs
@@ -155,6 +198,44 @@ backend/
 - Keep existing HTTP contracts unchanged; internal contracts evolve behind adapters.
 - Introduce compatibility mappers for old/new field names during migration window.
 
+### Section 2 contract hardening (micro-spec)
+
+#### 2.1 Contract versioning policy
+- Every contract must carry `schemaVersion` (`major.minor.patch`).
+- Backward-compatible additions increment `minor`; breaking changes increment `major`.
+- Module APIs must support `N` and `N-1` major versions during migration windows.
+
+#### 2.2 Required metadata envelope (for internal events)
+Every boundary event includes:
+- `eventId` (UUID), `eventType`, `occurredAt` (ISO timestamp), `schemaVersion`, `sourceModule`, `correlationId`, `causationId?`, `tenantId?`.
+
+#### 2.3 Idempotency and dedupe rules
+- Ingestion path requires deterministic `dedupeKey` from provider message id + channel.
+- Reminder dispatch requires idempotency key per `(taskId, attemptCount)`.
+- Stage transition emits at-most-once semantic via transition fingerprint `(leadId, fromStage, toStage, changedAtBucket)`.
+
+#### 2.4 Validation strategy
+- Runtime validation at module ingress (e.g., Zod/JSON schema validator).
+- Compile-time DTO typing for all service interfaces.
+- Reject unknown enum values at boundaries unless explicitly marked forward-compatible.
+
+#### 2.5 Error contract standard
+- Standard error object for module boundaries:
+  `{ code, message, retriable, category, details?, traceId }`
+- `category` must be one of `validation|dependency|timeout|conflict|not_found|internal`.
+- Map all module errors to stable HTTP responses in `errorBoundary` middleware.
+
+#### 2.6 Contract test obligations
+- Snapshot/golden tests for event payload shape.
+- Producer/consumer contract tests per module pair.
+- Compatibility tests for field rename mappers (old->new and new->old).
+
+#### 2.7 Section 2 acceptance artifacts
+- Contract catalog markdown generated from source schemas.
+- Changelog for contract versions.
+- CI gate: fail if schema change is unversioned or undocumented.
+
+
 ---
 
 ## 3) Migration PR Plan (small, sequenced)
@@ -194,6 +275,58 @@ backend/
      - `FF_REMINDERS_MODULE=canary` => percent/tenant scoped.
    - Add side-by-side metrics comparison hooks.
    - Rollback: flip to off.
+
+
+
+### Section 3 execution playbook (advanced)
+
+#### 3.1 PR quality bar (applies to every migration PR)
+- Max blast radius: one module concern per PR.
+- Each PR must include: `Goal`, `Scope`, `Out-of-scope`, `Risk`, `Rollback`, `Metrics impact`, `Test evidence`.
+- No PR may move behavior and change external response contract in same step.
+
+#### 3.2 Mandatory pre-merge checklist per PR
+1. Feature flag default-safe (`off` unless observability-only).
+2. Shadow/dual-path comparison available for extracted path.
+3. Structured logs include `requestId` and `module` tags.
+4. Regression tests for affected critical flow pass.
+5. Rollback command tested in staging.
+
+#### 3.3 PR-by-PR micro deliverables
+- **PR-2**
+  - Add schema source files and generated types.
+  - Add module folders with ownership metadata.
+  - Add import-boundary lint rule scaffolding.
+- **PR-3**
+  - Add `LeadIngestionFacade` with identical behavior mode.
+  - Add parity logging (`legacyResult` vs `moduleResult`) in dry-run option.
+  - Add per-tenant toggle resolution strategy.
+- **PR-4**
+  - Add deterministic integration fixtures (text, interactive, location, media).
+  - Add flaky-test guardrails (retry only for dependency timeouts, never assertions).
+  - Add release gate script wired to CI status check.
+- **PR-5**
+  - Add reminders service state-machine tests for all status transitions.
+  - Add dispatch reconciliation report (attempted/sent/failed/deferred counts).
+  - Add canary kill-switch and auto-disable threshold.
+
+#### 3.4 Cutover safety model
+- **Mode A: legacy** (serves traffic, module dark).
+- **Mode B: shadow** (legacy response served, module evaluated and compared).
+- **Mode C: canary** (module serves scoped traffic only).
+- **Mode D: full** (module default path; legacy retained for emergency rollback window).
+
+#### 3.5 Observability required during execution
+- RED metrics (Rate, Errors, Duration) per extracted route.
+- Queue health (lag, claim rate, processing duration, failure ratio) for reminders.
+- Business KPIs (lead ingest success %, duplicate prevention %, bot reply success %).
+
+#### 3.6 Section 3 Definition of Complete
+Section 3 is complete only when PR-1..PR-5 are merged with:
+- documented rollback proof,
+- passing critical integration gate,
+- canary evidence with non-regression against agreed SLOs,
+- post-release review notes for each PR.
 
 ### Dependency graph of critical flows (Immediate Task #2)
 
@@ -312,3 +445,46 @@ backend/
 
 ## Pause Gate
 No behavior-moving code refactor should start until this plan is reviewed and approved. Next implementation step after approval: PR-1 (observability baseline only).
+
+---
+
+## 8) Execution Focus to Reach Industrial-Level Standard
+
+### Which section we should complete next
+The immediate focus should be to complete **Section 3 (Migration PR Plan)** in sequence, because it is the execution backbone that unlocks safe refactoring, measurable rollout, and rollback confidence.
+
+**Recommended completion order (next updates):**
+1. Finish **PR-2** (contracts + module skeletons).
+2. Finish **PR-3** (lead ingestion facade behind flag).
+3. Finish **PR-4** (anti-regression integration suite + release gate).
+4. Finish **PR-5** (reminders extraction behind canary flag).
+5. Then execute **Section 5 (Release Plan)** canary stages and rollback drills.
+
+### Industrial-level completion blueprint (what must be true)
+To consider this migration “industrial standard”, all criteria below should be satisfied:
+
+#### A. Architecture & Code Organization
+- Monolithic runtime split into explicit internal modules listed in Section 1 target tree.
+- Shared domain contracts implemented in code, versioned, and used at module boundaries.
+- All high-risk paths (webhook/reminders/lifecycle) routed through module facades before deep extraction.
+
+#### B. Reliability & Operations
+- Every extraction is feature-flagged with safe defaults (`off`) and canary scope controls.
+- One-command rollback validated in staging for each release train.
+- Operational dashboards include latency, ingestion success, reminder dispatch outcomes, queue lag, and error rate alerts.
+
+#### C. Quality Gates
+- Mandatory CI gate includes build + typecheck + critical integration suite.
+- Integration suite covers webhook, bot flow, reminders tick, and stage transitions.
+- Smoke suite always verifies `/api/health`, `/api/ping`, `/api/debug/status`, webhook verification, media basics, and report generation.
+
+#### D. Security & Governance
+- Module ownership defined (CODEOWNERS per module path).
+- Config and secrets handling standardized; no implicit runtime fallbacks for critical secrets.
+- Runbooks for incident response, canary promotion, and rollback are version-controlled.
+
+### Definition of Done for the migration goal
+The migration goal is reached when:
+1. Day-90 checkpoint condition is met (second high-churn module extracted with rollback drill evidence).
+2. Scorecard targets show stable or improved reliability/performance after rollout.
+3. Legacy direct-path handlers are retired only after parity tests and canary evidence pass.
