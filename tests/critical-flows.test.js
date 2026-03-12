@@ -5,6 +5,17 @@ const { resolveModuleMode } = require('../backend/shared/infra/flags');
 const { LeadIngestionService } = require('../backend/modules/lead-ingestion/service');
 const { ReminderServiceFacade } = require('../backend/modules/reminders-escalations/service');
 const {
+  validateLeadIngestedPayload,
+  toLegacyLeadIngestedPayload,
+  buildDeterministicDedupeKey,
+} = require('../backend/modules/lead-ingestion/contracts');
+const {
+  normalizeReminderTaskDispatchedPayload,
+  toLegacyReminderTaskDispatchedPayload,
+  buildReminderAttemptIdempotencyKey,
+} = require('../backend/modules/reminders-escalations/contracts');
+const { buildStageTransitionFingerprint } = require('../backend/shared/contracts/idempotency');
+const {
   EVENT_TYPES,
   SCHEMA_VERSION,
   buildEventEnvelope,
@@ -77,4 +88,65 @@ test('event envelope includes required metadata and schemaVersion', () => {
 
 test('assertEventEnvelope throws for invalid event', () => {
   assert.throws(() => assertEventEnvelope({ eventType: 'x' }), /missing eventId/);
+});
+
+test('lead-ingested compatibility mapper supports old/new fields', () => {
+  const normalized = validateLeadIngestedPayload({
+    eventId: 'evt-1',
+    received_at: '2026-01-01T00:00:00.000Z',
+    source: 'meta',
+    phone_number: '+15551234567',
+    message_type: 'interactive',
+    message_id: 'wamid-1',
+    dedupeKey: 'whatsapp:wamid-1',
+    leadId: 'lead-1',
+  });
+
+  assert.equal(normalized.phoneNumber, '+15551234567');
+  assert.equal(normalized.messageType, 'interactive');
+
+  const legacy = toLegacyLeadIngestedPayload(normalized);
+  assert.equal(legacy.phone_number, normalized.phoneNumber);
+  assert.equal(legacy.message_type, normalized.messageType);
+});
+
+test('reminder dispatched compatibility mapper supports old/new fields', () => {
+  const normalized = normalizeReminderTaskDispatchedPayload({
+    taskId: 'task-1',
+    leadId: 'lead-1',
+    dispatched_at: '2026-01-01T00:00:00.000Z',
+    provider_message_id: 'msg-1',
+    success: true,
+  });
+
+  assert.equal(normalized.dispatchedAt, '2026-01-01T00:00:00.000Z');
+  assert.equal(normalized.providerMessageId, 'msg-1');
+
+  const legacy = toLegacyReminderTaskDispatchedPayload(normalized);
+  assert.equal(legacy.provider_message_id, 'msg-1');
+  assert.equal(legacy.dispatched_at, normalized.dispatchedAt);
+});
+
+test('idempotency builders are deterministic for ingestion/reminders/stage transitions', () => {
+  const dedupeA = buildDeterministicDedupeKey({ providerMessageId: 'wamid-abc', channel: 'whatsapp' });
+  const dedupeB = buildDeterministicDedupeKey({ providerMessageId: 'wamid-abc', channel: 'whatsapp' });
+  assert.equal(dedupeA, dedupeB);
+
+  const attemptA = buildReminderAttemptIdempotencyKey({ taskId: 'task-1', attemptCount: 2 });
+  const attemptB = buildReminderAttemptIdempotencyKey({ taskId: 'task-1', attemptCount: 2 });
+  assert.equal(attemptA, attemptB);
+
+  const fingerprintA = buildStageTransitionFingerprint({
+    leadId: 'lead-1',
+    fromStage: 'New',
+    toStage: 'Qualified',
+    changedAt: 1710000000000,
+  });
+  const fingerprintB = buildStageTransitionFingerprint({
+    leadId: 'lead-1',
+    fromStage: 'New',
+    toStage: 'Qualified',
+    changedAt: 1710000000000,
+  });
+  assert.equal(fingerprintA, fingerprintB);
 });
