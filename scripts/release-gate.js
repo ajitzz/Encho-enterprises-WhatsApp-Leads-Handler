@@ -11,6 +11,7 @@ const run = (cmd, args) => {
 run('npm', ['run', 'check:boundaries']);
 run('npm', ['run', 'check:contracts']);
 run('npm', ['run', 'check:migration-evidence']);
+run('npm', ['run', 'check:canary-perf']);
 run('npm', ['run', 'test:governance']);
 run('npm', ['run', 'test:critical']);
 console.log('\nRelease gate passed: governance + critical suites are green.');

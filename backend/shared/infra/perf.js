@@ -38,6 +38,36 @@ const buildLatencyTracker = ({ module, requestId = null, operation, warnThreshol
   };
 };
 
+const buildStageTimer = ({ module, requestId = null, operation, warnThresholdMs = 300, extraMeta = {} } = {}) => {
+  const startedAt = nowMs();
+
+  return {
+    end(meta = {}) {
+      const durationMs = nowMs() - startedAt;
+      const level = durationMs > warnThresholdMs ? 'error' : 'info';
+      const message = durationMs > warnThresholdMs
+        ? `${operation}.stage_latency_budget_exceeded`
+        : `${operation}.stage_latency`;
+
+      log({
+        level,
+        module,
+        message,
+        requestId,
+        meta: {
+          operation,
+          durationMs,
+          warnThresholdMs,
+          ...extraMeta,
+          ...meta,
+        },
+      });
+
+      return durationMs;
+    }
+  };
+};
+
 const runWithTimeout = async ({
   promise,
   timeoutMs,
@@ -68,6 +98,7 @@ const runWithTimeout = async ({
 
 module.exports = {
   buildLatencyTracker,
+  buildStageTimer,
   parsePositiveInt,
   runWithTimeout,
 };
