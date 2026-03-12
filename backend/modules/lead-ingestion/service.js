@@ -1,5 +1,5 @@
 const { log } = require('../../shared/infra/logger');
-const { buildLatencyTracker, parsePositiveInt, runWithTimeout } = require('../../shared/infra/perf');
+const { buildLatencyTracker, buildStageTimer, parsePositiveInt, runWithTimeout } = require('../../shared/infra/perf');
 const { parseBooleanFlag } = require('../../shared/infra/flags');
 const {
   validateLeadIngestedPayload,
@@ -14,6 +14,11 @@ const {
 const WEBHOOK_REPLY_WARN_MS = parsePositiveInt(process.env.WEBHOOK_REPLY_WARN_MS, 1200);
 const BOT_ENGINE_HARD_TIMEOUT_MS = parsePositiveInt(process.env.BOT_ENGINE_HARD_TIMEOUT_MS, 1800);
 const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, false);
+const WEBHOOK_DEFER_BOT_ENGINE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_BOT_ENGINE, false);
+const WEBHOOK_ADAPTIVE_BOT_DEFER = parseBooleanFlag(process.env.FF_WEBHOOK_ADAPTIVE_BOT_DEFER, false);
+const WEBHOOK_SYNC_BUDGET_MS = parsePositiveInt(process.env.WEBHOOK_SYNC_BUDGET_MS, 900);
+const WEBHOOK_DB_STAGE_WARN_MS = parsePositiveInt(process.env.WEBHOOK_DB_STAGE_WARN_MS, 450);
+const WEBHOOK_BOT_STAGE_WARN_MS = parsePositiveInt(process.env.WEBHOOK_BOT_STAGE_WARN_MS, 700);
 
 class LeadIngestionService {
   constructor({ legacyProcessor, withDb, executeWithRetry, runBotEngine, triggerReportingSyncDeferred }) {
@@ -30,6 +35,7 @@ class LeadIngestionService {
     log({ module: 'lead-ingestion', message: 'ingestion.module_path.selected', requestId, meta: { tenantId } });
 
     const latency = buildLatencyTracker({ module: 'lead-ingestion', requestId, operation: 'webhook_ingestion', warnThresholdMs: WEBHOOK_REPLY_WARN_MS, extraMeta: { tenantId } });
+    const webhookStartedMs = Date.now();
 
     if (!body?.object) {
       res.sendStatus(404);
@@ -55,72 +61,12 @@ class LeadIngestionService {
 
     const parsed = this.parseInboundMessage({ body, msg });
 
-    const processPromise = this.withDb(async (client) => {
-      await this.executeWithRetry(client, async () => {
-        const existing = await findInboundMessageByWhatsappId({ client, whatsappMessageId: msg.id });
-        if (existing) return;
-
-        const candidate = await upsertCandidateFromInbound({
-          client,
-          phoneNumber: parsed.from,
-          name: parsed.name,
-          lastMessage: parsed.text,
-          nowMs: Date.now(),
-        });
-
-        await insertInboundMessage({
-          client,
-          candidateId: candidate.id,
-          text: parsed.text,
-          type: parsed.messageType,
-          whatsappMessageId: msg.id,
-        });
-
-        if (!candidate.is_human_mode) {
-          const botResult = await runWithTimeout({
-            promise: this.runBotEngine(client, candidate, parsed.text, parsed.payloadId),
-            timeoutMs: BOT_ENGINE_HARD_TIMEOUT_MS,
-            onTimeout: async () => {
-              log({
-                level: 'error',
-                module: 'bot-conversation',
-                message: 'bot.engine.hard_timeout',
-                requestId,
-                meta: {
-                  candidateId: candidate.id,
-                  timeoutMs: BOT_ENGINE_HARD_TIMEOUT_MS,
-                },
-              });
-            },
-          });
-
-          if (botResult && botResult.timedOut) {
-            log({
-              module: 'lead-ingestion',
-              message: 'ingestion.bot_engine.deferred_after_timeout',
-              requestId,
-              meta: { candidateId: candidate.id },
-            });
-          }
-        }
-
-        this.triggerReportingSyncDeferred({
-          candidateId: candidate.id,
-          action: 'upsert',
-          requestId,
-          source: 'webhook',
-        });
-
-        validateLeadIngestedPayload({
-          eventId: `${msg.id}:${candidate.id}`,
-          source: 'whatsapp-meta',
-          phoneNumber: parsed.from,
-          messageType: parsed.messageType,
-          messageId: msg.id,
-          dedupeKey: buildDeterministicDedupeKey({ providerMessageId: msg.id, channel: 'whatsapp' }),
-          leadId: candidate.id,
-        });
-      });
+    const processPromise = this.processWebhookCore({
+      parsed,
+      msg,
+      requestId,
+      tenantId,
+      webhookStartedMs,
     });
 
     if (WEBHOOK_DEFER_POST_RESPONSE) {
@@ -142,6 +88,145 @@ class LeadIngestionService {
     res.sendStatus(200);
     latency.end({ path: 'module-service' });
     return { accepted: true, path: 'module-service' };
+  }
+
+  async processWebhookCore({ parsed, msg, requestId, tenantId, webhookStartedMs }) {
+    await this.withDb(async (client) => {
+      const dbStage = buildStageTimer({
+        module: 'lead-ingestion',
+        requestId,
+        operation: 'webhook_ingestion_db',
+        warnThresholdMs: WEBHOOK_DB_STAGE_WARN_MS,
+        extraMeta: { tenantId },
+      });
+
+      const state = await this.executeWithRetry(client, async () => {
+        const existing = await findInboundMessageByWhatsappId({ client, whatsappMessageId: msg.id });
+        if (existing) return { duplicate: true };
+
+        const candidate = await upsertCandidateFromInbound({
+          client,
+          phoneNumber: parsed.from,
+          name: parsed.name,
+          lastMessage: parsed.text,
+          nowMs: Date.now(),
+        });
+
+        await insertInboundMessage({
+          client,
+          candidateId: candidate.id,
+          text: parsed.text,
+          type: parsed.messageType,
+          whatsappMessageId: msg.id,
+        });
+
+        validateLeadIngestedPayload({
+          eventId: `${msg.id}:${candidate.id}`,
+          source: 'whatsapp-meta',
+          phoneNumber: parsed.from,
+          messageType: parsed.messageType,
+          messageId: msg.id,
+          dedupeKey: buildDeterministicDedupeKey({ providerMessageId: msg.id, channel: 'whatsapp' }),
+          leadId: candidate.id,
+        });
+
+        return { duplicate: false, candidate };
+      });
+
+      dbStage.end({ duplicate: state?.duplicate === true });
+
+      if (!state || state.duplicate || !state.candidate) {
+        return;
+      }
+
+      const candidate = state.candidate;
+      if (!candidate.is_human_mode) {
+        const elapsed = Date.now() - webhookStartedMs;
+        const shouldDeferBot = WEBHOOK_DEFER_BOT_ENGINE || (WEBHOOK_ADAPTIVE_BOT_DEFER && elapsed >= WEBHOOK_SYNC_BUDGET_MS);
+
+        if (shouldDeferBot) {
+          this.runBotDeferred({ candidate, parsed, requestId, tenantId, elapsed });
+        } else {
+          await this.runBotWithinBudget({ client, candidate, parsed, requestId, tenantId });
+        }
+      }
+
+      this.triggerReportingSyncDeferred({
+        candidateId: candidate.id,
+        action: 'upsert',
+        requestId,
+        source: 'webhook',
+      });
+    });
+  }
+
+  runBotDeferred({ candidate, parsed, requestId, tenantId, elapsed }) {
+    log({
+      module: 'lead-ingestion',
+      message: 'ingestion.bot_engine.deferred_pre_ack',
+      requestId,
+      meta: {
+        candidateId: candidate.id,
+        elapsedMs: elapsed,
+        syncBudgetMs: WEBHOOK_SYNC_BUDGET_MS,
+      },
+    });
+
+    setImmediate(() => {
+      this.withDb(async (client) => {
+        await this.runBotWithinBudget({ client, candidate, parsed, requestId, tenantId, deferred: true });
+      }).catch((error) => {
+        log({
+          level: 'error',
+          module: 'lead-ingestion',
+          message: 'ingestion.bot_engine.deferred.failed',
+          requestId,
+          meta: {
+            candidateId: candidate.id,
+            error: error?.message || String(error),
+          },
+        });
+      });
+    });
+  }
+
+  async runBotWithinBudget({ client, candidate, parsed, requestId, tenantId, deferred = false }) {
+    const botStage = buildStageTimer({
+      module: 'lead-ingestion',
+      requestId,
+      operation: 'webhook_ingestion_bot',
+      warnThresholdMs: WEBHOOK_BOT_STAGE_WARN_MS,
+      extraMeta: { tenantId, candidateId: candidate.id, deferred },
+    });
+
+    const botResult = await runWithTimeout({
+      promise: this.runBotEngine(client, candidate, parsed.text, parsed.payloadId),
+      timeoutMs: BOT_ENGINE_HARD_TIMEOUT_MS,
+      onTimeout: async () => {
+        log({
+          level: 'error',
+          module: 'bot-conversation',
+          message: 'bot.engine.hard_timeout',
+          requestId,
+          meta: {
+            candidateId: candidate.id,
+            timeoutMs: BOT_ENGINE_HARD_TIMEOUT_MS,
+            deferred,
+          },
+        });
+      },
+    });
+
+    if (botResult && botResult.timedOut) {
+      log({
+        module: 'lead-ingestion',
+        message: 'ingestion.bot_engine.deferred_after_timeout',
+        requestId,
+        meta: { candidateId: candidate.id, deferred },
+      });
+    }
+
+    botStage.end({ timedOut: Boolean(botResult && botResult.timedOut) });
   }
 
   parseInboundMessage({ body, msg }) {

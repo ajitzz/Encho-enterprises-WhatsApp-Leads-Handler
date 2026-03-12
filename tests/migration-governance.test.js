@@ -42,3 +42,9 @@ test('migration evidence check script passes', () => {
   const result = runScript('scripts/check-migration-evidence.js');
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
+
+
+test('performance canary check script passes', () => {
+  const result = runScript('scripts/check-performance-canary.js');
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});

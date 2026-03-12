@@ -80,7 +80,7 @@ test('lead ingestion service processes webhook via module service path', async (
     },
     executeWithRetry: async (_, handler) => {
       calls.push('executeWithRetry');
-      await handler();
+      return handler();
     },
     runBotEngine: async () => {
       calls.push('runBotEngine');
@@ -161,7 +161,7 @@ test('lead ingestion service supports deferred webhook ack mode', async () => {
       });
       processed = true;
     },
-    executeWithRetry: async (_, handler) => handler(),
+    executeWithRetry: async (_, handler) => { await new Promise((resolve) => setTimeout(resolve, 3)); return handler(); },
     runBotEngine: async () => {},
     triggerReportingSyncDeferred: () => {},
   });
@@ -201,7 +201,7 @@ test('lead ingestion service logs timeout and continues when bot exceeds hard ti
         }
       });
     },
-    executeWithRetry: async (_, handler) => handler(),
+    executeWithRetry: async (_, handler) => { await new Promise((resolve) => setTimeout(resolve, 3)); return handler(); },
     runBotEngine: async () => {
       await new Promise((resolve) => setTimeout(resolve, 30));
     },
@@ -474,4 +474,47 @@ test('auth-config contract validates runtime config update payload', () => {
     () => validateAuthConfigUpdateInput({ actor: 'ops-admin', googleClientId: '', publicAppUrl: 'https://example.com' }),
     /googleClientId is required/
   );
+});
+
+test('lead ingestion service defers bot when sync budget is exceeded', async () => {
+  const AdaptiveLeadIngestionService = loadLeadIngestionServiceWithEnv({
+    WEBHOOK_SYNC_BUDGET_MS: '1',
+    FF_WEBHOOK_ADAPTIVE_BOT_DEFER: 'true',
+    FF_WEBHOOK_DEFER_BOT_ENGINE: 'false',
+  });
+
+  let runBotCalls = 0;
+  const service = new AdaptiveLeadIngestionService({
+    withDb: async (handler) => {
+      await handler({
+        query: async (sql) => {
+          if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
+          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-4', phone_number: '+222', is_human_mode: false }] };
+          return { rows: [] };
+        }
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    },
+    executeWithRetry: async (_, handler) => { await new Promise((resolve) => setTimeout(resolve, 3)); return handler(); },
+    runBotEngine: async () => {
+      runBotCalls += 1;
+    },
+    triggerReportingSyncDeferred: () => {},
+  });
+
+  const res = { statusCode: null, sendStatus(code) { this.statusCode = code; } };
+  const result = await service.handleIncomingMessage({
+    body: {
+      object: 'whatsapp_business_account',
+      entry: [{ changes: [{ value: { contacts: [{ profile: { name: 'Adaptive User' } }], messages: [{ id: 'wamid-4', from: '+222', type: 'text', text: { body: 'Hello' } }] } }] }],
+    },
+    req: { requestId: 'r-5' },
+    res,
+    context: { requestId: 'r-5', tenantId: 't-5' },
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(result, { accepted: true, path: 'module-service' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(runBotCalls, 1);
 });
