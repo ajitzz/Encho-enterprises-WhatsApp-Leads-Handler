@@ -134,6 +134,8 @@ const memoryCache = {
     botGraphSource: null,
     runtimeConfig: null,
     runtimeConfigLastUpdated: 0,
+    runtimeConfigInFlight: null,
+    botSettingsInFlight: null,
 };
 
 const getRuntimeConfigCached = async (client) => {
@@ -145,11 +147,67 @@ const getRuntimeConfigCached = async (client) => {
         return memoryCache.runtimeConfig;
     }
 
-    const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config' LIMIT 1");
-    const runtimeConfig = sys.rows[0]?.value || { automation_enabled: true };
-    memoryCache.runtimeConfig = runtimeConfig;
-    memoryCache.runtimeConfigLastUpdated = now;
-    return runtimeConfig;
+    if (memoryCache.runtimeConfigInFlight) {
+        return memoryCache.runtimeConfigInFlight;
+    }
+
+    memoryCache.runtimeConfigInFlight = (async () => {
+        const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config' LIMIT 1");
+        const runtimeConfig = sys.rows[0]?.value || { automation_enabled: true };
+        memoryCache.runtimeConfig = runtimeConfig;
+        memoryCache.runtimeConfigLastUpdated = Date.now();
+        return runtimeConfig;
+    })();
+
+    try {
+        return await memoryCache.runtimeConfigInFlight;
+    } finally {
+        memoryCache.runtimeConfigInFlight = null;
+    }
+};
+
+const getBotSettingsCached = async (client) => {
+    const now = Date.now();
+    if (memoryCache.botSettings && (now - memoryCache.lastUpdated < SYSTEM_CONFIG.CACHE_TTL)) {
+        return memoryCache.botSettings;
+    }
+
+    if (memoryCache.botSettingsInFlight) {
+        return memoryCache.botSettingsInFlight;
+    }
+
+    memoryCache.botSettingsInFlight = (async () => {
+        const botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
+        const botSettings = botRes.rows[0]?.settings || getDefaultBotConfig();
+        memoryCache.botSettings = botSettings;
+        memoryCache.lastUpdated = Date.now();
+        return botSettings;
+    })();
+
+    try {
+        return await memoryCache.botSettingsInFlight;
+    } finally {
+        memoryCache.botSettingsInFlight = null;
+    }
+};
+
+const prewarmHotPathCaches = async (client) => {
+    const requestId = `cache-prewarm-${Date.now()}`;
+    const perf = createPerfTracker({ requestId, module: 'system-health', event: 'startup.cache.stage' });
+
+    perf.markStart('runtime_config');
+    await getRuntimeConfigCached(client);
+    perf.markEnd('runtime_config');
+
+    perf.markStart('bot_settings');
+    const botSettings = await getBotSettingsCached(client);
+    perf.markEnd('bot_settings');
+
+    perf.markStart('bot_graph_compile');
+    getCompiledBotGraph(botSettings);
+    perf.markEnd('bot_graph_compile');
+
+    structuredLog({ level: 'info', module: 'system-health', message: 'startup.cache_prewarm.completed', requestId });
 };
 
 const buildBotGraph = (botSettings) => {
@@ -2365,25 +2423,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         const config = await getRuntimeConfigCached(client);
         if (config.automation_enabled === false || candidate.is_human_mode) return;
 
-        let botSettings;
-
-        // 1. TRY CACHE
-        const now = Date.now();
-        if (memoryCache.botSettings && (now - memoryCache.lastUpdated < SYSTEM_CONFIG.CACHE_TTL)) {
-            botSettings = memoryCache.botSettings;
-        } else {
-            // 2. FALLBACK TO DB
-            let botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
-            if (botRes.rows.length > 0) {
-                botSettings = botRes.rows[0].settings;
-                memoryCache.botSettings = botSettings;
-                memoryCache.lastUpdated = now;
-            } else {
-                botSettings = getDefaultBotConfig();
-                memoryCache.botSettings = botSettings;
-                memoryCache.lastUpdated = now;
-            }
-        }
+        const botSettings = await getBotSettingsCached(client);
         
         const { nodes, nodeMap, edgeMap, startNode } = getCompiledBotGraph(botSettings);
         if (!nodes || nodes.length === 0) return;
@@ -3174,6 +3214,7 @@ apiRouter.patch('/system/settings', async (req, res) => {
             );
             memoryCache.runtimeConfig = null;
             memoryCache.runtimeConfigLastUpdated = 0;
+            memoryCache.runtimeConfigInFlight = null;
             res.json({ success: true, settings: await getSystemConfig(client) });
         });
     } catch (e) {
@@ -3844,6 +3885,7 @@ apiRouter.post('/bot/save', async (req, res) => {
         memoryCache.lastUpdated = 0;
         memoryCache.botGraph = null;
         memoryCache.botGraphSource = null;
+        memoryCache.botSettingsInFlight = null;
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -4451,10 +4493,12 @@ apiRouter.post('/system/init-db', async (req, res) => {
         });
         memoryCache.runtimeConfig = null;
         memoryCache.runtimeConfigLastUpdated = 0;
+        memoryCache.runtimeConfigInFlight = null;
         memoryCache.botSettings = null;
         memoryCache.lastUpdated = 0;
         memoryCache.botGraph = null;
         memoryCache.botGraphSource = null;
+        memoryCache.botSettingsInFlight = null;
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -4474,10 +4518,12 @@ apiRouter.post('/system/hard-reset', async (req, res) => {
         });
         memoryCache.runtimeConfig = null;
         memoryCache.runtimeConfigLastUpdated = 0;
+        memoryCache.runtimeConfigInFlight = null;
         memoryCache.botSettings = null;
         memoryCache.lastUpdated = 0;
         memoryCache.botGraph = null;
         memoryCache.botGraphSource = null;
+        memoryCache.botSettingsInFlight = null;
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -4529,6 +4575,8 @@ if (require.main === module) {
                             await ensurePerformanceIndexes(client);
                             console.log("[Auto-Init] Performance indexes verified.");
                         }
+                        await prewarmHotPathCaches(client);
+                        console.log("[Auto-Init] Hot-path caches prewarmed.");
                     } finally {
                         client.release();
                     }

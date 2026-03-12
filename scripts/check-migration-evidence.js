@@ -54,11 +54,28 @@ for (const relPath of requiredEvidenceFiles) {
     const hasCanarySignals = /\b(stage|cohort|percent|tenant)\b/i.test(body);
     const hasMetricSignals = /\b(error rate|5xx|latency|p95|success)\b/i.test(body);
     const hasTimeSignals = /\b\d{4}-\d{2}-\d{2}\b/.test(body);
+    const windowCount = (body.match(/\*\*Window\s*\d+\*\*/gi) || []).length;
+    const regressionMatches = Array.from(
+      body.matchAll(/p95\s+latency\s+delta\s*:\s*\*\*([+-]?\d+(?:\.\d+)?)%\*\*/gi)
+    );
+
+    const hasOutOfBudgetRegression = regressionMatches.some((entry) => {
+      const parsed = Number.parseFloat(entry[1]);
+      return Number.isFinite(parsed) && parsed > 5;
+    });
 
     if (!hasCanarySignals || !hasMetricSignals || !hasTimeSignals) {
       problems.push(
         `${relPath} must include concrete canary evidence (date, cohort/stage, and metric outcomes)`
       );
+    }
+
+    if (windowCount < 3) {
+      problems.push(`${relPath} must include at least 3 canary windows with explicit Window labels`);
+    }
+
+    if (hasOutOfBudgetRegression) {
+      problems.push(`${relPath} has a canary window above the allowed p95 regression budget (+5%)`);
     }
   }
 }
