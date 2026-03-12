@@ -1,5 +1,6 @@
 const { log } = require('../../shared/infra/logger');
-const { buildLatencyTracker, parsePositiveInt } = require('../../shared/infra/perf');
+const { buildLatencyTracker, parsePositiveInt, runWithTimeout } = require('../../shared/infra/perf');
+const { parseBooleanFlag } = require('../../shared/infra/flags');
 const {
   validateLeadIngestedPayload,
   buildDeterministicDedupeKey,
@@ -11,6 +12,8 @@ const {
 } = require('./adapters/candidateRepo');
 
 const WEBHOOK_REPLY_WARN_MS = parsePositiveInt(process.env.WEBHOOK_REPLY_WARN_MS, 1200);
+const BOT_ENGINE_HARD_TIMEOUT_MS = parsePositiveInt(process.env.BOT_ENGINE_HARD_TIMEOUT_MS, 1800);
+const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, false);
 
 class LeadIngestionService {
   constructor({ legacyProcessor, withDb, executeWithRetry, runBotEngine, triggerReportingSyncDeferred }) {
@@ -51,7 +54,8 @@ class LeadIngestionService {
     }
 
     const parsed = this.parseInboundMessage({ body, msg });
-    await this.withDb(async (client) => {
+
+    const processPromise = this.withDb(async (client) => {
       await this.executeWithRetry(client, async () => {
         const existing = await findInboundMessageByWhatsappId({ client, whatsappMessageId: msg.id });
         if (existing) return;
@@ -73,7 +77,31 @@ class LeadIngestionService {
         });
 
         if (!candidate.is_human_mode) {
-          await this.runBotEngine(client, candidate, parsed.text, parsed.payloadId);
+          const botResult = await runWithTimeout({
+            promise: this.runBotEngine(client, candidate, parsed.text, parsed.payloadId),
+            timeoutMs: BOT_ENGINE_HARD_TIMEOUT_MS,
+            onTimeout: async () => {
+              log({
+                level: 'error',
+                module: 'bot-conversation',
+                message: 'bot.engine.hard_timeout',
+                requestId,
+                meta: {
+                  candidateId: candidate.id,
+                  timeoutMs: BOT_ENGINE_HARD_TIMEOUT_MS,
+                },
+              });
+            },
+          });
+
+          if (botResult && botResult.timedOut) {
+            log({
+              module: 'lead-ingestion',
+              message: 'ingestion.bot_engine.deferred_after_timeout',
+              requestId,
+              meta: { candidateId: candidate.id },
+            });
+          }
         }
 
         this.triggerReportingSyncDeferred({
@@ -95,6 +123,22 @@ class LeadIngestionService {
       });
     });
 
+    if (WEBHOOK_DEFER_POST_RESPONSE) {
+      res.sendStatus(200);
+      processPromise.catch((error) => {
+        log({
+          level: 'error',
+          module: 'lead-ingestion',
+          message: 'webhook.post_response_processing.failed',
+          requestId,
+          meta: { error: error?.message || String(error) },
+        });
+      });
+      latency.end({ path: 'module-service', deferred: true });
+      return { accepted: true, path: 'module-service', deferred: true };
+    }
+
+    await processPromise;
     res.sendStatus(200);
     latency.end({ path: 'module-service' });
     return { accepted: true, path: 'module-service' };
