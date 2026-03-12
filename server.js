@@ -12,7 +12,7 @@ const { OAuth2Client, JWT } = require('google-auth-library');
 
 require('dotenv').config();
 
-const { parsePercent, resolveModuleMode } = require('./backend/shared/infra/flags');
+const { parseBooleanFlag, parsePercent, resolveModuleMode } = require('./backend/shared/infra/flags');
 const { buildLeadIngestionFacade } = require('./backend/modules/lead-ingestion/api');
 const { buildRemindersRouter } = require('./backend/modules/reminders-escalations/api');
 
@@ -29,6 +29,7 @@ const REQUEST_CONTEXT_FLAG = String(process.env.FF_REQUEST_CONTEXT || 'true').to
 const LEAD_INGESTION_FLAG = String(process.env.FF_LEAD_INGESTION_MODULE || 'off').toLowerCase();
 const REMINDERS_MODULE_FLAG = String(process.env.FF_REMINDERS_MODULE || 'off').toLowerCase();
 const REMINDERS_CANARY_PERCENT = parsePercent(process.env.FF_REMINDERS_MODULE_PERCENT || 0);
+const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, false);
 const MODULE_CANARY_TENANTS = String(process.env.FF_CANARY_TENANTS || '')
     .split(',')
     .map((item) => item.trim())
@@ -78,6 +79,19 @@ const createPerfTracker = ({ requestId = null, module = 'app', event = 'perf.tra
             });
         }
     };
+};
+
+const trackBackgroundTask = ({ taskName = 'background-task', requestId = null, promise } = {}) => {
+    if (!promise || typeof promise.then !== 'function') return;
+    promise.catch((error) => {
+        structuredLog({
+            level: 'error',
+            module: 'system-health',
+            message: `${taskName}.failed`,
+            requestId,
+            meta: { error: error?.message || String(error) },
+        });
+    });
 };
 
 // --- CONFIGURATION ---
@@ -3719,6 +3733,16 @@ const processWebhookLegacy = async ({ body, req, res }) => {
         });
 
         res.sendStatus(200);
+
+        if (WEBHOOK_DEFER_POST_RESPONSE) {
+            trackBackgroundTask({
+                taskName: 'webhook.post_response_processing',
+                requestId: req?.requestId || null,
+                promise: processPromise,
+            });
+            return;
+        }
+
         await processPromise;
     } catch (e) {
         console.error('Webhook processing error:', e);
@@ -4225,11 +4249,6 @@ apiRouter.post('/scheduled-messages', async (req, res) => {
         tenantAllowList: MODULE_CANARY_TENANTS,
     });
 
-    const remindersRouter = buildRemindersRouter({
-        legacyScheduleHandler: handleScheduledMessagesLegacy,
-        legacyQueueHandler: handleCronProcessQueueLegacy,
-    });
-
     if (mode !== 'off') return remindersRouter.schedule(req, res);
     return handleScheduledMessagesLegacy(req, res);
 });
@@ -4357,6 +4376,11 @@ const handleCronProcessQueueLegacy = async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 };
 
+const remindersRouter = buildRemindersRouter({
+    legacyScheduleHandler: handleScheduledMessagesLegacy,
+    legacyQueueHandler: handleCronProcessQueueLegacy,
+});
+
 apiRouter.get('/cron/process-queue', async (req, res) => {
     const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
     const mode = resolveModuleMode({
@@ -4365,11 +4389,6 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
         requestId: req.requestId,
         canaryPercent: REMINDERS_CANARY_PERCENT,
         tenantAllowList: MODULE_CANARY_TENANTS,
-    });
-
-    const remindersRouter = buildRemindersRouter({
-        legacyScheduleHandler: handleScheduledMessagesLegacy,
-        legacyQueueHandler: handleCronProcessQueueLegacy,
     });
 
     if (mode !== 'off') return remindersRouter.processQueue(req, res);
