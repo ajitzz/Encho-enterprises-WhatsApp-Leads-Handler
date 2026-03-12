@@ -41,6 +41,26 @@ for (const relPath of requiredEvidenceFiles) {
   if (/\bTBD\b/i.test(body)) {
     problems.push(`${relPath} still contains placeholder content (TBD)`);
   }
+
+  const hasFlagRollback = /FF_[A-Z0-9_]+\s*=\s*[^`\n]+/.test(body);
+  const hasRevertRollback = /git revert\s+\S+/.test(body);
+  const hasTestOnlyRollback = /Rollback is test-only/i.test(body);
+
+  if (!hasFlagRollback && !hasRevertRollback && !hasTestOnlyRollback) {
+    problems.push(`${relPath} must document a concrete rollback command/flag setting`);
+  }
+
+  if (/docs\/release-evidence\/pr-(3|5)\.md$/.test(relPath)) {
+    const hasCanarySignals = /\b(stage|cohort|percent|tenant)\b/i.test(body);
+    const hasMetricSignals = /\b(error rate|5xx|latency|p95|success)\b/i.test(body);
+    const hasTimeSignals = /\b\d{4}-\d{2}-\d{2}\b/.test(body);
+
+    if (!hasCanarySignals || !hasMetricSignals || !hasTimeSignals) {
+      problems.push(
+        `${relPath} must include concrete canary evidence (date, cohort/stage, and metric outcomes)`
+      );
+    }
+  }
 }
 
 for (const moduleName of moduleNames) {
@@ -58,4 +78,4 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log('Migration evidence check passed (release evidence is complete and ownership metadata exists).');
+console.log('Migration evidence check passed (release evidence is complete, concrete, and ownership metadata exists).');

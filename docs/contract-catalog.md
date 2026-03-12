@@ -14,12 +14,46 @@ Schema baseline: **1.0.0**
 ## Module Contract Snapshots
 
 ### lead-ingestion
+- Schema marker: uses shared baseline schema marker
 - Contract: `LEAD_INGESTED_CONTRACT`
 - Required fields: `eventId`, `receivedAt`, `source`, `phoneNumber`, `messageType`, `messageId`, `dedupeKey`, `leadId`
+- Validators: n/a
 
 ### reminders-escalations
-- Contract: `REMINDER_TASK_CREATED_CONTRACT`
-- Required fields: `taskId`, `leadId`, `scheduledAt`, `payloadType`
-- Contract: `REMINDER_TASK_DISPATCHED_CONTRACT`
-- Required fields: `taskId`, `leadId`, `dispatchedAt`, `success`
+- Schema marker: uses shared baseline schema marker
+- Validators: n/a
+
+### lead-lifecycle
+- Schema marker: `STAGE_TRANSITION_SCHEMA_VERSION` = `1.0.0`
+- Validators: `validateStageTransitionInput`
+
+### reporting-export
+- Schema marker: `REPORTING_EXPORT_SCHEMA_VERSION` = `1.0.0`
+- Validators: `validateReportingExportInput`
+
+### media
+- Schema marker: `MEDIA_SCHEMA_VERSION` = `1.0.0`
+- Validators: `validateMediaOperationInput`
+
+### bot-conversation
+- Schema marker: `BOT_CONVERSATION_SCHEMA_VERSION` = `1.0.0`
+- Validators: `validateConversationAdvanceInput`
+
+### agent-workspace
+- Schema marker: `AGENT_WORKSPACE_SCHEMA_VERSION` = `1.0.0`
+- Validators: `validateWorkspaceLeadDetailInput`
+
+### campaign-broadcast
+- Schema marker: uses shared baseline schema marker
+- Contract: `CAMPAIGN_JOB_UPDATED_CONTRACT`
+- Required fields: `jobId`, `previousStatus`, `currentStatus`, `counters`
+- Validators: `validateCampaignJobUpdatedPayload`
+
+### system-health
+- Schema marker: `SYSTEM_HEALTH_SCHEMA_VERSION` = `1.0.0`
+- Validators: `validateSystemHealthSnapshot`
+
+### auth-config
+- Schema marker: `AUTH_CONFIG_SCHEMA_VERSION` = `1.0.0`
+- Validators: `validateAuthConfigUpdateInput`
 

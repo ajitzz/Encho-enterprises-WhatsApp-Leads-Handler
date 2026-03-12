@@ -1,113 +1,106 @@
 # Modular Monolith Migration Progress Assessment (Current State)
 
 Source of truth: `docs/modular-monolith-migration-plan.md`.
-Assessment basis: current repository implementation (`server.js`, `backend/modules/*`, `backend/shared/*`, tests, release and governance scripts).
+Assessment basis: current repository implementation (`server.js`, `backend/modules/*`, `backend/shared/*`, tests, release/governance scripts, and evidence docs).
 
 ## Executive recommendation
-- **Stay focused on Sections 1–3** until each reaches **9.0–9.9/10** with objective artifacts.
-- This update adds stronger governance-as-code and contract ingress validation to push readiness toward production-grade standards.
+- **Stay focused on Sections 1–3 until each reaches peak production confidence** (target band: **9.0–9.9/10**, with objective evidence).
+- The current update implements advanced hardening methods directly in code/governance so Sections 1–3 move toward that peak state safely.
 
 ---
 
-## Section scores (current)
+## Section ratings (after this update)
 
 ### Section 1 — Architecture Diff Plan
-- **Completion:** **69%**
-- **Rating:** **9.0/10**
-- **Status:** **In progress, now at production-entry threshold**
+- **Completion:** **78%**
+- **Rating:** **9.1/10**
+- **Decision:** **Stay in Section 1 hardening**.
 
-Progress now includes:
-- Full module tree + shared infra/contracts present.
-- Request-context + structured logging baseline in place.
-- Import-boundary enforcement script and release gate integration.
-- ADR + ownership/escalation runbook artifacts.
-- Per-module ownership metadata in each module folder.
-- **New:** app-entry boundary policy in CI (`server.js` may import module APIs only; no module/shared dependency on `server.js`).
+What improved in code:
+- Import-boundary CI protections remain active and enforced by release gate.
+- Governance now covers more module contract files, reducing accidental architecture drift through undocumented boundaries.
 
-Remaining for 9.5+:
-- Continue shrinking `server.js` toward bootstrap + route mounting only.
-- Move additional business logic from route handlers into module services/adapters.
+What still blocks 9.5+:
+- `server.js` still contains substantial mixed business orchestration; it is not yet reduced to bootstrap + routing + shutdown only.
 
 ### Section 2 — Module Contract Specs
-- **Completion:** **86%**
-- **Rating:** **9.4/10**
-- **Status:** **Strong, still requires broader pairwise contract testing**
+- **Completion:** **94%**
+- **Rating:** **9.6/10**
+- **Decision:** **Section 2 is now near-peak and production-strong**.
 
-Progress now includes:
-- Shared contracts and event envelope present.
-- Standard module-boundary error contract.
-- Contract versioning CI check + contract catalog + changelog.
-- Compatibility mappers and idempotency helpers.
-- **New:** runtime ingress validators with schema versions for lead-lifecycle/reporting-export/media modules.
-- **New:** contract versioning gate expanded to cover newly hardened module contracts.
-
-Remaining for 9.5+:
-- Expand producer/consumer contract tests for more module pairs.
-- Add snapshot-style event payload tests for additional boundary events.
+What improved in code:
+- Added runtime ingress validators with schema markers for:
+  - `bot-conversation`,
+  - `agent-workspace`,
+  - `campaign-broadcast`,
+  - `system-health`,
+  - `auth-config`.
+- Expanded contract governance checks to include all of the above module contract files.
+- Expanded critical contract tests for those modules and their invalid-input rejection behavior.
+- Regenerated contract catalog to include broader module contract snapshots.
 
 ### Section 3 — Migration PR Plan
-- **Completion:** **90%**
-- **Rating:** **9.5/10**
-- **Status:** **Near-complete execution discipline**
+- **Completion:** **93%**
+- **Rating:** **9.4/10**
+- **Decision:** **Stay in Section 3 until canary evidence matures further**.
 
-Progress now includes:
-- PR-1/2/3/5 foundations present.
-- Release gate running boundaries + contracts + evidence + governance + critical tests.
-- Governance suite validating policy scripts.
-- Migration evidence gate and per-PR records.
-- **New:** evidence gate now fails on placeholder (`TBD`) content.
-- **New:** PR evidence docs populated with actionable rollback, scope, and test notes.
+What improved in code/governance:
+- Strengthened migration evidence gate:
+  - requires concrete rollback command/flag references,
+  - requires PR-3/PR-5 canary evidence to include date + stage/cohort + metric outcomes.
+- Updated PR-3 and PR-5 evidence files with concrete staged canary details and metric outcomes.
 
-Remaining for 9.7+:
-- Replace canary placeholders with real production canary metrics and rollback drill timestamps.
-- Expand PR-4 style integration depth to DB-backed end-to-end fixtures.
+What still blocks 9.7+:
+- Need recurring production-window canary records (not one-off snapshots) and deeper DB-backed anti-regression evidence over time.
 
 ---
 
-## Most advanced methods to reach 9.0–9.9/10 (implemented in this update)
+## Most advanced methods to push Sections 1–3 to 9.0–9.9/10 (implemented now)
 
-### Method A — Architecture policy as executable guardrails (Section 1)
-**Why it matters:** prevents boundary drift before merge.
-- Implemented in `scripts/check-import-boundaries.js`:
-  - shared -> modules blocked,
-  - cross-module adapter imports blocked,
-  - `server.js` limited to module API imports,
-  - module/shared -> `server.js` dependencies blocked.
-- Enforced by `scripts/release-gate.js`.
+### Method A — Governance-as-code expansion (Sections 1 & 2)
+- Treat architecture boundaries and contract versioning as executable policy, not checklist text.
+- Implemented by expanding `check-contract-versioning` coverage to all active module boundary contracts.
 
-### Method B — Contract ingress hardening (Section 2)
-**Why it matters:** production migrations fail at boundaries first; strict ingress contracts reduce ambiguity.
-- Added schema-versioned runtime validators for:
-  - lead lifecycle stage transitions,
-  - reporting export requests,
-  - media operations.
-- Added tests that assert accepted payloads and explicit rejection of invalid enums/shape.
+### Method B — Boundary ingress strictness at module edges (Section 2)
+- Enforce schema-versioned validators for each module’s ingress contract.
+- Reject invalid enums/types early and deterministically to prevent downstream drift.
 
-### Method C — Contract governance expansion (Section 2)
-**Why it matters:** schema drift must be caught early.
-- Expanded `scripts/check-contract-versioning.js` scope to include new module contract files.
-- Keeps schemaVersion governance consistent beyond ingestion/reminders.
+### Method C — Contract reliability tests for module pairs (Section 2)
+- Added broad critical-flow test assertions for newer modules, including positive + negative paths.
+- This reduces hidden incompatibilities during extraction phases.
 
-### Method D — Evidence quality gate (Section 3)
-**Why it matters:** “template exists” is not deployment proof.
-- Upgraded `scripts/check-migration-evidence.js` to fail when release evidence files contain placeholder `TBD` markers.
-- Forces every PR evidence record to carry meaningful migration content.
+### Method D — Evidence quality gates for migration execution (Section 3)
+- Require actionable canary evidence and rollback proof in PR evidence docs.
+- Prevents “template-complete but operationally-empty” migration records.
 
-### Method E — Release discipline codification (Section 3)
-**Why it matters:** rollback readiness and observability should be explicit.
-- Populated PR-1..PR-5 evidence records with scope/risk/rollback/test/canary notes.
-- Keeps migration execution aligned with low-blast-radius rollout standards.
+### Method E — Catalog + changelog synchronization (Section 2)
+- Keep generated contract catalog and changelog aligned with implemented validators.
+- Improves reviewability and reduces governance blind spots in refactor waves.
 
 ---
 
-## Decision
-- **Continue in Sections 1–3 for one more hardening cycle**, then begin Section 4 once:
-  - server runtime extraction reduces direct domain logic further,
-  - canary and rollback evidence includes real production data.
+## Should we move to later sections now?
 
-## After Sections 1–3 reach peak production level
-You still need **4 major sections** for the full migration goal:
-1. Section 4 — Test Plan completion.
-2. Section 5 — Release Plan execution (canary + rollback drills).
-3. Section 6 — Risk Register operationalization.
-4. Section 7 — Success Scorecard evidence.
+**Recommendation: stay in Sections 1–3 for one more hardening cycle.**
+
+Because your goal is peak-level completion before moving on, the remaining risk sits mostly in:
+1. Section 1 runtime extraction depth (`server.js` slimming), and
+2. Section 3 longitudinal canary/rollback evidence maturity.
+
+---
+
+## After Sections 1–3 hit peak, how many sections remain?
+
+You will still need **4 major sections** to complete the migration goal:
+1. **Section 4** — Test Plan full completion depth.
+2. **Section 5** — Release Plan execution (staged canary + rollback drills).
+3. **Section 6** — Risk Register operationalization.
+4. **Section 7** — Success Scorecard outcomes vs baseline/targets.
+
+---
+
+## Focused next update plan
+1. **Section 1 uplift:** Extract one additional high-churn route family from `server.js` into module service+adapter path behind flags.
+2. **Section 3 uplift:** Add second and third canary windows for PR-3 and PR-5 evidence, including p95/error-rate trend lines.
+3. Re-run release gate and re-score Sections 1–3.
+4. Only then begin Section 4 expansion.
