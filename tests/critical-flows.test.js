@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { resolveModuleMode } = require('../backend/shared/infra/flags');
+const { buildLatencyTracker, parsePositiveInt } = require('../backend/shared/infra/perf');
 const { LeadIngestionService } = require('../backend/modules/lead-ingestion/service');
 const { ReminderServiceFacade } = require('../backend/modules/reminders-escalations/service');
 const {
@@ -80,6 +81,26 @@ test('reminder facade delegates schedule and processQueue handlers', async () =>
   await facade.processQueue({ requestId: 'r-2' }, {});
 
   assert.deepEqual(calls, ['schedule', 'queue']);
+});
+
+test('parsePositiveInt uses fallback for invalid values', () => {
+  assert.equal(parsePositiveInt('1200', 500), 1200);
+  assert.equal(parsePositiveInt('-5', 500), 500);
+  assert.equal(parsePositiveInt(undefined, 700), 700);
+});
+
+test('buildLatencyTracker returns a numeric duration', async () => {
+  const tracker = buildLatencyTracker({
+    module: 'test-module',
+    requestId: 'req-1',
+    operation: 'test_operation',
+    warnThresholdMs: 1,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 3));
+  const duration = tracker.end({ check: true });
+  assert.equal(typeof duration, 'number');
+  assert.ok(duration >= 0);
 });
 
 test('event envelope includes required metadata and schemaVersion', () => {
