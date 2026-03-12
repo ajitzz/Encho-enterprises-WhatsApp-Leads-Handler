@@ -2239,6 +2239,37 @@ const initDatabase = async (client) => {
     if (botCheck.rows.length === 0) {
         await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), getDefaultBotConfig()]);
     }
+
+    await ensurePerformanceIndexes(client);
+};
+
+const ensurePerformanceIndexes = async (client) => {
+    // Webhook hot path: dedupe lookup by provider message id.
+    await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_candidate_messages_whatsapp_message_id
+        ON candidate_messages(whatsapp_message_id)
+        WHERE whatsapp_message_id IS NOT NULL
+    `);
+
+    // Chat history fetches and timeline queries.
+    await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_candidate_messages_candidate_created_at
+        ON candidate_messages(candidate_id, created_at DESC)
+    `);
+
+    // Reminders queue path: select pending jobs due at/behind now.
+    await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_scheduled_messages_pending_scheduled_time
+        ON scheduled_messages(scheduled_time)
+        WHERE status = 'pending'
+    `);
+
+    // Candidate pending reminders fetch for drawer/table views.
+    await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_scheduled_messages_candidate_pending_time
+        ON scheduled_messages(candidate_id, scheduled_time ASC)
+        WHERE status = 'pending'
+    `);
 };
 
 const executeWithRetry = async (client, operation) => {
@@ -4414,6 +4445,9 @@ if (require.main === module) {
                             console.log("[Auto-Init] Database schema missing. Initializing...");
                             await initDatabase(client);
                             console.log("[Auto-Init] Database ready.");
+                        } else {
+                            await ensurePerformanceIndexes(client);
+                            console.log("[Auto-Init] Performance indexes verified.");
                         }
                     } finally {
                         client.release();
