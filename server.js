@@ -3839,6 +3839,10 @@ const processWebhookLegacy = async ({ body, req, res }) => {
 
 const leadIngestionFacade = buildLeadIngestionFacade({
     legacyProcessor: processWebhookLegacy,
+    withDb,
+    executeWithRetry,
+    runBotEngine,
+    triggerReportingSyncDeferred,
 });
 
 apiRouter.post('/webhook', async (req, res) => {
