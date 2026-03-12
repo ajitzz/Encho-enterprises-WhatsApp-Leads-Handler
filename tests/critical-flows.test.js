@@ -187,6 +187,83 @@ test('lead ingestion service supports deferred webhook ack mode', async () => {
   assert.equal(processed, true);
 });
 
+test('lead ingestion service defers bot on backpressure to keep webhook fast', async () => {
+  const BackpressureLeadIngestionService = loadLeadIngestionServiceWithEnv({
+    BOT_ENGINE_MAX_CONCURRENCY: '1',
+    FF_WEBHOOK_BACKPRESSURE_DEFER: 'true',
+    FF_WEBHOOK_ADAPTIVE_BOT_DEFER: 'false',
+    FF_WEBHOOK_DEFER_BOT_ENGINE: 'false',
+  });
+
+  let releaseFirst;
+  let leadCounter = 0;
+  const calls = [];
+
+  const service = new BackpressureLeadIngestionService({
+    withDb: async (handler) => {
+      await handler({
+        query: async (sql) => {
+          if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
+          if (String(sql).includes('INSERT INTO candidates')) {
+            leadCounter += 1;
+            return { rows: [{ id: `lead-bp-${leadCounter}`, phone_number: '+100', is_human_mode: false }] };
+          }
+          return { rows: [] };
+        }
+      });
+    },
+    executeWithRetry: async (_, handler) => handler(),
+    runBotEngine: async () => {
+      calls.push('runBotEngine');
+      await new Promise((resolve) => {
+        if (!releaseFirst) {
+          releaseFirst = resolve;
+          return;
+        }
+        resolve();
+      });
+    },
+    triggerReportingSyncDeferred: () => {
+      calls.push('reportingSync');
+    },
+  });
+
+  const res1 = { statusCode: null, sendStatus(code) { this.statusCode = code; } };
+  const res2 = { statusCode: null, sendStatus(code) { this.statusCode = code; } };
+
+  const first = service.handleIncomingMessage({
+    body: {
+      object: 'whatsapp_business_account',
+      entry: [{ changes: [{ value: { contacts: [{ profile: { name: 'A' } }], messages: [{ id: 'wamid-bp-1', from: '+100', type: 'text', text: { body: 'one' } }] } }] }],
+    },
+    req: { requestId: 'r-bp-1' },
+    res: res1,
+    context: { requestId: 'r-bp-1', tenantId: 't-bp' },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const second = service.handleIncomingMessage({
+    body: {
+      object: 'whatsapp_business_account',
+      entry: [{ changes: [{ value: { contacts: [{ profile: { name: 'B' } }], messages: [{ id: 'wamid-bp-2', from: '+100', type: 'text', text: { body: 'two' } }] } }] }],
+    },
+    req: { requestId: 'r-bp-2' },
+    res: res2,
+    context: { requestId: 'r-bp-2', tenantId: 't-bp' },
+  });
+
+  const secondResult = await second;
+
+  releaseFirst();
+  await first;
+
+  assert.equal(res1.statusCode, 200);
+  assert.equal(res2.statusCode, 200);
+  assert.deepEqual(secondResult, { accepted: true, path: 'module-service' });
+  assert.ok(calls.filter((call) => call === 'runBotEngine').length >= 1);
+});
+
 test('lead ingestion service logs timeout and continues when bot exceeds hard timeout', async () => {
   const TimeoutLeadIngestionService = loadLeadIngestionServiceWithEnv({ BOT_ENGINE_HARD_TIMEOUT_MS: '10' });
   let reportingTriggered = false;
