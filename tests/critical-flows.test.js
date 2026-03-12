@@ -44,24 +44,83 @@ test('resolveModuleMode supports tenant canary', () => {
   assert.equal(mode, 'canary');
 });
 
-test('lead ingestion facade service delegates to legacy processor', async () => {
+test('lead ingestion service processes webhook via module service path', async () => {
+  const calls = [];
+  const service = new LeadIngestionService({
+    withDb: async (handler) => {
+      calls.push('withDb');
+      await handler({
+        query: async (sql) => {
+          if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
+          if (String(sql).includes('INSERT INTO candidates')) {
+            return { rows: [{ id: 'lead-1', phone_number: '+123', is_human_mode: false }] };
+          }
+          return { rows: [] };
+        }
+      });
+    },
+    executeWithRetry: async (_, handler) => {
+      calls.push('executeWithRetry');
+      await handler();
+    },
+    runBotEngine: async () => {
+      calls.push('runBotEngine');
+    },
+    triggerReportingSyncDeferred: () => {
+      calls.push('reportingSync');
+    }
+  });
+
+  const req = { requestId: 'r-1' };
+  const res = {
+    statusCode: null,
+    sendStatus(code) {
+      this.statusCode = code;
+    },
+  };
+
+  const body = {
+    object: 'whatsapp_business_account',
+    entry: [{
+      changes: [{
+        value: {
+          contacts: [{ profile: { name: 'Test User' } }],
+          messages: [{ id: 'wamid-1', from: '+123', type: 'text', text: { body: 'Hello' } }]
+        }
+      }]
+    }]
+  };
+
+  const result = await service.handleIncomingMessage({
+    body,
+    req,
+    res,
+    context: { requestId: 'r-1', tenantId: 't-1' },
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(result, { accepted: true, path: 'module-service' });
+  assert.deepEqual(calls, ['withDb', 'executeWithRetry', 'runBotEngine', 'reportingSync']);
+});
+
+test('lead ingestion service falls back to facade path when dependencies are missing', async () => {
   let called = false;
   const service = new LeadIngestionService({
     legacyProcessor: async ({ body }) => {
       called = true;
-      assert.deepEqual(body, { message: 'hello' });
+      assert.equal(body.object, 'whatsapp_business_account');
     },
   });
 
   const result = await service.handleIncomingMessage({
-    body: { message: 'hello' },
+    body: { object: 'whatsapp_business_account', entry: [{ changes: [{ value: { messages: [{ id: 'wamid-1' }] } }] }] },
     req: { requestId: 'r-1' },
-    res: {},
+    res: { sendStatus() {} },
     context: { requestId: 'r-1', tenantId: 't-1' },
   });
 
   assert.equal(called, true);
-  assert.deepEqual(result, { accepted: true, path: 'module-facade' });
+  assert.deepEqual(result, { accepted: true, path: 'module-facade-fallback' });
 });
 
 test('reminder facade delegates schedule and processQueue handlers', async () => {
