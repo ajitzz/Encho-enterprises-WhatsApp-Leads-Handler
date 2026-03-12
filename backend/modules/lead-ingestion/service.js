@@ -16,9 +16,22 @@ const BOT_ENGINE_HARD_TIMEOUT_MS = parsePositiveInt(process.env.BOT_ENGINE_HARD_
 const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, false);
 const WEBHOOK_DEFER_BOT_ENGINE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_BOT_ENGINE, false);
 const WEBHOOK_ADAPTIVE_BOT_DEFER = parseBooleanFlag(process.env.FF_WEBHOOK_ADAPTIVE_BOT_DEFER, false);
+const WEBHOOK_BACKPRESSURE_DEFER = parseBooleanFlag(process.env.FF_WEBHOOK_BACKPRESSURE_DEFER, true);
 const WEBHOOK_SYNC_BUDGET_MS = parsePositiveInt(process.env.WEBHOOK_SYNC_BUDGET_MS, 900);
 const WEBHOOK_DB_STAGE_WARN_MS = parsePositiveInt(process.env.WEBHOOK_DB_STAGE_WARN_MS, 450);
 const WEBHOOK_BOT_STAGE_WARN_MS = parsePositiveInt(process.env.WEBHOOK_BOT_STAGE_WARN_MS, 700);
+const BOT_ENGINE_MAX_CONCURRENCY = parsePositiveInt(process.env.BOT_ENGINE_MAX_CONCURRENCY, 8);
+
+let activeBotExecutions = 0;
+
+const withBotExecutionSlot = async (handler) => {
+  activeBotExecutions += 1;
+  try {
+    return await handler();
+  } finally {
+    activeBotExecutions = Math.max(0, activeBotExecutions - 1);
+  }
+};
 
 class LeadIngestionService {
   constructor({ legacyProcessor, withDb, executeWithRetry, runBotEngine, triggerReportingSyncDeferred }) {
@@ -142,10 +155,20 @@ class LeadIngestionService {
       const candidate = state.candidate;
       if (!candidate.is_human_mode) {
         const elapsed = Date.now() - webhookStartedMs;
-        const shouldDeferBot = WEBHOOK_DEFER_BOT_ENGINE || (WEBHOOK_ADAPTIVE_BOT_DEFER && elapsed >= WEBHOOK_SYNC_BUDGET_MS);
+        const shouldDeferForBudget = WEBHOOK_ADAPTIVE_BOT_DEFER && elapsed >= WEBHOOK_SYNC_BUDGET_MS;
+        const shouldDeferForBackpressure = WEBHOOK_BACKPRESSURE_DEFER && activeBotExecutions >= BOT_ENGINE_MAX_CONCURRENCY;
+        const shouldDeferBot = WEBHOOK_DEFER_BOT_ENGINE || shouldDeferForBudget || shouldDeferForBackpressure;
 
         if (shouldDeferBot) {
-          this.runBotDeferred({ candidate, parsed, requestId, tenantId, elapsed });
+          this.runBotDeferred({
+            candidate,
+            parsed,
+            requestId,
+            tenantId,
+            elapsed,
+            reason: shouldDeferForBackpressure ? 'backpressure' : 'sync_budget',
+            activeExecutions: activeBotExecutions,
+          });
         } else {
           await this.runBotWithinBudget({ client, candidate, parsed, requestId, tenantId });
         }
@@ -160,7 +183,7 @@ class LeadIngestionService {
     });
   }
 
-  runBotDeferred({ candidate, parsed, requestId, tenantId, elapsed }) {
+  runBotDeferred({ candidate, parsed, requestId, tenantId, elapsed, reason = 'flag', activeExecutions = activeBotExecutions }) {
     log({
       module: 'lead-ingestion',
       message: 'ingestion.bot_engine.deferred_pre_ack',
@@ -169,6 +192,9 @@ class LeadIngestionService {
         candidateId: candidate.id,
         elapsedMs: elapsed,
         syncBudgetMs: WEBHOOK_SYNC_BUDGET_MS,
+        reason,
+        activeExecutions,
+        maxConcurrency: BOT_ENGINE_MAX_CONCURRENCY,
       },
     });
 
@@ -199,7 +225,7 @@ class LeadIngestionService {
       extraMeta: { tenantId, candidateId: candidate.id, deferred },
     });
 
-    const botResult = await runWithTimeout({
+    const botResult = await withBotExecutionSlot(async () => runWithTimeout({
       promise: this.runBotEngine(client, candidate, parsed.text, parsed.payloadId),
       timeoutMs: BOT_ENGINE_HARD_TIMEOUT_MS,
       onTimeout: async () => {
@@ -215,7 +241,7 @@ class LeadIngestionService {
           },
         });
       },
-    });
+    }));
 
     if (botResult && botResult.timedOut) {
       log({
