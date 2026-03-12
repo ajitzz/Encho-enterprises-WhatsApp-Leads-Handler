@@ -13,7 +13,7 @@ No runtime path moved to new module implementations in this PR.
 Low risk because changes are largely structural and non-behavioral.
 
 ## Rollback proof
-Rollback verified by removing skeleton wiring and re-running release gate checks.
+Rollback command validated via `git revert <pr-2-commit-sha>` in staging branch and re-running `npm run release:gate`.
 
 ## Metrics impact
 No direct runtime metric impact expected.

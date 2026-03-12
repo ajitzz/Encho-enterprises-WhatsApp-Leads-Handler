@@ -11,6 +11,11 @@ const contractFiles = [
   'backend/modules/lead-lifecycle/contracts.js',
   'backend/modules/reporting-export/contracts.js',
   'backend/modules/media/contracts.js',
+  'backend/modules/bot-conversation/contracts.js',
+  'backend/modules/agent-workspace/contracts.js',
+  'backend/modules/campaign-broadcast/contracts.js',
+  'backend/modules/system-health/contracts.js',
+  'backend/modules/auth-config/contracts.js',
 ];
 
 const changelogPath = path.join(repoRoot, 'docs', 'contracts-changelog.md');

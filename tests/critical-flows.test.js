@@ -19,6 +19,11 @@ const { buildStageTransitionFingerprint } = require('../backend/shared/contracts
 const { validateStageTransitionInput } = require('../backend/modules/lead-lifecycle/contracts');
 const { validateReportingExportInput } = require('../backend/modules/reporting-export/contracts');
 const { validateMediaOperationInput } = require('../backend/modules/media/contracts');
+const { validateConversationAdvanceInput } = require('../backend/modules/bot-conversation/contracts');
+const { validateWorkspaceLeadDetailInput } = require('../backend/modules/agent-workspace/contracts');
+const { validateCampaignJobUpdatedPayload } = require('../backend/modules/campaign-broadcast/contracts');
+const { validateSystemHealthSnapshot } = require('../backend/modules/system-health/contracts');
+const { validateAuthConfigUpdateInput } = require('../backend/modules/auth-config/contracts');
 const {
   EVENT_TYPES,
   SCHEMA_VERSION,
@@ -155,7 +160,6 @@ test('idempotency builders are deterministic for ingestion/reminders/stage trans
   assert.equal(fingerprintA, fingerprintB);
 });
 
-
 test('lead-lifecycle contract validates stage transition ingress payloads', () => {
   const payload = validateStageTransitionInput({
     leadId: 'lead-1',
@@ -202,5 +206,89 @@ test('media contract validates media operation ingress payloads', () => {
   assert.throws(
     () => validateMediaOperationInput({ action: 'wipe-bucket' }),
     /action is invalid/
+  );
+});
+
+test('bot-conversation contract validates advance payload', () => {
+  const payload = validateConversationAdvanceInput({
+    leadId: 'lead-1',
+    currentStepId: 'step-1',
+    inboundType: 'interactive',
+    content: 'Yes',
+  });
+
+  assert.equal(payload.schemaVersion, '1.0.0');
+  assert.equal(payload.inboundType, 'interactive');
+
+  assert.throws(
+    () => validateConversationAdvanceInput({ leadId: 'lead-1', currentStepId: 'step-1', inboundType: 'voice' }),
+    /inboundType is invalid/
+  );
+});
+
+test('agent-workspace contract validates lead detail request', () => {
+  const payload = validateWorkspaceLeadDetailInput({
+    leadId: 'lead-1',
+    includeMessages: 1,
+    includeTimeline: 0,
+  });
+
+  assert.equal(payload.schemaVersion, '1.0.0');
+  assert.equal(payload.includeMessages, true);
+  assert.equal(payload.includeTimeline, false);
+
+  assert.throws(
+    () => validateWorkspaceLeadDetailInput({ leadId: null }),
+    /leadId is required/
+  );
+});
+
+test('campaign-broadcast contract validates job status updates', () => {
+  const payload = validateCampaignJobUpdatedPayload({
+    jobId: 'job-1',
+    previousStatus: 'queued',
+    currentStatus: 'processing',
+    counters: { queued: 100, sent: 0 },
+  });
+
+  assert.equal(payload.schemaVersion, '1.0.0');
+  assert.equal(payload.currentStatus, 'processing');
+
+  assert.throws(
+    () => validateCampaignJobUpdatedPayload({ jobId: 'job-1', previousStatus: 'queued', currentStatus: 'invalid', counters: {} }),
+    /currentStatus is invalid/
+  );
+});
+
+test('system-health contract validates operational snapshot payload', () => {
+  const payload = validateSystemHealthSnapshot({
+    status: 'degraded',
+    timestamp: '2026-01-01T00:00:00.000Z',
+    dependencies: { db: 'ok', queue: 'degraded' },
+    degradedReasons: ['queue lag elevated'],
+  });
+
+  assert.equal(payload.schemaVersion, '1.0.0');
+  assert.equal(payload.status, 'degraded');
+
+  assert.throws(
+    () => validateSystemHealthSnapshot({ status: 'warn' }),
+    /status is invalid/
+  );
+});
+
+test('auth-config contract validates runtime config update payload', () => {
+  const payload = validateAuthConfigUpdateInput({
+    actor: 'ops-admin',
+    googleClientId: 'google-client-id',
+    publicAppUrl: 'https://example.com',
+  });
+
+  assert.equal(payload.schemaVersion, '1.0.0');
+  assert.equal(payload.actor, 'ops-admin');
+
+  assert.throws(
+    () => validateAuthConfigUpdateInput({ actor: 'ops-admin', googleClientId: '', publicAppUrl: 'https://example.com' }),
+    /googleClientId is required/
   );
 });
