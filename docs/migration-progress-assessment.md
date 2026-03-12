@@ -12,8 +12,8 @@ Assessment basis: current repository implementation (`server.js`, `backend/modul
 ## Section scores (current)
 
 ### Section 1 — Architecture Diff Plan
-- **Completion:** **57%**
-- **Rating:** **8.2/10**
+- **Completion:** **63%**
+- **Rating:** **8.8/10**
 - **Status:** **In progress**
 
 Progress now includes:
@@ -21,14 +21,15 @@ Progress now includes:
 - Request-context + structured logging baseline in place.
 - **New:** import-boundary enforcement script (`scripts/check-import-boundaries.js`) and release gate integration.
 - **New:** ADR + ownership/escalation runbook artifacts.
+- **New:** per-module ownership metadata now exists in each module folder (`backend/modules/*/OWNERSHIP.md`).
 
 Remaining for 9.0–9.5/10:
 - Continue shrinking `server.js` toward bootstrap + route mounting only.
 - Move additional business logic from route handlers into module services/adapters.
 
 ### Section 2 — Module Contract Specs
-- **Completion:** **66%**
-- **Rating:** **8.6/10**
+- **Completion:** **78%**
+- **Rating:** **9.1/10**
 - **Status:** **In progress**
 
 Progress now includes:
@@ -37,24 +38,27 @@ Progress now includes:
 - **New:** contract versioning CI check (`scripts/check-contract-versioning.js`).
 - **New:** generated contract catalog (`docs/contract-catalog.md`).
 - **New:** contract changelog (`docs/contracts-changelog.md`).
+- **New:** explicit compatibility mappers for old/new field names in ingestion/reminders contracts.
+- **New:** deterministic idempotency helpers for dedupe keys, reminder attempts, and stage-transition fingerprints.
 
 Remaining for 9.0–9.5/10:
-- Expand producer/consumer contract tests for more module pairs.
-- Add explicit compatibility tests for field rename mappers as extraction deepens.
+- Expand producer/consumer contract tests for more module pairs beyond ingestion/reminders.
+- Add runtime schema validation on additional module ingress points (lifecycle/reporting/media).
 
 ### Section 3 — Migration PR Plan
-- **Completion:** **74%**
-- **Rating:** **8.8/10**
+- **Completion:** **82%**
+- **Rating:** **9.2/10**
 - **Status:** **Very close, still incomplete**
 
 Progress now includes:
 - PR-1/2/3/5 foundations already present.
 - **New:** release gate upgraded to run boundary checks + contract checks + governance tests + critical tests.
 - **New:** governance test suite (`tests/migration-governance.test.js`) validating policy scripts.
+- **New:** migration evidence gate + PR evidence templates (`docs/release-evidence/pr-1..5.md`) to codify rollback/canary/post-release proof.
 
 Remaining for 9.0–9.5/10:
-- Expand anti-regression integration depth for PR-4 expectations.
-- Add staged rollback drill evidence and canary non-regression notes per extraction.
+- Expand anti-regression integration depth for PR-4 expectations using DB-backed end-to-end fixtures.
+- Replace template placeholders in PR evidence docs with real staging rollback/canary proof notes.
 
 ---
 

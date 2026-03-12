@@ -37,3 +37,8 @@ test('contract versioning check script passes', () => {
   const result = runScript('scripts/check-contract-versioning.js');
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
+
+test('migration evidence check script passes', () => {
+  const result = runScript('scripts/check-migration-evidence.js');
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});

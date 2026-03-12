@@ -13,6 +13,7 @@
     "test:governance": "node --test tests/migration-governance.test.js",
     "check:boundaries": "node scripts/check-import-boundaries.js",
     "check:contracts": "node scripts/check-contract-versioning.js",
+    "check:migration-evidence": "node scripts/check-migration-evidence.js",
     "contracts:catalog": "node scripts/generate-contract-catalog.js"
   },
   "dependencies": {
