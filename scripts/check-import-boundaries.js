@@ -71,6 +71,7 @@ const violations = [];
 const filesToCheck = [
   ...walk(modulesRoot),
   ...walk(sharedRoot),
+  path.join(repoRoot, 'server.js'),
 ];
 
 for (const filePath of filesToCheck) {
@@ -97,6 +98,21 @@ for (const filePath of filesToCheck) {
       if (importerModule && importedModule && importerModule !== importedModule) {
         violations.push(`${relFile} imports adapter from another module: ${relImport}`);
       }
+    }
+
+    // Rule 3: app entrypoint must import module APIs only (not module services/adapters/contracts)
+    if (relFile === 'server.js' && relImport.startsWith('backend/modules/')) {
+      const allowedSuffixes = ['/api.js', '/api.ts', '/api/index.js', '/api/index.ts'];
+      const isApiImport = allowedSuffixes.some((suffix) => relImport.endsWith(suffix));
+      if (!isApiImport) {
+        violations.push(`server.js imports non-api module path: ${relImport}`);
+      }
+    }
+
+    // Rule 4: modules/shared cannot depend on server entrypoint
+    const isModuleOrSharedFile = relFile.startsWith('backend/modules/') || relFile.startsWith('backend/shared/');
+    if (isModuleOrSharedFile && (relImport === 'server.js' || importPath === '../../server' || importPath === '../server')) {
+      violations.push(`${relFile} depends on server entrypoint via ${importPath}`);
     }
   }
 }

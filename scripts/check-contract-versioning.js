@@ -8,6 +8,9 @@ const contractFiles = [
   'backend/shared/contracts/internalEvents.js',
   'backend/modules/lead-ingestion/contracts.js',
   'backend/modules/reminders-escalations/contracts.js',
+  'backend/modules/lead-lifecycle/contracts.js',
+  'backend/modules/reporting-export/contracts.js',
+  'backend/modules/media/contracts.js',
 ];
 
 const changelogPath = path.join(repoRoot, 'docs', 'contracts-changelog.md');
