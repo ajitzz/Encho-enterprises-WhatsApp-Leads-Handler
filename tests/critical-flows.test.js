@@ -32,6 +32,25 @@ const {
   assertEventEnvelope,
 } = require('../backend/shared/contracts/internalEvents');
 
+const loadLeadIngestionServiceWithEnv = (env = {}) => {
+  const servicePath = require.resolve('../backend/modules/lead-ingestion/service');
+  const previousEnv = {};
+  for (const key of Object.keys(env)) {
+    previousEnv[key] = process.env[key];
+  }
+
+  Object.assign(process.env, env);
+  delete require.cache[servicePath];
+  const { LeadIngestionService: ReloadedLeadIngestionService } = require('../backend/modules/lead-ingestion/service');
+
+  for (const key of Object.keys(env)) {
+    if (previousEnv[key] === undefined) delete process.env[key];
+    else process.env[key] = previousEnv[key];
+  }
+
+  return ReloadedLeadIngestionService;
+};
+
 test('resolveModuleMode supports tenant canary', () => {
   const mode = resolveModuleMode({
     flagValue: 'canary',
@@ -121,6 +140,90 @@ test('lead ingestion service falls back to facade path when dependencies are mis
 
   assert.equal(called, true);
   assert.deepEqual(result, { accepted: true, path: 'module-facade-fallback' });
+});
+
+test('lead ingestion service supports deferred webhook ack mode', async () => {
+  const DeferredLeadIngestionService = loadLeadIngestionServiceWithEnv({ FF_WEBHOOK_DEFER_POST_RESPONSE: 'true' });
+  let resolveProcessing;
+  let processed = false;
+
+  const service = new DeferredLeadIngestionService({
+    withDb: async (handler) => {
+      await handler({
+        query: async (sql) => {
+          if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
+          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-2', phone_number: '+999', is_human_mode: false }] };
+          return { rows: [] };
+        }
+      });
+      await new Promise((resolve) => {
+        resolveProcessing = resolve;
+      });
+      processed = true;
+    },
+    executeWithRetry: async (_, handler) => handler(),
+    runBotEngine: async () => {},
+    triggerReportingSyncDeferred: () => {},
+  });
+
+  const res = { statusCode: null, sendStatus(code) { this.statusCode = code; } };
+  const webhookPromise = service.handleIncomingMessage({
+    body: {
+      object: 'whatsapp_business_account',
+      entry: [{ changes: [{ value: { contacts: [{ profile: { name: 'Deferred User' } }], messages: [{ id: 'wamid-2', from: '+999', type: 'text', text: { body: 'Hi' } }] } }] }],
+    },
+    req: { requestId: 'r-3' },
+    res,
+    context: { requestId: 'r-3', tenantId: 't-3' },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(res.statusCode, 200);
+  assert.equal(processed, false);
+
+  resolveProcessing();
+  const result = await webhookPromise;
+  assert.deepEqual(result, { accepted: true, path: 'module-service', deferred: true });
+  assert.equal(processed, true);
+});
+
+test('lead ingestion service logs timeout and continues when bot exceeds hard timeout', async () => {
+  const TimeoutLeadIngestionService = loadLeadIngestionServiceWithEnv({ BOT_ENGINE_HARD_TIMEOUT_MS: '10' });
+  let reportingTriggered = false;
+
+  const service = new TimeoutLeadIngestionService({
+    withDb: async (handler) => {
+      await handler({
+        query: async (sql) => {
+          if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
+          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-3', phone_number: '+111', is_human_mode: false }] };
+          return { rows: [] };
+        }
+      });
+    },
+    executeWithRetry: async (_, handler) => handler(),
+    runBotEngine: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    },
+    triggerReportingSyncDeferred: () => {
+      reportingTriggered = true;
+    },
+  });
+
+  const res = { statusCode: null, sendStatus(code) { this.statusCode = code; } };
+  const result = await service.handleIncomingMessage({
+    body: {
+      object: 'whatsapp_business_account',
+      entry: [{ changes: [{ value: { contacts: [{ profile: { name: 'Timeout User' } }], messages: [{ id: 'wamid-3', from: '+111', type: 'text', text: { body: 'Hello' } }] } }] }],
+    },
+    req: { requestId: 'r-4' },
+    res,
+    context: { requestId: 'r-4', tenantId: 't-4' },
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(reportingTriggered, true);
+  assert.deepEqual(result, { accepted: true, path: 'module-service' });
 });
 
 test('reminder facade delegates schedule and processQueue handlers', async () => {

@@ -38,7 +38,36 @@ const buildLatencyTracker = ({ module, requestId = null, operation, warnThreshol
   };
 };
 
+const runWithTimeout = async ({
+  promise,
+  timeoutMs,
+  onTimeout,
+} = {}) => {
+  const normalizedTimeout = parsePositiveInt(timeoutMs, 0);
+  if (!normalizedTimeout || !promise || typeof promise.then !== 'function') {
+    return promise;
+  }
+
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve) => {
+        timer = setTimeout(async () => {
+          if (typeof onTimeout === 'function') {
+            await onTimeout();
+          }
+          resolve({ timedOut: true });
+        }, normalizedTimeout);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
 module.exports = {
   buildLatencyTracker,
   parsePositiveInt,
+  runWithTimeout,
 };
