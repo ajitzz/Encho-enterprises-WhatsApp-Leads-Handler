@@ -58,6 +58,28 @@ const structuredLog = ({ level = 'info', message = '', requestId = null, module 
     console.log(output);
 };
 
+const nowMs = () => Number(process.hrtime.bigint() / 1000000n);
+
+const createPerfTracker = ({ requestId = null, module = 'app', event = 'perf.trace' } = {}) => {
+    const marks = new Map();
+    return {
+        markStart(name) {
+            marks.set(name, nowMs());
+        },
+        markEnd(name, meta = {}) {
+            if (!marks.has(name)) return;
+            const durationMs = Math.max(0, nowMs() - marks.get(name));
+            structuredLog({
+                level: 'info',
+                module,
+                requestId,
+                message: event,
+                meta: { stage: name, durationMs, ...meta }
+            });
+        }
+    };
+};
+
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
     META_TIMEOUT: 15000,
@@ -1072,6 +1094,25 @@ const scheduleDriverExcelIncrementalSync = ({ candidateId, action = 'upsert' } =
             flushDriverExcelIncrementalQueue().catch(() => null);
         }, remainingMaxWaitMs);
     }
+};
+
+const triggerReportingSyncDeferred = ({ candidateId, action = 'upsert', requestId = null, source = 'unknown' } = {}) => {
+    setImmediate(() => {
+        try {
+            scheduleDriverExcelSync();
+            if (candidateId) {
+                scheduleDriverExcelIncrementalSync({ candidateId, action });
+            }
+        } catch (error) {
+            structuredLog({
+                level: 'error',
+                module: 'reporting-export',
+                requestId,
+                message: 'reporting.sync.deferred_failed',
+                meta: { candidateId, action, source, error: error?.message || String(error) },
+            });
+        }
+    });
 };
 
 const uploadToS3 = async ({ key, body, contentType }) => {
@@ -2223,6 +2264,8 @@ const executeWithRetry = async (client, operation) => {
 const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
     console.log(`[Bot Engine] START for ${candidate.phone_number}`);
     try {
+        const engineStart = nowMs();
+        const MAX_ENGINE_MS = Number.parseInt(process.env.BOT_ENGINE_MAX_EXEC_MS || '2500', 10);
         const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
         const config = sys.rows[0]?.value || { automation_enabled: true }; 
         if (config.automation_enabled === false || candidate.is_human_mode) return;
@@ -2247,6 +2290,13 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         
         const { nodes, edges } = botSettings;
         if (!nodes || nodes.length === 0) return;
+        const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+        const edgeMap = new Map();
+        for (const edge of edges || []) {
+            if (!edgeMap.has(edge.source)) edgeMap.set(edge.source, []);
+            edgeMap.get(edge.source).push(edge);
+        }
+        const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
 
         let currentNodeId = candidate.current_bot_step_id;
         let nextNodeId = null;
@@ -2263,10 +2313,9 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
         // 2. Determine Current State
         if (!currentNodeId) {
-            const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
             nextNodeId = startNode ? startNode.id : nodes[0]?.id;
         } else {
-            const currentNode = nodes.find(n => n.id === currentNodeId);
+            const currentNode = nodeMap.get(currentNodeId);
             if (currentNode) {
                 // A. Handle Variable Capture (IMPROVED FOR ALL INTERACTIVE NODES)
                 const captureTypes = ['input', 'location_request', 'pickup_location', 'destination_location', 'datetime_picker', 'interactive_button', 'interactive_list', 'rich_card'];
@@ -2517,7 +2566,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 }
 
                 // B. Find Next Path
-                const outgoingEdges = edges.filter(e => e.source === currentNodeId);
+                const outgoingEdges = edgeMap.get(currentNodeId) || [];
                 let matchedEdge = null;
 
                 // Match Buttons / List Rows via Payload ID
@@ -2581,7 +2630,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     nextNodeId = matchedEdge.target;
                 } else {
                     if (outgoingEdges.length === 0) {
-                        const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
                         nextNodeId = startNode ? startNode.id : null;
                     } else {
                         // Stay on node (Loop)
@@ -2609,7 +2657,6 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     }
                 }
             } else {
-                const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
                 nextNodeId = startNode ? startNode.id : null;
             }
         }
@@ -2625,8 +2672,21 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         const MAX_OPS = 15; 
 
         while (activeNodeId && opsCount < MAX_OPS) {
+            if (Number.isFinite(MAX_ENGINE_MS) && (nowMs() - engineStart) > MAX_ENGINE_MS) {
+                structuredLog({
+                    level: 'error',
+                    module: 'bot-conversation',
+                    message: 'bot.engine.execution_budget_exceeded',
+                    meta: {
+                        candidateId: candidate.id,
+                        elapsedMs: nowMs() - engineStart,
+                        maxEngineMs: MAX_ENGINE_MS,
+                    },
+                });
+                break;
+            }
             opsCount++;
-            const node = nodes.find(n => n.id === activeNodeId);
+            const node = nodeMap.get(activeNodeId);
             if (!node) break;
 
             const data = node.data || {};
@@ -2662,7 +2722,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     }
                 }
                 const handle = isMatch ? 'true' : 'false';
-                const nextEdge = edges.find(e => e.source === node.id && (e.sourceHandle === handle || !e.sourceHandle));
+                const nextEdge = (edgeMap.get(node.id) || []).find(e => e.sourceHandle === handle || !e.sourceHandle);
                 activeNodeId = nextEdge ? nextEdge.target : null;
                 continue; 
             }
@@ -3555,13 +3615,16 @@ apiRouter.get('/webhook', (req, res) => {
 const processWebhookLegacy = async ({ body, req, res }) => {
     if (!body.object) { res.sendStatus(404); return; }
     try {
+        const perf = createPerfTracker({ requestId: req?.requestId || null, module: 'lead-ingestion', event: 'webhook.processing.stage' });
         const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
         if (!msg) { res.sendStatus(200); return; }
 
         const processPromise = withDb(async (client) => {
             // WRAPPER: Retry logic for cold starts / missing tables
             await executeWithRetry(client, async () => {
+                perf.markStart('dedupe_lookup');
                 const existing = await client.query("SELECT id FROM candidate_messages WHERE whatsapp_message_id = $1", [msg.id]);
+                perf.markEnd('dedupe_lookup', { found: existing.rows.length > 0 });
                 if (existing.rows.length > 0) return;
 
                 const from = msg.from;
@@ -3588,6 +3651,7 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                     text = `[${msg.type.toUpperCase()}]`;
                 } else text = `[${msg.type.toUpperCase()}]`;
 
+                perf.markStart('lead_upsert');
                 let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
                 let candidate;
                 if (c.rows.length === 0) {
@@ -3598,19 +3662,28 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                     candidate = c.rows[0];
                     await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
                 }
+                perf.markEnd('lead_upsert', { candidateId: candidate.id, isNew: c.rows.length === 0 });
 
+                perf.markStart('inbound_message_insert');
                 await client.query(
                     `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
                      VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW())`,
                     [crypto.randomUUID(), candidate.id, text, messageType, msg.id]
                 );
+                perf.markEnd('inbound_message_insert', { candidateId: candidate.id, messageType });
 
                 if (!candidate.is_human_mode) {
+                    perf.markStart('bot_engine');
                     await runBotEngine(client, candidate, text, payloadId);
+                    perf.markEnd('bot_engine', { candidateId: candidate.id });
                 }
 
-                scheduleDriverExcelSync();
-                scheduleDriverExcelIncrementalSync({ candidateId: candidate.id, action: 'upsert' });
+                triggerReportingSyncDeferred({
+                    candidateId: candidate.id,
+                    action: 'upsert',
+                    requestId: req?.requestId || null,
+                    source: 'webhook',
+                });
             });
         });
 
@@ -4172,11 +4245,13 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
 const handleCronProcessQueueLegacy = async (req, res) => {
     let processed = 0, errors = 0;
     try {
+        const perf = createPerfTracker({ requestId: req?.requestId || null, module: 'reminders-escalations', event: 'reminders.queue.stage' });
         await withDb(async (client) => {
             await executeWithRetry(client, async () => {
                 const now = Date.now();
                 
                 // Fetch larger batch (50) for efficiency
+                perf.markStart('jobs_select');
                 const jobs = await client.query(`
                     SELECT sm.id, sm.candidate_id, sm.payload, c.phone_number 
                     FROM scheduled_messages sm 
@@ -4185,6 +4260,7 @@ const handleCronProcessQueueLegacy = async (req, res) => {
                     LIMIT 50 
                     FOR UPDATE OF sm SKIP LOCKED
                 `, [now]);
+                perf.markEnd('jobs_select', { selectedJobs: jobs.rows.length });
 
                 if (jobs.rows.length === 0) return;
 
@@ -4222,8 +4298,12 @@ const handleCronProcessQueueLegacy = async (req, res) => {
                         // Log success
                         await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]);
                         await client.query("UPDATE scheduled_messages SET status = 'sent' WHERE id = $1", [job.id]);
-                        scheduleDriverExcelSync();
-                        scheduleDriverExcelIncrementalSync({ candidateId: job.candidate_id, action: 'upsert' });
+                        triggerReportingSyncDeferred({
+                            candidateId: job.candidate_id,
+                            action: 'upsert',
+                            requestId: req?.requestId || null,
+                            source: 'reminders-queue',
+                        });
                         processed++;
                     } catch (e) {
                         errors++;
@@ -4234,10 +4314,12 @@ const handleCronProcessQueueLegacy = async (req, res) => {
 
                 // PARALLEL EXECUTION (Batch of 5 concurrently)
                 const BATCH_SIZE = 5;
+                perf.markStart('jobs_dispatch');
                 for (let i = 0; i < jobs.rows.length; i += BATCH_SIZE) {
                     const chunk = jobs.rows.slice(i, i + BATCH_SIZE);
                     await Promise.all(chunk.map(job => processJob(job)));
                 }
+                perf.markEnd('jobs_dispatch', { processed, errors, batchSize: BATCH_SIZE });
             });
         });
         res.json({ status: 'ok', processed, errors, queueSize: processed + errors });
