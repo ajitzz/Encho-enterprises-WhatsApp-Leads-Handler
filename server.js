@@ -107,6 +107,7 @@ const SYSTEM_CONFIG = {
     GOOGLE_SERVICE_ACCOUNT_EMAIL: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || '',
     GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || '',
     CACHE_TTL: 60 * 1000, // 60 Seconds Cache for Bot Settings
+    RUNTIME_CONFIG_CACHE_TTL: Number.parseInt(process.env.RUNTIME_CONFIG_CACHE_TTL_MS || '2000', 10),
     PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
 };
 
@@ -128,7 +129,57 @@ const applyRuntimeGoogleSheetsConfig = (rawConfig = {}) => {
 // --- IN-MEMORY CACHE (Performance Boost) ---
 const memoryCache = {
     botSettings: null,
-    lastUpdated: 0
+    lastUpdated: 0,
+    botGraph: null,
+    botGraphSource: null,
+    runtimeConfig: null,
+    runtimeConfigLastUpdated: 0,
+};
+
+const getRuntimeConfigCached = async (client) => {
+    const now = Date.now();
+    if (
+        memoryCache.runtimeConfig &&
+        (now - memoryCache.runtimeConfigLastUpdated) < SYSTEM_CONFIG.RUNTIME_CONFIG_CACHE_TTL
+    ) {
+        return memoryCache.runtimeConfig;
+    }
+
+    const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config' LIMIT 1");
+    const runtimeConfig = sys.rows[0]?.value || { automation_enabled: true };
+    memoryCache.runtimeConfig = runtimeConfig;
+    memoryCache.runtimeConfigLastUpdated = now;
+    return runtimeConfig;
+};
+
+const buildBotGraph = (botSettings) => {
+    const nodes = Array.isArray(botSettings?.nodes) ? botSettings.nodes : [];
+    const edges = Array.isArray(botSettings?.edges) ? botSettings.edges : [];
+    const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+    const edgeMap = new Map();
+    for (const edge of edges) {
+        if (!edgeMap.has(edge.source)) edgeMap.set(edge.source, []);
+        edgeMap.get(edge.source).push(edge);
+    }
+
+    return {
+        nodes,
+        edges,
+        nodeMap,
+        edgeMap,
+        startNode: nodes.find((n) => n.type === 'start' || n.data?.type === 'start') || null,
+    };
+};
+
+const getCompiledBotGraph = (botSettings) => {
+    if (memoryCache.botGraph && memoryCache.botGraphSource === botSettings) {
+        return memoryCache.botGraph;
+    }
+
+    const graph = buildBotGraph(botSettings);
+    memoryCache.botGraph = graph;
+    memoryCache.botGraphSource = botSettings;
+    return graph;
 };
 
 // --- INITIALIZE CLIENTS ---
@@ -2311,8 +2362,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
     try {
         const engineStart = nowMs();
         const MAX_ENGINE_MS = Number.parseInt(process.env.BOT_ENGINE_MAX_EXEC_MS || '2500', 10);
-        const sys = await client.query("SELECT value FROM system_settings WHERE key = 'config'");
-        const config = sys.rows[0]?.value || { automation_enabled: true }; 
+        const config = await getRuntimeConfigCached(client);
         if (config.automation_enabled === false || candidate.is_human_mode) return;
 
         let botSettings;
@@ -2330,18 +2380,13 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 memoryCache.lastUpdated = now;
             } else {
                 botSettings = getDefaultBotConfig();
+                memoryCache.botSettings = botSettings;
+                memoryCache.lastUpdated = now;
             }
         }
         
-        const { nodes, edges } = botSettings;
+        const { nodes, nodeMap, edgeMap, startNode } = getCompiledBotGraph(botSettings);
         if (!nodes || nodes.length === 0) return;
-        const nodeMap = new Map(nodes.map((node) => [node.id, node]));
-        const edgeMap = new Map();
-        for (const edge of edges || []) {
-            if (!edgeMap.has(edge.source)) edgeMap.set(edge.source, []);
-            edgeMap.get(edge.source).push(edge);
-        }
-        const startNode = nodes.find(n => n.type === 'start' || n.data?.type === 'start');
 
         let currentNodeId = candidate.current_bot_step_id;
         let nextNodeId = null;
@@ -3127,6 +3172,8 @@ apiRouter.patch('/system/settings', async (req, res) => {
                 "INSERT INTO system_settings (key, value) VALUES ('config', $1::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                 [JSON.stringify(next)]
             );
+            memoryCache.runtimeConfig = null;
+            memoryCache.runtimeConfigLastUpdated = 0;
             res.json({ success: true, settings: await getSystemConfig(client) });
         });
     } catch (e) {
@@ -3795,6 +3842,8 @@ apiRouter.post('/bot/save', async (req, res) => {
         });
         memoryCache.botSettings = null;
         memoryCache.lastUpdated = 0;
+        memoryCache.botGraph = null;
+        memoryCache.botGraphSource = null;
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -4400,6 +4449,12 @@ apiRouter.post('/system/init-db', async (req, res) => {
         await withDb(async (client) => {
             await initDatabase(client);
         });
+        memoryCache.runtimeConfig = null;
+        memoryCache.runtimeConfigLastUpdated = 0;
+        memoryCache.botSettings = null;
+        memoryCache.lastUpdated = 0;
+        memoryCache.botGraph = null;
+        memoryCache.botGraphSource = null;
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -4417,6 +4472,12 @@ apiRouter.post('/system/hard-reset', async (req, res) => {
                 throw err;
             }
         });
+        memoryCache.runtimeConfig = null;
+        memoryCache.runtimeConfigLastUpdated = 0;
+        memoryCache.botSettings = null;
+        memoryCache.lastUpdated = 0;
+        memoryCache.botGraph = null;
+        memoryCache.botGraphSource = null;
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });

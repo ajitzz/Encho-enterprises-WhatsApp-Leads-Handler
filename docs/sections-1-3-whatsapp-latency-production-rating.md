@@ -30,6 +30,21 @@ You should stay in **Sections 1–3** until all three sections are consistently 
 - **Current improved reply efficiency/performance:** **9.3 / 10**
 - **Production target before moving beyond Sections 1–3:** **9.7+ / 10 sustained**
 
+## Fast-response boost map (where to invest next)
+
+### 1) Section 1 boost area (highest ROI for WhatsApp speed)
+- Keep webhook synchronous path to minimal work only.
+- Keep bot traversal under strict execution budget.
+- Defer non-critical sync/reporting side effects off the request path.
+
+### 2) Section 3 boost area (stability under real traffic)
+- Add repeated canary windows with p50/p95/p99 tracking.
+- Add automatic rollback/kill-switch thresholds for latency and error spikes.
+
+### 3) Section 2 boost area (consistency and retry reduction)
+- Continue strict ingress validation and schema/version discipline.
+- Preserve compatibility mapping to avoid payload drift and replay overhead.
+
 ## Why this is the current state in this repository
 - The backend entrypoint remains very large (`server.js` ~4.4k lines), and webhook + bot execution still run in this central file.
 - Feature flags and modular facades exist for ingestion/reminders, which is good for safe cutover.
