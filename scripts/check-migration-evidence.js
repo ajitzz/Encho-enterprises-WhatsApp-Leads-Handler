@@ -37,6 +37,10 @@ for (const relPath of requiredEvidenceFiles) {
       problems.push(`${relPath} is missing section: ${section}`);
     }
   }
+
+  if (/\bTBD\b/i.test(body)) {
+    problems.push(`${relPath} still contains placeholder content (TBD)`);
+  }
 }
 
 for (const moduleName of moduleNames) {
@@ -54,4 +58,4 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log('Migration evidence check passed (PR templates + module ownership metadata in place).');
+console.log('Migration evidence check passed (release evidence is complete and ownership metadata exists).');

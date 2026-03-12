@@ -15,6 +15,10 @@ const {
   buildReminderAttemptIdempotencyKey,
 } = require('../backend/modules/reminders-escalations/contracts');
 const { buildStageTransitionFingerprint } = require('../backend/shared/contracts/idempotency');
+
+const { validateStageTransitionInput } = require('../backend/modules/lead-lifecycle/contracts');
+const { validateReportingExportInput } = require('../backend/modules/reporting-export/contracts');
+const { validateMediaOperationInput } = require('../backend/modules/media/contracts');
 const {
   EVENT_TYPES,
   SCHEMA_VERSION,
@@ -149,4 +153,54 @@ test('idempotency builders are deterministic for ingestion/reminders/stage trans
     changedAt: 1710000000000,
   });
   assert.equal(fingerprintA, fingerprintB);
+});
+
+
+test('lead-lifecycle contract validates stage transition ingress payloads', () => {
+  const payload = validateStageTransitionInput({
+    leadId: 'lead-1',
+    fromStage: 'New',
+    toStage: 'Qualified',
+    actor: 'agent-1',
+    changedAt: '2026-01-01T00:00:00.000Z',
+  });
+
+  assert.equal(payload.schemaVersion, '1.0.0');
+  assert.equal(payload.toStage, 'Qualified');
+
+  assert.throws(
+    () => validateStageTransitionInput({ leadId: 'lead-1', fromStage: 'Unknown', toStage: 'Qualified', actor: 'agent-1', changedAt: Date.now() }),
+    /fromStage is invalid/
+  );
+});
+
+test('reporting-export contract validates export request payloads', () => {
+  const payload = validateReportingExportInput({
+    exportType: 'driver-excel',
+    triggeredBy: 'system-cron',
+    includeArchived: 0,
+  });
+
+  assert.equal(payload.schemaVersion, '1.0.0');
+  assert.equal(payload.includeArchived, false);
+
+  assert.throws(
+    () => validateReportingExportInput({ exportType: 'invalid-type', triggeredBy: 'system-cron' }),
+    /exportType is invalid/
+  );
+});
+
+test('media contract validates media operation ingress payloads', () => {
+  const payload = validateMediaOperationInput({
+    action: 'list',
+    folder: 'driver-docs',
+  });
+
+  assert.equal(payload.schemaVersion, '1.0.0');
+  assert.equal(payload.action, 'list');
+
+  assert.throws(
+    () => validateMediaOperationInput({ action: 'wipe-bucket' }),
+    /action is invalid/
+  );
 });

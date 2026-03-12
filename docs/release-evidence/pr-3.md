@@ -1,28 +1,28 @@
 # PR Evidence Record
 
 ## Goal
-TBD
+Introduce lead-ingestion facade wrapper behind feature flag with behavior parity intent.
 
 ## Scope
-TBD
+Added facade-based route path and module mode resolution while retaining legacy processor path.
 
 ## Out-of-scope
-TBD
+No deep rewrite of webhook internals or schema migrations.
 
 ## Risk
-TBD
+Medium-low due to dual-path logic and flag-controlled activation.
 
 ## Rollback proof
-TBD
+Verified rollback by setting `FF_LEAD_INGESTION_MODULE=off`, restoring legacy-only path.
 
 ## Metrics impact
-TBD
+Adds module-path observability and parity comparison opportunity with minimal latency impact.
 
 ## Test evidence
-TBD
+Critical test suite confirms facade delegation and deterministic contract behavior.
 
 ## Canary evidence
-TBD
+Canary-ready through tenant/percent mode controls; production cohort rollout pending release window.
 
 ## Post-release notes
-TBD
+Facade enables controlled migration while keeping emergency fallback immediate.
