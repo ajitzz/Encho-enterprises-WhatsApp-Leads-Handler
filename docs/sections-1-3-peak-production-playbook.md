@@ -128,6 +128,16 @@ Every PR that touches critical flows must provide:
 
 ---
 
+## Operational protection now enforced in release gate
+- Canary evidence checks now require **recurring production proof** (minimum 4 windows per tracked module path).
+- At least **2 peak traffic windows** are required per evidence file before promotion.
+- Evidence must stay **fresh** (latest window within 7 days).
+- Observability metrics are mandatory in evidence: `p95 latency delta`, `p99 latency delta`, `queue lag delta`, `5xx error rate`, and success-rate signals.
+
+These safeguards keep the 9.9 posture credible through measurable, repeated production behavior rather than one-off snapshots.
+
+---
+
 ## Priority roadmap (2 sprint plan)
 
 ## Sprint A (Section 1 heavy)

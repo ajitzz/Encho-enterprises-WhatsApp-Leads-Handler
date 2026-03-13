@@ -259,6 +259,11 @@ class LeadIngestionService {
         const shouldDeferForBudget = WEBHOOK_ADAPTIVE_BOT_DEFER && elapsed >= WEBHOOK_SYNC_BUDGET_MS;
         const shouldDeferForBackpressure = WEBHOOK_BACKPRESSURE_DEFER && activeBotExecutions >= BOT_ENGINE_MAX_CONCURRENCY;
         const shouldDeferBot = WEBHOOK_DEFER_BOT_ENGINE || shouldDeferForBudget || shouldDeferForBackpressure;
+        const deferReason = shouldDeferForBackpressure
+          ? 'backpressure'
+          : shouldDeferForBudget
+            ? 'sync_budget'
+            : 'flag';
 
         if (shouldDeferBot) {
           this.runBotDeferred({
@@ -267,7 +272,7 @@ class LeadIngestionService {
             requestId,
             tenantId,
             elapsed,
-            reason: shouldDeferForBackpressure ? 'backpressure' : 'sync_budget',
+            reason: deferReason,
             activeExecutions: activeBotExecutions,
           });
         } else {

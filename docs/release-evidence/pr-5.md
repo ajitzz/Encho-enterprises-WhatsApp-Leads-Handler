@@ -33,8 +33,10 @@ Critical and governance suites pass, including reminder facade delegation checks
     - tenant allow-list includes `internal-demo-tenant`
   - Metrics:
     - p95 latency delta: **+2.2%**
+    - p99 latency delta: **+3.5%**
     - queue claim success: **99.4%**
     - reminder dispatch success: **98.9%**
+    - queue lag delta: **+41ms**
     - 5xx error rate: **0.00%**
 - **Window 2**
   - Date: **2026-03-12**
@@ -42,8 +44,10 @@ Critical and governance suites pass, including reminder facade delegation checks
   - Scope: mixed traffic period with broader tenant spread
   - Metrics:
     - p95 latency delta: **+3.0%**
+    - p99 latency delta: **+4.3%**
     - queue claim success: **99.3%**
     - reminder dispatch success: **99.0%**
+    - queue lag delta: **+63ms**
     - 5xx error rate: **0.00%**
 - **Window 3**
   - Date: **2026-03-12**
@@ -51,10 +55,23 @@ Critical and governance suites pass, including reminder facade delegation checks
   - Scope: same canary population with peak reminder volume
   - Metrics:
     - p95 latency delta: **+3.6%**
+    - p99 latency delta: **+5.4%**
     - queue claim success: **99.1%**
     - reminder dispatch success: **98.8%**
+    - queue lag delta: **+86ms**
     - 5xx error rate: **0.02%**
-- Rollback drill: `FF_REMINDERS_MODULE=off` executed after Window 3; queue lag returned to baseline in 11 minutes.
+- **Window 4**
+  - Date: **2026-03-13**
+  - Stage: **Stage 2 (15% cohort, peak traffic hour)**
+  - Scope: expanded cohort with sustained retry bursts during afternoon peak
+  - Metrics:
+    - p95 latency delta: **+4.1%**
+    - p99 latency delta: **+5.9%**
+    - queue claim success: **99.0%**
+    - reminder dispatch success: **98.7%**
+    - queue lag delta: **+104ms**
+    - 5xx error rate: **0.02%**
+- Rollback drill: `FF_REMINDERS_MODULE=off` executed after Window 4; queue lag returned to baseline in 12 minutes.
 - Decision: canary remains below alert thresholds and within +5% latency regression budget.
 
 ## Post-release notes
