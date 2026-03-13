@@ -132,7 +132,7 @@ test('lead ingestion service falls back to facade path when dependencies are mis
   });
 
   const result = await service.handleIncomingMessage({
-    body: { object: 'whatsapp_business_account', entry: [{ changes: [{ value: { messages: [{ id: 'wamid-1' }] } }] }] },
+    body: { object: 'whatsapp_business_account', entry: [{ changes: [{ value: { messages: [{ id: 'wamid-fallback-1' }] } }] }] },
     req: { requestId: 'r-1' },
     res: { sendStatus() {} },
     context: { requestId: 'r-1', tenantId: 't-1' },
@@ -349,6 +349,97 @@ test('lead ingestion service acks quickly when ack-timeout guard is exceeded', a
   assert.ok(elapsed < 30);
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(runBotCalls, 1);
+});
+
+test('lead ingestion service short-circuits immediate duplicate message ids from memory cache', async () => {
+  let runBotCalls = 0;
+  let dbCalls = 0;
+
+  const service = new LeadIngestionService({
+    withDb: async (handler) => {
+      dbCalls += 1;
+      await handler({
+        query: async (sql) => {
+          if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
+          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-m1', phone_number: '+333', is_human_mode: false }] };
+          return { rows: [] };
+        }
+      });
+    },
+    executeWithRetry: async (_, handler) => handler(),
+    runBotEngine: async () => {
+      runBotCalls += 1;
+    },
+    triggerReportingSyncDeferred: () => {},
+  });
+
+  const body = {
+    object: 'whatsapp_business_account',
+    entry: [{ changes: [{ value: { contacts: [{ profile: { name: 'Cache User' } }], messages: [{ id: 'wamid-cache-1', from: '+333', type: 'text', text: { body: 'hi' } }] } }] }],
+  };
+
+  const res1 = { statusCode: null, sendStatus(code) { this.statusCode = code; } };
+  const res2 = { statusCode: null, sendStatus(code) { this.statusCode = code; } };
+
+  const first = await service.handleIncomingMessage({ body, req: { requestId: 'r-cache-1' }, res: res1, context: { requestId: 'r-cache-1', tenantId: 't-cache' } });
+  const second = await service.handleIncomingMessage({ body, req: { requestId: 'r-cache-2' }, res: res2, context: { requestId: 'r-cache-2', tenantId: 't-cache' } });
+
+  assert.equal(res1.statusCode, 200);
+  assert.equal(res2.statusCode, 200);
+  assert.deepEqual(first, { accepted: true, path: 'module-service' });
+  assert.deepEqual(second, { accepted: true, path: 'module-service' });
+  assert.equal(runBotCalls, 1);
+  assert.equal(dbCalls, 1);
+});
+
+test('lead ingestion service evicts oldest dedupe id when cache reaches max size', async () => {
+  const BoundedCacheLeadIngestionService = loadLeadIngestionServiceWithEnv({
+    WEBHOOK_DEDUPE_MEMORY_MAX_SIZE: '1',
+    WEBHOOK_DEDUPE_MEMORY_TTL_MS: '60000',
+  });
+
+  let runBotCalls = 0;
+  let dbCalls = 0;
+
+  const service = new BoundedCacheLeadIngestionService({
+    withDb: async (handler) => {
+      dbCalls += 1;
+      await handler({
+        query: async (sql) => {
+          if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
+          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: `lead-cache-cap-${dbCalls}`, phone_number: '+444', is_human_mode: false }] };
+          return { rows: [] };
+        }
+      });
+    },
+    executeWithRetry: async (_, handler) => handler(),
+    runBotEngine: async () => {
+      runBotCalls += 1;
+    },
+    triggerReportingSyncDeferred: () => {},
+  });
+
+  const buildBody = (id) => ({
+    object: 'whatsapp_business_account',
+    entry: [{ changes: [{ value: { contacts: [{ profile: { name: 'Cache Cap User' } }], messages: [{ id, from: '+444', type: 'text', text: { body: 'hi' } }] } }] }],
+  });
+
+  const res1 = { statusCode: null, sendStatus(code) { this.statusCode = code; } };
+  const res2 = { statusCode: null, sendStatus(code) { this.statusCode = code; } };
+  const res3 = { statusCode: null, sendStatus(code) { this.statusCode = code; } };
+
+  const first = await service.handleIncomingMessage({ body: buildBody('wamid-cap-1'), req: { requestId: 'r-cap-1' }, res: res1, context: { requestId: 'r-cap-1', tenantId: 't-cap' } });
+  const second = await service.handleIncomingMessage({ body: buildBody('wamid-cap-2'), req: { requestId: 'r-cap-2' }, res: res2, context: { requestId: 'r-cap-2', tenantId: 't-cap' } });
+  const third = await service.handleIncomingMessage({ body: buildBody('wamid-cap-1'), req: { requestId: 'r-cap-3' }, res: res3, context: { requestId: 'r-cap-3', tenantId: 't-cap' } });
+
+  assert.equal(res1.statusCode, 200);
+  assert.equal(res2.statusCode, 200);
+  assert.equal(res3.statusCode, 200);
+  assert.deepEqual(first, { accepted: true, path: 'module-service' });
+  assert.deepEqual(second, { accepted: true, path: 'module-service' });
+  assert.deepEqual(third, { accepted: true, path: 'module-service' });
+  assert.equal(runBotCalls, 3);
+  assert.equal(dbCalls, 3);
 });
 
 test('reminder facade delegates schedule and processQueue handlers', async () => {

@@ -24,10 +24,41 @@ const BOT_ENGINE_MAX_CONCURRENCY = parsePositiveInt(process.env.BOT_ENGINE_MAX_C
 const WEBHOOK_ACK_TIMEOUT_MS = parsePositiveInt(process.env.WEBHOOK_ACK_TIMEOUT_MS, 950);
 const FF_WEBHOOK_ACK_TIMEOUT_GUARD = parseBooleanFlag(process.env.FF_WEBHOOK_ACK_TIMEOUT_GUARD, true);
 const WEBHOOK_DEFER_QUEUE_MAX = parsePositiveInt(process.env.WEBHOOK_DEFER_QUEUE_MAX, 256);
+const WEBHOOK_DEDUPE_MEMORY_TTL_MS = parsePositiveInt(process.env.WEBHOOK_DEDUPE_MEMORY_TTL_MS, 120000);
+const WEBHOOK_DEDUPE_MEMORY_MAX_SIZE = parsePositiveInt(process.env.WEBHOOK_DEDUPE_MEMORY_MAX_SIZE, 5000);
 
 let activeBotExecutions = 0;
 let drainingDeferredBotQueue = false;
 const deferredBotQueue = [];
+const recentMessageCache = new Map();
+const inFlightMessageIds = new Set();
+
+const pruneRecentMessageCache = () => {
+  const now = Date.now();
+  for (const [messageId, expiresAt] of recentMessageCache.entries()) {
+    if (expiresAt <= now) recentMessageCache.delete(messageId);
+  }
+};
+
+const hasRecentMessage = (messageId) => {
+  pruneRecentMessageCache();
+  const expiresAt = recentMessageCache.get(messageId);
+  if (!expiresAt) return false;
+  if (expiresAt <= Date.now()) {
+    recentMessageCache.delete(messageId);
+    return false;
+  }
+  return true;
+};
+
+const rememberMessageId = (messageId) => {
+  if (!messageId) return;
+  if (recentMessageCache.size >= WEBHOOK_DEDUPE_MEMORY_MAX_SIZE) {
+    const oldestMessageId = recentMessageCache.keys().next()?.value;
+    if (oldestMessageId) recentMessageCache.delete(oldestMessageId);
+  }
+  recentMessageCache.set(messageId, Date.now() + WEBHOOK_DEDUPE_MEMORY_TTL_MS);
+};
 
 
 const safeSendStatus = (res, code) => {
@@ -75,6 +106,20 @@ class LeadIngestionService {
       return { accepted: true, path: 'module-service' };
     }
 
+    const hasMessageId = Boolean(msg.id);
+
+    if (hasMessageId && hasRecentMessage(msg.id)) {
+      safeSendStatus(res, 200);
+      latency.end({ path: 'module-service', duplicate: true, dedupe: 'memory-cache' });
+      return { accepted: true, path: 'module-service' };
+    }
+
+    if (hasMessageId && inFlightMessageIds.has(msg.id)) {
+      safeSendStatus(res, 200);
+      latency.end({ path: 'module-service', duplicate: true, dedupe: 'in-flight' });
+      return { accepted: true, path: 'module-service' };
+    }
+
     if (!this.withDb || !this.executeWithRetry || !this.runBotEngine || !this.triggerReportingSyncDeferred) {
       if (!this.legacyProcessor) {
         throw new Error('lead-ingestion dependencies are not fully configured');
@@ -86,12 +131,22 @@ class LeadIngestionService {
 
     const parsed = this.parseInboundMessage({ body, msg });
 
+    if (hasMessageId) inFlightMessageIds.add(msg.id);
+
+    let shouldRememberMessageId = false;
     const processPromise = this.processWebhookCore({
       parsed,
       msg,
       requestId,
       tenantId,
       webhookStartedMs,
+    }).then((result) => {
+      shouldRememberMessageId = result !== false;
+    }).finally(() => {
+      if (hasMessageId) inFlightMessageIds.delete(msg.id);
+      if (hasMessageId && shouldRememberMessageId) {
+        rememberMessageId(msg.id);
+      }
     });
 
     if (WEBHOOK_DEFER_POST_RESPONSE) {
@@ -150,7 +205,7 @@ class LeadIngestionService {
   }
 
   async processWebhookCore({ parsed, msg, requestId, tenantId, webhookStartedMs }) {
-    await this.withDb(async (client) => {
+    return this.withDb(async (client) => {
       const dbStage = buildStageTimer({
         module: 'lead-ingestion',
         requestId,
@@ -195,7 +250,7 @@ class LeadIngestionService {
       dbStage.end({ duplicate: state?.duplicate === true });
 
       if (!state || state.duplicate || !state.candidate) {
-        return;
+        return true;
       }
 
       const candidate = state.candidate;
@@ -226,6 +281,8 @@ class LeadIngestionService {
         requestId,
         source: 'webhook',
       });
+
+      return true;
     });
   }
 
