@@ -85,7 +85,7 @@ const runWithTimeout = async ({
       new Promise((resolve) => {
         timer = setTimeout(async () => {
           if (typeof onTimeout === 'function') {
-            await onTimeout();
+            Promise.resolve(onTimeout()).catch(() => null);
           }
           resolve({ timedOut: true });
         }, normalizedTimeout);

@@ -21,8 +21,20 @@ const WEBHOOK_SYNC_BUDGET_MS = parsePositiveInt(process.env.WEBHOOK_SYNC_BUDGET_
 const WEBHOOK_DB_STAGE_WARN_MS = parsePositiveInt(process.env.WEBHOOK_DB_STAGE_WARN_MS, 450);
 const WEBHOOK_BOT_STAGE_WARN_MS = parsePositiveInt(process.env.WEBHOOK_BOT_STAGE_WARN_MS, 700);
 const BOT_ENGINE_MAX_CONCURRENCY = parsePositiveInt(process.env.BOT_ENGINE_MAX_CONCURRENCY, 8);
+const WEBHOOK_ACK_TIMEOUT_MS = parsePositiveInt(process.env.WEBHOOK_ACK_TIMEOUT_MS, 950);
+const FF_WEBHOOK_ACK_TIMEOUT_GUARD = parseBooleanFlag(process.env.FF_WEBHOOK_ACK_TIMEOUT_GUARD, true);
+const WEBHOOK_DEFER_QUEUE_MAX = parsePositiveInt(process.env.WEBHOOK_DEFER_QUEUE_MAX, 256);
 
 let activeBotExecutions = 0;
+let drainingDeferredBotQueue = false;
+const deferredBotQueue = [];
+
+
+const safeSendStatus = (res, code) => {
+  if (!res || typeof res.sendStatus !== 'function') return;
+  if (res.statusCode) return;
+  res.sendStatus(code);
+};
 
 const withBotExecutionSlot = async (handler) => {
   activeBotExecutions += 1;
@@ -51,14 +63,14 @@ class LeadIngestionService {
     const webhookStartedMs = Date.now();
 
     if (!body?.object) {
-      res.sendStatus(404);
+      safeSendStatus(res, 404);
       latency.end({ path: 'module-service', status: 404 });
       return { accepted: false, path: 'module-service' };
     }
 
     const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) {
-      res.sendStatus(200);
+      safeSendStatus(res, 200);
       latency.end({ path: 'module-service', noop: true });
       return { accepted: true, path: 'module-service' };
     }
@@ -83,7 +95,7 @@ class LeadIngestionService {
     });
 
     if (WEBHOOK_DEFER_POST_RESPONSE) {
-      res.sendStatus(200);
+      safeSendStatus(res, 200);
       processPromise.catch((error) => {
         log({
           level: 'error',
@@ -97,8 +109,42 @@ class LeadIngestionService {
       return { accepted: true, path: 'module-service', deferred: true };
     }
 
-    await processPromise;
-    res.sendStatus(200);
+    if (!FF_WEBHOOK_ACK_TIMEOUT_GUARD) {
+      await processPromise;
+      safeSendStatus(res, 200);
+      latency.end({ path: 'module-service' });
+      return { accepted: true, path: 'module-service' };
+    }
+
+    const guardedResult = await runWithTimeout({
+      promise: processPromise,
+      timeoutMs: WEBHOOK_ACK_TIMEOUT_MS,
+      onTimeout: () => {
+        log({
+          module: 'lead-ingestion',
+          message: 'webhook.ack_timeout_guard.triggered',
+          requestId,
+          meta: { tenantId, timeoutMs: WEBHOOK_ACK_TIMEOUT_MS },
+        });
+      },
+    });
+
+    if (guardedResult && guardedResult.timedOut) {
+      safeSendStatus(res, 200);
+      processPromise.catch((error) => {
+        log({
+          level: 'error',
+          module: 'lead-ingestion',
+          message: 'webhook.ack_timeout_guard.processing_failed',
+          requestId,
+          meta: { error: error?.message || String(error) },
+        });
+      });
+      latency.end({ path: 'module-service', deferred: true, reason: 'ack_timeout_guard' });
+      return { accepted: true, path: 'module-service', deferred: true };
+    }
+
+    safeSendStatus(res, 200);
     latency.end({ path: 'module-service' });
     return { accepted: true, path: 'module-service' };
   }
@@ -184,6 +230,22 @@ class LeadIngestionService {
   }
 
   runBotDeferred({ candidate, parsed, requestId, tenantId, elapsed, reason = 'flag', activeExecutions = activeBotExecutions }) {
+    if (deferredBotQueue.length >= WEBHOOK_DEFER_QUEUE_MAX) {
+      const dropped = deferredBotQueue.shift();
+      log({
+        level: 'error',
+        module: 'lead-ingestion',
+        message: 'ingestion.bot_engine.defer_queue_capacity_reached',
+        requestId,
+        meta: {
+          candidateId: candidate.id,
+          queueDepth: deferredBotQueue.length,
+          queueMax: WEBHOOK_DEFER_QUEUE_MAX,
+          droppedCandidateId: dropped?.candidate?.id || null,
+        },
+      });
+    }
+
     log({
       module: 'lead-ingestion',
       message: 'ingestion.bot_engine.deferred_pre_ack',
@@ -195,25 +257,57 @@ class LeadIngestionService {
         reason,
         activeExecutions,
         maxConcurrency: BOT_ENGINE_MAX_CONCURRENCY,
+        queueDepth: deferredBotQueue.length,
       },
     });
 
-    setImmediate(() => {
+    deferredBotQueue.push({ candidate, parsed, requestId, tenantId, enqueuedAt: Date.now() });
+    this.drainBotDeferredQueue();
+  }
+
+  drainBotDeferredQueue() {
+    if (drainingDeferredBotQueue) return;
+    drainingDeferredBotQueue = true;
+
+    const drainLoop = () => {
+      if (!deferredBotQueue.length) {
+        drainingDeferredBotQueue = false;
+        return;
+      }
+
+      if (activeBotExecutions >= BOT_ENGINE_MAX_CONCURRENCY) {
+        setTimeout(drainLoop, 1);
+        return;
+      }
+
+      const job = deferredBotQueue.shift();
       this.withDb(async (client) => {
-        await this.runBotWithinBudget({ client, candidate, parsed, requestId, tenantId, deferred: true });
+        await this.runBotWithinBudget({
+          client,
+          candidate: job.candidate,
+          parsed: job.parsed,
+          requestId: job.requestId,
+          tenantId: job.tenantId,
+          deferred: true,
+        });
       }).catch((error) => {
         log({
           level: 'error',
           module: 'lead-ingestion',
           message: 'ingestion.bot_engine.deferred.failed',
-          requestId,
+          requestId: job.requestId,
           meta: {
-            candidateId: candidate.id,
+            candidateId: job.candidate.id,
+            queueWaitMs: Date.now() - job.enqueuedAt,
             error: error?.message || String(error),
           },
         });
+      }).finally(() => {
+        setImmediate(drainLoop);
       });
-    });
+    };
+
+    setImmediate(drainLoop);
   }
 
   async runBotWithinBudget({ client, candidate, parsed, requestId, tenantId, deferred = false }) {

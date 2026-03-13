@@ -303,6 +303,54 @@ test('lead ingestion service logs timeout and continues when bot exceeds hard ti
   assert.deepEqual(result, { accepted: true, path: 'module-service' });
 });
 
+test('lead ingestion service acks quickly when ack-timeout guard is exceeded', async () => {
+  const GuardedLeadIngestionService = loadLeadIngestionServiceWithEnv({
+    WEBHOOK_ACK_TIMEOUT_MS: '10',
+    FF_WEBHOOK_ACK_TIMEOUT_GUARD: 'true',
+    FF_WEBHOOK_DEFER_POST_RESPONSE: 'false',
+    FF_WEBHOOK_DEFER_BOT_ENGINE: 'false',
+    FF_WEBHOOK_ADAPTIVE_BOT_DEFER: 'false',
+  });
+
+  let runBotCalls = 0;
+  const service = new GuardedLeadIngestionService({
+    withDb: async (handler) => {
+      await handler({
+        query: async (sql) => {
+          if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
+          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-guard-1', phone_number: '+333', is_human_mode: false }] };
+          return { rows: [] };
+        }
+      });
+    },
+    executeWithRetry: async (_, handler) => handler(),
+    runBotEngine: async () => {
+      runBotCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 35));
+    },
+    triggerReportingSyncDeferred: () => {},
+  });
+
+  const res = { statusCode: null, sendStatus(code) { this.statusCode = code; } };
+  const startedAt = Date.now();
+  const result = await service.handleIncomingMessage({
+    body: {
+      object: 'whatsapp_business_account',
+      entry: [{ changes: [{ value: { contacts: [{ profile: { name: 'Guard User' } }], messages: [{ id: 'wamid-guard-1', from: '+333', type: 'text', text: { body: 'Ping' } }] } }] }],
+    },
+    req: { requestId: 'r-guard-1' },
+    res,
+    context: { requestId: 'r-guard-1', tenantId: 't-guard' },
+  });
+
+  const elapsed = Date.now() - startedAt;
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(result, { accepted: true, path: 'module-service', deferred: true });
+  assert.ok(elapsed < 30);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(runBotCalls, 1);
+});
+
 test('reminder facade delegates schedule and processQueue handlers', async () => {
   const calls = [];
   const facade = new ReminderServiceFacade({
