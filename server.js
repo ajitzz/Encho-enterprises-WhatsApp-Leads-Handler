@@ -2440,8 +2440,10 @@ const executeWithRetry = async (client, operation) => {
 // It is protected based on the GitHub "Source of Truth".
 // Any changes to the loop structure, delays, or variable saving will break the bot.
 // =========================================================================
-const BOT_ENGINE_AUTO_ADVANCE_DELAY_MS = Math.max(0, Number(process.env.BOT_ENGINE_AUTO_ADVANCE_DELAY_MS || 40));
-const BOT_ENGINE_DELAY_NODE_CAP_MS = Math.max(0, Number(process.env.BOT_ENGINE_DELAY_NODE_CAP_MS || 1200));
+const BOT_ENGINE_AUTO_ADVANCE_DELAY_MS = Math.max(0, Number(process.env.BOT_ENGINE_AUTO_ADVANCE_DELAY_MS || 15));
+const BOT_ENGINE_DELAY_NODE_CAP_MS = Math.max(0, Number(process.env.BOT_ENGINE_DELAY_NODE_CAP_MS || 800));
+const FF_BOT_PRIORITIZE_INBOUND_REPLY = String(process.env.FF_BOT_PRIORITIZE_INBOUND_REPLY || 'true').toLowerCase() !== 'false';
+const BOT_ENGINE_INBOUND_DELAY_CAP_MS = Math.max(0, Number(process.env.BOT_ENGINE_INBOUND_DELAY_CAP_MS || 120));
 
 const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
     console.log(`[Bot Engine] START for ${candidate.phone_number}`);
@@ -2863,8 +2865,15 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             }
             
             else if (data.type === 'delay') {
-                const ms = Math.min(data.delayTime || 2000, BOT_ENGINE_DELAY_NODE_CAP_MS);
-                await new Promise(r => setTimeout(r, ms));
+                const isInboundTriggered = Boolean(incomingText || incomingPayloadId);
+                const baseDelayMs = Math.min(data.delayTime || 2000, BOT_ENGINE_DELAY_NODE_CAP_MS);
+                const ms = (FF_BOT_PRIORITIZE_INBOUND_REPLY && isInboundTriggered)
+                    ? Math.min(baseDelayMs, BOT_ENGINE_INBOUND_DELAY_CAP_MS)
+                    : baseDelayMs;
+
+                if (ms > 0) {
+                    await new Promise(r => setTimeout(r, ms));
+                }
             }
 
             else if (data.type === 'condition') {
