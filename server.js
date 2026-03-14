@@ -612,14 +612,39 @@ const withDb = async (operation) => {
     }
 };
 
-const getMetaClient = () => axios.create({
-    httpsAgent: new https.Agent({ keepAlive: true }),
-    timeout: SYSTEM_CONFIG.META_TIMEOUT,
-    headers: { 
-        'Content-Type': 'application/json', 
-        'Authorization': `Bearer ${process.env.META_API_TOKEN}` 
+let metaHttpsAgent = null;
+let metaClient = null;
+
+const getMetaClient = () => {
+    const token = process.env.META_API_TOKEN;
+
+    if (!metaHttpsAgent) {
+        metaHttpsAgent = new https.Agent({ keepAlive: true, maxSockets: 128, keepAliveMsecs: 1000 });
     }
-});
+
+    if (!metaClient) {
+        metaClient = axios.create({
+            httpsAgent: metaHttpsAgent,
+            timeout: SYSTEM_CONFIG.META_TIMEOUT,
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            }
+        });
+        return metaClient;
+    }
+
+    const currentAuth = metaClient.defaults?.headers?.common?.Authorization;
+    const nextAuth = `Bearer ${token}`;
+    if (currentAuth !== nextAuth) {
+        if (!metaClient.defaults.headers) metaClient.defaults.headers = {};
+        if (!metaClient.defaults.headers.common) metaClient.defaults.headers.common = {};
+        metaClient.defaults.headers.common.Authorization = nextAuth;
+        metaClient.defaults.headers.common['Content-Type'] = 'application/json';
+    }
+
+    return metaClient;
+};
 
 let driverExcelSyncInProgress = false;
 let driverExcelSyncRequested = false;
