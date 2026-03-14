@@ -612,14 +612,39 @@ const withDb = async (operation) => {
     }
 };
 
-const getMetaClient = () => axios.create({
-    httpsAgent: new https.Agent({ keepAlive: true }),
-    timeout: SYSTEM_CONFIG.META_TIMEOUT,
-    headers: { 
-        'Content-Type': 'application/json', 
-        'Authorization': `Bearer ${process.env.META_API_TOKEN}` 
+let metaHttpsAgent = null;
+let metaClient = null;
+
+const getMetaClient = () => {
+    const token = process.env.META_API_TOKEN;
+
+    if (!metaHttpsAgent) {
+        metaHttpsAgent = new https.Agent({ keepAlive: true, maxSockets: 128, keepAliveMsecs: 1000 });
     }
-});
+
+    if (!metaClient) {
+        metaClient = axios.create({
+            httpsAgent: metaHttpsAgent,
+            timeout: SYSTEM_CONFIG.META_TIMEOUT,
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            }
+        });
+        return metaClient;
+    }
+
+    const currentAuth = metaClient.defaults?.headers?.common?.Authorization;
+    const nextAuth = `Bearer ${token}`;
+    if (currentAuth !== nextAuth) {
+        if (!metaClient.defaults.headers) metaClient.defaults.headers = {};
+        if (!metaClient.defaults.headers.common) metaClient.defaults.headers.common = {};
+        metaClient.defaults.headers.common.Authorization = nextAuth;
+        metaClient.defaults.headers.common['Content-Type'] = 'application/json';
+    }
+
+    return metaClient;
+};
 
 let driverExcelSyncInProgress = false;
 let driverExcelSyncRequested = false;
@@ -1973,6 +1998,8 @@ const fetchAndStoreIncomingMedia = async ({ msg, phoneNumber, candidateId, clien
     }
 };
 
+const META_VERBOSE_LOGS = String(process.env.META_VERBOSE_LOGS || 'false').toLowerCase() === 'true';
+
 const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
@@ -1990,7 +2017,7 @@ const sendToMeta = async (phoneNumber, payload) => {
     }
 
     try {
-        console.log(`[Meta] Sending to ${to} | Type: ${payload.type}`);
+        if (META_VERBOSE_LOGS) console.log(`[Meta] Sending to ${to} | Type: ${payload.type}`);
         await getMetaClient().post(`https://graph.facebook.com/v18.0/${phoneId}/messages`, {
             messaging_product: "whatsapp",
             recipient_type: "individual",
@@ -2415,8 +2442,14 @@ const executeWithRetry = async (client, operation) => {
 // It is protected based on the GitHub "Source of Truth".
 // Any changes to the loop structure, delays, or variable saving will break the bot.
 // =========================================================================
+const BOT_ENGINE_AUTO_ADVANCE_DELAY_MS = Math.max(0, Number(process.env.BOT_ENGINE_AUTO_ADVANCE_DELAY_MS || 5));
+const BOT_ENGINE_DELAY_NODE_CAP_MS = Math.max(0, Number(process.env.BOT_ENGINE_DELAY_NODE_CAP_MS || 800));
+const FF_BOT_PRIORITIZE_INBOUND_REPLY = String(process.env.FF_BOT_PRIORITIZE_INBOUND_REPLY || 'true').toLowerCase() !== 'false';
+const BOT_ENGINE_INBOUND_DELAY_CAP_MS = Math.max(0, Number(process.env.BOT_ENGINE_INBOUND_DELAY_CAP_MS || 60));
+const BOT_ENGINE_VERBOSE_LOGS = String(process.env.BOT_ENGINE_VERBOSE_LOGS || 'false').toLowerCase() === 'true';
+
 const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
-    console.log(`[Bot Engine] START for ${candidate.phone_number}`);
+    if (BOT_ENGINE_VERBOSE_LOGS) console.log(`[Bot Engine] START for ${candidate.phone_number}`);
     try {
         const engineStart = nowMs();
         const MAX_ENGINE_MS = Number.parseInt(process.env.BOT_ENGINE_MAX_EXEC_MS || '2500', 10);
@@ -2835,8 +2868,15 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             }
             
             else if (data.type === 'delay') {
-                const ms = Math.min(data.delayTime || 2000, 5000);
-                await new Promise(r => setTimeout(r, ms));
+                const isInboundTriggered = Boolean(incomingText || incomingPayloadId);
+                const baseDelayMs = Math.min(data.delayTime || 2000, BOT_ENGINE_DELAY_NODE_CAP_MS);
+                const ms = (FF_BOT_PRIORITIZE_INBOUND_REPLY && isInboundTriggered)
+                    ? Math.min(baseDelayMs, BOT_ENGINE_INBOUND_DELAY_CAP_MS)
+                    : baseDelayMs;
+
+                if (ms > 0) {
+                    await new Promise(r => setTimeout(r, ms));
+                }
             }
 
             else if (data.type === 'condition') {
@@ -3095,10 +3135,12 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
 
             if (!autoAdvance) break; 
 
-            const nextEdge = edges.find(e => e.source === node.id);
+            const nextEdge = (edgeMap.get(node.id) || [])[0] || null;
             if (nextEdge) {
                 activeNodeId = nextEdge.target;
-                await new Promise(r => setTimeout(r, 200));
+                if (BOT_ENGINE_AUTO_ADVANCE_DELAY_MS > 0) {
+                    await new Promise(r => setTimeout(r, BOT_ENGINE_AUTO_ADVANCE_DELAY_MS));
+                }
             } else {
                 activeNodeId = null;
             }
