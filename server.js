@@ -1998,6 +1998,8 @@ const fetchAndStoreIncomingMedia = async ({ msg, phoneNumber, candidateId, clien
     }
 };
 
+const META_VERBOSE_LOGS = String(process.env.META_VERBOSE_LOGS || 'false').toLowerCase() === 'true';
+
 const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
@@ -2015,7 +2017,7 @@ const sendToMeta = async (phoneNumber, payload) => {
     }
 
     try {
-        console.log(`[Meta] Sending to ${to} | Type: ${payload.type}`);
+        if (META_VERBOSE_LOGS) console.log(`[Meta] Sending to ${to} | Type: ${payload.type}`);
         await getMetaClient().post(`https://graph.facebook.com/v18.0/${phoneId}/messages`, {
             messaging_product: "whatsapp",
             recipient_type: "individual",
@@ -2440,13 +2442,14 @@ const executeWithRetry = async (client, operation) => {
 // It is protected based on the GitHub "Source of Truth".
 // Any changes to the loop structure, delays, or variable saving will break the bot.
 // =========================================================================
-const BOT_ENGINE_AUTO_ADVANCE_DELAY_MS = Math.max(0, Number(process.env.BOT_ENGINE_AUTO_ADVANCE_DELAY_MS || 15));
+const BOT_ENGINE_AUTO_ADVANCE_DELAY_MS = Math.max(0, Number(process.env.BOT_ENGINE_AUTO_ADVANCE_DELAY_MS || 5));
 const BOT_ENGINE_DELAY_NODE_CAP_MS = Math.max(0, Number(process.env.BOT_ENGINE_DELAY_NODE_CAP_MS || 800));
 const FF_BOT_PRIORITIZE_INBOUND_REPLY = String(process.env.FF_BOT_PRIORITIZE_INBOUND_REPLY || 'true').toLowerCase() !== 'false';
-const BOT_ENGINE_INBOUND_DELAY_CAP_MS = Math.max(0, Number(process.env.BOT_ENGINE_INBOUND_DELAY_CAP_MS || 120));
+const BOT_ENGINE_INBOUND_DELAY_CAP_MS = Math.max(0, Number(process.env.BOT_ENGINE_INBOUND_DELAY_CAP_MS || 60));
+const BOT_ENGINE_VERBOSE_LOGS = String(process.env.BOT_ENGINE_VERBOSE_LOGS || 'false').toLowerCase() === 'true';
 
 const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
-    console.log(`[Bot Engine] START for ${candidate.phone_number}`);
+    if (BOT_ENGINE_VERBOSE_LOGS) console.log(`[Bot Engine] START for ${candidate.phone_number}`);
     try {
         const engineStart = nowMs();
         const MAX_ENGINE_MS = Number.parseInt(process.env.BOT_ENGINE_MAX_EXEC_MS || '2500', 10);
@@ -3132,7 +3135,7 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
 
             if (!autoAdvance) break; 
 
-            const nextEdge = edges.find(e => e.source === node.id);
+            const nextEdge = (edgeMap.get(node.id) || [])[0] || null;
             if (nextEdge) {
                 activeNodeId = nextEdge.target;
                 if (BOT_ENGINE_AUTO_ADVANCE_DELAY_MS > 0) {
