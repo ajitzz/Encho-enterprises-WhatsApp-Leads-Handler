@@ -2415,6 +2415,9 @@ const executeWithRetry = async (client, operation) => {
 // It is protected based on the GitHub "Source of Truth".
 // Any changes to the loop structure, delays, or variable saving will break the bot.
 // =========================================================================
+const BOT_ENGINE_AUTO_ADVANCE_DELAY_MS = Math.max(0, Number(process.env.BOT_ENGINE_AUTO_ADVANCE_DELAY_MS || 40));
+const BOT_ENGINE_DELAY_NODE_CAP_MS = Math.max(0, Number(process.env.BOT_ENGINE_DELAY_NODE_CAP_MS || 1200));
+
 const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
     console.log(`[Bot Engine] START for ${candidate.phone_number}`);
     try {
@@ -2835,7 +2838,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             }
             
             else if (data.type === 'delay') {
-                const ms = Math.min(data.delayTime || 2000, 5000);
+                const ms = Math.min(data.delayTime || 2000, BOT_ENGINE_DELAY_NODE_CAP_MS);
                 await new Promise(r => setTimeout(r, ms));
             }
 
@@ -3098,7 +3101,9 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
             const nextEdge = edges.find(e => e.source === node.id);
             if (nextEdge) {
                 activeNodeId = nextEdge.target;
-                await new Promise(r => setTimeout(r, 200));
+                if (BOT_ENGINE_AUTO_ADVANCE_DELAY_MS > 0) {
+                    await new Promise(r => setTimeout(r, BOT_ENGINE_AUTO_ADVANCE_DELAY_MS));
+                }
             } else {
                 activeNodeId = null;
             }
