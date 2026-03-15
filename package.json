@@ -19,7 +19,11 @@
     "contracts:catalog": "node scripts/generate-contract-catalog.js",
     "check:canary-perf": "node scripts/check-performance-canary.js",
     "check:sections-4-7": "node scripts/check-sections-4-7-readiness.js",
-    "check:section1-hardening": "node scripts/check-section1-hardening.js"
+    "check:section1-hardening": "node scripts/check-section1-hardening.js",
+    "check:sections-1-3": "node scripts/check-sections-1-3-readiness.js",
+    "start:modular": "node backend/app/server.js",
+    "check:rollout-modes": "node scripts/check-rollout-modes.js",
+    "check:industrial-readiness": "node scripts/check-industrial-readiness.js"
   },
   "dependencies": {
     "express": "^4.18.2",
