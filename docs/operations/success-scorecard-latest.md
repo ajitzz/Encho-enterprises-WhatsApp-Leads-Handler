@@ -1,7 +1,5 @@
 # Success Scorecard (Latest)
 
-Updated: **2026-03-15**
-
 ## Baseline + current operational metrics
 - webhook latency p95: **+1.8%** vs baseline (within +5% budget).
 - webhook latency p99: **+2.6%** vs baseline (within +8% budget).
