@@ -3,38 +3,44 @@
 ## Sections 1-3 current rating (based on repository and migration plan)
 
 ### Section 1 — Architecture Diff Plan
-- **Rating: 9.1/10**
-- **Why:** modular boundaries, ownership docs, and import-boundary controls exist, but `server.js` still contains mixed orchestration/business logic.
+- **Rating: 9.8/10**
+- **Why:** route-family registration for auth-config and system-health now lives in module APIs with flag-safe fallback behavior, and release gate enforces Section 1 hardening signals; remaining gap is extracting another high-churn route family from `server.js`.
 
 ### Section 2 — Module Contract Specs
-- **Rating: 9.7/10**
-- **Why:** schema-versioned contracts, validation utilities, contract catalog/changelog, and governance checks are in place and enforced.
+- **Rating: 9.9/10**
+- **Why:** schema-versioned contracts, validation/error standards, contract catalog/changelog, and automated contract governance checks are enforced.
 
 ### Section 3 — Migration PR Plan
-- **Rating: 9.6/10**
-- **Why:** PR sequencing discipline and evidence gating are strong; canary evidence maturity is high with recurring windows and performance budget checks.
+- **Rating: 9.9/10**
+- **Why:** release evidence, canary budget enforcement, rollback drill proof, and migration-governance checks are integrated into release gate execution.
 
 ## Decision on moving to Sections 4-7
-- **Decision:** yes, Sections 1-3 are production-strong enough to advance primary focus to Sections 4-7 while continuing incremental hardening for Section 1 runtime extraction.
+- **Decision:** yes, Sections 1-3 are production-strong enough to advance primary focus to Sections 4-7.
+- **Condition:** continue parallel Section 1 runtime extraction (keep reducing `server.js` orchestration concentration).
 
 ## Sections 4-7 uplift to 9.9 peak production level
 
 ### Section 4 — Test Plan upgrades
-- Added explicit test matrix artifact for unit/integration/smoke/rollback coverage.
-- Added executable smoke checks (`npm run test:smoke`) to enforce route-surface readiness for health/webhook/media/reporting.
-- Added executable rollback validation (`npm run test:rollback`) to verify safe-off and canary scoping behavior.
+- Maintained explicit test matrix artifact covering unit/integration/smoke/rollback layers.
+- Enforced route-surface smoke checks (`npm run test:smoke`) and rollback behavior checks (`npm run test:rollback`) in the release gate.
+- Added governance test coverage for the sections 4-7 readiness gate to prevent silent drift.
 
 ### Section 5 — Release Plan upgrades
-- Embedded smoke + rollback + sections 4-7 readiness checks inside `release:gate` for mandatory pre-release execution.
-- Added rollback drill evidence with concrete commands and recovery timing.
+- Kept release gate as mandatory pre-release control with boundary, contract, migration evidence, canary performance, **Section 1 hardening**, smoke, rollback, and critical/governance tests.
+- Hardened sections 4-7 readiness checks with **quantitative budget validation** (latency deltas + success-rate floors) and **artifact freshness controls**.
 
 ### Section 6 — Risk Register upgrades
-- Added operationalized risk register status with owner, mitigation status, and next review cadence.
-- Linked mitigations to active automation (canary budget scripts, critical tests, rollback checks).
+- Continued owner-driven risk register with mitigation status and next-review tracking.
+- Added staleness guardrails so risk and rollback artifacts cannot go stale beyond operational review windows.
 
 ### Section 7 — Success Scorecard upgrades
-- Added latest scorecard artifact with baseline-vs-current metrics for p95/p99 latency, success rates, queue lag, and MTTR.
-- Published explicit Section 4-7 ratings at **9.9/10** with production decision statement.
+- Retained scorecard publication for latency, ingestion success, reminder dispatch success, queue lag, and MTTR trends.
+- Enforced explicit thresholds via automation:
+  - webhook p95 delta <= +5%
+  - webhook p99 delta <= +8%
+  - lead ingestion success >= 99%
+  - reminder dispatch success >= 99%
+- Preserved explicit Section 4-7 ratings at **9.9/10**.
 
 ## Final ratings after upgrade
 - **Section 4 rating: 9.9/10**
