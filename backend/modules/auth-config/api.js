@@ -27,4 +27,58 @@ const buildAuthConfigRouter = ({
   };
 };
 
-module.exports = { buildAuthConfigRouter };
+const registerAuthConfigRoutes = ({
+  apiRouter,
+  moduleRouter,
+  resolveMode,
+  legacyHandlers,
+}) => {
+  const routes = [
+    {
+      method: 'get',
+      path: '/system/settings',
+      moduleHandler: moduleRouter.getSystemSettings,
+      legacyHandler: legacyHandlers.getSystemSettings,
+    },
+    {
+      method: 'patch',
+      path: '/system/settings',
+      moduleHandler: moduleRouter.patchSystemSettings,
+      legacyHandler: legacyHandlers.patchSystemSettings,
+    },
+    {
+      method: 'post',
+      path: '/auth/google',
+      moduleHandler: moduleRouter.verifyGoogle,
+      legacyHandler: legacyHandlers.verifyGoogle,
+    },
+    {
+      method: 'get',
+      path: '/bot/settings',
+      moduleHandler: moduleRouter.getBotSettings,
+      legacyHandler: legacyHandlers.getBotSettings,
+    },
+    {
+      method: 'post',
+      path: '/bot/save',
+      moduleHandler: moduleRouter.saveBotSettings,
+      legacyHandler: legacyHandlers.saveBotSettings,
+    },
+    {
+      method: 'post',
+      path: '/bot/publish',
+      moduleHandler: moduleRouter.publishBot,
+      legacyHandler: legacyHandlers.publishBot,
+    },
+  ];
+
+  for (const route of routes) {
+    apiRouter[route.method](route.path, async (req, res) => {
+      const mode = resolveMode(req);
+      if (mode !== 'off') return route.moduleHandler(req, res);
+      return route.legacyHandler(req, res);
+    });
+  }
+};
+
+module.exports = { buildAuthConfigRouter, registerAuthConfigRoutes };

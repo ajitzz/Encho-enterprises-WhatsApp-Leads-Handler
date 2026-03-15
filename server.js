@@ -15,8 +15,8 @@ require('dotenv').config();
 const { parseBooleanFlag, parsePercent, resolveModuleMode } = require('./backend/shared/infra/flags');
 const { buildLeadIngestionFacade } = require('./backend/modules/lead-ingestion/api');
 const { buildRemindersRouter } = require('./backend/modules/reminders-escalations/api');
-const { buildAuthConfigRouter } = require('./backend/modules/auth-config/api');
-const { buildSystemHealthRouter } = require('./backend/modules/system-health/api');
+const { buildAuthConfigRouter, registerAuthConfigRoutes } = require('./backend/modules/auth-config/api');
+const { buildSystemHealthRouter, registerSystemHealthRoutes } = require('./backend/modules/system-health/api');
 
 process.on('unhandledRejection', (reason) => {
     console.error('[UNHANDLED REJECTION]', reason);
@@ -3954,18 +3954,15 @@ const authConfigRouter = buildAuthConfigRouter({
     legacyPatchSystemSettingsHandler: handleSystemSettingsPatchLegacy,
 });
 
-const handleAuthConfigRoute = ({ req, res, handler }) => {
+const resolveAuthConfigMode = (req) => {
     const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
-    const mode = resolveModuleMode({
+    return resolveModuleMode({
         flagValue: AUTH_CONFIG_MODULE_FLAG,
         tenantId,
         requestId: req.requestId,
         canaryPercent: AUTH_CONFIG_CANARY_PERCENT,
         tenantAllowList: MODULE_CANARY_TENANTS,
     });
-
-    if (mode !== 'off') return handler(req, res);
-    return null;
 };
 
 const systemHealthRouter = buildSystemHealthRouter({
@@ -3976,84 +3973,42 @@ const systemHealthRouter = buildSystemHealthRouter({
     legacyDebugStatusHandler: handleDebugStatusLegacy,
 });
 
-const handleSystemHealthRoute = ({ req, res, handler }) => {
+const resolveSystemHealthMode = (req) => {
     const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
-    const mode = resolveModuleMode({
+    return resolveModuleMode({
         flagValue: SYSTEM_HEALTH_MODULE_FLAG,
         tenantId,
         requestId: req.requestId,
         canaryPercent: SYSTEM_HEALTH_CANARY_PERCENT,
         tenantAllowList: MODULE_CANARY_TENANTS,
     });
-
-    if (mode !== 'off') return handler(req, res);
-    return null;
 };
 
-apiRouter.get('/health', async (req, res) => {
-    const result = handleSystemHealthRoute({ req, res, handler: systemHealthRouter.health });
-    if (result) return result;
-    return handleHealthLegacy(req, res);
+registerSystemHealthRoutes({
+    apiRouter,
+    moduleRouter: systemHealthRouter,
+    resolveMode: resolveSystemHealthMode,
+    legacyHandlers: {
+        health: handleHealthLegacy,
+        ready: handleReadyLegacy,
+        operationalStatus: handleOperationalStatusLegacy,
+        ping: handlePingLegacy,
+        debugStatus: handleDebugStatusLegacy,
+    },
 });
 
-apiRouter.get('/ready', async (req, res) => {
-    const result = handleSystemHealthRoute({ req, res, handler: systemHealthRouter.ready });
-    if (result) return result;
-    return handleReadyLegacy(req, res);
-});
-
-apiRouter.get('/system/operational-status', async (req, res) => {
-    const result = handleSystemHealthRoute({ req, res, handler: systemHealthRouter.operationalStatus });
-    if (result) return result;
-    return handleOperationalStatusLegacy(req, res);
-});
-
-apiRouter.get('/ping', async (req, res) => {
-    const result = handleSystemHealthRoute({ req, res, handler: systemHealthRouter.ping });
-    if (result) return result;
-    return handlePingLegacy(req, res);
-});
-
-apiRouter.get('/debug/status', async (req, res) => {
-    const result = handleSystemHealthRoute({ req, res, handler: systemHealthRouter.debugStatus });
-    if (result) return result;
-    return handleDebugStatusLegacy(req, res);
-});
-
-apiRouter.get('/system/settings', async (req, res) => {
-    const result = handleAuthConfigRoute({ req, res, handler: authConfigRouter.getSystemSettings });
-    if (result) return result;
-    return handleSystemSettingsGetLegacy(req, res);
-});
-
-apiRouter.patch('/system/settings', async (req, res) => {
-    const result = handleAuthConfigRoute({ req, res, handler: authConfigRouter.patchSystemSettings });
-    if (result) return result;
-    return handleSystemSettingsPatchLegacy(req, res);
-});
-
-apiRouter.post('/auth/google', async (req, res) => {
-    const result = handleAuthConfigRoute({ req, res, handler: authConfigRouter.verifyGoogle });
-    if (result) return result;
-    return handleAuthGoogleLegacy(req, res);
-});
-
-apiRouter.get('/bot/settings', async (req, res) => {
-    const result = handleAuthConfigRoute({ req, res, handler: authConfigRouter.getBotSettings });
-    if (result) return result;
-    return handleBotSettingsGetLegacy(req, res);
-});
-
-apiRouter.post('/bot/save', async (req, res) => {
-    const result = handleAuthConfigRoute({ req, res, handler: authConfigRouter.saveBotSettings });
-    if (result) return result;
-    return handleBotSaveLegacy(req, res);
-});
-
-apiRouter.post('/bot/publish', async (req, res) => {
-    const result = handleAuthConfigRoute({ req, res, handler: authConfigRouter.publishBot });
-    if (result) return result;
-    return handleBotPublishLegacy(req, res);
+registerAuthConfigRoutes({
+    apiRouter,
+    moduleRouter: authConfigRouter,
+    resolveMode: resolveAuthConfigMode,
+    legacyHandlers: {
+        verifyGoogle: handleAuthGoogleLegacy,
+        getBotSettings: handleBotSettingsGetLegacy,
+        saveBotSettings: handleBotSaveLegacy,
+        publishBot: handleBotPublishLegacy,
+        getSystemSettings: handleSystemSettingsGetLegacy,
+        patchSystemSettings: handleSystemSettingsPatchLegacy,
+    },
 });
 
 apiRouter.get('/drivers', async (req, res) => {

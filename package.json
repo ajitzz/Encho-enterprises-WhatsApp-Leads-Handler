@@ -18,7 +18,8 @@
     "check:migration-evidence": "node scripts/check-migration-evidence.js",
     "contracts:catalog": "node scripts/generate-contract-catalog.js",
     "check:canary-perf": "node scripts/check-performance-canary.js",
-    "check:sections-4-7": "node scripts/check-sections-4-7-readiness.js"
+    "check:sections-4-7": "node scripts/check-sections-4-7-readiness.js",
+    "check:section1-hardening": "node scripts/check-section1-hardening.js"
   },
   "dependencies": {
     "express": "^4.18.2",

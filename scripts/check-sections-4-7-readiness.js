@@ -14,6 +14,18 @@ const read = (relPath) => {
   return fs.readFileSync(fullPath, 'utf8');
 };
 
+const assertRecentEvidence = (relPath, maxAgeDays) => {
+  const fullPath = path.join(root, relPath);
+  if (!fs.existsSync(fullPath)) return;
+
+  const stats = fs.statSync(fullPath);
+  const ageMs = Date.now() - stats.mtimeMs;
+  const ageDays = ageMs / (1000 * 60 * 60 * 24);
+  if (ageDays > maxAgeDays) {
+    problems.push(`${relPath} is stale (${ageDays.toFixed(1)} days old, max ${maxAgeDays} days)`);
+  }
+};
+
 const packageJson = JSON.parse(read('package.json') || '{}');
 const scripts = packageJson.scripts || {};
 
@@ -93,7 +105,44 @@ if (scorecard) {
       }
     }
   }
+
+  const percentDelta = (name, maxAllowed) => {
+    const regex = new RegExp(`${name}:[^\n]*?([+-]?\\d+(?:\\.\\d+)?)%`, 'i');
+    const match = scorecard.match(regex);
+    if (!match) {
+      problems.push(`success-scorecard-latest.md missing percent delta for ${name}`);
+      return;
+    }
+
+    const value = Number.parseFloat(match[1]);
+    if (!Number.isFinite(value) || value > maxAllowed) {
+      problems.push(`${name} exceeds budget (${value}% > ${maxAllowed}%)`);
+    }
+  };
+
+  const rateFloor = (name, minAllowed) => {
+    const regex = new RegExp(`${name}:[^\n]*?(\\d+(?:\\.\\d+)?)%`, 'i');
+    const match = scorecard.match(regex);
+    if (!match) {
+      problems.push(`success-scorecard-latest.md missing rate for ${name}`);
+      return;
+    }
+
+    const value = Number.parseFloat(match[1]);
+    if (!Number.isFinite(value) || value < minAllowed) {
+      problems.push(`${name} below production floor (${value}% < ${minAllowed}%)`);
+    }
+  };
+
+  percentDelta('webhook latency p95', 5);
+  percentDelta('webhook latency p99', 8);
+  rateFloor('lead ingestion success rate', 99);
+  rateFloor('reminder dispatch success', 99);
 }
+
+assertRecentEvidence('docs/operations/success-scorecard-latest.md', 14);
+assertRecentEvidence('docs/operations/risk-register-status.md', 14);
+assertRecentEvidence('docs/release-evidence/rollback-drill-2026-03-15.md', 30);
 
 if (problems.length > 0) {
   console.error('Sections 4-7 readiness check failed:');
