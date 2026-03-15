@@ -5,6 +5,7 @@ const { resolveModuleMode } = require('../backend/shared/infra/flags');
 const { buildLatencyTracker, parsePositiveInt } = require('../backend/shared/infra/perf');
 const { LeadIngestionService } = require('../backend/modules/lead-ingestion/service');
 const { ReminderServiceFacade } = require('../backend/modules/reminders-escalations/service');
+const { AuthConfigServiceFacade } = require('../backend/modules/auth-config/service');
 const {
   validateLeadIngestedPayload,
   toLegacyLeadIngestedPayload,
@@ -748,4 +749,36 @@ test('lead ingestion service defers bot when sync budget is exceeded', async () 
   assert.deepEqual(result, { accepted: true, path: 'module-service' });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(runBotCalls, 1);
+});
+
+
+test('auth-config facade delegates auth and bot/system settings handlers', async () => {
+  const calls = [];
+  const facade = new AuthConfigServiceFacade({
+    legacyVerifyGoogleHandler: async () => { calls.push('verifyGoogle'); return { ok: true }; },
+    legacyGetBotSettingsHandler: async () => { calls.push('getBotSettings'); return { ok: true }; },
+    legacySaveBotSettingsHandler: async () => { calls.push('saveBotSettings'); return { ok: true }; },
+    legacyPublishBotHandler: async () => { calls.push('publishBot'); return { ok: true }; },
+    legacyGetSystemSettingsHandler: async () => { calls.push('getSystemSettings'); return { ok: true }; },
+    legacyPatchSystemSettingsHandler: async () => { calls.push('patchSystemSettings'); return { ok: true }; },
+  });
+
+  const req = { requestId: 'r-auth-1' };
+  const res = {};
+
+  await facade.verifyGoogle(req, res);
+  await facade.getBotSettings(req, res);
+  await facade.saveBotSettings(req, res);
+  await facade.publishBot(req, res);
+  await facade.getSystemSettings(req, res);
+  await facade.patchSystemSettings(req, res);
+
+  assert.deepEqual(calls, [
+    'verifyGoogle',
+    'getBotSettings',
+    'saveBotSettings',
+    'publishBot',
+    'getSystemSettings',
+    'patchSystemSettings',
+  ]);
 });

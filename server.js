@@ -15,6 +15,7 @@ require('dotenv').config();
 const { parseBooleanFlag, parsePercent, resolveModuleMode } = require('./backend/shared/infra/flags');
 const { buildLeadIngestionFacade } = require('./backend/modules/lead-ingestion/api');
 const { buildRemindersRouter } = require('./backend/modules/reminders-escalations/api');
+const { buildAuthConfigRouter } = require('./backend/modules/auth-config/api');
 
 process.on('unhandledRejection', (reason) => {
     console.error('[UNHANDLED REJECTION]', reason);
@@ -29,6 +30,8 @@ const REQUEST_CONTEXT_FLAG = String(process.env.FF_REQUEST_CONTEXT || 'true').to
 const LEAD_INGESTION_FLAG = String(process.env.FF_LEAD_INGESTION_MODULE || 'off').toLowerCase();
 const REMINDERS_MODULE_FLAG = String(process.env.FF_REMINDERS_MODULE || 'off').toLowerCase();
 const REMINDERS_CANARY_PERCENT = parsePercent(process.env.FF_REMINDERS_MODULE_PERCENT || 0);
+const AUTH_CONFIG_MODULE_FLAG = String(process.env.FF_AUTH_CONFIG_MODULE || 'off').toLowerCase();
+const AUTH_CONFIG_CANARY_PERCENT = parsePercent(process.env.FF_AUTH_CONFIG_MODULE_PERCENT || 0);
 const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, false);
 const MODULE_CANARY_TENANTS = String(process.env.FF_CANARY_TENANTS || '')
     .split(',')
@@ -3220,7 +3223,7 @@ apiRouter.get('/ready', async (req, res) => {
     }
 });
 
-apiRouter.get('/system/settings', async (req, res) => {
+const handleSystemSettingsGetLegacy = async (req, res) => {
     try {
         await withDb(async (client) => {
             const config = await getSystemConfig(client);
@@ -3229,9 +3232,9 @@ apiRouter.get('/system/settings', async (req, res) => {
     } catch (e) {
         res.status(500).json({ error: e.message || 'Failed to load system settings' });
     }
-});
+};
 
-apiRouter.patch('/system/settings', async (req, res) => {
+const handleSystemSettingsPatchLegacy = async (req, res) => {
     try {
         const updates = req.body || {};
         await withDb(async (client) => {
@@ -3262,7 +3265,7 @@ apiRouter.patch('/system/settings', async (req, res) => {
     } catch (e) {
         res.status(500).json({ error: e.message || 'Failed to update system settings' });
     }
-});
+};
 
 apiRouter.get('/system/operational-status', async (req, res) => {
     const status = {
@@ -3905,24 +3908,24 @@ apiRouter.post('/webhook', async (req, res) => {
     await processWebhookLegacy({ body: req.body, req, res });
 });
 
-apiRouter.post('/auth/google', async (req, res) => {
+const handleAuthGoogleLegacy = async (req, res) => {
     try {
         const { credential } = req.body;
         const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
         res.json({ success: true, user: ticket.getPayload() });
     } catch (e) { res.status(401).json({ success: false, error: e.message }); }
-});
+};
 
-apiRouter.get('/bot/settings', async (req, res) => {
+const handleBotSettingsGetLegacy = async (req, res) => {
     try {
         await withDb(async (client) => {
             const r = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
             res.json(r.rows[0]?.settings || { isEnabled: false, nodes: [], edges: [] });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
-});
+};
 
-apiRouter.post('/bot/save', async (req, res) => {
+const handleBotSaveLegacy = async (req, res) => {
     try {
         await withDb(async (client) => {
             await client.query("INSERT INTO bot_versions (id, status, settings, created_at) VALUES ($1, 'published', $2, NOW())", [crypto.randomUUID(), req.body]);
@@ -3934,9 +3937,69 @@ apiRouter.post('/bot/save', async (req, res) => {
         memoryCache.botSettingsInFlight = null;
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
+};
+
+const handleBotPublishLegacy = async (req, res) => res.json({ success: true });
+
+
+const authConfigRouter = buildAuthConfigRouter({
+    legacyVerifyGoogleHandler: handleAuthGoogleLegacy,
+    legacyGetBotSettingsHandler: handleBotSettingsGetLegacy,
+    legacySaveBotSettingsHandler: handleBotSaveLegacy,
+    legacyPublishBotHandler: handleBotPublishLegacy,
+    legacyGetSystemSettingsHandler: handleSystemSettingsGetLegacy,
+    legacyPatchSystemSettingsHandler: handleSystemSettingsPatchLegacy,
 });
 
-apiRouter.post('/bot/publish', async (req, res) => res.json({ success: true }));
+const handleAuthConfigRoute = ({ req, res, handler }) => {
+    const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
+    const mode = resolveModuleMode({
+        flagValue: AUTH_CONFIG_MODULE_FLAG,
+        tenantId,
+        requestId: req.requestId,
+        canaryPercent: AUTH_CONFIG_CANARY_PERCENT,
+        tenantAllowList: MODULE_CANARY_TENANTS,
+    });
+
+    if (mode !== 'off') return handler(req, res);
+    return null;
+};
+
+apiRouter.get('/system/settings', async (req, res) => {
+    const result = handleAuthConfigRoute({ req, res, handler: authConfigRouter.getSystemSettings });
+    if (result) return result;
+    return handleSystemSettingsGetLegacy(req, res);
+});
+
+apiRouter.patch('/system/settings', async (req, res) => {
+    const result = handleAuthConfigRoute({ req, res, handler: authConfigRouter.patchSystemSettings });
+    if (result) return result;
+    return handleSystemSettingsPatchLegacy(req, res);
+});
+
+apiRouter.post('/auth/google', async (req, res) => {
+    const result = handleAuthConfigRoute({ req, res, handler: authConfigRouter.verifyGoogle });
+    if (result) return result;
+    return handleAuthGoogleLegacy(req, res);
+});
+
+apiRouter.get('/bot/settings', async (req, res) => {
+    const result = handleAuthConfigRoute({ req, res, handler: authConfigRouter.getBotSettings });
+    if (result) return result;
+    return handleBotSettingsGetLegacy(req, res);
+});
+
+apiRouter.post('/bot/save', async (req, res) => {
+    const result = handleAuthConfigRoute({ req, res, handler: authConfigRouter.saveBotSettings });
+    if (result) return result;
+    return handleBotSaveLegacy(req, res);
+});
+
+apiRouter.post('/bot/publish', async (req, res) => {
+    const result = handleAuthConfigRoute({ req, res, handler: authConfigRouter.publishBot });
+    if (result) return result;
+    return handleBotPublishLegacy(req, res);
+});
 
 apiRouter.get('/drivers', async (req, res) => {
     try {
