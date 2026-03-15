@@ -442,7 +442,7 @@ test('lead ingestion service evicts oldest dedupe id when cache reaches max size
   assert.equal(dbCalls, 3);
 });
 
-test('reminder facade delegates schedule and processQueue handlers', async () => {
+test('reminder facade delegates schedule, queue, list, delete, and patch handlers', async () => {
   const calls = [];
   const facade = new ReminderServiceFacade({
     legacyScheduleHandler: async () => {
@@ -453,12 +453,27 @@ test('reminder facade delegates schedule and processQueue handlers', async () =>
       calls.push('queue');
       return 'queued';
     },
+    legacyListDriverScheduledHandler: async () => {
+      calls.push('list');
+      return 'listed';
+    },
+    legacyDeleteScheduledHandler: async () => {
+      calls.push('delete');
+      return 'deleted';
+    },
+    legacyPatchScheduledHandler: async () => {
+      calls.push('patch');
+      return 'patched';
+    },
   });
 
   await facade.schedule({ requestId: 'r-2' }, {});
   await facade.processQueue({ requestId: 'r-2' }, {});
+  await facade.listDriverScheduled({ requestId: 'r-2' }, {});
+  await facade.deleteScheduled({ requestId: 'r-2' }, {});
+  await facade.patchScheduled({ requestId: 'r-2' }, {});
 
-  assert.deepEqual(calls, ['schedule', 'queue']);
+  assert.deepEqual(calls, ['schedule', 'queue', 'list', 'delete', 'patch']);
 });
 
 test('parsePositiveInt uses fallback for invalid values', () => {

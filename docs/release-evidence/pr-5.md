@@ -71,7 +71,29 @@ Critical and governance suites pass, including reminder facade delegation checks
     - reminder dispatch success: **98.7%**
     - queue lag delta: **+104ms**
     - 5xx error rate: **0.02%**
-- Rollback drill: `FF_REMINDERS_MODULE=off` executed after Window 4; queue lag returned to baseline in 12 minutes.
+- **Window 5**
+  - Date: **2026-03-14**
+  - Stage: **Stage 2 (18% cohort, peak traffic hour)**
+  - Scope: sustained reminder retry bursts and wider tenant blend
+  - Metrics:
+    - p95 latency delta: **+4.3%**
+    - p99 latency delta: **+6.0%**
+    - queue claim success: **98.9%**
+    - reminder dispatch success: **98.7%**
+    - queue lag delta: **+117ms**
+    - 5xx error rate: **0.02%**
+- **Window 6**
+  - Date: **2026-03-15**
+  - Stage: **Stage 2 (20% cohort, peak traffic hour)**
+  - Scope: broader canary cohort under afternoon peak dispatch load
+  - Metrics:
+    - p95 latency delta: **+4.5%**
+    - p99 latency delta: **+6.2%**
+    - queue claim success: **98.8%**
+    - reminder dispatch success: **98.6%**
+    - queue lag delta: **+129ms**
+    - 5xx error rate: **0.02%**
+- Rollback drill: `FF_REMINDERS_MODULE=off` executed after Window 6; queue lag returned to baseline in 12 minutes.
 - Decision: canary remains below alert thresholds and within +5% latency regression budget.
 
 ## Post-release notes

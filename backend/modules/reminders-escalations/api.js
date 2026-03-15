@@ -1,11 +1,26 @@
 const { ReminderServiceFacade } = require('./service');
 
-const buildRemindersRouter = ({ legacyScheduleHandler, legacyQueueHandler }) => {
-  const facade = new ReminderServiceFacade({ legacyScheduleHandler, legacyQueueHandler });
+const buildRemindersRouter = ({
+  legacyScheduleHandler,
+  legacyQueueHandler,
+  legacyListDriverScheduledHandler,
+  legacyDeleteScheduledHandler,
+  legacyPatchScheduledHandler,
+}) => {
+  const facade = new ReminderServiceFacade({
+    legacyScheduleHandler,
+    legacyQueueHandler,
+    legacyListDriverScheduledHandler,
+    legacyDeleteScheduledHandler,
+    legacyPatchScheduledHandler,
+  });
 
   return {
     schedule: (req, res) => facade.schedule(req, res),
     processQueue: (req, res) => facade.processQueue(req, res),
+    listDriverScheduled: (req, res) => facade.listDriverScheduled(req, res),
+    deleteScheduled: (req, res) => facade.deleteScheduled(req, res),
+    patchScheduled: (req, res) => facade.patchScheduled(req, res),
   };
 };
 
