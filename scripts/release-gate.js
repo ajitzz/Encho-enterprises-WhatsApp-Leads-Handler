@@ -17,4 +17,4 @@ run('npm', ['run', 'test:rollback']);
 run('npm', ['run', 'check:sections-4-7']);
 run('npm', ['run', 'test:governance']);
 run('npm', ['run', 'test:critical']);
-console.log('\nRelease gate passed: governance + critical suites are green.');
+console.log('\nRelease gate passed: governance, critical, smoke, rollback, and sections 4-7 readiness checks are green.');
