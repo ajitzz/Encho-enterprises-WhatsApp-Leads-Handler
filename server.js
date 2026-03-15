@@ -4684,10 +4684,9 @@ app.use((err, req, res, next) => {
 });
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
-if (require.main === module) {
-    const PORT = process.env.PORT || 3001;
-    app.listen(PORT, () => {
-        console.log(`Server running on ${PORT}`);
+const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
+    return app.listen(port, () => {
+        console.log(`Server running on ${port}`);
         // Auto-Init Check on Start (For Local/VPS, NOT Vercel)
         (async () => {
             try {
@@ -4712,6 +4711,10 @@ if (require.main === module) {
             } catch(e) { console.error("[Auto-Init] Failed:", e.message); }
         })();
     });
+};
+
+if (require.main === module) {
+    startServer();
 }
 
-module.exports = app;
+module.exports = { app, startServer };
