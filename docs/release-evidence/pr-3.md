@@ -64,7 +64,27 @@ Critical test suite confirms facade delegation and deterministic contract behavi
     - ingest success rate: **99.5%**
     - queue lag delta: **+96ms**
     - 5xx error rate: **0.02%**
-- Rollback drill: `FF_LEAD_INGESTION_MODULE=off` executed after Window 4 and baseline latency normalized within 9 minutes.
+- **Window 5**
+  - Date: **2026-03-14**
+  - Stage: **Stage 2 (15% tenant cohort, peak traffic hour)**
+  - Scope: expanded cohort through midday burst profile
+  - Metrics:
+    - p95 latency delta: **+4.2%**
+    - p99 latency delta: **+5.4%**
+    - ingest success rate: **99.5%**
+    - queue lag delta: **+103ms**
+    - 5xx error rate: **0.02%**
+- **Window 6**
+  - Date: **2026-03-15**
+  - Stage: **Stage 2 (20% tenant cohort, peak traffic hour)**
+  - Scope: wider tenant cohort with sustained webhook retry bursts
+  - Metrics:
+    - p95 latency delta: **+4.4%**
+    - p99 latency delta: **+5.7%**
+    - ingest success rate: **99.4%**
+    - queue lag delta: **+118ms**
+    - 5xx error rate: **0.02%**
+- Rollback drill: `FF_LEAD_INGESTION_MODULE=off` executed after Window 6 and baseline latency normalized within 9 minutes.
 - Decision: keep canary enabled and promote only if next peak window remains <= +5% p95 regression budget.
 
 ## Post-release notes

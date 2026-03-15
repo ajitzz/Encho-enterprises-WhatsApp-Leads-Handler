@@ -4390,7 +4390,13 @@ apiRouter.post('/scheduled-messages', async (req, res) => {
     return handleScheduledMessagesLegacy(req, res);
 });
 
-apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => {
+apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => remindersRouter.listDriverScheduled(req, res));
+
+apiRouter.delete('/scheduled-messages/:id', async (req, res) => remindersRouter.deleteScheduled(req, res));
+
+apiRouter.patch('/scheduled-messages/:id', async (req, res) => remindersRouter.patchScheduled(req, res));
+
+const handleDriverScheduledMessagesLegacy = async (req, res) => {
     try {
         await withDb(async (client) => {
             const r = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status = 'pending' ORDER BY scheduled_time ASC`, [req.params.id]);
@@ -4402,16 +4408,16 @@ apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => {
             res.json(mapped);
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
-});
+};
 
-apiRouter.delete('/scheduled-messages/:id', async (req, res) => {
+const handleDeleteScheduledMessageLegacy = async (req, res) => {
     try {
         await withDb(async (client) => { await client.query("DELETE FROM scheduled_messages WHERE id = $1", [req.params.id]); });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
-});
+};
 
-apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
+const handlePatchScheduledMessageLegacy = async (req, res) => {
     try {
         const { text, scheduledTime } = req.body;
         await withDb(async (client) => {
@@ -4426,7 +4432,7 @@ apiRouter.patch('/scheduled-messages/:id', async (req, res) => {
         });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
-});
+};
 
 // --- ADVANCED PARALLEL CRON PROCESSOR ---
 const handleCronProcessQueueLegacy = async (req, res) => {
@@ -4516,6 +4522,9 @@ const handleCronProcessQueueLegacy = async (req, res) => {
 const remindersRouter = buildRemindersRouter({
     legacyScheduleHandler: handleScheduledMessagesLegacy,
     legacyQueueHandler: handleCronProcessQueueLegacy,
+    legacyListDriverScheduledHandler: handleDriverScheduledMessagesLegacy,
+    legacyDeleteScheduledHandler: handleDeleteScheduledMessageLegacy,
+    legacyPatchScheduledHandler: handlePatchScheduledMessageLegacy,
 });
 
 apiRouter.get('/cron/process-queue', async (req, res) => {
