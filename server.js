@@ -16,6 +16,7 @@ const { parseBooleanFlag, parsePercent, resolveModuleMode } = require('./backend
 const { buildLeadIngestionFacade } = require('./backend/modules/lead-ingestion/api');
 const { buildRemindersRouter } = require('./backend/modules/reminders-escalations/api');
 const { buildAuthConfigRouter } = require('./backend/modules/auth-config/api');
+const { buildSystemHealthRouter } = require('./backend/modules/system-health/api');
 
 process.on('unhandledRejection', (reason) => {
     console.error('[UNHANDLED REJECTION]', reason);
@@ -32,6 +33,8 @@ const REMINDERS_MODULE_FLAG = String(process.env.FF_REMINDERS_MODULE || 'off').t
 const REMINDERS_CANARY_PERCENT = parsePercent(process.env.FF_REMINDERS_MODULE_PERCENT || 0);
 const AUTH_CONFIG_MODULE_FLAG = String(process.env.FF_AUTH_CONFIG_MODULE || 'off').toLowerCase();
 const AUTH_CONFIG_CANARY_PERCENT = parsePercent(process.env.FF_AUTH_CONFIG_MODULE_PERCENT || 0);
+const SYSTEM_HEALTH_MODULE_FLAG = String(process.env.FF_SYSTEM_HEALTH_MODULE || 'off').toLowerCase();
+const SYSTEM_HEALTH_CANARY_PERCENT = parsePercent(process.env.FF_SYSTEM_HEALTH_MODULE_PERCENT || 0);
 const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, false);
 const MODULE_CANARY_TENANTS = String(process.env.FF_CANARY_TENANTS || '')
     .split(',')
@@ -3203,9 +3206,9 @@ if (REQUEST_CONTEXT_FLAG) {
 
 const apiRouter = express.Router();
 
-apiRouter.get('/health', (req, res) => res.json({ status: 'ok', timestamp: Date.now() }));
+const handleHealthLegacy = async (req, res) => res.json({ status: 'ok', timestamp: Date.now() });
 
-apiRouter.get('/ready', async (req, res) => {
+const handleReadyLegacy = async (req, res) => {
     try {
         await withDb(async (client) => {
             await client.query('SELECT 1');
@@ -3221,7 +3224,7 @@ apiRouter.get('/ready', async (req, res) => {
         });
         res.status(503).json({ status: 'not_ready', error: error.message });
     }
-});
+};
 
 const handleSystemSettingsGetLegacy = async (req, res) => {
     try {
@@ -3267,7 +3270,7 @@ const handleSystemSettingsPatchLegacy = async (req, res) => {
     }
 };
 
-apiRouter.get('/system/operational-status', async (req, res) => {
+const handleOperationalStatusLegacy = async (req, res) => {
     const status = {
         timestamp: new Date().toISOString(),
         postgres: { state: 'unknown', reason: null },
@@ -3312,7 +3315,7 @@ apiRouter.get('/system/operational-status', async (req, res) => {
 
     status.integrations.googleSheets = await checkGoogleSheetsOperationalStatus();
     res.json(status);
-});
+};
 
 
 apiRouter.get('/media', async (req, res) => {
@@ -3739,7 +3742,7 @@ apiRouter.get('/showcase/status', async (req, res) => {
 });
 
 // --- DEEP WAKE PING ---
-apiRouter.get('/ping', async (req, res) => {
+const handlePingLegacy = async (req, res) => {
     try {
         if (pgPool) {
              // Wakes up Neon Postgres
@@ -3752,9 +3755,9 @@ apiRouter.get('/ping', async (req, res) => {
         console.error("Ping DB Wake Failed", e.message);
         res.status(200).send('pong - db waking...');
     }
-});
+};
 
-apiRouter.get('/debug/status', async (req, res) => {
+const handleDebugStatusLegacy = async (req, res) => {
     const status = {
         postgres: 'unknown',
         tables: { candidates: false, bot_versions: false },
@@ -3780,7 +3783,7 @@ apiRouter.get('/debug/status', async (req, res) => {
         status.lastError = e.message;
     }
     res.json(status);
-});
+};
 
 apiRouter.get('/webhook', (req, res) => {
     if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
@@ -3964,6 +3967,58 @@ const handleAuthConfigRoute = ({ req, res, handler }) => {
     if (mode !== 'off') return handler(req, res);
     return null;
 };
+
+const systemHealthRouter = buildSystemHealthRouter({
+    legacyHealthHandler: handleHealthLegacy,
+    legacyReadyHandler: handleReadyLegacy,
+    legacyOperationalStatusHandler: handleOperationalStatusLegacy,
+    legacyPingHandler: handlePingLegacy,
+    legacyDebugStatusHandler: handleDebugStatusLegacy,
+});
+
+const handleSystemHealthRoute = ({ req, res, handler }) => {
+    const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
+    const mode = resolveModuleMode({
+        flagValue: SYSTEM_HEALTH_MODULE_FLAG,
+        tenantId,
+        requestId: req.requestId,
+        canaryPercent: SYSTEM_HEALTH_CANARY_PERCENT,
+        tenantAllowList: MODULE_CANARY_TENANTS,
+    });
+
+    if (mode !== 'off') return handler(req, res);
+    return null;
+};
+
+apiRouter.get('/health', async (req, res) => {
+    const result = handleSystemHealthRoute({ req, res, handler: systemHealthRouter.health });
+    if (result) return result;
+    return handleHealthLegacy(req, res);
+});
+
+apiRouter.get('/ready', async (req, res) => {
+    const result = handleSystemHealthRoute({ req, res, handler: systemHealthRouter.ready });
+    if (result) return result;
+    return handleReadyLegacy(req, res);
+});
+
+apiRouter.get('/system/operational-status', async (req, res) => {
+    const result = handleSystemHealthRoute({ req, res, handler: systemHealthRouter.operationalStatus });
+    if (result) return result;
+    return handleOperationalStatusLegacy(req, res);
+});
+
+apiRouter.get('/ping', async (req, res) => {
+    const result = handleSystemHealthRoute({ req, res, handler: systemHealthRouter.ping });
+    if (result) return result;
+    return handlePingLegacy(req, res);
+});
+
+apiRouter.get('/debug/status', async (req, res) => {
+    const result = handleSystemHealthRoute({ req, res, handler: systemHealthRouter.debugStatus });
+    if (result) return result;
+    return handleDebugStatusLegacy(req, res);
+});
 
 apiRouter.get('/system/settings', async (req, res) => {
     const result = handleAuthConfigRoute({ req, res, handler: authConfigRouter.getSystemSettings });
