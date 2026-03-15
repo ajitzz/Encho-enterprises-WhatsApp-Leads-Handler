@@ -6,6 +6,7 @@ const { buildLatencyTracker, parsePositiveInt } = require('../backend/shared/inf
 const { LeadIngestionService } = require('../backend/modules/lead-ingestion/service');
 const { ReminderServiceFacade } = require('../backend/modules/reminders-escalations/service');
 const { AuthConfigServiceFacade } = require('../backend/modules/auth-config/service');
+const { SystemHealthServiceFacade } = require('../backend/modules/system-health/service');
 const {
   validateLeadIngestedPayload,
   toLegacyLeadIngestedPayload,
@@ -441,6 +442,25 @@ test('lead ingestion service evicts oldest dedupe id when cache reaches max size
   assert.deepEqual(third, { accepted: true, path: 'module-service' });
   assert.equal(runBotCalls, 3);
   assert.equal(dbCalls, 3);
+});
+
+test('system-health facade delegates health, ready, operational, ping, and debug handlers', async () => {
+  const calls = [];
+  const facade = new SystemHealthServiceFacade({
+    legacyHealthHandler: async () => { calls.push('health'); return 'ok'; },
+    legacyReadyHandler: async () => { calls.push('ready'); return 'ready'; },
+    legacyOperationalStatusHandler: async () => { calls.push('operational'); return 'operational'; },
+    legacyPingHandler: async () => { calls.push('ping'); return 'pong'; },
+    legacyDebugStatusHandler: async () => { calls.push('debug'); return 'debug'; },
+  });
+
+  await facade.health({ requestId: 'r-sys-1' }, {});
+  await facade.ready({ requestId: 'r-sys-1' }, {});
+  await facade.operationalStatus({ requestId: 'r-sys-1' }, {});
+  await facade.ping({ requestId: 'r-sys-1' }, {});
+  await facade.debugStatus({ requestId: 'r-sys-1' }, {});
+
+  assert.deepEqual(calls, ['health', 'ready', 'operational', 'ping', 'debug']);
 });
 
 test('reminder facade delegates schedule, queue, list, delete, and patch handlers', async () => {
