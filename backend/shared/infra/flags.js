@@ -29,7 +29,6 @@ const resolveModuleMode = ({ flagValue = 'off', tenantId, requestId, canaryPerce
   const mode = normalize(flagValue, 'off');
   if (mode === 'off') return 'off';
   if (mode === 'on' || mode === 'full') return 'on';
-  if (mode === 'shadow') return 'shadow';
   if (mode === 'canary') {
     if (isCanaryTenant(tenantId, tenantAllowList)) return 'canary';
     if (isCanaryPercentHit(requestId || tenantId, canaryPercent)) return 'canary';

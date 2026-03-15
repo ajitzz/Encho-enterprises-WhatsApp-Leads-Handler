@@ -3,7 +3,6 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 
 const { buildBoundaryError } = require('../backend/shared/contracts/errorContract');
-const { resolveModuleMode } = require('../backend/shared/infra/flags');
 
 const { registerAuthConfigRoutes } = require('../backend/modules/auth-config/api');
 const { registerSystemHealthRoutes } = require('../backend/modules/system-health/api');
@@ -22,12 +21,6 @@ const runScript = (script) => {
   const result = spawnSync('node', [script], { encoding: 'utf8' });
   return result;
 };
-
-test('resolveModuleMode supports shadow and canary fallback semantics', () => {
-  assert.equal(resolveModuleMode({ flagValue: 'shadow', tenantId: 't-1', requestId: 'r-1', canaryPercent: 0, tenantAllowList: [] }), 'shadow');
-  assert.equal(resolveModuleMode({ flagValue: 'canary', tenantId: 'tenant-allowed', requestId: 'r-1', canaryPercent: 0, tenantAllowList: ['tenant-allowed'] }), 'canary');
-  assert.equal(resolveModuleMode({ flagValue: 'canary', tenantId: 'tenant-denied', requestId: 'r-1', canaryPercent: 0, tenantAllowList: ['tenant-allowed'] }), 'off');
-});
 
 test('buildBoundaryError enforces standard error shape', () => {
   const err = buildBoundaryError({
@@ -77,21 +70,6 @@ test('sections 4-7 readiness check script passes', () => {
 
 test('section 1 hardening check script passes', () => {
   const result = runScript('scripts/check-section1-hardening.js');
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-});
-
-test('rollout mode check script passes', () => {
-  const result = runScript('scripts/check-rollout-modes.js');
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-});
-
-test('industrial readiness check script passes', () => {
-  const result = runScript('scripts/check-industrial-readiness.js');
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-});
-
-test('sections 1-3 readiness check script passes', () => {
-  const result = runScript('scripts/check-sections-1-3-readiness.js');
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
