@@ -9,13 +9,16 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:critical": "node --test tests/critical-flows.test.js",
+    "test:smoke": "node scripts/run-smoke-checks.js",
+    "test:rollback": "node scripts/run-rollback-validation.js",
     "release:gate": "node scripts/release-gate.js",
     "test:governance": "node --test tests/migration-governance.test.js",
     "check:boundaries": "node scripts/check-import-boundaries.js",
     "check:contracts": "node scripts/check-contract-versioning.js",
     "check:migration-evidence": "node scripts/check-migration-evidence.js",
     "contracts:catalog": "node scripts/generate-contract-catalog.js",
-    "check:canary-perf": "node scripts/check-performance-canary.js"
+    "check:canary-perf": "node scripts/check-performance-canary.js",
+    "check:sections-4-7": "node scripts/check-sections-4-7-readiness.js"
   },
   "dependencies": {
     "express": "^4.18.2",
