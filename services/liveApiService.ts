@@ -21,6 +21,8 @@ interface SubscribeToUpdatesOptions {
     onMessages?: (messages: Message[]) => void;
     onScheduledMessages?: (items: ScheduledMessage[]) => void;
     onConnectionStateChange?: (state: UpdateConnectionState) => void;
+    onSyncFailure?: (details: { channel: 'push' | 'polling'; endpoint: string; streak: number; error: unknown }) => void;
+    onSyncRecovery?: (details: { channel: 'push' | 'polling'; endpoint: string; previousStreak: number }) => void;
 }
 
 export const setAuthToken = (token: string) => {
@@ -108,7 +110,9 @@ export const liveApiService = {
           pollIntervalMs = 10000,
           onMessages,
           onScheduledMessages,
-          onConnectionStateChange
+          onConnectionStateChange,
+          onSyncFailure,
+          onSyncRecovery
       } = options;
 
       let isClosed = false;
@@ -145,9 +149,13 @@ export const liveApiService = {
           pollInterval = setInterval(async () => {
               try {
                   await fetchFallbackSnapshot();
+                  if (consecutiveFailures > 0) {
+                      onSyncRecovery?.({ channel: 'polling', endpoint: '/api/drivers', previousStreak: consecutiveFailures });
+                  }
                   consecutiveFailures = 0;
               } catch (e) {
                   consecutiveFailures += 1;
+                  onSyncFailure?.({ channel: 'polling', endpoint: '/api/drivers', streak: consecutiveFailures, error: e });
                   if (consecutiveFailures >= 3) {
                       console.warn('[liveApiService] fallback polling failed repeatedly', e);
                   }
@@ -180,6 +188,9 @@ export const liveApiService = {
 
               eventSource.onopen = () => {
                   reconnectAttempts = 0;
+                  if (consecutiveFailures > 0) {
+                      onSyncRecovery?.({ channel: 'push', endpoint: '/api/updates/stream', previousStreak: consecutiveFailures });
+                  }
                   consecutiveFailures = 0;
                   stopPolling();
                   setConnectionState('connected');
@@ -202,16 +213,21 @@ export const liveApiService = {
               };
 
               eventSource.onerror = () => {
+                  consecutiveFailures += 1;
+                  onSyncFailure?.({ channel: 'push', endpoint: '/api/updates/stream', streak: consecutiveFailures, error: new Error('EventSource disconnected') });
                   eventSource?.close();
                   eventSource = null;
                   scheduleReconnect();
               };
           } catch {
+              consecutiveFailures += 1;
+              onSyncFailure?.({ channel: 'push', endpoint: '/api/updates/stream', streak: consecutiveFailures, error: new Error('Failed to connect EventSource') });
               scheduleReconnect();
           }
       };
 
       fetchFallbackSnapshot().catch((e) => {
+          onSyncFailure?.({ channel: 'polling', endpoint: '/api/drivers', streak: 1, error: e });
           console.warn('[liveApiService] initial update snapshot failed', e);
       });
       connectPush();

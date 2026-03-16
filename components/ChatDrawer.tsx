@@ -5,6 +5,7 @@ import {
   X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save, AlertTriangle
 } from 'lucide-react';
 import { liveApiService, UpdateConnectionState } from '../services/liveApiService';
+import { reportUiFailure, reportUiRecovery } from '../services/uiFailureMonitor';
 import { MediaSelectorModal } from './MediaSelectorModal';
 
 interface ChatDrawerProps {
@@ -74,11 +75,37 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       try { 
           const docs = await liveApiService.getDriverDocuments(driverId); 
           setDocuments(docs || []); 
-      } catch(e) { setDocuments([]); }
+          reportUiRecovery('polling', `/api/drivers/${driverId}/documents`);
+      } catch(e) {
+          const streak = reportUiFailure({
+            channel: 'polling',
+            endpoint: `/api/drivers/${driverId}/documents`,
+            error: e,
+            notifyAdmin: (message) => console.warn('[admin.notify]', message)
+          });
+          if (streak === 1) {
+            alert('Documents are temporarily unavailable.');
+          }
+          setDocuments([]);
+      }
   };
 
   const loadScheduledMessages = async (driverId: string) => {
-      try { const items = await liveApiService.getScheduledMessages(driverId); setScheduledMessages(items); } catch(e) {}
+      try {
+          const items = await liveApiService.getScheduledMessages(driverId);
+          setScheduledMessages(items);
+          reportUiRecovery('polling', `/api/drivers/${driverId}/scheduled-messages`);
+      } catch(e) {
+          const streak = reportUiFailure({
+            channel: 'polling',
+            endpoint: `/api/drivers/${driverId}/scheduled-messages`,
+            error: e,
+            notifyAdmin: (message) => console.warn('[admin.notify]', message)
+          });
+          if (streak === 1) {
+            alert('Scheduled message sync is degraded.');
+          }
+      }
   };
 
   const handleCancelScheduled = async (msgId: string) => {
@@ -176,7 +203,13 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
               if (parsed.caption) return <p className="text-sm leading-relaxed whitespace-pre-wrap">{parsed.caption}</p>;
               return null; 
           }
-      } catch (e) {}
+      } catch (e) {
+          reportUiFailure({
+            channel: 'ui',
+            endpoint: 'parser://message-json-caption',
+            error: e
+          });
+      }
       return <p className="text-sm leading-relaxed whitespace-pre-wrap">{rawText}</p>;
   };
 

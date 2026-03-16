@@ -2,6 +2,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Database, Server, Shield, X, AlertTriangle, Zap, RefreshCw, AlertCircle, DatabaseZap, Workflow, Trash2, Hammer } from 'lucide-react';
 import { SystemStats } from '../types';
+import { reportUiFailure, reportUiRecovery } from '../services/uiFailureMonitor';
 
 interface DiagnosticStats extends SystemStats {
     dbStatus?: 'connected' | 'error' | 'unknown';
@@ -30,6 +31,7 @@ export const SystemMonitor = () => {
                    headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }
                 });
                 if (response.ok) {
+                    reportUiRecovery('polling', '/api/debug/status');
                     const debugStats = await response.json();
                     setStats({
                         serverLoad: 0, dbLatency: 0, aiCredits: 0, aiModel: 'unknown', s3Status: 'ok', s3Load: 0, whatsappStatus: 'ok', whatsappUploadLoad: 0, activeUploads: 0, uptime: 0,
@@ -40,7 +42,14 @@ export const SystemMonitor = () => {
                         env: debugStats.env
                     });
                 }
-            } catch(e) {}
+            } catch(e) {
+                reportUiFailure({
+                    channel: 'polling',
+                    endpoint: '/api/debug/status',
+                    error: e,
+                    notifyAdmin: (message) => console.warn('[admin.notify]', message)
+                });
+            }
             timerRef.current = setTimeout(poll, 5000); 
         };
         poll();

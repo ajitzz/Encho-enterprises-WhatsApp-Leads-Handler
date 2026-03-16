@@ -21,6 +21,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { Login } from './components/Login'; 
 import { mockBackend } from './services/mockBackend';
 import { liveApiService, setAuthToken, UpdateConnectionState } from './services/liveApiService';
+import { reportUiFailure, reportUiRecovery } from './services/uiFailureMonitor';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle, Wifi, WifiOff, Loader2 } from 'lucide-react';
 
@@ -64,6 +65,7 @@ export default function App() {
   const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
   const [isRepeatToggling, setIsRepeatToggling] = useState(false);
   const [updateConnectionState, setUpdateConnectionState] = useState<UpdateConnectionState>('disconnected');
+  const [syncFailureMetrics, setSyncFailureMetrics] = useState({ polling: 0, push: 0, lastEndpoint: 'n/a' });
   
   const [dataSource, setDataSource] = useState<'mock' | 'live'>(() => {
       const saved = localStorage.getItem('uber_fleet_data_source');
@@ -89,12 +91,17 @@ export default function App() {
                   return;
               }
 
+              reportUiRecovery('polling', '/api/cron/process-queue');
               failedAttempts = 0;
           } catch(e) {
-              failedAttempts += 1;
-              if (failedAttempts >= 3) {
-                  console.warn('[Cron Heartbeat] heartbeat skipped', e);
-              }
+              const streak = reportUiFailure({
+                channel: 'polling',
+                endpoint: '/api/cron/process-queue',
+                error: e,
+                notifyUser: (message) => addNotification({ type: 'warning', title: 'Queue Heartbeat Degraded', message }),
+                notifyAdmin: (message) => console.warn('[admin.notify]', message)
+              });
+              failedAttempts = streak;
           }
       };
 
@@ -114,7 +121,15 @@ export default function App() {
           try {
               const s = dataSource === 'live' ? await liveApiService.getBotSettings() : mockBackend.getBotSettings();
               setBotSettings(s);
-          } catch(e) {}
+          } catch(e) {
+              reportUiFailure({
+                channel: 'ui',
+                endpoint: '/api/bot/settings',
+                error: e,
+                notifyUser: (message) => addNotification({ type: 'warning', title: 'Bot Settings Unavailable', message }),
+                notifyAdmin: (message) => console.warn('[admin.notify]', message)
+              });
+          }
       };
       if (activeTab === 'dashboard') loadSettings();
   }, [activeTab, dataSource, isAuthenticated, isEmergencyMode]);
@@ -149,7 +164,21 @@ export default function App() {
                    return Array.from(driverMap.values()).sort((a, b) => b.lastMessageTime - a.lastMessageTime);
                });
            }, {
-               onConnectionStateChange: setUpdateConnectionState
+               onConnectionStateChange: setUpdateConnectionState,
+               onSyncFailure: ({ channel, endpoint, streak, error }) => {
+                 const failureStreak = reportUiFailure({
+                   channel,
+                   endpoint,
+                   error,
+                   notifyUser: (message) => addNotification({ type: 'warning', title: 'Live Sync Degraded', message }),
+                   notifyAdmin: (message) => console.warn('[admin.notify]', message)
+                 });
+                 setSyncFailureMetrics(prev => ({ ...prev, [channel]: failureStreak, lastEndpoint: endpoint }));
+               },
+               onSyncRecovery: ({ channel, endpoint }) => {
+                 reportUiRecovery(channel, endpoint);
+                 setSyncFailureMetrics(prev => ({ ...prev, [channel]: 0, lastEndpoint: endpoint }));
+               }
            });
            addNotification({ type: 'info', title: 'Connected to Live Server', message: 'Delta-Sync Active' });
          } catch (e: any) {
@@ -243,7 +272,14 @@ export default function App() {
     setNotifications(prev => [newNotif, ...prev]);
     if (notif.title.includes('Incoming') || notif.title.includes('Call')) {
          if ("Notification" in window && Notification.permission === "granted") new Notification(notif.title, { body: notif.message });
-         try { new Audio('https://codeskulptor-demos.commondatastorage.googleapis.com/pang/pop.mp3').play(); } catch(e) {}
+         try { new Audio('https://codeskulptor-demos.commondatastorage.googleapis.com/pang/pop.mp3').play(); } catch(e) {
+           reportUiFailure({
+             channel: 'ui',
+             endpoint: 'audio://notification-pop',
+             error: e,
+             notifyAdmin: (message) => console.warn('[admin.notify]', message)
+           });
+         }
     }
     setTimeout(() => { setNotifications(prev => prev.filter(n => n.id !== newNotif.id)); }, 5000);
   };
@@ -388,7 +424,7 @@ export default function App() {
                  </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
                   <div className="flex items-center justify-between mb-4"><span className="text-gray-500 text-sm font-medium">Total Leads</span><div className="p-2 bg-blue-50 text-blue-600 rounded-lg"><Users size={20} /></div></div>
                   <div className="text-3xl font-bold text-gray-900">{stats.total}</div>
@@ -405,6 +441,11 @@ export default function App() {
                  <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
                   <div className="flex items-center justify-between mb-4"><span className="text-gray-500 text-sm font-medium">New Leads</span><div className="p-2 bg-purple-50 text-purple-600 rounded-lg"><MessageSquare size={20} /></div></div>
                   <div className="text-3xl font-bold text-gray-900">{stats.new}</div>
+                </div>
+                <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+                  <div className="flex items-center justify-between mb-4"><span className="text-gray-500 text-sm font-medium">Sync Failures</span><div className="p-2 bg-rose-50 text-rose-600 rounded-lg"><AlertTriangle size={20} /></div></div>
+                  <div className="text-2xl font-bold text-gray-900">P:{syncFailureMetrics.push} · F:{syncFailureMetrics.polling}</div>
+                  <div className="text-xs text-rose-600 mt-2 font-medium truncate" title={syncFailureMetrics.lastEndpoint}>Last: {syncFailureMetrics.lastEndpoint}</div>
                 </div>
               </div>
 
