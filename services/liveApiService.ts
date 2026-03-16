@@ -46,7 +46,23 @@ const apiRequest = async <T>(endpoint: string, options: RequestInit = {}): Promi
         const errorBody = await response.text();
         throw new Error(`API Error ${response.status}: ${errorBody}`);
     }
-    return response.json();
+
+    if (response.status === 204) {
+        return undefined as T;
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+        return response.json();
+    }
+
+    const bodyText = await response.text();
+    if (!bodyText) return undefined as T;
+    try {
+        return JSON.parse(bodyText) as T;
+    } catch {
+        return bodyText as T;
+    }
 };
 
 export const liveApiService = {
@@ -77,11 +93,18 @@ export const liveApiService = {
   },
 
   subscribeToUpdates: (callback: (drivers: Driver[]) => void) => {
+      let consecutiveFailures = 0;
       const interval = setInterval(async () => {
           try {
               const drivers = await liveApiService.getDrivers();
+              consecutiveFailures = 0;
               callback(drivers);
-          } catch(e) {}
+          } catch(e) {
+              consecutiveFailures += 1;
+              if (consecutiveFailures >= 3) {
+                  console.warn('[liveApiService] subscribeToUpdates polling failed', e);
+              }
+          }
       }, 5000);
       return () => clearInterval(interval);
   },
