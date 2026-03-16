@@ -34,7 +34,9 @@ process.on('uncaughtException', (error) => {
 
 const REQUEST_ID_HEADER = 'x-request-id';
 const REQUEST_CONTEXT_FLAG = String(process.env.FF_REQUEST_CONTEXT || 'true').toLowerCase() !== 'false';
-const LEAD_INGESTION_FLAG = String(process.env.FF_LEAD_INGESTION_MODULE || 'off').toLowerCase();
+const LEAD_INGESTION_DEFAULT_MODE = process.env.NODE_ENV === 'production' ? 'on' : 'off';
+const LEAD_INGESTION_FLAG = String(process.env.FF_LEAD_INGESTION_MODULE || LEAD_INGESTION_DEFAULT_MODE).toLowerCase();
+const LEAD_INGESTION_LEGACY_EMERGENCY_FALLBACK = parseBooleanFlag(process.env.FF_LEAD_INGESTION_LEGACY_EMERGENCY_FALLBACK, false);
 const REMINDERS_MODULE_FLAG = String(process.env.FF_REMINDERS_MODULE || 'off').toLowerCase();
 const REMINDERS_CANARY_PERCENT = parsePercent(process.env.FF_REMINDERS_MODULE_PERCENT || 0);
 const AUTH_CONFIG_MODULE_FLAG = String(process.env.FF_AUTH_CONFIG_MODULE || 'off').toLowerCase();
@@ -103,6 +105,32 @@ const trackBackgroundTask = ({ taskName = 'background-task', requestId = null, p
             requestId,
             meta: { error: error?.message || String(error) },
         });
+    });
+};
+
+const logLeadIngestionRuntimePosture = () => {
+    const tenantContexts = MODULE_CANARY_TENANTS.length > 0 ? MODULE_CANARY_TENANTS : ['default'];
+    const effectiveModes = tenantContexts.map((tenantId) => ({
+        tenantId,
+        mode: resolveModuleMode({
+            flagValue: LEAD_INGESTION_FLAG,
+            tenantId: tenantId === 'default' ? null : tenantId,
+            requestId: null,
+            canaryPercent: 100,
+            tenantAllowList: MODULE_CANARY_TENANTS,
+        }),
+    }));
+
+    structuredLog({
+        level: 'info',
+        module: 'lead-ingestion',
+        message: 'startup.module_mode_posture',
+        meta: {
+            flagValue: LEAD_INGESTION_FLAG,
+            defaultMode: LEAD_INGESTION_DEFAULT_MODE,
+            legacyEmergencyFallbackEnabled: LEAD_INGESTION_LEGACY_EMERGENCY_FALLBACK,
+            effectiveModes,
+        },
     });
 };
 
@@ -3975,6 +4003,28 @@ apiRouter.post('/webhook', async (req, res) => {
         return;
     }
 
+    if (!LEAD_INGESTION_LEGACY_EMERGENCY_FALLBACK) {
+        structuredLog({
+            level: 'error',
+            module: 'lead-ingestion',
+            requestId: req.requestId || null,
+            message: 'webhook.legacy_fallback_blocked',
+            meta: { tenantId, mode, emergencyFallbackEnabled: false },
+        });
+        res.status(503).json({
+            error: 'Lead ingestion module is off and legacy emergency fallback is disabled.',
+            requiredAction: 'Set FF_LEAD_INGESTION_MODULE=on/canary or FF_LEAD_INGESTION_LEGACY_EMERGENCY_FALLBACK=true for emergency fallback.',
+        });
+        return;
+    }
+
+    structuredLog({
+        level: 'error',
+        module: 'lead-ingestion',
+        requestId: req.requestId || null,
+        message: 'webhook.legacy_fallback_emergency_mode',
+        meta: { tenantId, mode, emergencyFallbackEnabled: true },
+    });
     await processWebhookLegacy({ body: req.body, req, res });
 });
 
@@ -4796,6 +4846,7 @@ app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
     return app.listen(port, () => {
         console.log(`Server running on ${port}`);
+        logLeadIngestionRuntimePosture();
         // Auto-Init Check on Start (For Local/VPS, NOT Vercel)
         (async () => {
             try {
