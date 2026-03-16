@@ -72,13 +72,29 @@ export default function App() {
 
   useEffect(() => {
       if (dataSource !== 'live' || !isAuthenticated || isEmergencyMode) return;
-      
+
+      let failedAttempts = 0;
       const triggerCron = async () => {
           try {
-              await fetch('/api/cron/process-queue', {
+              const response = await fetch('/api/cron/process-queue', {
                   headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }
               });
-          } catch(e) { console.error("Heartbeat skipped"); }
+
+              if (!response.ok) {
+                  failedAttempts += 1;
+                  if (failedAttempts >= 3) {
+                      console.warn('[Cron Heartbeat] queue processor unhealthy', response.status);
+                  }
+                  return;
+              }
+
+              failedAttempts = 0;
+          } catch(e) {
+              failedAttempts += 1;
+              if (failedAttempts >= 3) {
+                  console.warn('[Cron Heartbeat] heartbeat skipped', e);
+              }
+          }
       };
 
       const interval = setInterval(triggerCron, 10000);
