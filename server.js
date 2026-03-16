@@ -2449,7 +2449,7 @@ const executeWithRetry = async (client, operation) => {
 // Any changes to the loop structure, delays, or variable saving will break the bot.
 // =========================================================================
 const BOT_ENGINE_AUTO_ADVANCE_DELAY_MS = Math.max(0, Number(process.env.BOT_ENGINE_AUTO_ADVANCE_DELAY_MS || 5));
-const BOT_ENGINE_DELAY_NODE_CAP_MS = Math.max(0, Number(process.env.BOT_ENGINE_DELAY_NODE_CAP_MS || 800));
+const BOT_ENGINE_DELAY_NODE_CAP_MS = Math.max(0, Number(process.env.BOT_ENGINE_DELAY_NODE_CAP_MS || 60000));
 const FF_BOT_PRIORITIZE_INBOUND_REPLY = String(process.env.FF_BOT_PRIORITIZE_INBOUND_REPLY || 'true').toLowerCase() !== 'false';
 const BOT_ENGINE_INBOUND_DELAY_CAP_MS = Math.max(0, Number(process.env.BOT_ENGINE_INBOUND_DELAY_CAP_MS || 60));
 const BOT_ENGINE_VERBOSE_LOGS = String(process.env.BOT_ENGINE_VERBOSE_LOGS || 'false').toLowerCase() === 'true';
@@ -2458,7 +2458,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
     if (BOT_ENGINE_VERBOSE_LOGS) console.log(`[Bot Engine] START for ${candidate.phone_number}`);
     try {
         const engineStart = nowMs();
-        const MAX_ENGINE_MS = Number.parseInt(process.env.BOT_ENGINE_MAX_EXEC_MS || '2500', 10);
+        let maxEngineMs = Number.parseInt(process.env.BOT_ENGINE_MAX_EXEC_MS || '2500', 10);
         const config = await getRuntimeConfigCached(client);
         if (config.automation_enabled === false || candidate.is_human_mode) return;
 
@@ -2841,7 +2841,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         const MAX_OPS = 15; 
 
         while (activeNodeId && opsCount < MAX_OPS) {
-            if (Number.isFinite(MAX_ENGINE_MS) && (nowMs() - engineStart) > MAX_ENGINE_MS) {
+            if (Number.isFinite(maxEngineMs) && (nowMs() - engineStart) > maxEngineMs) {
                 structuredLog({
                     level: 'error',
                     module: 'bot-conversation',
@@ -2849,7 +2849,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     meta: {
                         candidateId: candidate.id,
                         elapsedMs: nowMs() - engineStart,
-                        maxEngineMs: MAX_ENGINE_MS,
+                        maxEngineMs,
                     },
                 });
                 break;
@@ -2875,13 +2875,18 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             
             else if (data.type === 'delay') {
                 const isInboundTriggered = Boolean(incomingText || incomingPayloadId);
-                const baseDelayMs = Math.min(data.delayTime || 2000, BOT_ENGINE_DELAY_NODE_CAP_MS);
-                const ms = (FF_BOT_PRIORITIZE_INBOUND_REPLY && isInboundTriggered)
+                const requestedDelayMs = Math.max(0, Number(data.delayTime || 2000));
+                const baseDelayMs = Math.min(requestedDelayMs, BOT_ENGINE_DELAY_NODE_CAP_MS);
+                const shouldApplyInboundCap = FF_BOT_PRIORITIZE_INBOUND_REPLY && isInboundTriggered && data.reduceDelayOnInbound === true;
+                const ms = shouldApplyInboundCap
                     ? Math.min(baseDelayMs, BOT_ENGINE_INBOUND_DELAY_CAP_MS)
                     : baseDelayMs;
 
                 if (ms > 0) {
                     await new Promise(r => setTimeout(r, ms));
+                    if (Number.isFinite(maxEngineMs)) {
+                        maxEngineMs += ms;
+                    }
                 }
             }
 

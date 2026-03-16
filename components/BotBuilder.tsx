@@ -1107,7 +1107,15 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         <div className="bg-gray-100 p-4 rounded-xl border border-gray-200">
                              <label className="block text-[10px] font-bold text-gray-600 uppercase mb-1">Delay Duration (Milliseconds)</label>
                              <input type="number" className="w-full border border-gray-300 p-2 rounded text-sm bg-white" value={local.delayTime || 2000} onChange={e => update('delayTime', parseInt(e.target.value))} />
-                             <p className="text-[10px] text-gray-400 mt-1">1000ms = 1 Second. Max 5000ms recommended.</p>
+                             <p className="text-[10px] text-gray-400 mt-1">1000ms = 1 Second.</p>
+                             <label className="flex items-center gap-2 mt-3 text-[11px] text-gray-700">
+                                <input
+                                    type="checkbox"
+                                    checked={local.reduceDelayOnInbound === true}
+                                    onChange={e => update('reduceDelayOnInbound', e.target.checked)}
+                                />
+                                Shorten this delay when triggered by a customer reply
+                            </label>
                         </div>
                     )}
 
