@@ -36,6 +36,7 @@ const requiredScripts = [
   'test:rollback',
   'release:gate',
   'check:sections-4-7',
+  'check:extraction-freeze',
 ];
 
 for (const name of requiredScripts) {
@@ -73,6 +74,10 @@ for (const signal of [
   '## Top risks operational status',
   'Owner',
   'Mitigation status',
+  'Residual risk score',
+  'Trend',
+  'Linked monitor/runbook',
+  'Last incident/postmortem',
   'Next review',
 ]) {
   if (riskRegister && !riskRegister.includes(signal)) {
@@ -90,6 +95,30 @@ for (const metric of [
 ]) {
   if (scorecard && !scorecard.toLowerCase().includes(metric.toLowerCase())) {
     problems.push(`success-scorecard-latest.md missing metric: ${metric}`);
+  }
+}
+
+
+for (const signal of [
+  '### 30/60/90 trend view',
+  '### Release linkage and canary cohort traceability',
+  '### Extraction freeze control',
+]) {
+  if (scorecard && !scorecard.includes(signal)) {
+    problems.push(`success-scorecard-latest.md missing signal: ${signal}`);
+  }
+}
+
+for (const signal of [
+  'day-30',
+  'day-60',
+  'day-90',
+  'release id',
+  'canary cohort',
+  'extraction freeze status',
+]) {
+  if (scorecard && !scorecard.toLowerCase().includes(signal.toLowerCase())) {
+    problems.push(`success-scorecard-latest.md missing trend/traceability field: ${signal}`);
   }
 }
 
@@ -138,6 +167,31 @@ if (scorecard) {
   percentDelta('webhook latency p99', 8);
   rateFloor('lead ingestion success rate', 99);
   rateFloor('reminder dispatch success', 99);
+}
+
+
+
+const freezeStatusMatch = scorecard.match(/extraction freeze status:\s*\*\*(active|inactive)\*\*/i);
+if (!freezeStatusMatch) {
+  problems.push('success-scorecard-latest.md missing extraction freeze status declaration');
+} else {
+  const freezeStatus = freezeStatusMatch[1].toLowerCase();
+  const hasBreach =
+    /webhook latency p95:[^\n]*?([+-]?\d+(?:\.\d+)?)%/i.test(scorecard) &&
+    Number.parseFloat(scorecard.match(/webhook latency p95:[^\n]*?([+-]?\d+(?:\.\d+)?)%/i)[1]) > 5
+    || /webhook latency p99:[^\n]*?([+-]?\d+(?:\.\d+)?)%/i.test(scorecard) &&
+    Number.parseFloat(scorecard.match(/webhook latency p99:[^\n]*?([+-]?\d+(?:\.\d+)?)%/i)[1]) > 8
+    || /lead ingestion success rate:[^\n]*?(\d+(?:\.\d+)?)%/i.test(scorecard) &&
+    Number.parseFloat(scorecard.match(/lead ingestion success rate:[^\n]*?(\d+(?:\.\d+)?)%/i)[1]) < 99
+    || /reminder dispatch success:[^\n]*?(\d+(?:\.\d+)?)%/i.test(scorecard) &&
+    Number.parseFloat(scorecard.match(/reminder dispatch success:[^\n]*?(\d+(?:\.\d+)?)%/i)[1]) < 99;
+
+  if (hasBreach && freezeStatus !== 'active') {
+    problems.push('extraction freeze must be active when KPI breach exists');
+  }
+  if (!hasBreach && freezeStatus !== 'inactive') {
+    problems.push('extraction freeze must be inactive when KPI budgets are healthy');
+  }
 }
 
 assertRecentEvidence('docs/operations/success-scorecard-latest.md', 14);
