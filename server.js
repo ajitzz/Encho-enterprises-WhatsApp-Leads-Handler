@@ -2005,31 +2005,59 @@ const fetchAndStoreIncomingMedia = async ({ msg, phoneNumber, candidateId, clien
 };
 
 const META_VERBOSE_LOGS = String(process.env.META_VERBOSE_LOGS || 'false').toLowerCase() === 'true';
+const MAX_TEXT_MESSAGE_LENGTH = Number.parseInt(process.env.MAX_TEXT_MESSAGE_LENGTH || '4096', 10);
+
+const normalizeTextBody = (value) => (typeof value === 'string' ? value : String(value || ''));
+
+const validateOutboundPayload = (payload) => {
+    if (!payload || typeof payload !== 'object') return { valid: false, reason: 'payload_missing' };
+
+    if (payload.type === 'text') {
+        const body = normalizeTextBody(payload.text?.body).trim();
+        if (!body) return { valid: false, reason: 'empty_text_body' };
+        if (body.length > MAX_TEXT_MESSAGE_LENGTH) return { valid: false, reason: 'text_too_long' };
+        return { valid: true };
+    }
+
+    if (payload.type === 'interactive') {
+        const interactive = payload.interactive || {};
+        if (interactive.type === 'button') {
+            const buttons = interactive.action?.buttons;
+            if (!Array.isArray(buttons) || buttons.length === 0) return { valid: false, reason: 'interactive_buttons_missing' };
+            return { valid: true };
+        }
+        if (interactive.type === 'list') {
+            const sections = interactive.action?.sections;
+            if (!Array.isArray(sections) || sections.length === 0) return { valid: false, reason: 'interactive_sections_missing' };
+            return { valid: true };
+        }
+        if (interactive.type === 'location_request_message') return { valid: true };
+        return { valid: false, reason: 'interactive_type_unsupported' };
+    }
+
+    return { valid: true };
+};
 
 const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
     
-    if (payload.type === 'text') {
-        if (!payload.text?.body || !payload.text.body.trim()) {
-            console.warn("[Meta] Blocked empty text message");
-            return;
-        }
-    }
-    if (payload.type === 'interactive') {
-        const i = payload.interactive;
-        if (i.type === 'button' && (!i.action.buttons || i.action.buttons.length === 0) && !['location_request_message', 'product_list'].includes(i.type)) return;
-        if (i.type === 'list' && (!i.action.sections || i.action.sections.length === 0)) return;
+    const validation = validateOutboundPayload(payload);
+    if (!validation.valid) {
+        console.warn(`[Meta] Blocked outbound payload (${validation.reason})`);
+        return { delivered: false, blocked: true, reason: validation.reason };
     }
 
     try {
         if (META_VERBOSE_LOGS) console.log(`[Meta] Sending to ${to} | Type: ${payload.type}`);
-        await getMetaClient().post(`https://graph.facebook.com/v18.0/${phoneId}/messages`, {
+        const response = await getMetaClient().post(`https://graph.facebook.com/v18.0/${phoneId}/messages`, {
             messaging_product: "whatsapp",
             recipient_type: "individual",
             to,
             ...payload
         });
+        const providerMessageId = response?.data?.messages?.[0]?.id || null;
+        return { delivered: true, blocked: false, providerMessageId };
     } catch (e) {
         const errMsg = e.response?.data?.error?.message || e.message;
         console.error(`[Meta Failed] ${to}: ${errMsg}`);
@@ -3123,10 +3151,19 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
 
                 if (payload) {
                     try {
-                        await sendToMeta(candidate.phone_number, payload);
+                        const sendResult = await sendToMeta(candidate.phone_number, payload);
+                        const sendStatus = sendResult?.delivered ? 'sent' : 'blocked_validation';
                         await client.query(
-                            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`,
-                            [crypto.randomUUID(), candidate.id, payload.text?.body || payload.interactive?.body?.text || '[Media]', data.type]
+                            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
+                             VALUES ($1, $2, 'out', $3, $4, $5, $6, NOW())`,
+                            [
+                                crypto.randomUUID(),
+                                candidate.id,
+                                payload.text?.body || payload.interactive?.body?.text || '[Media]',
+                                data.type,
+                                sendStatus,
+                                sendResult?.providerMessageId || null,
+                            ]
                         );
                         scheduleDriverExcelSync();
                         scheduleDriverExcelIncrementalSync({ candidateId: candidate.id, action: 'upsert' });
@@ -4079,20 +4116,31 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
 apiRouter.post('/drivers/:id/messages', async (req, res) => {
     try {
         const { text, mediaUrl, mediaType } = req.body;
+        const normalizedText = normalizeTextBody(text);
+        if (!mediaUrl) {
+            const trimmed = normalizedText.trim();
+            if (!trimmed) return res.status(400).json({ error: 'Text is required when mediaUrl is not provided' });
+            if (trimmed.length > MAX_TEXT_MESSAGE_LENGTH) return res.status(400).json({ error: `Text exceeds max length (${MAX_TEXT_MESSAGE_LENGTH})` });
+        }
         await withDb(async (client) => {
             const c = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
             if (c.rows.length === 0) throw new Error("Candidate not found");
-            let payload = { type: 'text', text: { body: text } };
-            let dbText = text;
+            let payload = { type: 'text', text: { body: normalizedText } };
+            let dbText = normalizedText;
             if (mediaUrl) {
                 const freshUrl = await refreshMediaUrl(mediaUrl);
                 const type = mediaType || 'image';
-                payload = { type, [type]: { link: freshUrl, caption: text } };
+                payload = { type, [type]: { link: freshUrl, caption: normalizedText } };
                 if (type === 'document') payload[type].filename = decodeURIComponent(new URL(freshUrl).pathname.split('/').pop() || 'file.pdf');
-                dbText = JSON.stringify({ url: mediaUrl, caption: text });
+                dbText = JSON.stringify({ url: mediaUrl, caption: normalizedText });
             }
-            await sendToMeta(c.rows[0].phone_number, payload);
-            await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text']);
+            const sendResult = await sendToMeta(c.rows[0].phone_number, payload);
+            const sendStatus = sendResult?.delivered ? 'sent' : 'blocked_validation';
+            await client.query(
+                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
+                 VALUES ($1, $2, 'out', $3, $4, $5, $6, NOW())`,
+                [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text', sendStatus, sendResult?.providerMessageId || null]
+            );
             scheduleDriverExcelSync();
             scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'upsert' });
         });
@@ -4559,11 +4607,16 @@ const handleCronProcessQueueLegacy = async (req, res) => {
                             metaP = { type: 'text', text: { body: dbLogText } };
                         }
                         
-                        await sendToMeta(job.phone_number, metaP);
+                        const sendResult = await sendToMeta(job.phone_number, metaP);
+                        const sendStatus = sendResult?.delivered ? 'sent' : 'blocked_validation';
                         
                         // Log success
-                        await client.query(`INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at) VALUES ($1, $2, 'out', $3, $4, 'sent', NOW())`, [crypto.randomUUID(), job.candidate_id, dbLogText, dbType]);
-                        await client.query("UPDATE scheduled_messages SET status = 'sent' WHERE id = $1", [job.id]);
+                        await client.query(
+                            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
+                             VALUES ($1, $2, 'out', $3, $4, $5, $6, NOW())`,
+                            [crypto.randomUUID(), job.candidate_id, dbLogText, dbType, sendStatus, sendResult?.providerMessageId || null]
+                        );
+                        await client.query("UPDATE scheduled_messages SET status = $2 WHERE id = $1", [job.id, sendResult?.delivered ? 'sent' : 'blocked_validation']);
                         triggerReportingSyncDeferred({
                             candidateId: job.candidate_id,
                             action: 'upsert',
