@@ -2525,11 +2525,52 @@ const FF_BOT_PRIORITIZE_INBOUND_REPLY = String(process.env.FF_BOT_PRIORITIZE_INB
 const BOT_ENGINE_INBOUND_DELAY_CAP_MS = Math.max(0, Number(process.env.BOT_ENGINE_INBOUND_DELAY_CAP_MS || 60));
 const BOT_ENGINE_VERBOSE_LOGS = String(process.env.BOT_ENGINE_VERBOSE_LOGS || 'false').toLowerCase() === 'true';
 
+const queueBotMessageSideEffects = ({ candidateId, payload, nodeType, sendResult }) => {
+    if (!candidateId || !payload) return;
+
+    setImmediate(async () => {
+        try {
+            const sendStatus = sendResult?.delivered ? 'sent' : 'blocked_validation';
+            await withDb(async (dbClient) => {
+                await dbClient.query(
+                    `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
+                     VALUES ($1, $2, 'out', $3, $4, $5, $6, NOW())`,
+                    [
+                        crypto.randomUUID(),
+                        candidateId,
+                        summarizePayloadForStorage(payload),
+                        nodeType,
+                        sendStatus,
+                        sendResult?.providerMessageId || null,
+                    ]
+                );
+            });
+        } catch (error) {
+            structuredLog({
+                level: 'error',
+                module: 'bot-conversation',
+                message: 'bot.engine.side_effects_log_failed',
+                meta: {
+                    candidateId,
+                    nodeType,
+                    error: error?.message || String(error),
+                },
+            });
+        }
+
+        triggerReportingSyncDeferred({
+            candidateId,
+            action: 'upsert',
+            source: 'bot-engine-send-loop',
+        });
+    });
+};
+
 const runBotEngine = async (client, candidate, incomingText, incomingPayloadId = null) => {
     if (BOT_ENGINE_VERBOSE_LOGS) console.log(`[Bot Engine] START for ${candidate.phone_number}`);
     try {
         const engineStart = nowMs();
-        const MAX_ENGINE_MS = Number.parseInt(process.env.BOT_ENGINE_MAX_EXEC_MS || '2500', 10);
+        const MAX_ENGINE_MS = Number.parseInt(process.env.BOT_ENGINE_MAX_EXEC_MS || '1500', 10);
         const config = await getRuntimeConfigCached(client);
         if (config.automation_enabled === false || candidate.is_human_mode) return;
 
@@ -2909,7 +2950,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         // 3. Execute Node Chain (Synchronous Loop)
         let activeNodeId = nextNodeId;
         let opsCount = 0;
-        const MAX_OPS = 15; 
+        const MAX_OPS = 15;
 
         while (activeNodeId && opsCount < MAX_OPS) {
             if (Number.isFinite(MAX_ENGINE_MS) && (nowMs() - engineStart) > MAX_ENGINE_MS) {
@@ -2929,32 +2970,33 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             const node = nodeMap.get(activeNodeId);
             if (!node) break;
 
+            const nodeExecStart = nowMs();
+
             const data = node.data || {};
             let autoAdvance = true; 
-            
             if (data.type === 'status_update') {
                 if (data.targetStatus) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [data.targetStatus, candidate.id]);
             }
 
-            else if (data.type === 'set_variable') {
-                if (data.variable && data.operationValue) {
-                    const newVars = { ...candidate.variables, [data.variable]: data.operationValue };
-                    await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
-                    candidate.variables = newVars;
+                else if (data.type === 'set_variable') {
+                    if (data.variable && data.operationValue) {
+                        const newVars = { ...candidate.variables, [data.variable]: data.operationValue };
+                        await client.query("UPDATE candidates SET variables = $1 WHERE id = $2", [newVars, candidate.id]);
+                        candidate.variables = newVars;
+                    }
                 }
-            }
-            
-            else if (data.type === 'delay') {
-                const isInboundTriggered = Boolean(incomingText || incomingPayloadId);
-                const baseDelayMs = Math.min(data.delayTime || 2000, BOT_ENGINE_DELAY_NODE_CAP_MS);
-                const ms = (FF_BOT_PRIORITIZE_INBOUND_REPLY && isInboundTriggered)
-                    ? Math.min(baseDelayMs, BOT_ENGINE_INBOUND_DELAY_CAP_MS)
-                    : baseDelayMs;
+                
+                else if (data.type === 'delay') {
+                    const isInboundTriggered = Boolean(incomingText || incomingPayloadId);
+                    const baseDelayMs = Math.min(data.delayTime || 2000, BOT_ENGINE_DELAY_NODE_CAP_MS);
+                    const ms = (FF_BOT_PRIORITIZE_INBOUND_REPLY && isInboundTriggered)
+                        ? Math.min(baseDelayMs, BOT_ENGINE_INBOUND_DELAY_CAP_MS)
+                        : baseDelayMs;
 
-                if (ms > 0) {
-                    await new Promise(r => setTimeout(r, ms));
+                    if (ms > 0) {
+                        await new Promise(r => setTimeout(r, ms));
+                    }
                 }
-            }
 
             else if (data.type === 'condition') {
                 let isMatch = false;
@@ -2971,7 +3013,19 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 const handle = isMatch ? 'true' : 'false';
                 const nextEdge = (edgeMap.get(node.id) || []).find(e => e.sourceHandle === handle || !e.sourceHandle);
                 activeNodeId = nextEdge ? nextEdge.target : null;
-                continue; 
+                structuredLog({
+                    level: 'info',
+                    module: 'bot-conversation',
+                    message: 'bot.engine.node_timing',
+                    meta: {
+                        candidateId: candidate.id,
+                        nodeId: node.id,
+                        nodeType: data.type || 'unknown',
+                        durationMs: nowMs() - nodeExecStart,
+                        opsCount,
+                    },
+                });
+                continue;
             }
 
             else if (data.type === 'handoff') {
@@ -3207,26 +3261,30 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
                             }
                         }
 
-                        const sendStatus = sendResult?.delivered ? 'sent' : 'blocked_validation';
-                        await client.query(
-                            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
-                             VALUES ($1, $2, 'out', $3, $4, $5, $6, NOW())`,
-                            [
-                                crypto.randomUUID(),
-                                candidate.id,
-                                summarizePayloadForStorage(loggedPayload),
-                                data.type,
-                                sendStatus,
-                                sendResult?.providerMessageId || null,
-                            ]
-                        );
-                        scheduleDriverExcelSync();
-                        scheduleDriverExcelIncrementalSync({ candidateId: candidate.id, action: 'upsert' });
+                        queueBotMessageSideEffects({
+                            candidateId: candidate.id,
+                            payload: loggedPayload,
+                            nodeType: data.type,
+                            sendResult,
+                        });
                     } catch (apiError) {
                         console.error("Meta Send Error:", apiError);
                     }
                 }
             }
+            const nodeDurationMs = nowMs() - nodeExecStart;
+            structuredLog({
+                level: 'info',
+                module: 'bot-conversation',
+                message: 'bot.engine.node_timing',
+                meta: {
+                    candidateId: candidate.id,
+                    nodeId: node.id,
+                    nodeType: data.type || 'unknown',
+                    durationMs: nodeDurationMs,
+                    opsCount,
+                },
+            });
 
             // 4. Update State & Move On
             await client.query("UPDATE candidates SET current_bot_step_id = $1 WHERE id = $2", [node.id, candidate.id]);
@@ -3242,6 +3300,20 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
             } else {
                 activeNodeId = null;
             }
+        }
+
+        if (activeNodeId && opsCount >= MAX_OPS) {
+            structuredLog({
+                level: 'warn',
+                module: 'bot-conversation',
+                message: 'bot.engine.max_ops_reached',
+                meta: {
+                    candidateId: candidate.id,
+                    activeNodeId,
+                    maxOps: MAX_OPS,
+                    elapsedMs: nowMs() - engineStart,
+                },
+            });
         }
     } catch (fatalError) {
         console.error("Bot Engine Fatal Crash:", fatalError);
