@@ -36,6 +36,7 @@ const requiredScripts = [
   'test:rollback',
   'release:gate',
   'check:sections-4-7',
+  'docs:scorecard-trends',
 ];
 
 for (const name of requiredScripts) {
@@ -73,7 +74,10 @@ for (const signal of [
   '## Top risks operational status',
   'Owner',
   'Mitigation status',
+  'Trigger',
+  'Kill-switch mapping',
   'Next review',
+  'Stale review guard',
 ]) {
   if (riskRegister && !riskRegister.includes(signal)) {
     problems.push(`risk-register-status.md missing signal: ${signal}`);
@@ -140,8 +144,17 @@ if (scorecard) {
   rateFloor('reminder dispatch success', 99);
 }
 
+
+const scorecardTrends = read('docs/operations/scorecard-trends-latest.md');
+for (const token of ['30/60/90 checkpoint validation', '30d', '60d', '90d']) {
+  if (scorecardTrends && !scorecardTrends.toLowerCase().includes(token.toLowerCase())) {
+    problems.push(`scorecard-trends-latest.md missing checkpoint token: ${token}`);
+  }
+}
+
 assertRecentEvidence('docs/operations/success-scorecard-latest.md', 14);
 assertRecentEvidence('docs/operations/risk-register-status.md', 14);
+assertRecentEvidence('docs/operations/scorecard-trends-latest.md', 14);
 assertRecentEvidence('docs/release-evidence/rollback-drill-2026-03-15.md', 30);
 
 if (problems.length > 0) {

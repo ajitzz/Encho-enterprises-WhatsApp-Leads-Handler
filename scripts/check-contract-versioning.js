@@ -55,10 +55,31 @@ if (!schemaVersionMatch) {
   process.exit(1);
 }
 
+for (const envelopeField of ['eventId', 'eventType', 'occurredAt', 'schemaVersion', 'sourceModule', 'correlationId']) {
+  if (!internalEvents.includes(envelopeField)) {
+    console.error(`internalEvents.js is missing required envelope field token: ${envelopeField}`);
+    process.exit(1);
+  }
+}
+
+const leadContracts = fs.readFileSync(path.join(repoRoot, 'backend/modules/lead-ingestion/contracts.js'), 'utf8');
+const reminderContracts = fs.readFileSync(path.join(repoRoot, 'backend/modules/reminders-escalations/contracts.js'), 'utf8');
+for (const [source, signal] of [
+  [leadContracts, 'toLegacyLeadIngestedPayload'],
+  [leadContracts, 'normalizeLeadIngestedPayload'],
+  [reminderContracts, 'toLegacyReminderTaskDispatchedPayload'],
+  [reminderContracts, 'normalizeReminderTaskDispatchedPayload'],
+]) {
+  if (!source.includes(signal)) {
+    console.error(`Compatibility mapper missing: ${signal}`);
+    process.exit(1);
+  }
+}
+
 const currentVersion = schemaVersionMatch[1];
 if (!changelog.includes(currentVersion)) {
   console.error(`contracts-changelog.md does not mention current schema version ${currentVersion}`);
   process.exit(1);
 }
 
-console.log(`Contract versioning check passed (current schema version ${currentVersion}).`);
+console.log(`Contract versioning check passed (current schema version ${currentVersion}, envelope metadata, and compatibility mappers are in place).`);
