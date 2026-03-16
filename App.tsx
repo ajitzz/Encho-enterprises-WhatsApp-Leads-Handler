@@ -20,9 +20,9 @@ import { IsolatedFeatureBoundary } from './components/IsolatedFeatureBoundary';
 import { SettingsModal } from './components/SettingsModal'; 
 import { Login } from './components/Login'; 
 import { mockBackend } from './services/mockBackend';
-import { liveApiService, setAuthToken } from './services/liveApiService';
+import { liveApiService, setAuthToken, UpdateConnectionState } from './services/liveApiService';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
-import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle } from 'lucide-react';
+import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle, Wifi, WifiOff, Loader2 } from 'lucide-react';
 
 const FALLBACK_CLIENT_ID = "764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.googleusercontent.com";
 const ENV_CLIENT_ID = (import.meta as any)?.env?.VITE_GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
@@ -63,6 +63,7 @@ export default function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
   const [isRepeatToggling, setIsRepeatToggling] = useState(false);
+  const [updateConnectionState, setUpdateConnectionState] = useState<UpdateConnectionState>('disconnected');
   
   const [dataSource, setDataSource] = useState<'mock' | 'live'>(() => {
       const saved = localStorage.getItem('uber_fleet_data_source');
@@ -147,6 +148,8 @@ export default function App() {
                    });
                    return Array.from(driverMap.values()).sort((a, b) => b.lastMessageTime - a.lastMessageTime);
                });
+           }, {
+               onConnectionStateChange: setUpdateConnectionState
            });
            addNotification({ type: 'info', title: 'Connected to Live Server', message: 'Delta-Sync Active' });
          } catch (e: any) {
@@ -159,7 +162,10 @@ export default function App() {
       }
     };
     fetchData();
-    return () => unsubscribe();
+    return () => {
+      setUpdateConnectionState('disconnected');
+      unsubscribe();
+    };
   }, [dataSource, activeTab, isShowcaseMode, activePublicPage, isAuthenticated, isEmergencyMode]); 
 
   const handleLoginSuccess = (token: string, user: any) => {
@@ -327,6 +333,26 @@ export default function App() {
       } catch(e) { alert("Failed to toggle setting"); } finally { setIsRepeatToggling(false); }
   };
 
+
+  const renderConnectionHealth = () => {
+    if (dataSource !== 'live') return null;
+    const isHealthy = updateConnectionState === 'connected';
+    const labelMap: Record<UpdateConnectionState, string> = {
+      connecting: 'Connecting…',
+      connected: 'Live Push',
+      reconnecting: 'Reconnecting…',
+      polling: 'Polling Fallback',
+      disconnected: 'Disconnected'
+    };
+
+    return (
+      <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-semibold ${isHealthy ? 'bg-green-50 border-green-200 text-green-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}>
+        {updateConnectionState === 'connecting' || updateConnectionState === 'reconnecting' ? <Loader2 size={14} className="animate-spin" /> : isHealthy ? <Wifi size={14} /> : <WifiOff size={14} />}
+        <span>{labelMap[updateConnectionState]}</span>
+      </div>
+    );
+  };
+
   const stats = {
     total: drivers.length,
     flagged: drivers.filter(d => d.status === LeadStatus.FLAGGED_FOR_REVIEW).length,
@@ -345,6 +371,7 @@ export default function App() {
                     <p className="text-gray-500">Welcome back. Here is your fleet recruitment overview.</p>
                  </div>
                  <div className="flex items-center gap-2">
+                   {renderConnectionHealth()}
                    {botSettings && (
                        <button onClick={handleToggleRepeat} disabled={isRepeatToggling} className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-bold transition-all shadow-sm ${botSettings.shouldRepeat ? 'bg-purple-100 text-purple-700 border-purple-200 hover:bg-purple-200' : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'}`} title="Restart bot flow automatically">
                            <Repeat size={18} className={isRepeatToggling ? 'animate-spin' : ''} />
@@ -404,7 +431,7 @@ export default function App() {
         {showSettingsModal && <SettingsModal onClose={() => setShowSettingsModal(false)} />}
         {showBulkModal && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"><div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md m-4"><h3 className="text-lg font-bold mb-4">Send Bulk Message</h3><div className="flex gap-3"><button onClick={() => setShowBulkModal(false)} className="flex-1 px-4 py-2 border rounded-lg">Cancel</button><button onClick={handleBulkSendLegacy} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg">Send</button></div></div></div>}
 
-        <ChatDrawer driver={selectedDriver} onClose={() => setSelectedDriver(null)} onSendMessage={handleSendMessage} onUpdateDriver={handleUpdateDriver} />
+        <ChatDrawer driver={selectedDriver} onClose={() => setSelectedDriver(null)} onSendMessage={handleSendMessage} onUpdateDriver={handleUpdateDriver} updateConnectionState={updateConnectionState} />
         {dataSource === 'live' && <AssistantChat />}
         {dataSource === 'live' && <SystemMonitor />}
         <NotificationToast notifications={notifications} onDismiss={removeNotification} />

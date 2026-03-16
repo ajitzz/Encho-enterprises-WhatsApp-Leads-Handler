@@ -4,7 +4,7 @@ import { Driver, Message, ScheduledMessage, DriverDocument } from '../types';
 import { 
   X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save, AlertTriangle
 } from 'lucide-react';
-import { liveApiService } from '../services/liveApiService';
+import { liveApiService, UpdateConnectionState } from '../services/liveApiService';
 import { MediaSelectorModal } from './MediaSelectorModal';
 
 interface ChatDrawerProps {
@@ -12,9 +12,10 @@ interface ChatDrawerProps {
   onClose: () => void;
   onSendMessage: (text: string) => void;
   onUpdateDriver: (id: string, updates: Partial<Driver>) => void;
+  updateConnectionState?: UpdateConnectionState;
 }
 
-export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver }) => {
+export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver, updateConnectionState = 'disconnected' }) => {
   const [replyText, setReplyText] = useState('');
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
@@ -44,13 +45,11 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
   useEffect(() => {
       if (!driver) return;
-      const pollMessages = async () => {
-          try {
-              const [latestMsgs, latestSched] = await Promise.all([
-                  liveApiService.getDriverMessages(driver.id, 50),
-                  liveApiService.getScheduledMessages(driver.id)
-              ]);
 
+      const unsubscribe = liveApiService.subscribeToUpdates(() => {}, {
+          driverId: driver.id,
+          pollIntervalMs: 12000,
+          onMessages: (latestMsgs) => {
               setLocalMessages(prev => {
                   if (latestMsgs.length === 0) return prev;
                   const newLastId = latestMsgs[latestMsgs.length - 1].id;
@@ -58,12 +57,13 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                   if (latestMsgs.length !== prev.length || newLastId !== prevLastId) return latestMsgs;
                   return prev;
               });
-
+          },
+          onScheduledMessages: (latestSched) => {
               setScheduledMessages(latestSched);
-          } catch (e) {}
-      };
-      const interval = setInterval(pollMessages, 3000);
-      return () => clearInterval(interval);
+          }
+      });
+
+      return () => unsubscribe();
   }, [driver?.id]);
 
   useEffect(() => {
@@ -207,7 +207,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                <div className="h-10 w-10 bg-gray-800 rounded-full flex items-center justify-center text-lg font-bold">{driver.name.charAt(0)}</div>
                <div>
                  <div className="flex items-center gap-2"><h2 className="text-xl font-semibold">{driver.name}</h2></div>
-                 <p className="text-gray-400 text-sm font-mono">{driver.phoneNumber}</p>
+                 <div className="flex items-center gap-2">
+                   <p className="text-gray-400 text-sm font-mono">{driver.phoneNumber}</p>
+                   <span className={`text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full ${updateConnectionState === 'connected' ? 'bg-green-600/30 text-green-200' : 'bg-amber-500/30 text-amber-100'}`}>
+                     {updateConnectionState === 'connected' ? 'Push Live' : updateConnectionState}
+                   </span>
+                 </div>
                </div>
             </div>
             <div className="flex items-center gap-4">

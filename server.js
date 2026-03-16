@@ -4213,6 +4213,93 @@ registerAuthConfigRoutes({
     },
 });
 
+apiRouter.get('/updates/stream', async (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    let closed = false;
+    const driverId = typeof req.query.driverId === 'string' ? req.query.driverId : null;
+
+    const sendEvent = (data) => {
+        if (closed) return;
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    const fetchSnapshot = async () => {
+        return withDb(async (client) => {
+            const driverRows = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC NULLS LAST LIMIT 50');
+            const drivers = driverRows.rows.map((row) => ({
+                id: row.id,
+                phoneNumber: row.phone_number,
+                name: row.name,
+                status: row.stage,
+                lastMessage: row.last_message,
+                lastMessageTime: parseInt(row.last_message_at || '0'),
+                source: row.source,
+                isHumanMode: row.is_human_mode,
+            }));
+
+            const payload = { drivers };
+
+            if (driverId) {
+                const [messagesRes, scheduledRes] = await Promise.all([
+                    client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [driverId]),
+                    client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed'])
+                ]);
+
+                payload.messagesByDriver = {
+                    [driverId]: messagesRes.rows
+                        .map((row) => ({
+                            id: row.id,
+                            sender: row.direction === 'in' ? 'driver' : 'agent',
+                            text: row.text,
+                            timestamp: new Date(row.created_at).getTime(),
+                            type: row.type || 'text',
+                            status: row.status,
+                        }))
+                        .sort((a, b) => a.timestamp - b.timestamp)
+                };
+
+                payload.scheduledByDriver = {
+                    [driverId]: scheduledRes.rows.map((row) => ({
+                        id: row.id,
+                        scheduledTime: new Date(row.scheduled_time).getTime(),
+                        payload: row.payload,
+                        status: row.status,
+                    }))
+                };
+            }
+
+            return payload;
+        });
+    };
+
+    const streamSnapshot = async () => {
+        try {
+            const snapshot = await fetchSnapshot();
+            sendEvent(snapshot);
+        } catch (e) {
+            sendEvent({ error: e.message || 'snapshot_error' });
+        }
+    };
+
+    const snapshotInterval = setInterval(streamSnapshot, 4000);
+    const heartbeat = setInterval(() => {
+        if (!closed) res.write('data: heartbeat\n\n');
+    }, 20000);
+
+    streamSnapshot();
+
+    req.on('close', () => {
+        closed = true;
+        clearInterval(snapshotInterval);
+        clearInterval(heartbeat);
+        res.end();
+    });
+});
+
 apiRouter.get('/drivers', async (req, res) => {
     try {
         await withDb(async (client) => {

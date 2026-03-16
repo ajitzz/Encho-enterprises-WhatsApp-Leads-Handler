@@ -13,6 +13,16 @@ const resolveProxyUploadMaxBytes = () => {
 
 let authToken: string | null = localStorage.getItem('uber_fleet_auth_token');
 
+export type UpdateConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'polling' | 'disconnected';
+
+interface SubscribeToUpdatesOptions {
+    driverId?: string;
+    pollIntervalMs?: number;
+    onMessages?: (messages: Message[]) => void;
+    onScheduledMessages?: (items: ScheduledMessage[]) => void;
+    onConnectionStateChange?: (state: UpdateConnectionState) => void;
+}
+
 export const setAuthToken = (token: string) => {
     authToken = token;
     localStorage.setItem('uber_fleet_auth_token', token);
@@ -92,21 +102,127 @@ export const liveApiService = {
       });
   },
 
-  subscribeToUpdates: (callback: (drivers: Driver[]) => void) => {
+  subscribeToUpdates: (callback: (drivers: Driver[]) => void, options: SubscribeToUpdatesOptions = {}) => {
+      const {
+          driverId,
+          pollIntervalMs = 10000,
+          onMessages,
+          onScheduledMessages,
+          onConnectionStateChange
+      } = options;
+
+      let isClosed = false;
       let consecutiveFailures = 0;
-      const interval = setInterval(async () => {
-          try {
-              const drivers = await liveApiService.getDrivers();
-              consecutiveFailures = 0;
-              callback(drivers);
-          } catch(e) {
-              consecutiveFailures += 1;
-              if (consecutiveFailures >= 3) {
-                  console.warn('[liveApiService] subscribeToUpdates polling failed', e);
-              }
+      let reconnectAttempts = 0;
+      let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+      let pollInterval: ReturnType<typeof setInterval> | null = null;
+      let eventSource: EventSource | null = null;
+
+      const setConnectionState = (state: UpdateConnectionState) => onConnectionStateChange?.(state);
+
+      const fetchFallbackSnapshot = async () => {
+          const [drivers, messages, scheduled] = await Promise.all([
+              liveApiService.getDrivers(),
+              driverId ? liveApiService.getDriverMessages(driverId, 50) : Promise.resolve(null),
+              driverId ? liveApiService.getScheduledMessages(driverId) : Promise.resolve(null)
+          ]);
+
+          callback(drivers);
+          if (messages && onMessages) onMessages(messages);
+          if (scheduled && onScheduledMessages) onScheduledMessages(scheduled);
+      };
+
+      const stopPolling = () => {
+          if (pollInterval) {
+              clearInterval(pollInterval);
+              pollInterval = null;
           }
-      }, 5000);
-      return () => clearInterval(interval);
+      };
+
+      const startPolling = () => {
+          if (pollInterval || isClosed) return;
+          setConnectionState('polling');
+          pollInterval = setInterval(async () => {
+              try {
+                  await fetchFallbackSnapshot();
+                  consecutiveFailures = 0;
+              } catch (e) {
+                  consecutiveFailures += 1;
+                  if (consecutiveFailures >= 3) {
+                      console.warn('[liveApiService] fallback polling failed repeatedly', e);
+                  }
+              }
+          }, pollIntervalMs);
+      };
+
+      const scheduleReconnect = () => {
+          if (isClosed) return;
+          reconnectAttempts += 1;
+          const backoffMs = Math.min(30000, 1000 * (2 ** Math.min(reconnectAttempts, 5)));
+          setConnectionState('reconnecting');
+          startPolling();
+
+          reconnectTimer = setTimeout(() => {
+              if (!isClosed) connectPush();
+          }, backoffMs + Math.floor(Math.random() * 400));
+      };
+
+      const connectPush = () => {
+          if (isClosed || typeof window === 'undefined' || typeof EventSource === 'undefined') {
+              startPolling();
+              return;
+          }
+
+          try {
+              setConnectionState('connecting');
+              const tokenQuery = authToken ? `?token=${encodeURIComponent(authToken)}` : '';
+              eventSource = new EventSource(`${API_BASE_URL}/api/updates/stream${tokenQuery}`);
+
+              eventSource.onopen = () => {
+                  reconnectAttempts = 0;
+                  consecutiveFailures = 0;
+                  stopPolling();
+                  setConnectionState('connected');
+              };
+
+              eventSource.onmessage = (event) => {
+                  if (!event.data || event.data === 'heartbeat') return;
+                  try {
+                      const payload = JSON.parse(event.data);
+                      if (Array.isArray(payload?.drivers)) callback(payload.drivers);
+                      if (driverId && payload?.messagesByDriver?.[driverId] && onMessages) {
+                          onMessages(payload.messagesByDriver[driverId]);
+                      }
+                      if (driverId && payload?.scheduledByDriver?.[driverId] && onScheduledMessages) {
+                          onScheduledMessages(payload.scheduledByDriver[driverId]);
+                      }
+                  } catch {
+                      // Ignore malformed update events and continue streaming.
+                  }
+              };
+
+              eventSource.onerror = () => {
+                  eventSource?.close();
+                  eventSource = null;
+                  scheduleReconnect();
+              };
+          } catch {
+              scheduleReconnect();
+          }
+      };
+
+      fetchFallbackSnapshot().catch((e) => {
+          console.warn('[liveApiService] initial update snapshot failed', e);
+      });
+      connectPush();
+
+      return () => {
+          isClosed = true;
+          setConnectionState('disconnected');
+          stopPolling();
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          if (eventSource) eventSource.close();
+      };
   },
 
   updateDriver: async (id: string, updates: Partial<Driver>) => {
