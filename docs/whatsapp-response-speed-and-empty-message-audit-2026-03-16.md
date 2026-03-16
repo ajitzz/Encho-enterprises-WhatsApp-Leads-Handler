@@ -9,6 +9,8 @@
 
 ### Solution cycle status update (implemented in current cycle)
 - ✅ Outbound payload validation now blocks empty text and malformed interactive payloads before Meta send.
+- ✅ Interactive payload validation now enforces non-empty body + button/list row integrity to prevent blank auto-messages.
+- ✅ Bot engine now falls back to safe text when interactive payload is blocked, reducing dead-end chat states.
 - ✅ `/api/drivers/:id/messages` now rejects invalid text-only requests with HTTP 400.
 - ✅ Outbound message persistence now records `blocked_validation` instead of incorrectly marking blocked sends as `sent`.
 - ✅ Outbound sends now persist Meta `messages[0].id` into `candidate_messages.whatsapp_message_id` when available.

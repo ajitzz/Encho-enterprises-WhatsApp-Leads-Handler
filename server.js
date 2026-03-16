@@ -13,6 +13,12 @@ const { OAuth2Client, JWT } = require('google-auth-library');
 require('dotenv').config();
 
 const { parseBooleanFlag, parsePercent, resolveModuleMode } = require('./backend/shared/infra/flags');
+const {
+    MAX_TEXT_MESSAGE_LENGTH,
+    normalizeTextBody,
+    summarizePayloadForStorage,
+    validateOutboundPayload,
+} = require('./backend/shared/infra/whatsappPayload');
 const { buildLeadIngestionFacade } = require('./backend/modules/lead-ingestion/api');
 const { buildRemindersRouter } = require('./backend/modules/reminders-escalations/api');
 const { buildAuthConfigRouter, registerAuthConfigRoutes } = require('./backend/modules/auth-config/api');
@@ -2046,38 +2052,6 @@ const fetchAndStoreIncomingMedia = async ({ msg, phoneNumber, candidateId, clien
 };
 
 const META_VERBOSE_LOGS = String(process.env.META_VERBOSE_LOGS || 'false').toLowerCase() === 'true';
-const MAX_TEXT_MESSAGE_LENGTH = Number.parseInt(process.env.MAX_TEXT_MESSAGE_LENGTH || '4096', 10);
-
-const normalizeTextBody = (value) => (typeof value === 'string' ? value : String(value || ''));
-
-const validateOutboundPayload = (payload) => {
-    if (!payload || typeof payload !== 'object') return { valid: false, reason: 'payload_missing' };
-
-    if (payload.type === 'text') {
-        const body = normalizeTextBody(payload.text?.body).trim();
-        if (!body) return { valid: false, reason: 'empty_text_body' };
-        if (body.length > MAX_TEXT_MESSAGE_LENGTH) return { valid: false, reason: 'text_too_long' };
-        return { valid: true };
-    }
-
-    if (payload.type === 'interactive') {
-        const interactive = payload.interactive || {};
-        if (interactive.type === 'button') {
-            const buttons = interactive.action?.buttons;
-            if (!Array.isArray(buttons) || buttons.length === 0) return { valid: false, reason: 'interactive_buttons_missing' };
-            return { valid: true };
-        }
-        if (interactive.type === 'list') {
-            const sections = interactive.action?.sections;
-            if (!Array.isArray(sections) || sections.length === 0) return { valid: false, reason: 'interactive_sections_missing' };
-            return { valid: true };
-        }
-        if (interactive.type === 'location_request_message') return { valid: true };
-        return { valid: false, reason: 'interactive_type_unsupported' };
-    }
-
-    return { valid: true };
-};
 
 const sendToMeta = async (phoneNumber, payload) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
@@ -3192,7 +3166,19 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
 
                 if (payload) {
                     try {
-                        const sendResult = await sendToMeta(candidate.phone_number, payload);
+                        let sendResult = await sendToMeta(candidate.phone_number, payload);
+                        let loggedPayload = payload;
+
+                        if (!sendResult?.delivered && sendResult?.blocked && String(sendResult?.reason || '').startsWith('interactive_')) {
+                            const fallbackText = validBody || 'Please reply with your preferred option.';
+                            const fallbackPayload = { type: 'text', text: { body: fallbackText } };
+                            const fallbackResult = await sendToMeta(candidate.phone_number, fallbackPayload);
+                            if (fallbackResult?.delivered) {
+                                sendResult = fallbackResult;
+                                loggedPayload = fallbackPayload;
+                            }
+                        }
+
                         const sendStatus = sendResult?.delivered ? 'sent' : 'blocked_validation';
                         await client.query(
                             `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
@@ -3200,7 +3186,7 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
                             [
                                 crypto.randomUUID(),
                                 candidate.id,
-                                payload.text?.body || payload.interactive?.body?.text || '[Media]',
+                                summarizePayloadForStorage(loggedPayload),
                                 data.type,
                                 sendStatus,
                                 sendResult?.providerMessageId || null,
@@ -4182,14 +4168,15 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
         await withDb(async (client) => {
             const c = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
             if (c.rows.length === 0) throw new Error("Candidate not found");
-            let payload = { type: 'text', text: { body: normalizedText } };
-            let dbText = normalizedText;
+            const sanitizedText = normalizedText.trim();
+            let payload = { type: 'text', text: { body: sanitizedText } };
+            let dbText = sanitizedText;
             if (mediaUrl) {
                 const freshUrl = await refreshMediaUrl(mediaUrl);
                 const type = mediaType || 'image';
-                payload = { type, [type]: { link: freshUrl, caption: normalizedText } };
+                payload = { type, [type]: { link: freshUrl, caption: sanitizedText } };
                 if (type === 'document') payload[type].filename = decodeURIComponent(new URL(freshUrl).pathname.split('/').pop() || 'file.pdf');
-                dbText = JSON.stringify({ url: mediaUrl, caption: normalizedText });
+                dbText = JSON.stringify({ url: mediaUrl, caption: sanitizedText });
             }
             const sendResult = await sendToMeta(c.rows[0].phone_number, payload);
             const sendStatus = sendResult?.delivered ? 'sent' : 'blocked_validation';
