@@ -249,6 +249,56 @@ const getCompiledBotGraph = (botSettings) => {
 // --- INITIALIZE CLIENTS ---
 let s3Client, googleClient, pgPool;
 
+const hasConnectionString = () => Boolean((process.env.POSTGRES_URL || process.env.DATABASE_URL || '').trim());
+
+const buildPoolConfig = () => {
+    const connectionString = (process.env.POSTGRES_URL || process.env.DATABASE_URL || '').trim();
+    const baseConfig = {
+        connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
+        idleTimeoutMillis: 30000,
+        max: 20,
+        keepAlive: true
+    };
+
+    if (!connectionString) {
+        return {
+            ...baseConfig,
+            host: process.env.PGHOST,
+            port: process.env.PGPORT ? Number.parseInt(process.env.PGPORT, 10) : undefined,
+            user: process.env.PGUSER,
+            password: process.env.PGPASSWORD,
+            database: process.env.PGDATABASE,
+            ssl: parseBooleanFlag(process.env.PGSSL || process.env.PGSSLMODE, true)
+                ? { rejectUnauthorized: false }
+                : false
+        };
+    }
+
+    const sanitized = connectionString.includes('sslmode=')
+        ? connectionString.replace(/([?&])sslmode=[^&]+(&|$)/, '$1').replace(/[?&]$/, '')
+        : connectionString;
+
+    return {
+        ...baseConfig,
+        connectionString: sanitized,
+        ssl: { rejectUnauthorized: false }
+    };
+};
+
+const isRecoverableInfraError = (error) => {
+    const code = String(error?.code || '').toUpperCase();
+    const message = String(error?.message || '').toLowerCase();
+    if (message.includes('database not initialized')) return true;
+    return ['57P01', '57P03', '53300', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND'].includes(code);
+};
+
+const sendDegradedJson = (res, payload = {}) => {
+    res.status(200).json({
+        status: 'degraded',
+        ...payload
+    });
+};
+
 try {
     s3Client = new S3Client({
         region: SYSTEM_CONFIG.AWS_REGION,
@@ -260,21 +310,12 @@ try {
 
     googleClient = new OAuth2Client(SYSTEM_CONFIG.GOOGLE_CLIENT_ID);
     
-    let connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
-    if (connectionString && connectionString.includes('sslmode=')) {
-        connectionString = connectionString.replace(/([?&])sslmode=[^&]+(&|$)/, '$1').replace(/[?&]$/, '');
+    if (hasConnectionString() || process.env.PGHOST) {
+        pgPool = new Pool(buildPoolConfig());
+        pgPool.on('error', (err) => console.error('[DB POOL ERROR]', err));
+    } else {
+        console.warn('[DB INIT] Skipped Postgres pool setup: no DATABASE_URL/POSTGRES_URL/PGHOST provided');
     }
-    
-    pgPool = new Pool({
-        connectionString,
-        connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
-        idleTimeoutMillis: 30000,
-        ssl: { rejectUnauthorized: false }, 
-        max: 20, 
-        keepAlive: true
-    });
-    
-    pgPool.on('error', (err) => console.error('[DB POOL ERROR]', err));
 
 } catch (initError) {
     console.error("[INIT CRITICAL ERROR]", initError);
@@ -3818,6 +3859,9 @@ const handleDebugStatusLegacy = async (req, res) => {
     } catch (e) {
         status.postgres = 'error';
         status.lastError = e.message;
+        if (isRecoverableInfraError(e)) {
+            return sendDegradedJson(res, status);
+        }
     }
     res.json(status);
 };
@@ -3962,7 +4006,20 @@ const handleBotSettingsGetLegacy = async (req, res) => {
             const r = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
             res.json(r.rows[0]?.settings || { isEnabled: false, nodes: [], edges: [] });
         });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        if (isRecoverableInfraError(e)) {
+            structuredLog({
+                level: 'error',
+                module: 'auth-config',
+                message: 'bot_settings.degraded_fallback',
+                requestId: req?.requestId || null,
+                meta: { error: e.message }
+            });
+            res.setHeader('x-system-mode', 'degraded');
+            return res.status(200).json(getDefaultBotConfig());
+        }
+        res.status(500).json({ error: e.message });
+    }
 };
 
 const handleBotSaveLegacy = async (req, res) => {
@@ -4642,7 +4699,19 @@ const handleCronProcessQueueLegacy = async (req, res) => {
             });
         });
         res.json({ status: 'ok', processed, errors, queueSize: processed + errors });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        if (isRecoverableInfraError(e)) {
+            structuredLog({
+                level: 'error',
+                module: 'reminders-escalations',
+                message: 'queue.degraded_skip',
+                requestId: req?.requestId || null,
+                meta: { error: e.message }
+            });
+            return sendDegradedJson(res, { processed, errors, queueSize: processed + errors, skipped: true });
+        }
+        res.status(500).json({ error: e.message });
+    }
 };
 
 const remindersRouter = buildRemindersRouter({

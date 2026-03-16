@@ -123,6 +123,28 @@
     - ensure DB status is not `sent` when blocked,
     - ensure webhook ack time remains under configured budget.
 
+
+### 13) Repeating 500s when DB connection is unavailable (observed on `/api/bot/settings`, `/api/debug/status`, `/api/cron/process-queue`)
+- **Symptom**: Console shows continuous `500` errors and dashboard appears disconnected.
+- **Evidence**:
+  - UI heartbeats poll queue endpoint every 10s and monitor polls status endpoint.
+  - Legacy handlers return hard `500` on infra outages, causing noisy retry loops.
+- **Risk**: Operator panic, unstable UX, and noisy logs while infra is recovering.
+- **Fix (implemented)**:
+  1. Add recoverable infrastructure error classifier (`database not initialized`, connection/refused/timeout codes).
+  2. Return a **degraded 200 response** for status/queue diagnostics to avoid hard-fail loops while still signaling degraded mode.
+  3. Add degraded fallback for bot settings so dashboard can still render with default graph.
+  4. Increase heartbeat observability by warning after repeated failures.
+
+### 14) Postgres pool hard-fails boot when only PGHOST-style envs exist
+- **Symptom**: Service fails to initialize DB pool in some deployments with split Postgres env variables.
+- **Evidence**:
+  - Pool init was connection-string-first only (`DATABASE_URL`/`POSTGRES_URL`).
+- **Risk**: Startup instability and avoidable outage during config transitions.
+- **Fix (implemented)**:
+  - Add `buildPoolConfig()` fallback to `PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE` with controlled SSL defaults.
+
+
 ## Prioritized implementation plan
 
 ### P0 (immediate)
