@@ -137,6 +137,12 @@ const logLeadIngestionRuntimePosture = () => {
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG = {
     META_TIMEOUT: 15000,
+    META_TIMEOUT_MANUAL_MS: Math.max(1000, Number(process.env.META_TIMEOUT_MANUAL_MS || 6000)),
+    META_TIMEOUT_BOT_MS: Math.max(1000, Number(process.env.META_TIMEOUT_BOT_MS || 12000)),
+    META_TIMEOUT_SCHEDULED_MS: Math.max(1000, Number(process.env.META_TIMEOUT_SCHEDULED_MS || 20000)),
+    META_RETRY_MAX_ATTEMPTS: Math.max(1, Number(process.env.META_RETRY_MAX_ATTEMPTS || 3)),
+    META_RETRY_BASE_DELAY_MS: Math.max(100, Number(process.env.META_RETRY_BASE_DELAY_MS || 300)),
+    META_RETRY_MAX_DELAY_MS: Math.max(250, Number(process.env.META_RETRY_MAX_DELAY_MS || 2500)),
     DB_CONNECTION_TIMEOUT: 20000,
     AWS_REGION: process.env.AWS_REGION || 'us-east-1',
     AWS_BUCKET: process.env.AWS_BUCKET_NAME || 'uber-fleet-assets',
@@ -695,6 +701,90 @@ const withDb = async (operation) => {
 
 let metaHttpsAgent = null;
 let metaClient = null;
+const META_SEND_METRICS_WINDOW = 250;
+const META_SEND_TYPES = new Set(['manual', 'bot', 'scheduled']);
+const metaSendMetrics = {
+    manual: { total: 0, success: 0, timeout: 0, error: 0, timeoutDurations: [], errorDurations: [] },
+    bot: { total: 0, success: 0, timeout: 0, error: 0, timeoutDurations: [], errorDurations: [] },
+    scheduled: { total: 0, success: 0, timeout: 0, error: 0, timeoutDurations: [], errorDurations: [] },
+};
+
+const nowHrMs = () => Number(process.hrtime.bigint() / 1000000n);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const pushBoundedMetric = (collection, value) => {
+    collection.push(value);
+    if (collection.length > META_SEND_METRICS_WINDOW) collection.shift();
+};
+
+const percentile = (values, p) => {
+    if (!Array.isArray(values) || values.length === 0) return null;
+    const sorted = [...values].sort((a, b) => a - b);
+    const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+    return sorted[idx];
+};
+
+const normalizeSendType = (rawType = 'bot') => (META_SEND_TYPES.has(rawType) ? rawType : 'bot');
+
+const getSendTimeoutBudgetMs = (sendType = 'bot') => {
+    const normalized = normalizeSendType(sendType);
+    if (normalized === 'manual') return SYSTEM_CONFIG.META_TIMEOUT_MANUAL_MS;
+    if (normalized === 'scheduled') return SYSTEM_CONFIG.META_TIMEOUT_SCHEDULED_MS;
+    return SYSTEM_CONFIG.META_TIMEOUT_BOT_MS;
+};
+
+const isRetrySafeTransientMetaError = (error) => {
+    if (!error) return false;
+    const status = error.response?.status;
+    if (typeof status === 'number' && status >= 500 && status < 600) return true;
+    if (error.code === 'ECONNABORTED' || error.code === 'ECONNRESET' || error.code === 'ENOTFOUND' || error.code === 'ETIMEDOUT') return true;
+    return !error.response && Boolean(error.code);
+};
+
+const buildMetaRetryDelayMs = (attempt) => {
+    const expDelay = Math.min(SYSTEM_CONFIG.META_RETRY_MAX_DELAY_MS, SYSTEM_CONFIG.META_RETRY_BASE_DELAY_MS * (2 ** Math.max(0, attempt - 1)));
+    const jitter = Math.floor(Math.random() * SYSTEM_CONFIG.META_RETRY_BASE_DELAY_MS);
+    return expDelay + jitter;
+};
+
+const trackMetaSendMetric = ({ sendType = 'bot', outcome = 'success', durationMs = 0 } = {}) => {
+    const bucket = metaSendMetrics[normalizeSendType(sendType)];
+    bucket.total += 1;
+    if (outcome === 'timeout') {
+        bucket.timeout += 1;
+        pushBoundedMetric(bucket.timeoutDurations, durationMs);
+        return;
+    }
+    if (outcome === 'error') {
+        bucket.error += 1;
+        pushBoundedMetric(bucket.errorDurations, durationMs);
+        return;
+    }
+    bucket.success += 1;
+};
+
+const getMetaSendMetricsSnapshot = () => Object.entries(metaSendMetrics).reduce((acc, [sendType, stats]) => {
+    const total = stats.total || 0;
+    acc[sendType] = {
+        total,
+        success: stats.success,
+        timeout: stats.timeout,
+        error: stats.error,
+        timeoutRate: total > 0 ? Number((stats.timeout / total).toFixed(4)) : 0,
+        errorRate: total > 0 ? Number((stats.error / total).toFixed(4)) : 0,
+        timeoutDurationPercentilesMs: {
+            p50: percentile(stats.timeoutDurations, 50),
+            p95: percentile(stats.timeoutDurations, 95),
+            p99: percentile(stats.timeoutDurations, 99),
+        },
+        errorDurationPercentilesMs: {
+            p50: percentile(stats.errorDurations, 50),
+            p95: percentile(stats.errorDurations, 95),
+            p99: percentile(stats.errorDurations, 99),
+        },
+    };
+    return acc;
+}, {});
 
 const getMetaClient = () => {
     const token = process.env.META_API_TOKEN;
@@ -2081,31 +2171,110 @@ const fetchAndStoreIncomingMedia = async ({ msg, phoneNumber, candidateId, clien
 
 const META_VERBOSE_LOGS = String(process.env.META_VERBOSE_LOGS || 'false').toLowerCase() === 'true';
 
-const sendToMeta = async (phoneNumber, payload) => {
+const sendToMeta = async (phoneNumber, payload, options = {}) => {
     const phoneId = process.env.PHONE_NUMBER_ID;
     const to = (phoneNumber || '').toString().replace(/\D/g, '');
-    
+    const sendType = normalizeSendType(options.sendType || 'bot');
+    const timeoutBudgetMs = getSendTimeoutBudgetMs(sendType);
+    const maxAttempts = options.enableRetry ? SYSTEM_CONFIG.META_RETRY_MAX_ATTEMPTS : 1;
+
     const validation = validateOutboundPayload(payload);
     if (!validation.valid) {
         console.warn(`[Meta] Blocked outbound payload (${validation.reason})`);
         return { delivered: false, blocked: true, reason: validation.reason };
     }
 
-    try {
-        if (META_VERBOSE_LOGS) console.log(`[Meta] Sending to ${to} | Type: ${payload.type}`);
-        const response = await getMetaClient().post(`https://graph.facebook.com/v18.0/${phoneId}/messages`, {
+    const attemptSend = async (attempt) => {
+        if (META_VERBOSE_LOGS) console.log(`[Meta] Sending to ${to} | Type: ${payload.type} | sendType=${sendType} | attempt=${attempt}`);
+        return getMetaClient().post(`https://graph.facebook.com/v18.0/${phoneId}/messages`, {
             messaging_product: "whatsapp",
             recipient_type: "individual",
             to,
             ...payload
+        }, {
+            timeout: timeoutBudgetMs,
         });
-        const providerMessageId = response?.data?.messages?.[0]?.id || null;
-        return { delivered: true, blocked: false, providerMessageId };
-    } catch (e) {
-        const errMsg = e.response?.data?.error?.message || e.message;
-        console.error(`[Meta Failed] ${to}: ${errMsg}`);
-        throw new Error(`Meta API Error: ${errMsg}`);
+    };
+
+    const backgroundRetry = async (startAttempt) => {
+        for (let attempt = startAttempt; attempt <= maxAttempts; attempt += 1) {
+            try {
+                const response = await attemptSend(attempt);
+                const providerMessageId = response?.data?.messages?.[0]?.id || null;
+                trackMetaSendMetric({ sendType, outcome: 'success', durationMs: timeoutBudgetMs });
+                structuredLog({
+                    level: 'info',
+                    module: 'lead-ingestion',
+                    message: 'meta.send.background_retry_succeeded',
+                    meta: { to, sendType, attempt, maxAttempts, providerMessageId }
+                });
+                return { delivered: true, blocked: false, providerMessageId, backgroundRecovered: true };
+            } catch (error) {
+                const isRetryable = isRetrySafeTransientMetaError(error);
+                if (!isRetryable || attempt >= maxAttempts) {
+                    const errMsg = error.response?.data?.error?.message || error.message;
+                    trackMetaSendMetric({ sendType, outcome: error.code === 'ECONNABORTED' ? 'timeout' : 'error', durationMs: timeoutBudgetMs });
+                    structuredLog({
+                        level: 'error',
+                        module: 'lead-ingestion',
+                        message: 'meta.send.background_retry_failed',
+                        meta: { to, sendType, attempt, maxAttempts, error: errMsg }
+                    });
+                    return null;
+                }
+                await sleep(buildMetaRetryDelayMs(attempt));
+            }
+        }
+        return null;
+    };
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const startedAt = nowHrMs();
+        try {
+            const response = await attemptSend(attempt);
+            const providerMessageId = response?.data?.messages?.[0]?.id || null;
+            trackMetaSendMetric({ sendType, outcome: 'success', durationMs: Math.max(0, nowHrMs() - startedAt) });
+            return { delivered: true, blocked: false, providerMessageId };
+        } catch (e) {
+            const durationMs = Math.max(0, nowHrMs() - startedAt);
+            const errMsg = e.response?.data?.error?.message || e.message;
+            const retryable = isRetrySafeTransientMetaError(e);
+            const timedOut = e.code === 'ECONNABORTED';
+
+            if (timedOut) {
+                trackMetaSendMetric({ sendType, outcome: 'timeout', durationMs });
+            } else {
+                trackMetaSendMetric({ sendType, outcome: 'error', durationMs });
+            }
+
+            if (retryable && attempt < maxAttempts) {
+                await sleep(buildMetaRetryDelayMs(attempt));
+                continue;
+            }
+
+            if (timedOut && options.returnFastOnTimeout) {
+                if (options.enableRetry && attempt < maxAttempts) {
+                    trackBackgroundTask({
+                        taskName: 'meta.send.background_retry_after_timeout',
+                        requestId: options.requestId || null,
+                        promise: backgroundRetry(attempt + 1),
+                    });
+                }
+                return {
+                    delivered: false,
+                    timeout: true,
+                    fastFailed: true,
+                    retryingInBackground: Boolean(options.enableRetry && attempt < maxAttempts),
+                    reason: `Meta API timeout after ${timeoutBudgetMs}ms`,
+                };
+            }
+
+            console.error(`[Meta Failed] ${to}: ${errMsg}`);
+            throw new Error(`Meta API Error: ${errMsg}`);
+        }
     }
+
+    throw new Error('Meta API Error: send exhausted without response');
 };
 
 const applyWhatsAppMarker = (rawValue, marker) => {
@@ -2715,7 +2884,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
                         // ERROR HANDLING: If matchFound is FALSE, respond immediately with correction help
                         if (!matchFound && cleanInput.length > 0 && !isManualTrigger) {
-                            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: getCheckpointErrorMessage(checkpointStage) } });
+                            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: getCheckpointErrorMessage(checkpointStage) } }, { sendType: 'bot', enableRetry: true });
                             return; // STOP EXECUTION HERE - Wait for user to correct input
                         }
 
@@ -2840,7 +3009,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             value: valueForLog
                         });
                     } else if (isManualTrigger && currentNode.data.type === 'datetime_picker') {
-                        await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "Sure, please type your preferred time below (e.g., 11:25 PM):" } });
+                        await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "Sure, please type your preferred time below (e.g., 11:25 PM):" } }, { sendType: 'bot', enableRetry: true });
                         return; // Stop here, wait for text
                     }
                     // --- SMART LOGIC END ---
@@ -2928,7 +3097,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         const expectsMediaInput = currentNode.data.type === 'input' && currentNode.data.validationType === 'media';
 
                         if (expectsMediaInput && !incomingMediaPayload?.mediaKey) {
-                            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: currentNode.data.retryMessage || 'Please upload a valid licence file (image, PDF, or video) to continue.' } });
+                            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: currentNode.data.retryMessage || 'Please upload a valid licence file (image, PDF, or video) to continue.' } }, { sendType: 'bot', enableRetry: true });
                             return;
                         }
 
@@ -2943,7 +3112,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         }
 
         if (shouldReplyInvalid) {
-            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "I didn't catch that. Please select an option from the menu." } });
+            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: "I didn't catch that. Please select an option from the menu." } }, { sendType: 'bot', enableRetry: true });
             return;
         }
 
@@ -3031,7 +3200,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             else if (data.type === 'handoff') {
                 await client.query("UPDATE candidates SET is_human_mode = TRUE WHERE id = $1", [candidate.id]);
                 const msg = processText(data.content, candidate);
-                if (isValidContent(msg)) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } });
+                if (isValidContent(msg)) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } }, { sendType: 'bot', enableRetry: true });
                 break; 
             }
 
@@ -3248,13 +3417,13 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
 
                 if (payload) {
                     try {
-                        let sendResult = await sendToMeta(candidate.phone_number, payload);
+                        let sendResult = await sendToMeta(candidate.phone_number, payload, { sendType: 'bot', enableRetry: true });
                         let loggedPayload = payload;
 
                         if (!sendResult?.delivered && sendResult?.blocked && String(sendResult?.reason || '').startsWith('interactive_')) {
                             const fallbackText = validBody || 'Please reply with your preferred option.';
                             const fallbackPayload = { type: 'text', text: { body: fallbackText } };
-                            const fallbackResult = await sendToMeta(candidate.phone_number, fallbackPayload);
+                            const fallbackResult = await sendToMeta(candidate.phone_number, fallbackPayload, { sendType: 'bot', enableRetry: true });
                             if (fallbackResult?.delivered) {
                                 sendResult = fallbackResult;
                                 loggedPayload = fallbackPayload;
@@ -4374,6 +4543,8 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
             if (!trimmed) return res.status(400).json({ error: 'Text is required when mediaUrl is not provided' });
             if (trimmed.length > MAX_TEXT_MESSAGE_LENGTH) return res.status(400).json({ error: `Text exceeds max length (${MAX_TEXT_MESSAGE_LENGTH})` });
         }
+
+        let sendResult = null;
         await withDb(async (client) => {
             const c = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
             if (c.rows.length === 0) throw new Error("Candidate not found");
@@ -4387,8 +4558,10 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
                 if (type === 'document') payload[type].filename = decodeURIComponent(new URL(freshUrl).pathname.split('/').pop() || 'file.pdf');
                 dbText = JSON.stringify({ url: mediaUrl, caption: sanitizedText });
             }
-            const sendResult = await sendToMeta(c.rows[0].phone_number, payload);
-            const sendStatus = sendResult?.delivered ? 'sent' : 'blocked_validation';
+            sendResult = await sendToMeta(c.rows[0].phone_number, payload, { sendType: 'manual', enableRetry: true, returnFastOnTimeout: true, requestId: req.requestId });
+            const sendStatus = sendResult?.delivered
+                ? 'sent'
+                : (sendResult?.timeout ? 'timeout_fast_fail' : 'blocked_validation');
             await client.query(
                 `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
                  VALUES ($1, $2, 'out', $3, $4, $5, $6, NOW())`,
@@ -4397,8 +4570,18 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
             scheduleDriverExcelSync();
             scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'upsert' });
         });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+
+        if (sendResult?.timeout) {
+            return res.status(504).json({
+                success: false,
+                timeout: true,
+                retryingInBackground: Boolean(sendResult?.retryingInBackground),
+                error: sendResult?.reason || 'Meta API timeout',
+            });
+        }
+
+        return res.json({ success: true });
+    } catch (e) { return res.status(500).json({ error: e.message }); }
 });
 
 apiRouter.get('/drivers/:id/documents', async (req, res) => {
@@ -4860,7 +5043,7 @@ const handleCronProcessQueueLegacy = async (req, res) => {
                             metaP = { type: 'text', text: { body: dbLogText } };
                         }
                         
-                        const sendResult = await sendToMeta(job.phone_number, metaP);
+                        const sendResult = await sendToMeta(job.phone_number, metaP, { sendType: 'scheduled', enableRetry: true });
                         const sendStatus = sendResult?.delivered ? 'sent' : 'blocked_validation';
                         
                         // Log success
@@ -4982,6 +5165,28 @@ apiRouter.post('/system/seed-db', async (req, res) => {
         });
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/system/meta-send-metrics', async (_req, res) => {
+    try {
+        return res.json({
+            success: true,
+            windowSize: META_SEND_METRICS_WINDOW,
+            timeoutBudgetsMs: {
+                manual: SYSTEM_CONFIG.META_TIMEOUT_MANUAL_MS,
+                bot: SYSTEM_CONFIG.META_TIMEOUT_BOT_MS,
+                scheduled: SYSTEM_CONFIG.META_TIMEOUT_SCHEDULED_MS,
+            },
+            retry: {
+                maxAttempts: SYSTEM_CONFIG.META_RETRY_MAX_ATTEMPTS,
+                baseDelayMs: SYSTEM_CONFIG.META_RETRY_BASE_DELAY_MS,
+                maxDelayMs: SYSTEM_CONFIG.META_RETRY_MAX_DELAY_MS,
+            },
+            metrics: getMetaSendMetricsSnapshot(),
+        });
+    } catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
 });
 
 app.use('/api', apiRouter);
