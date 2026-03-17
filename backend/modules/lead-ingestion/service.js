@@ -63,7 +63,7 @@ const rememberMessageId = (messageId) => {
 
 const safeSendStatus = (res, code) => {
   if (!res || typeof res.sendStatus !== 'function') return;
-  if (res.statusCode) return;
+  if (res.headersSent || res.writableEnded || res.finished) return;
   res.sendStatus(code);
 };
 
