@@ -64,7 +64,8 @@ export type NodeType =
   | 'handoff' 
   | 'status_update'
   | 'template'
-  | 'summary';
+  | 'summary'
+  | 'ask_image';
 
 export interface ConditionRule {
   id: string;
@@ -87,6 +88,9 @@ export type SummaryTextStyle = 'plain' | 'bold' | 'italic' | 'uppercase' | 'code
 export type MessageFontSize = 'small' | 'medium' | 'large';
 export type MessageFontWeight = 'regular' | 'semibold' | 'bold';
 export type MessageTextAlign = 'left' | 'center' | 'right';
+
+
+export type RequestedDocumentType = 'driving_license' | 'insurance_card' | 'profile_photo' | 'id_proof' | 'other';
 
 export interface FlowNodeData {
   id: string;
@@ -113,6 +117,8 @@ export interface FlowNodeData {
   validationType?: 'text' | 'email' | 'phone' | 'number' | 'regex' | 'location' | 'media';
   validationRegex?: string;
   retryMessage?: string; 
+  requestedDocumentType?: RequestedDocumentType;
+  documentInstructions?: string;
   
   // Logic & Operations
   delayTime?: number; 
@@ -211,6 +217,12 @@ export interface Driver extends Candidate {
     hasVehicle: boolean;
     isLocallyAvailable: boolean;
   };
+  leadPriorityScore?: number;
+  leadPriorityBand?: 'hot' | 'warm' | 'cold';
+  priorityReasonCodes?: string[];
+  isGenuineLead?: boolean;
+  genuineLeadScore?: number;
+  nextActionAt?: number;
 }
 
 export interface SystemStats {

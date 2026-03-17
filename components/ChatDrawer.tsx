@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, ScheduledMessage, DriverDocument } from '../types';
 import { 
-  X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save, AlertTriangle
+  X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save, AlertTriangle, CheckCircle2
 } from 'lucide-react';
 import { liveApiService, UpdateConnectionState } from '../services/liveApiService';
 import { reportUiFailure, reportUiRecovery } from '../services/uiFailureMonitor';
@@ -28,6 +28,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [documents, setDocuments] = useState<DriverDocument[]>([]);
   const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>([]);
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
+  const [previewDocument, setPreviewDocument] = useState<DriverDocument | null>(null);
   
   // EDIT STATE
   const [editingMessage, setEditingMessage] = useState<ScheduledMessage | null>(null);
@@ -359,7 +360,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                 ) : (
                     <div className="space-y-3">
                         {documents.map(doc => (
-                            <div key={doc.id} className="bg-white p-3 rounded-xl border border-gray-200 shadow-sm flex justify-between items-center group hover:border-blue-200 transition-colors">
+                            <div key={doc.id} onClick={() => setPreviewDocument(doc)} className="bg-white p-3 rounded-xl border border-gray-200 shadow-sm flex justify-between items-center group hover:border-blue-200 transition-colors cursor-pointer">
                                 <div className="flex items-center gap-2">
                                     <div className="bg-blue-50 p-2 rounded-lg text-blue-600"><FileText size={16} /></div>
                                     <div className="flex flex-col">
@@ -367,7 +368,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                                         <span className="text-[9px] text-gray-400">{new Date(doc.timestamp).toLocaleDateString()}</span>
                                     </div>
                                 </div>
-                                <a href={doc.url} target="_blank" rel="noreferrer" className="text-gray-400 hover:text-blue-600 p-1"><Download size={14}/></a>
+                                <div className="flex items-center gap-2"><span className={`text-[9px] px-2 py-0.5 rounded-full font-bold uppercase ${doc.verificationStatus === 'approved' ? 'bg-green-100 text-green-700' : doc.verificationStatus === 'rejected' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`}>{doc.verificationStatus}</span><a onClick={(e) => e.stopPropagation()} href={doc.url} target="_blank" rel="noreferrer" className="text-gray-400 hover:text-blue-600 p-1"><Download size={14}/></a></div>
                             </div>
                         ))}
                     </div>
@@ -407,6 +408,50 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
               </div>
           </div>
       )}
+
+      {previewDocument && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl overflow-hidden">
+                  <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+                      <div>
+                          <h4 className="font-bold text-gray-900">Document Verification</h4>
+                          <p className="text-xs text-gray-500 capitalize">{previewDocument.docType.replace('_', ' ')}</p>
+                      </div>
+                      <button type="button" onClick={() => setPreviewDocument(null)} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+                  </div>
+                  <div className="grid md:grid-cols-[2fr,1fr] gap-0">
+                      <div className="bg-gray-900 flex items-center justify-center min-h-[280px]">
+                          <img src={previewDocument.url} alt={previewDocument.docType} className="max-h-[420px] w-full object-contain" />
+                      </div>
+                      <div className="p-4 space-y-3">
+                          <div className="text-xs text-gray-500">Review actions</div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDocuments(prev => prev.map(d => d.id === previewDocument.id ? { ...d, verificationStatus: 'approved' } : d));
+                              setPreviewDocument(null);
+                            }}
+                            className="w-full py-2 rounded-lg bg-green-600 text-white text-sm font-bold flex items-center justify-center gap-2"
+                          >
+                            <CheckCircle2 size={16} /> Approve document
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDocuments(prev => prev.map(d => d.id === previewDocument.id ? { ...d, verificationStatus: 'rejected' } : d));
+                              setPreviewDocument(null);
+                            }}
+                            className="w-full py-2 rounded-lg bg-red-600 text-white text-sm font-bold"
+                          >
+                            Reject (ask re-upload)
+                          </button>
+                          <p className="text-[11px] text-gray-500">Tip: use reject when image is blurry/cropped/wrong document.</p>
+                      </div>
+                  </div>
+              </div>
+          </div>
+      )}
+
       <MediaSelectorModal isOpen={showMediaPicker} onClose={() => setShowMediaPicker(false)} onSelect={(url, type) => { setSelectedMedia({ url, type }); setShowMediaPicker(false); }} allowedType="All" />
     </div>
   );

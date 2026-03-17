@@ -22,7 +22,7 @@ import { mockBackend } from '../services/mockBackend';
 import { AITraining } from './AITraining';
 import { 
   MessageSquare, List, GitBranch, Save, Play, Trash2, X, Zap, 
-  Image as ImageIcon, MousePointer, Settings, GripVertical, Plus, 
+  Image as ImageIcon, ImagePlus, MousePointer, Settings, GripVertical, Plus, 
   ListPlus, LayoutTemplate, RefreshCw, User, Check, Clock, MapPin, 
   CreditCard, FileText, Type, Variable, CornerRightDown, Navigation,
   LocateFixed, AlertTriangle, Bot, CalendarClock, Calendar, FileCheck,
@@ -119,6 +119,7 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
         case 'image': config = { color: 'bg-purple-500', icon: <ImageIcon size={14} />, label: 'Media', subtitle: 'Image/Video' }; break;
         case 'rich_card': config = { color: 'bg-pink-600', icon: <CreditCard size={14} />, label: 'Rich Card', subtitle: 'Media + Buttons' }; break;
         case 'input': config = { color: 'bg-orange-500', icon: <CornerRightDown size={14} />, label: 'Collect Input', subtitle: 'Wait for user' }; break;
+        case 'ask_image': config = { color: 'bg-fuchsia-600', icon: <ImagePlus size={14} />, label: 'Ask Image', subtitle: 'Document Capture' }; break;
         case 'interactive_button': config = { color: 'bg-rose-500', icon: <MousePointer size={14} />, label: 'Buttons', subtitle: 'Quick Reply' }; break;
         case 'interactive_list': config = { color: 'bg-indigo-500', icon: <List size={14} />, label: 'List Menu', subtitle: 'Up to 10 Options' }; break;
         case 'condition': config = { color: 'bg-amber-500', icon: <GitBranch size={14} />, label: 'Logic Check', subtitle: 'If/Else' }; break;
@@ -472,7 +473,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                     )}
 
                     {/* Main Message Body */}
-                    {['text', 'image', 'input', 'interactive_button', 'interactive_list', 'handoff', 'rich_card', 'location_request', 'pickup_location', 'destination_location', 'summary', 'datetime_picker'].includes(local.type) && (
+                    {['text', 'image', 'ask_image', 'input', 'interactive_button', 'interactive_list', 'handoff', 'rich_card', 'location_request', 'pickup_location', 'destination_location', 'summary', 'datetime_picker'].includes(local.type) && (
                         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
                             <label className="block text-xs font-bold text-gray-700 uppercase mb-2">
                                 {local.type === 'summary' ? 'Summary Header Text' : local.type === 'datetime_picker' ? 'Greeting Message' : 'Message Body'}
@@ -524,7 +525,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         </div>
                     )}
 
-                    {['text', 'image', 'input', 'interactive_button', 'interactive_list', 'handoff', 'rich_card', 'location_request', 'pickup_location', 'destination_location', 'summary', 'datetime_picker'].includes(local.type) && (
+                    {['text', 'image', 'ask_image', 'input', 'interactive_button', 'interactive_list', 'handoff', 'rich_card', 'location_request', 'pickup_location', 'destination_location', 'summary', 'datetime_picker'].includes(local.type) && (
                         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm">
                             <label className="block text-xs font-bold text-gray-700 uppercase mb-2">Message Typography</label>
                             <div className="grid grid-cols-3 gap-2">
@@ -750,7 +751,7 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                     )}
 
                     {/* Footer Text */}
-                    {['text', 'rich_card', 'interactive_button', 'summary', 'datetime_picker'].includes(local.type) && (
+                    {['text', 'rich_card', 'interactive_button', 'summary', 'datetime_picker', 'ask_image'].includes(local.type) && (
                         <div>
                              <label className="block text-xs font-bold text-gray-500 uppercase mb-1.5 ml-1">Footer Text (Optional)</label>
                              <input 
@@ -1133,6 +1134,30 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                         </div>
                     )}
 
+
+                    {local.type === 'ask_image' && (
+                        <div className="bg-fuchsia-50 p-4 rounded-xl border border-fuchsia-100 space-y-4">
+                             <div>
+                                <label className="block text-[10px] font-bold text-fuchsia-800 uppercase mb-1">Save Image URL To</label>
+                                <input className="w-full border border-fuchsia-200 p-2 rounded text-sm bg-white" value={local.variable || 'document_image_url'} onChange={e => update('variable', e.target.value)} placeholder="document_image_url" />
+                            </div>
+                            <div>
+                                <label className="block text-[10px] font-bold text-fuchsia-800 uppercase mb-1">Requested Document Type</label>
+                                <select className="w-full border border-fuchsia-200 p-2 rounded text-sm bg-white" value={local.requestedDocumentType || 'driving_license'} onChange={e => update('requestedDocumentType', e.target.value)}>
+                                    <option value="driving_license">Driving License</option>
+                                    <option value="insurance_card">Insurance Card</option>
+                                    <option value="id_proof">ID Proof</option>
+                                    <option value="profile_photo">Profile Photo</option>
+                                    <option value="other">Other</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-[10px] font-bold text-fuchsia-800 uppercase mb-1">Retry Message</label>
+                                <input className="w-full border border-fuchsia-200 p-2 rounded text-sm bg-white" value={local.retryMessage || ''} onChange={e => update('retryMessage', e.target.value)} placeholder="Please upload a clear image to continue." />
+                            </div>
+                        </div>
+                    )}
+
                     {/* Optional Response Capture (Interactive Nodes) */}
                     {['interactive_button', 'interactive_list', 'rich_card'].includes(local.type) && (
                         <div className="bg-rose-50 p-4 rounded-xl border border-rose-100 space-y-2">
@@ -1277,6 +1302,11 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
           newNode.data.summaryEmptyText = "No responses captured yet.";
           newNode.data.footerText = "Reply YES to confirm or NO to edit.";
       }
+      if (type === 'ask_image') {
+          newNode.data.content = 'Please upload your driving license image to continue.';
+          newNode.data.variable = 'document_image_url';
+          newNode.data.requestedDocumentType = 'driving_license';
+      }
       if (type === 'datetime_picker') {
           newNode.data.content = "When would you like to schedule this ride?";
           newNode.data.variable = 'pickup_time';
@@ -1327,6 +1357,10 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
                      <button onClick={() => handleAddNode('image')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-purple-400 hover:shadow-sm transition-all text-gray-600 hover:text-purple-600">
                          <ImageIcon size={20} className="mb-1" />
                          <span className="text-[10px] font-bold">Media</span>
+                     </button>
+                     <button onClick={() => handleAddNode('ask_image')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-fuchsia-400 hover:shadow-sm transition-all text-gray-600 hover:text-fuchsia-600">
+                         <ImagePlus size={20} className="mb-1" />
+                         <span className="text-[10px] font-bold">Ask Image</span>
                      </button>
                      <button onClick={() => handleAddNode('interactive_button')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-rose-400 hover:shadow-sm transition-all text-gray-600 hover:text-rose-600">
                          <MousePointer size={20} className="mb-1" />
