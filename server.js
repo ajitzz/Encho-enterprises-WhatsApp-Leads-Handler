@@ -44,7 +44,6 @@ const AUTH_CONFIG_CANARY_PERCENT = parsePercent(process.env.FF_AUTH_CONFIG_MODUL
 const SYSTEM_HEALTH_MODULE_FLAG = String(process.env.FF_SYSTEM_HEALTH_MODULE || 'off').toLowerCase();
 const SYSTEM_HEALTH_CANARY_PERCENT = parsePercent(process.env.FF_SYSTEM_HEALTH_MODULE_PERCENT || 0);
 const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, false);
-const WEBHOOK_EARLY_ACK = parseBooleanFlag(process.env.FF_WEBHOOK_EARLY_ACK, true);
 const MODULE_CANARY_TENANTS = String(process.env.FF_CANARY_TENANTS || '')
     .split(',')
     .map((item) => item.trim())
@@ -4241,19 +4240,6 @@ apiRouter.post('/webhook', async (req, res) => {
     });
 
     if (mode !== 'off') {
-        if (WEBHOOK_EARLY_ACK) {
-            if (!res.headersSent && !res.writableEnded && !res.finished) {
-                res.sendStatus(200);
-            }
-
-            trackBackgroundTask({
-                taskName: 'webhook.early_ack_processing',
-                requestId: req.requestId || null,
-                promise: leadIngestionFacade({ body: req.body, req, res, context: { requestId: req.requestId || null, tenantId } }),
-            });
-            return;
-        }
-
         await leadIngestionFacade({ body: req.body, req, res, context: { requestId: req.requestId || null, tenantId } });
         return;
     }

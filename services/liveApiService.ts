@@ -11,16 +11,6 @@ const resolveProxyUploadMaxBytes = () => {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_PROXY_UPLOAD_MAX_BYTES;
 };
 
-const shouldUsePushTransport = () => {
-    const envFlag = String((import.meta as any)?.env?.VITE_ENABLE_PUSH_STREAM || '').trim().toLowerCase();
-    if (envFlag === '1' || envFlag === 'true') return true;
-    if (envFlag === '0' || envFlag === 'false') return false;
-
-    if (typeof window === 'undefined') return false;
-    const host = window.location.hostname.toLowerCase();
-    return !host.endsWith('.vercel.app');
-};
-
 let authToken: string | null = localStorage.getItem('uber_fleet_auth_token');
 
 export type UpdateConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'polling' | 'disconnected';
@@ -186,7 +176,7 @@ export const liveApiService = {
       };
 
       const connectPush = () => {
-          if (isClosed || !shouldUsePushTransport() || typeof window === 'undefined' || typeof EventSource === 'undefined') {
+          if (isClosed || typeof window === 'undefined' || typeof EventSource === 'undefined') {
               startPolling();
               return;
           }
