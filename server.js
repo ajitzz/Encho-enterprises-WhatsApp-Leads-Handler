@@ -4258,32 +4258,29 @@ apiRouter.post('/webhook', async (req, res) => {
         return;
     }
 
+    if (!LEAD_INGESTION_LEGACY_EMERGENCY_FALLBACK) {
         structuredLog({
             level: 'error',
             module: 'lead-ingestion',
             requestId: req.requestId || null,
-            message: 'webhook.legacy_fallback_emergency_mode',
-            meta: { tenantId, mode, emergencyFallbackEnabled: true },
+            message: 'webhook.legacy_fallback_blocked',
+            meta: { tenantId, mode, emergencyFallbackEnabled: false },
         });
-        await processWebhookLegacy({ body: req.body, req, res });
-    };
-
-    if (WEBHOOK_EARLY_ACK) {
-        if (!res.headersSent && !res.writableEnded && !res.finished) {
-            res.sendStatus(200);
-        }
-
-        setImmediate(() => {
-            trackBackgroundTask({
-                taskName: 'webhook.early_ack_processing',
-                requestId: req.requestId || null,
-                promise: runWebhookPipeline(),
-            });
+        res.status(503).json({
+            error: 'Lead ingestion module is off and legacy emergency fallback is disabled.',
+            requiredAction: 'Set FF_LEAD_INGESTION_MODULE=on/canary or FF_LEAD_INGESTION_LEGACY_EMERGENCY_FALLBACK=true for emergency fallback.',
         });
         return;
     }
 
-    await runWebhookPipeline();
+    structuredLog({
+        level: 'error',
+        module: 'lead-ingestion',
+        requestId: req.requestId || null,
+        message: 'webhook.legacy_fallback_emergency_mode',
+        meta: { tenantId, mode, emergencyFallbackEnabled: true },
+    });
+    await processWebhookLegacy({ body: req.body, req, res });
 });
 
 const handleAuthGoogleLegacy = async (req, res) => {
