@@ -29,7 +29,7 @@ interface LeadManagerProps {
 }
 
 type PriorityBand = 'hot' | 'warm' | 'cold';
-type QueueFilter = 'all' | 'hot' | 'warm' | 'cold' | 'overdue' | 'fresh' | 'genuine' | 'at_risk';
+type QueueFilter = 'all' | 'hot' | 'warm' | 'cold' | 'overdue' | 'fresh';
 
 interface LeadInsight {
   score: number;
@@ -37,10 +37,6 @@ interface LeadInsight {
   nextAction: string;
   followupAt: number | null;
   isOverdue: boolean;
-  genuineScore: number;
-  isGenuine: boolean;
-  lossRisk: number;
-  reasonCodes: string[];
 }
 
 const ITEMS_PER_PAGE = 15;
@@ -72,54 +68,34 @@ const getFollowupAt = (driver: Driver): number | null => {
 
 const buildLeadInsight = (driver: Driver): LeadInsight => {
   let score = 0;
-  let genuineScore = 0;
-  const reasonCodes: string[] = [];
 
-  if (driver.status === LeadStatus.QUALIFIED) { score += 35; genuineScore += 18; reasonCodes.push('qualified_stage'); }
-  if (driver.status === LeadStatus.NEW) { score += 20; reasonCodes.push('new_inquiry'); }
+  if (driver.status === LeadStatus.QUALIFIED) score += 35;
+  if (driver.status === LeadStatus.NEW) score += 20;
   if (driver.status === LeadStatus.FLAGGED_FOR_REVIEW) score += 8;
   if (driver.status === LeadStatus.REJECTED) score -= 35;
 
   const source = (driver.source || '').toLowerCase();
-  if (['meta_ads', 'facebook_ads', 'google_ads', 'paid'].some((tag) => source.includes(tag))) { score += 20; genuineScore += 8; reasonCodes.push('paid_source'); }
-  if (source.includes('organic')) { score += 10; }
+  if (['meta_ads', 'facebook_ads', 'google_ads', 'paid'].some((tag) => source.includes(tag))) score += 20;
+  if (source.includes('organic')) score += 10;
 
   const intentText = getVariableText(driver, ['intent', 'interest_level', 'urgency', 'timeline']);
-  if (/ready|urgent|today|now|immediately|high/.test(intentText)) { score += 25; genuineScore += 22; reasonCodes.push('high_intent_text'); }
-  if (/later|maybe|not sure|low/.test(intentText)) { score -= 12; genuineScore -= 8; }
+  if (/ready|urgent|today|now|immediately|high/.test(intentText)) score += 25;
+  if (/later|maybe|not sure|low/.test(intentText)) score -= 12;
 
   const docsText = getVariableText(driver, ['license_status', 'document_status', 'kyc_status']);
-  if (/approved|complete|uploaded|valid/.test(docsText)) { score += 18; genuineScore += 26; reasonCodes.push('document_uploaded'); }
-  if (/missing|invalid|rejected/.test(docsText)) { score -= 15; genuineScore -= 12; }
-
-
-  const hasUploadedDocs = Object.keys(driver.documents || {}).length > 0;
-  if (hasUploadedDocs) {
-    score += 14;
-    genuineScore += 24;
-    reasonCodes.push('document_evidence');
-  }
-
-  const flowProgress = Number(driver.variables?.flow_completion_percent || driver.variables?.progress || 0);
-  if (Number.isFinite(flowProgress) && flowProgress >= 80) {
-    score += 16;
-    genuineScore += 20;
-    reasonCodes.push('flow_near_finish');
-  }
+  if (/approved|complete|uploaded|valid/.test(docsText)) score += 18;
+  if (/missing|invalid|rejected/.test(docsText)) score -= 15;
 
   const lastMessageAge = Date.now() - (driver.lastMessageTime || 0);
   if (lastMessageAge < FIFTEEN_MINUTES_MS) score += 12;
   else if (lastMessageAge > TWENTY_FOUR_HOURS_MS) score -= 8;
 
   score = Math.max(0, Math.min(100, score));
-  genuineScore = Math.max(0, Math.min(100, genuineScore));
 
   const followupAt = getFollowupAt(driver);
   const isOverdue = Boolean(followupAt && followupAt < Date.now());
 
   const priority: PriorityBand = score >= 70 ? 'hot' : score >= 40 ? 'warm' : 'cold';
-  const isGenuine = genuineScore >= 55;
-  const lossRisk = Math.max(0, Math.min(100, (isOverdue ? 40 : 0) + (priority === 'hot' ? 25 : 10) + (isGenuine ? 20 : 5) + (lastMessageAge > TWENTY_FOUR_HOURS_MS ? 20 : 0)));
   const nextAction = isOverdue
     ? 'Follow-up now'
     : priority === 'hot'
@@ -128,7 +104,7 @@ const buildLeadInsight = (driver: Driver): LeadInsight => {
         ? 'Send qualification template'
         : 'Add to nurture flow';
 
-  return { score, priority, nextAction, followupAt, isOverdue, genuineScore, isGenuine, lossRisk, reasonCodes: reasonCodes.slice(0, 3) };
+  return { score, priority, nextAction, followupAt, isOverdue };
 };
 
 const priorityStyles: Record<PriorityBand, string> = {
@@ -178,9 +154,7 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
     warm: enrichedDrivers.filter((d) => d.insight.priority === 'warm').length,
     cold: enrichedDrivers.filter((d) => d.insight.priority === 'cold').length,
     overdue: enrichedDrivers.filter((d) => d.insight.isOverdue).length,
-    fresh: enrichedDrivers.filter((d) => Date.now() - (d.lastMessageTime || 0) < FIFTEEN_MINUTES_MS).length,
-    genuine: enrichedDrivers.filter((d) => d.insight.isGenuine).length,
-    at_risk: enrichedDrivers.filter((d) => d.insight.lossRisk >= 70).length
+    fresh: enrichedDrivers.filter((d) => Date.now() - (d.lastMessageTime || 0) < FIFTEEN_MINUTES_MS).length
   }), [enrichedDrivers]);
 
   const queueOptions: Array<{ id: QueueFilter; label: string; icon: React.ReactNode }> = [
@@ -189,9 +163,7 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
     { id: 'warm', label: 'Warm', icon: <CircleDot size={14} /> },
     { id: 'cold', label: 'Cold', icon: <CircleDot size={14} /> },
     { id: 'overdue', label: 'Overdue', icon: <Timer size={14} /> },
-    { id: 'fresh', label: 'Fresh 15m', icon: <Clock size={14} /> },
-    { id: 'genuine', label: 'Genuine', icon: <CheckCircle size={14} /> },
-    { id: 'at_risk', label: 'Loss Risk', icon: <AlertCircle size={14} /> }
+    { id: 'fresh', label: 'Fresh 15m', icon: <Clock size={14} /> }
   ];
 
   const filteredDrivers = useMemo(() => {
@@ -201,8 +173,6 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
       if (queueFilter === 'all') return true;
       if (queueFilter === 'overdue') return driver.insight.isOverdue;
       if (queueFilter === 'fresh') return Date.now() - (driver.lastMessageTime || 0) < FIFTEEN_MINUTES_MS;
-      if (queueFilter === 'genuine') return driver.insight.isGenuine;
-      if (queueFilter === 'at_risk') return driver.insight.lossRisk >= 70;
       return driver.insight.priority === queueFilter;
     });
 
@@ -331,26 +301,6 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
             </div>
           </div>
 
-
-          <div className="mt-3 grid grid-cols-2 gap-2 rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs sm:grid-cols-4">
-            <div>
-              <p className="text-gray-500">Admin Mission Board</p>
-              <p className="font-bold text-gray-800">{queueCounters.overdue} overdue</p>
-            </div>
-            <div>
-              <p className="text-gray-500">Genuine leads</p>
-              <p className="font-bold text-emerald-700">{queueCounters.genuine}</p>
-            </div>
-            <div>
-              <p className="text-gray-500">Loss risk</p>
-              <p className="font-bold text-red-600">{queueCounters.at_risk}</p>
-            </div>
-            <div>
-              <p className="text-gray-500">Hot queue</p>
-              <p className="font-bold text-amber-700">{queueCounters.hot}</p>
-            </div>
-          </div>
-
           <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
             {queueOptions.map((option) => (
               <button
@@ -413,11 +363,6 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
                     <div className="mt-2 text-xs text-gray-500">
                       <span className="font-medium text-gray-700">Next:</span> {driver.insight.nextAction}
                     </div>
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {driver.insight.reasonCodes.map((code) => (
-                        <span key={code} className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">{code.replace(/_/g, ' ')}</span>
-                      ))}
-                    </div>
                   </div>
                   <div className="space-y-1 md:hidden">
                     <span className={`inline-block rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase ${priorityStyles[driver.insight.priority]}`}>{driver.insight.priority}</span>
@@ -432,9 +377,6 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
                     <span className={`inline-block rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase ${priorityStyles[driver.insight.priority]}`}>{driver.insight.priority} • {driver.insight.score}</span>
                     <div className={`text-xs font-medium ${driver.insight.isOverdue ? 'text-red-600' : 'text-gray-500'}`}>
                       {driver.insight.isOverdue ? 'Follow-up overdue' : formatFollowupLabel(driver.insight.followupAt)}
-                    </div>
-                    <div className="text-[10px] font-semibold text-gray-500">
-                      Genuine {driver.insight.genuineScore} • Risk {driver.insight.lossRisk}
                     </div>
                   </div>
                 </div>
