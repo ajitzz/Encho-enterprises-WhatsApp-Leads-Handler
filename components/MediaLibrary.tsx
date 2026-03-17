@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { Upload, File, Image as ImageIcon, Video, Copy, Check, Trash2, Cloud, Folder, FolderPlus, Home, ChevronRight, X, Loader2, AlertCircle, RefreshCw, Zap, Globe, Eye, Link as LinkIcon, ExternalLink, Share2, Power, Edit2, Pencil, AlertTriangle, RefreshCcw, DownloadCloud, FileText } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
+import { reportUiFailure, reportUiRecovery } from '../services/uiFailureMonitor';
 
 interface MediaFile {
     id: string;
@@ -70,7 +71,15 @@ export const MediaLibrary = () => {
         try {
             const status = await liveApiService.getShowcaseStatus();
             setGlobalStatus(status);
-        } catch(e) {}
+            reportUiRecovery('polling', '/api/showcase/status');
+        } catch(e) {
+            reportUiFailure({
+                channel: 'polling',
+                endpoint: '/api/showcase/status',
+                error: e,
+                notifyAdmin: (message) => console.warn('[admin.notify]', message)
+            });
+        }
     };
 
     const loadMedia = async (path: string) => {

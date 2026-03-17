@@ -17,6 +17,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { useFlowStore } from '../services/flowStore';
 import { liveApiService } from '../services/liveApiService';
+import { reportUiFailure, reportUiRecovery } from '../services/uiFailureMonitor';
 import { mockBackend } from '../services/mockBackend';
 import { AITraining } from './AITraining';
 import { 
@@ -1201,7 +1202,17 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
     const load = async () => {
       let settings;
       if (isLiveMode) {
-         try { settings = await liveApiService.getBotSettings(); } catch(e) {}
+         try {
+           settings = await liveApiService.getBotSettings();
+           reportUiRecovery('polling', '/api/bot/settings');
+         } catch(e) {
+           reportUiFailure({
+             channel: 'polling',
+             endpoint: '/api/bot/settings',
+             error: e,
+             notifyAdmin: (message) => console.warn('[admin.notify]', message)
+           });
+         }
       } else {
          settings = mockBackend.getBotSettings();
       }
