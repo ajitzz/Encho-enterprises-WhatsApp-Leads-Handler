@@ -148,6 +148,34 @@ class MockBackendService {
             }
         }
 
+        if (currentNode.data.type === 'ask_image') {
+            const requestedType = currentNode.data.requestedDocumentType || 'driving_license';
+            if (imageUrl) {
+                driver.documents = driver.documents || {};
+                driver.documents[requestedType] = {
+                    url: imageUrl,
+                    type: 'image',
+                    timestamp: Date.now()
+                };
+                driver.variables = driver.variables || {};
+                driver.variables.document_status = 'uploaded';
+                driver.variables.last_document_type = requestedType;
+                driver.variables.last_document_uploaded_at = Date.now();
+                selectedValue = imageUrl;
+            } else {
+                this.addMessage(driver.id, {
+                    id: `${Date.now()}_retry`,
+                    sender: 'system',
+                    text: currentNode.data.retryMessage || 'Please upload a clear image to continue.',
+                    timestamp: Date.now(),
+                    type: 'text'
+                });
+                driver.currentBotStepId = currentNodeId;
+                this.persist();
+                return { driver, actionNeeded: 'NONE' };
+            }
+        }
+
         if (currentNode.data.variable) {
             driver.variables[currentNode.data.variable] = selectedValue || text;
         }
@@ -177,7 +205,12 @@ class MockBackendService {
         let msgType: any = 'text';
         if (data.type === 'interactive_button') msgType = 'interactive';
         if (data.type === 'interactive_list') msgType = 'interactive';
+        if (data.type === 'ask_image') msgType = 'text';
         
+        if (data.type === 'ask_image' && !data.content) {
+            data.content = `Please upload your ${String(data.requestedDocumentType || 'document').replace(/_/g, ' ')} image.`;
+        }
+
         if (data.content || data.mediaUrl) {
              this.addMessage(driver.id, {
                  id: Date.now().toString() + '_' + limit,
@@ -190,7 +223,7 @@ class MockBackendService {
         }
 
         // Wait Check
-        if (['input', 'interactive_button', 'interactive_list'].includes(data.type)) {
+        if (['input', 'interactive_button', 'interactive_list', 'ask_image'].includes(data.type)) {
             driver.currentBotStepId = node.id;
             break; 
         }
