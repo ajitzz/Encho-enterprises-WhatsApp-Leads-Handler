@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, ScheduledMessage, DriverDocument } from '../types';
 import { 
-  X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save, AlertTriangle
+  X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save, AlertTriangle, History, MessageCircle, ShieldAlert
 } from 'lucide-react';
 import { liveApiService, UpdateConnectionState } from '../services/liveApiService';
 import { reportUiFailure, reportUiRecovery } from '../services/uiFailureMonitor';
@@ -15,6 +15,43 @@ interface ChatDrawerProps {
   onUpdateDriver: (id: string, updates: Partial<Driver>) => void;
   updateConnectionState?: UpdateConnectionState;
 }
+
+const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTime }) => {
+  const [timeLeft, setTimeLeft] = useState<number>(0);
+  const WINDOW_DURATION = 24 * 60 * 60 * 1000; // 24 hours
+
+  useEffect(() => {
+    const calculateTime = () => {
+      const now = Date.now();
+      const diff = (lastMessageTime + WINDOW_DURATION) - now;
+      setTimeLeft(Math.max(0, diff));
+    };
+
+    calculateTime();
+    const timer = setInterval(calculateTime, 1000);
+    return () => clearInterval(timer);
+  }, [lastMessageTime]);
+
+  if (timeLeft === 0) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-1.5 bg-red-50 text-red-600 rounded-full text-[10px] font-bold uppercase tracking-wider border border-red-100">
+        <ShieldAlert size={12} />
+        Window Expired (History Mode)
+      </div>
+    );
+  }
+
+  const hours = Math.floor(timeLeft / (60 * 60 * 1000));
+  const minutes = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
+  const seconds = Math.floor((timeLeft % (60 * 1000)) / 1000);
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 text-emerald-600 rounded-full text-[10px] font-bold uppercase tracking-wider border border-emerald-100">
+      <Clock size={12} className="animate-pulse" />
+      {hours}h {minutes}m {seconds}s remaining
+    </div>
+  );
+};
 
 export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver, updateConnectionState = 'disconnected' }) => {
   const [replyText, setReplyText] = useState('');
@@ -35,6 +72,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [editText, setEditText] = useState('');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const isWindowActive = driver ? (Date.now() - driver.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
   useEffect(() => {
     if (driver) {
@@ -239,7 +278,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             <div className="flex items-center gap-4">
                <div className="h-10 w-10 bg-gray-800 rounded-full flex items-center justify-center text-lg font-bold">{driver.name.charAt(0)}</div>
                <div>
-                 <div className="flex items-center gap-2"><h2 className="text-xl font-semibold">{driver.name}</h2></div>
+                 <div className="flex items-center gap-2">
+                    <h2 className="text-xl font-semibold">{driver.name}</h2>
+                    <MetaWindowTimer lastMessageTime={driver.lastMessageTime} />
+                 </div>
                  <div className="flex items-center gap-2">
                    <p className="text-gray-400 text-sm font-mono">{driver.phoneNumber}</p>
                    <span className={`text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full ${updateConnectionState === 'connected' ? 'bg-green-600/30 text-green-200' : 'bg-amber-500/30 text-amber-100'}`}>
@@ -322,30 +364,44 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
               </div>
 
               <div className="p-4 bg-white border-t border-gray-200 relative">
-                {selectedMedia && (
-                    <div className="absolute bottom-full left-0 right-0 bg-gray-100 p-2 border-t border-gray-200 flex items-center justify-between px-4">
-                        <div className="flex items-center gap-2 text-xs font-bold text-gray-700">
-                            <Paperclip size={12} /> Selected: {selectedMedia.type.toUpperCase()}
+                {!isWindowActive ? (
+                  <div className="flex flex-col items-center justify-center py-8 px-4 bg-gray-50 rounded-2xl border border-dashed border-gray-300 animate-in fade-in zoom-in duration-300">
+                    <div className="w-12 h-12 bg-gray-200 rounded-full flex items-center justify-center mb-3 text-gray-500">
+                      <History size={24} />
+                    </div>
+                    <h4 className="text-sm font-bold text-gray-900 mb-1">Chat History Mode</h4>
+                    <p className="text-xs text-gray-500 text-center max-w-xs leading-relaxed">
+                      The 24-hour Meta response window has expired. You can only view the history until the customer sends a new message.
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    {selectedMedia && (
+                        <div className="absolute bottom-full left-0 right-0 bg-blue-50 p-2 border-t border-blue-200 flex items-center justify-between px-4 animate-in slide-in-from-bottom-2">
+                            <div className="flex items-center gap-2 text-xs font-bold text-blue-700">
+                                <Paperclip size={12} /> Selected: {selectedMedia.type.toUpperCase()}
+                            </div>
+                            <button type="button" onClick={() => setSelectedMedia(null)} className="text-blue-700 hover:bg-blue-100 p-1 rounded-full transition-colors"><X size={14} /></button>
                         </div>
-                        <button type="button" onClick={() => setSelectedMedia(null)}><X size={14} /></button>
+                    )}
+                    {showSchedule && (
+                        <div className="absolute bottom-[calc(100%+10px)] left-4 right-4 bg-white rounded-xl shadow-2xl border border-gray-200 p-4 z-20 animate-in slide-in-from-bottom-2">
+                            <div className="flex justify-between mb-2"><h4 className="font-bold text-gray-800">Schedule Message</h4><button type="button" onClick={() => setShowSchedule(false)}><X size={16} /></button></div>
+                            <input type="datetime-local" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} className="w-full p-2 border rounded-lg text-sm" />
+                        </div>
+                    )}
+                    <div className="flex gap-2 mb-3">
+                        <button type="button" onClick={() => setShowMediaPicker(true)} disabled={isSending} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${selectedMedia ? 'bg-blue-100 text-blue-700 border-blue-200' : 'border-gray-200 hover:bg-gray-50'}`}><Paperclip size={12} /> Attach</button>
+                        <button type="button" onClick={() => setShowSchedule(!showSchedule)} disabled={isSending} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${showSchedule ? 'bg-amber-100 text-amber-700 border-amber-200' : 'border-gray-200 hover:bg-gray-50'}`}><Clock size={12} /> Schedule</button>
                     </div>
-                )}
-                {showSchedule && (
-                    <div className="absolute bottom-[calc(100%+10px)] left-4 right-4 bg-white rounded-xl shadow-2xl border border-gray-200 p-4 z-20 animate-in slide-in-from-bottom-2">
-                        <div className="flex justify-between mb-2"><h4 className="font-bold text-gray-800">Schedule Message</h4><button type="button" onClick={() => setShowSchedule(false)}><X size={16} /></button></div>
-                        <input type="datetime-local" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} className="w-full p-2 border rounded-lg text-sm" />
+                    <div className="flex gap-3">
+                      <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Type a message..." className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20 shadow-inner" disabled={isSending} />
+                      <button type="button" onClick={handleSend} disabled={(!replyText.trim() && !selectedMedia) || isSending} className="self-end p-3 rounded-xl bg-black text-white hover:bg-gray-800 w-12 h-12 flex items-center justify-center disabled:opacity-50">
+                          {isSending ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
+                      </button>
                     </div>
+                  </>
                 )}
-                <div className="flex gap-2 mb-3">
-                    <button type="button" onClick={() => setShowMediaPicker(true)} disabled={isSending} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${selectedMedia ? 'bg-blue-100 text-blue-700 border-blue-200' : 'border-gray-200 hover:bg-gray-50'}`}><Paperclip size={12} /> Attach</button>
-                    <button type="button" onClick={() => setShowSchedule(!showSchedule)} disabled={isSending} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${showSchedule ? 'bg-amber-100 text-amber-700 border-amber-200' : 'border-gray-200 hover:bg-gray-50'}`}><Clock size={12} /> Schedule</button>
-                </div>
-                <div className="flex gap-3">
-                  <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Type a message..." className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20 shadow-inner" disabled={isSending} />
-                  <button type="button" onClick={handleSend} disabled={(!replyText.trim() && !selectedMedia) || isSending} className="self-end p-3 rounded-xl bg-black text-white hover:bg-gray-800 w-12 h-12 flex items-center justify-center disabled:opacity-50">
-                      {isSending ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
-                  </button>
-                </div>
               </div>
             </div>
 

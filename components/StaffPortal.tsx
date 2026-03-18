@@ -22,10 +22,49 @@ import {
   Calendar,
   ClipboardList,
   LogOut,
-  X
+  X,
+  ShieldAlert,
+  Paperclip
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 import { Driver, Message } from '../types.ts';
+
+const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTime }) => {
+  const [timeLeft, setTimeLeft] = useState<number>(0);
+  const WINDOW_DURATION = 24 * 60 * 60 * 1000; // 24 hours
+
+  useEffect(() => {
+    const calculateTime = () => {
+      const now = Date.now();
+      const diff = (lastMessageTime + WINDOW_DURATION) - now;
+      setTimeLeft(Math.max(0, diff));
+    };
+
+    calculateTime();
+    const timer = setInterval(calculateTime, 1000);
+    return () => clearInterval(timer);
+  }, [lastMessageTime]);
+
+  if (timeLeft === 0) {
+    return (
+      <div className="flex items-center gap-1.5 px-2 py-1 bg-red-50 text-red-600 rounded-lg text-[9px] font-bold uppercase tracking-wider border border-red-100">
+        <ShieldAlert size={10} />
+        Expired
+      </div>
+    );
+  }
+
+  const hours = Math.floor(timeLeft / (60 * 60 * 1000));
+  const minutes = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
+  const seconds = Math.floor((timeLeft % (60 * 1000)) / 1000);
+
+  return (
+    <div className="flex items-center gap-1.5 px-2 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-[9px] font-bold uppercase tracking-wider border border-emerald-100">
+      <Clock size={10} className="animate-pulse" />
+      {hours}h {minutes}m {seconds}s
+    </div>
+  );
+};
 
 interface LeadActivity {
   id: string;
@@ -48,6 +87,55 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [actionNote, setActionNote] = useState('');
   const [actionStatus, setActionStatus] = useState('');
   const [connectionState, setConnectionState] = useState<string>('connecting');
+  const [replyText, setReplyText] = useState('');
+  const [isSending, setIsSending] = useState(false);
+  const [selectedMedia, setSelectedMedia] = useState<{ type: 'image' | 'video' | 'document'; file: File; preview: string } | null>(null);
+
+  const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const type = file.type.startsWith('image/') ? 'image' : 
+                 file.type.startsWith('video/') ? 'video' : 'document';
+    
+    const preview = URL.createObjectURL(file);
+    setSelectedMedia({ type, file, preview });
+  };
+
+  const handleSendReply = async () => {
+    if (!selectedLead || (!replyText.trim() && !selectedMedia) || isSending) return;
+    
+    setIsSending(true);
+    try {
+      let mediaUrl = undefined;
+      let mediaType = undefined;
+
+      if (selectedMedia) {
+        const upload = await liveApiService.uploadMedia(selectedMedia.file, `chats/${selectedLead.id}`);
+        mediaUrl = upload.url;
+        mediaType = selectedMedia.type;
+      }
+
+      await liveApiService.sendMessage(selectedLead.id, replyText, {
+        type: mediaType || 'text',
+        imageUrl: mediaType === 'image' ? mediaUrl : undefined,
+        videoUrl: mediaType === 'video' ? mediaUrl : undefined,
+        documentUrl: mediaType === 'document' ? mediaUrl : undefined
+      });
+
+      setReplyText('');
+      setSelectedMedia(null);
+      // Refresh messages
+      const messages = await liveApiService.getDriverMessages(selectedLead.id);
+      setLeadMessages(messages);
+    } catch (err) {
+      console.error('Failed to send message:', err);
+    } finally {
+      setIsSending(false);
+    }
+  };
 
   const myLeads = React.useMemo(() => 
     allLeads.filter(l => (l as any).assigned_to === user.staffId),
@@ -370,6 +458,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                     {(lead as any).lead_score} Score
                   </div>
                 )}
+                <MetaWindowTimer lastMessageTime={lead.lastMessageTime} />
               </div>
               <p className="text-gray-500 mb-6">{lead.phone_number}</p>
 
@@ -433,9 +522,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           </div>
 
           {detailTab === 'chat' ? (
-            <div className="p-4 space-y-4">
-              <div className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm min-h-[400px] flex flex-col">
-                <div className="flex-1 space-y-4 overflow-y-auto max-h-[500px] pr-2 custom-scrollbar">
+            <div className="p-4 space-y-4 flex flex-col h-full">
+              <div className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm flex-1 flex flex-col min-h-[400px]">
+                <div className="flex-1 space-y-4 overflow-y-auto max-h-[400px] pr-2 custom-scrollbar mb-4">
                   {leadMessages.map((msg, idx) => (
                     <div key={msg.id || idx} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
                       <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${
@@ -466,6 +555,62 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       </div>
                       <p className="text-sm font-bold text-gray-900">No messages yet</p>
                       <p className="text-xs text-gray-400 mt-1">The conversation hasn't started or history is unavailable.</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Chat Input Area */}
+                <div className="pt-4 border-t border-gray-100">
+                  {!isWindowActive ? (
+                    <div className="flex flex-col items-center justify-center py-4 px-4 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+                      <History size={20} className="text-gray-400 mb-2" />
+                      <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">History Mode Only</p>
+                      <p className="text-[9px] text-gray-400 text-center mt-1">Window expired. Waiting for customer response.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {selectedMedia && (
+                        <div className="flex items-center justify-between p-2 bg-blue-50 rounded-xl border border-blue-100">
+                          <div className="flex items-center gap-2">
+                            {selectedMedia.type === 'image' ? (
+                              <img src={selectedMedia.preview} className="w-8 h-8 rounded object-cover" alt="Preview" />
+                            ) : (
+                              <div className="w-8 h-8 bg-blue-100 rounded flex items-center justify-center text-blue-600">
+                                <Paperclip size={14} />
+                              </div>
+                            )}
+                            <span className="text-[10px] font-bold text-blue-700 truncate max-w-[150px]">{selectedMedia.file.name}</span>
+                          </div>
+                          <button onClick={() => setSelectedMedia(null)} className="text-blue-500 hover:text-blue-700">
+                            <X size={14} />
+                          </button>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2">
+                        <label className="w-10 h-10 flex items-center justify-center bg-gray-100 text-gray-500 rounded-2xl cursor-pointer hover:bg-gray-200 transition-colors">
+                          <Paperclip size={18} />
+                          <input type="file" className="hidden" onChange={handleFileSelect} />
+                        </label>
+                        <textarea 
+                          placeholder="Type a message..."
+                          className="flex-1 bg-gray-50 border-none rounded-2xl text-xs p-3 focus:ring-2 focus:ring-black resize-none h-10"
+                          value={replyText}
+                          onChange={e => setReplyText(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              handleSendReply();
+                            }
+                          }}
+                        />
+                        <button 
+                          onClick={handleSendReply}
+                          disabled={isSending || (!replyText.trim() && !selectedMedia)}
+                          className="w-10 h-10 bg-black text-white rounded-2xl flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all"
+                        >
+                          {isSending ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />}
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
