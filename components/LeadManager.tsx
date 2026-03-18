@@ -129,7 +129,7 @@ export const LeadManager: React.FC<LeadManagerProps> = ({
   const [queueFilter, setQueueFilter] = useState<QueueFilter>('all');
 
   const [bulkMessage, setBulkMessage] = useState('');
-  const [selectedMedia, setSelectedMedia] = useState<{ url: string, type: 'image' | 'video' | 'document' | 'audio' } | null>(null);
+  const [selectedMedia, setSelectedMedia] = useState<{ url: string, type: 'image' | 'video' | 'document' } | null>(null);
   const [showMediaPicker, setShowMediaPicker] = useState(false);
 
   const [isScheduled, setIsScheduled] = useState(false);

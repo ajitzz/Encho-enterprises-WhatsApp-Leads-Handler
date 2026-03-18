@@ -1194,15 +1194,8 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
   } = useFlowStore();
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<'flow' | 'ai' | 'chat-settings'>('flow');
+  const [activeView, setActiveView] = useState<'flow' | 'ai'>('flow');
   const [isSaving, setIsSaving] = useState(false);
-
-  const { 
-    humanModeEntryMessage, 
-    botModeTransitionMessage,
-    setHumanModeEntryMessage,
-    setBotModeTransitionMessage
-  } = useFlowStore();
 
   // Load Initial Data
   useEffect(() => {
@@ -1224,17 +1217,10 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
          settings = mockBackend.getBotSettings();
       }
       
-      if (settings) {
-          if (settings.nodes) {
-              setNodes(settings.nodes);
-              setEdges(settings.edges);
-          }
-          if (settings.humanModeEntryMessage) {
-              setHumanModeEntryMessage(settings.humanModeEntryMessage);
-          }
-          if (settings.botModeTransitionMessage) {
-              setBotModeTransitionMessage(settings.botModeTransitionMessage);
-          }
+      if (settings && settings.nodes) {
+          // Hydrate store
+          setNodes(settings.nodes);
+          setEdges(settings.edges);
       }
     };
     load();
@@ -1246,8 +1232,6 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
           isEnabled: true,
           shouldRepeat: false, 
           routingStrategy: 'BOT_ONLY',
-          humanModeEntryMessage,
-          botModeTransitionMessage,
           nodes,
           edges
       };
@@ -1317,90 +1301,6 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
       );
   }
 
-  if (activeView === 'chat-settings') {
-      return (
-          <div className="h-full flex flex-col bg-slate-50">
-              <div className="bg-white border-b border-gray-200 p-4 flex items-center gap-4">
-                  <button onClick={() => setActiveView('flow')} className="flex items-center gap-2 text-gray-500 hover:text-gray-900 font-bold text-sm">
-                      <LayoutTemplate size={18} /> Back to Flow
-                  </button>
-                  <h2 className="font-bold text-gray-900">Chat & Human Mode Settings</h2>
-              </div>
-              
-              <div className="flex-1 overflow-y-auto p-8">
-                  <div className="max-w-2xl mx-auto space-y-8">
-                      <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
-                          <div className="flex items-center gap-3 mb-6">
-                              <div className="p-2 bg-green-100 text-green-600 rounded-lg">
-                                  <MessageSquare size={20} />
-                              </div>
-                              <div>
-                                  <h3 className="font-bold text-gray-900">Human Mode Messages</h3>
-                                  <p className="text-xs text-gray-500">Customize the automated messages sent during mode transitions.</p>
-                              </div>
-                          </div>
-
-                          <div className="space-y-6">
-                              <div>
-                                  <label className="block text-sm font-bold text-gray-700 mb-2">
-                                      Human Mode Entry Message
-                                  </label>
-                                  <textarea
-                                      className="w-full border border-gray-200 rounded-xl p-4 text-sm focus:ring-2 focus:ring-green-500 outline-none min-h-[100px]"
-                                      placeholder="Hi, I am {{name}}, how may I help you?"
-                                      value={humanModeEntryMessage}
-                                      onChange={(e) => setHumanModeEntryMessage(e.target.value)}
-                                  />
-                                  <p className="text-[10px] text-gray-400 mt-2">
-                                      Use <code className="bg-gray-100 px-1 rounded">{"{{name}}"}</code> to insert the staff member's name.
-                                  </p>
-                              </div>
-
-                              <div>
-                                  <label className="block text-sm font-bold text-gray-700 mb-2">
-                                      Bot Mode Transition Message
-                                  </label>
-                                  <textarea
-                                      className="w-full border border-gray-200 rounded-xl p-4 text-sm focus:ring-2 focus:ring-green-500 outline-none min-h-[100px]"
-                                      placeholder="our Staff will get back to you shortly"
-                                      value={botModeTransitionMessage}
-                                      onChange={(e) => setBotModeTransitionMessage(e.target.value)}
-                                  />
-                                  <p className="text-[10px] text-gray-400 mt-2">
-                                      This message is sent when switching back to Bot Mode to signal the bot's resumption.
-                                  </p>
-                              </div>
-                          </div>
-                      </div>
-
-                      <div className="bg-blue-50 p-6 rounded-2xl border border-blue-100">
-                          <div className="flex gap-3">
-                              <Sparkles className="text-blue-600 shrink-0" size={20} />
-                              <div>
-                                  <h4 className="text-sm font-bold text-blue-900 mb-1">Pro Tip</h4>
-                                  <p className="text-xs text-blue-700 leading-relaxed">
-                                      Personalized messages help build trust with your leads. Make sure your entry message sounds natural and welcoming.
-                                  </p>
-                              </div>
-                          </div>
-                      </div>
-                      
-                      <div className="flex justify-end">
-                          <button 
-                              onClick={handleSave}
-                              disabled={isSaving}
-                              className="bg-black text-white px-8 py-3 rounded-xl font-bold flex items-center gap-2 hover:bg-gray-800 transition-all disabled:opacity-50"
-                          >
-                              {isSaving ? <RefreshCw size={18} className="animate-spin" /> : <Save size={18} />}
-                              Save Settings
-                          </button>
-                      </div>
-                  </div>
-              </div>
-          </div>
-      );
-  }
-
   return (
     <div className="flex h-full relative font-sans text-gray-900">
       {/* Sidebar / Toolbar */}
@@ -1412,7 +1312,6 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
              <div className="flex gap-2 mt-4">
                  <button onClick={() => setActiveView('flow')} className={`flex-1 py-1.5 text-xs font-bold rounded-lg border ${activeView === 'flow' ? 'bg-blue-50 border-blue-200 text-blue-700' : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`}>Flow</button>
                  <button onClick={() => setActiveView('ai')} className={`flex-1 py-1.5 text-xs font-bold rounded-lg border ${(activeView as string) === 'ai' ? 'bg-purple-50 border-purple-200 text-purple-700' : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`}>AI Persona</button>
-                 <button onClick={() => setActiveView('chat-settings')} className={`flex-1 py-1.5 text-xs font-bold rounded-lg border ${(activeView as string) === 'chat-settings' ? 'bg-green-50 border-green-200 text-green-700' : 'border-gray-200 text-gray-500 hover:bg-gray-50'}`}>Chat</button>
              </div>
          </div>
          

@@ -505,15 +505,7 @@ export default function App() {
         {showSettingsModal && <SettingsModal onClose={() => setShowSettingsModal(false)} />}
         {showBulkModal && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"><div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md m-4"><h3 className="text-lg font-bold mb-4">Send Bulk Message</h3><div className="flex gap-3"><button onClick={() => setShowBulkModal(false)} className="flex-1 px-4 py-2 border rounded-lg">Cancel</button><button onClick={handleBulkSendLegacy} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg">Send</button></div></div></div>}
 
-        <ChatDrawer 
-          driver={selectedDriver} 
-          onClose={() => setSelectedDriver(null)} 
-          onSendMessage={handleSendMessage} 
-          onUpdateDriver={handleUpdateDriver} 
-          updateConnectionState={updateConnectionState} 
-          userName={userProfile?.name}
-          botSettings={botSettings}
-        />
+        <ChatDrawer driver={selectedDriver} onClose={() => setSelectedDriver(null)} onSendMessage={handleSendMessage} onUpdateDriver={handleUpdateDriver} updateConnectionState={updateConnectionState} />
         {dataSource === 'live' && <AssistantChat />}
         {dataSource === 'live' && <SystemMonitor />}
         <NotificationToast notifications={notifications} onDismiss={removeNotification} />

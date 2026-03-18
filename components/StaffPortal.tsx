@@ -24,14 +24,7 @@ import {
   LogOut,
   X,
   ShieldAlert,
-  Paperclip,
-  Headset,
-  MicOff,
-  CheckCheck,
-  Video,
-  FileText,
-  Download,
-  Mic
+  Paperclip
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 import { Driver, Message } from '../types.ts';
@@ -96,20 +89,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [connectionState, setConnectionState] = useState<string>('connecting');
   const [replyText, setReplyText] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const [botSettings, setBotSettings] = useState<any>(null);
-
-  useEffect(() => {
-    const loadSettings = async () => {
-      try {
-        const s = await liveApiService.getBotSettings();
-        setBotSettings(s);
-      } catch (e) {
-        console.error("Failed to load bot settings", e);
-      }
-    };
-    loadSettings();
-  }, []);
-  const [selectedMedia, setSelectedMedia] = useState<{ type: 'image' | 'video' | 'document' | 'audio'; file: File; preview: string } | null>(null);
+  const [selectedMedia, setSelectedMedia] = useState<{ type: 'image' | 'video' | 'document'; file: File; preview: string } | null>(null);
 
   const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
@@ -118,8 +98,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     if (!file) return;
 
     const type = file.type.startsWith('image/') ? 'image' : 
-                 file.type.startsWith('video/') ? 'video' : 
-                 file.type.startsWith('audio/') ? 'audio' : 'document';
+                 file.type.startsWith('video/') ? 'video' : 'document';
     
     const preview = URL.createObjectURL(file);
     setSelectedMedia({ type, file, preview });
@@ -155,34 +134,6 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       console.error('Failed to send message:', err);
     } finally {
       setIsSending(false);
-    }
-  };
-
-  const handleToggleHumanMode = async () => {
-    if (!selectedLead) return;
-    try {
-      const newMode = !selectedLead.isHumanMode;
-      await liveApiService.updateDriver(selectedLead.id, { isHumanMode: newMode });
-      setSelectedLead({ ...selectedLead, isHumanMode: newMode });
-
-      // Send predefined message
-      const firstName = user.name?.split(' ')[0] || 'Staff';
-      let message = '';
-      
-      if (newMode) {
-        const template = botSettings?.humanModeEntryMessage || "Hi, I am {{name}}, how may I help you?";
-        message = template.replace(/\{\{name\}\}/g, firstName);
-      } else {
-        message = botSettings?.botModeTransitionMessage || "our Staff will get back to you shortly";
-      }
-      
-      await liveApiService.sendMessage(selectedLead.id, message);
-      
-      // Refresh messages
-      const messages = await liveApiService.getDriverMessages(selectedLead.id);
-      setLeadMessages(messages);
-    } catch (err: any) {
-      setError(err.message);
     }
   };
 
@@ -271,18 +222,6 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     } finally {
       setLoading(false);
     }
-  };
-
-  const formatMessageDate = (timestamp: number) => {
-    const date = new Date(timestamp);
-    const today = new Date();
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-
-    if (date.toDateString() === today.toDateString()) return 'Today';
-    if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
-    
-    return date.toLocaleDateString([], { day: 'numeric', month: 'long', year: 'numeric' });
   };
 
   const renderDashboard = () => (
@@ -521,16 +460,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                 )}
                 <MetaWindowTimer lastMessageTime={lead.lastMessageTime} />
               </div>
-              <div className="flex items-center gap-3 mb-6">
-                <p className="text-gray-500 text-sm">{lead.phone_number}</p>
-                <button 
-                  onClick={handleToggleHumanMode}
-                  className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-bold transition-all border ${lead.isHumanMode ? 'bg-emerald-500 text-white border-emerald-500' : 'bg-white text-gray-400 border-gray-200 hover:border-gray-300'}`}
-                >
-                  {lead.isHumanMode ? <Headset size={12} /> : <MicOff size={12} />}
-                  {lead.isHumanMode ? 'Human Mode' : 'Bot Mode'}
-                </button>
-              </div>
+              <p className="text-gray-500 mb-6">{lead.phone_number}</p>
 
               {/* Bot Progression */}
               <div className="w-full px-4 mb-6">
@@ -592,146 +522,80 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           </div>
 
           {detailTab === 'chat' ? (
-            <div className="flex-1 flex flex-col min-h-0 bg-[#e5ddd5]" style={{ backgroundImage: 'url("https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png")', backgroundRepeat: 'repeat', backgroundSize: '400px' }}>
-              <div className="flex-1 p-4 space-y-2 overflow-y-auto custom-scrollbar">
-                {leadMessages.map((msg, idx) => {
-                  const isOutgoing = msg.sender !== 'driver';
-                  const showTail = idx === 0 || leadMessages[idx-1].sender !== msg.sender;
-                  
-                  const showDateSeparator = idx === 0 || 
-                    new Date(leadMessages[idx-1].timestamp).toDateString() !== new Date(msg.timestamp).toDateString();
-                  
-                  return (
-                    <React.Fragment key={msg.id || idx}>
-                      {showDateSeparator && (
-                        <div className="flex justify-center my-4 sticky top-2 z-10">
-                          <div className="bg-white/80 backdrop-blur-md px-4 py-1 rounded-lg shadow-sm text-[10px] font-bold text-gray-500 uppercase tracking-widest border border-white/50">
-                            {formatMessageDate(msg.timestamp)}
-                          </div>
-                        </div>
-                      )}
-                      <div className={`flex ${isOutgoing ? 'justify-end' : 'justify-start'} mb-1 px-2`}>
-                        <div className={`max-w-[85%] rounded-lg shadow-sm overflow-hidden relative ${isOutgoing ? 'bg-[#dcf8c6] text-gray-900' : 'bg-white text-gray-900'} ${showTail ? (isOutgoing ? 'rounded-tr-none' : 'rounded-tl-none') : ''}`}>
-                          {showTail && (
-                            <div className={`absolute top-0 w-2 h-2 ${isOutgoing ? '-right-1 bg-[#dcf8c6]' : '-left-1 bg-white'}`} style={{ clipPath: isOutgoing ? 'polygon(0 0, 0 100%, 100% 0)' : 'polygon(100% 0, 100% 100%, 0 0)' }}></div>
-                          )}
+            <div className="p-4 space-y-4 flex flex-col h-full">
+              <div className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm flex-1 flex flex-col min-h-[400px]">
+                <div className="flex-1 space-y-4 overflow-y-auto max-h-[400px] pr-2 custom-scrollbar mb-4">
+                  {leadMessages.map((msg, idx) => (
+                    <div key={msg.id || idx} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
+                      <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${
+                        msg.sender === 'driver' 
+                          ? 'bg-gray-100 text-gray-800 rounded-bl-none' 
+                          : 'bg-black text-white rounded-br-none'
+                      }`}>
+                        {msg.text && <p className="leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
                         {msg.type === 'image' && msg.imageUrl && (
-                          <div className="w-full aspect-square bg-gray-100 rounded-t-lg overflow-hidden relative group">
-                            <img src={msg.imageUrl} className="w-full h-full object-cover transition-transform group-hover:scale-105" alt="media" referrerPolicy="no-referrer" />
-                            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-all" />
-                          </div>
-                        )}
-                        {msg.type === 'video' && msg.videoUrl && (
-                          <div className="w-full aspect-video bg-black rounded-t-lg relative group">
-                            <video src={msg.videoUrl} className="w-full h-full object-contain" />
-                            <div className="absolute inset-0 flex items-center justify-center bg-black/20 group-hover:bg-black/40 transition-all">
-                                <div className="w-12 h-12 rounded-full bg-white/20 backdrop-blur-md flex items-center justify-center text-white border border-white/30">
-                                    <Video size={24} />
-                                </div>
-                            </div>
-                            <div className="absolute bottom-2 right-2 px-1.5 py-0.5 bg-black/60 rounded text-[10px] text-white font-bold flex items-center gap-1">
-                                <Video size={10} /> VIDEO
-                            </div>
-                          </div>
-                        )}
-                        {msg.type === 'audio' && msg.audioUrl && (
-                          <div className="w-full bg-[#f0f0f0]/50 p-3 rounded-t-lg flex items-center gap-3 border-b border-gray-100">
-                              <div className="w-12 h-12 rounded-full bg-emerald-500 flex items-center justify-center text-white shadow-md flex-shrink-0">
-                                  <Headset size={24} />
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-2 mb-1">
-                                    <div className="h-1 flex-1 bg-gray-300 rounded-full overflow-hidden">
-                                      <div className="h-full bg-emerald-500 w-1/3" />
-                                    </div>
-                                    <span className="text-[10px] font-bold text-gray-500">0:45</span>
-                                  </div>
-                                  <audio src={msg.audioUrl} controls className="w-full h-8 custom-audio-player opacity-0 absolute pointer-events-none" />
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">Voice Note</span>
-                                    <Mic size={12} className="text-emerald-500" />
-                                  </div>
-                              </div>
-                          </div>
+                          <img src={msg.imageUrl} alt="Shared" className="rounded-lg mt-1 max-w-full h-auto border border-white/10" referrerPolicy="no-referrer" />
                         )}
                         {msg.type === 'document' && msg.documentUrl && (
-                          <a 
-                              href={msg.documentUrl} 
-                              target="_blank" 
-                              rel="noopener noreferrer"
-                              className="w-full p-3 rounded-t-lg bg-gray-50 flex items-center gap-3 border-b border-gray-100 hover:bg-gray-100 transition-colors group"
-                          >
-                              <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center text-blue-600 group-hover:bg-blue-600 group-hover:text-white transition-all">
-                                  <FileText size={20} />
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                  <p className="text-xs font-bold text-gray-900 truncate">{msg.documentUrl.split('/').pop() || 'Document'}</p>
-                                  <p className="text-[10px] text-gray-400 uppercase font-bold">PDF • 1.2 MB</p>
-                              </div>
-                              <Download size={16} className="text-gray-400" />
+                          <a href={msg.documentUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 mt-1 p-2 bg-white/10 rounded-lg text-xs hover:bg-white/20 transition-colors">
+                            <ClipboardList size={14} />
+                            View Document
                           </a>
                         )}
-                        <div className="px-2 pt-1 pb-1 flex flex-col">
-                            <div className="pr-12">
-                                {msg.text && <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
-                            </div>
-                            <div className="text-[9px] mt-0.5 self-end opacity-50 flex items-center gap-1">
-                                {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                                {isOutgoing && <CheckCheck size={12} className={msg.status === 'read' ? 'text-blue-500' : ''} />}
-                            </div>
-                        </div>
+                        <p className={`text-[10px] mt-1 opacity-50 ${msg.sender === 'driver' ? 'text-gray-500' : 'text-gray-300'}`}>
+                          {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </p>
                       </div>
                     </div>
-                  </React.Fragment>
-                );
-              })}
-                {leadMessages.length === 0 && (
-                  <div className="flex flex-col items-center justify-center text-center p-10 bg-white/50 backdrop-blur-sm rounded-3xl mx-4">
-                    <MessageSquare size={32} className="text-gray-400 mb-2" />
-                    <p className="text-sm font-bold text-gray-900">No messages yet</p>
-                  </div>
-                )}
-              </div>
-
-              {/* Chat Input Area */}
-              <div className="p-2 bg-[#f0f0f0] border-t border-gray-200">
-                {!isWindowActive ? (
-                  <div className="flex flex-col items-center justify-center py-4 px-4 bg-white/80 backdrop-blur-sm rounded-xl border border-dashed border-gray-300 mx-2 my-2">
-                    <History size={20} className="text-gray-400 mb-1" />
-                    <h4 className="text-xs font-bold text-gray-900">Chat History Mode</h4>
-                    <p className="text-[10px] text-gray-500 text-center">Window expired. Waiting for customer response.</p>
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-2">
-                    {selectedMedia && (
-                      <div className="mx-2 p-2 bg-white rounded-lg border border-gray-200 flex items-center justify-between shadow-sm animate-in slide-in-from-bottom-2">
-                        <div className="flex items-center gap-2">
-                          {selectedMedia.type === 'image' ? (
-                            <img src={selectedMedia.preview} className="w-8 h-8 rounded object-cover" alt="Preview" />
-                          ) : (
-                            <div className="w-8 h-8 bg-gray-100 rounded flex items-center justify-center text-gray-500">
-                              <Paperclip size={14} />
-                            </div>
-                          )}
-                          <span className="text-[10px] font-bold text-gray-700 truncate max-w-[150px]">{selectedMedia.file.name}</span>
-                        </div>
-                        <button onClick={() => setSelectedMedia(null)} className="text-gray-400 hover:text-gray-600">
-                          <X size={14} />
-                        </button>
+                  ))}
+                  {leadMessages.length === 0 && (
+                    <div className="flex-1 flex flex-col items-center justify-center text-center p-10">
+                      <div className="w-16 h-16 rounded-full bg-gray-50 flex items-center justify-center mb-4">
+                        <MessageSquare size={32} className="text-gray-200" />
                       </div>
-                    )}
-                    <div className="flex items-end gap-2 px-2 py-1">
-                      <div className="flex-1 bg-white rounded-full flex items-center px-3 py-1 shadow-sm border border-gray-200">
-                        <label className="p-2 text-gray-500 hover:text-[#075e54] cursor-pointer transition-colors">
-                          <Paperclip size={20} className="rotate-45" />
+                      <p className="text-sm font-bold text-gray-900">No messages yet</p>
+                      <p className="text-xs text-gray-400 mt-1">The conversation hasn't started or history is unavailable.</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Chat Input Area */}
+                <div className="pt-4 border-t border-gray-100">
+                  {!isWindowActive ? (
+                    <div className="flex flex-col items-center justify-center py-4 px-4 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+                      <History size={20} className="text-gray-400 mb-2" />
+                      <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">History Mode Only</p>
+                      <p className="text-[9px] text-gray-400 text-center mt-1">Window expired. Waiting for customer response.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {selectedMedia && (
+                        <div className="flex items-center justify-between p-2 bg-blue-50 rounded-xl border border-blue-100">
+                          <div className="flex items-center gap-2">
+                            {selectedMedia.type === 'image' ? (
+                              <img src={selectedMedia.preview} className="w-8 h-8 rounded object-cover" alt="Preview" />
+                            ) : (
+                              <div className="w-8 h-8 bg-blue-100 rounded flex items-center justify-center text-blue-600">
+                                <Paperclip size={14} />
+                              </div>
+                            )}
+                            <span className="text-[10px] font-bold text-blue-700 truncate max-w-[150px]">{selectedMedia.file.name}</span>
+                          </div>
+                          <button onClick={() => setSelectedMedia(null)} className="text-blue-500 hover:text-blue-700">
+                            <X size={14} />
+                          </button>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2">
+                        <label className="w-10 h-10 flex items-center justify-center bg-gray-100 text-gray-500 rounded-2xl cursor-pointer hover:bg-gray-200 transition-colors">
+                          <Paperclip size={18} />
                           <input type="file" className="hidden" onChange={handleFileSelect} />
                         </label>
                         <textarea 
-                          placeholder="Type a message"
-                          className="flex-1 bg-transparent border-none py-2 px-2 focus:outline-none text-sm min-h-[40px] max-h-[120px] resize-none"
+                          placeholder="Type a message..."
+                          className="flex-1 bg-gray-50 border-none rounded-2xl text-xs p-3 focus:ring-2 focus:ring-black resize-none h-10"
                           value={replyText}
                           onChange={e => setReplyText(e.target.value)}
-                          disabled={isSending}
                           onKeyDown={e => {
                             if (e.key === 'Enter' && !e.shiftKey) {
                               e.preventDefault();
@@ -739,17 +603,17 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                             }
                           }}
                         />
+                        <button 
+                          onClick={handleSendReply}
+                          disabled={isSending || (!replyText.trim() && !selectedMedia)}
+                          className="w-10 h-10 bg-black text-white rounded-2xl flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all"
+                        >
+                          {isSending ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />}
+                        </button>
                       </div>
-                      <button 
-                        onClick={handleSendReply}
-                        disabled={isSending || (!replyText.trim() && !selectedMedia)}
-                        className="w-12 h-12 bg-[#075e54] text-white rounded-full flex items-center justify-center disabled:opacity-50 shadow-md active:scale-95 transition-all"
-                      >
-                        {isSending ? <Loader2 className="animate-spin" size={20} /> : <Send size={20} />}
-                      </button>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             </div>
           ) : (
