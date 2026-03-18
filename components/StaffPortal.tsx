@@ -30,7 +30,8 @@ import {
   CheckCheck,
   Video,
   FileText,
-  Download
+  Download,
+  Mic
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 import { Driver, Message } from '../types.ts';
@@ -270,6 +271,18 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     } finally {
       setLoading(false);
     }
+  };
+
+  const formatMessageDate = (timestamp: number) => {
+    const date = new Date(timestamp);
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    if (date.toDateString() === today.toDateString()) return 'Today';
+    if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+    
+    return date.toLocaleDateString([], { day: 'numeric', month: 'long', year: 'numeric' });
   };
 
   const renderDashboard = () => (
@@ -585,12 +598,23 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                   const isOutgoing = msg.sender !== 'driver';
                   const showTail = idx === 0 || leadMessages[idx-1].sender !== msg.sender;
                   
+                  const showDateSeparator = idx === 0 || 
+                    new Date(leadMessages[idx-1].timestamp).toDateString() !== new Date(msg.timestamp).toDateString();
+                  
                   return (
-                    <div key={msg.id || idx} className={`flex ${isOutgoing ? 'justify-end' : 'justify-start'} mb-1 px-2`}>
-                      <div className={`max-w-[85%] rounded-lg shadow-sm overflow-hidden relative ${isOutgoing ? 'bg-[#dcf8c6] text-gray-900' : 'bg-white text-gray-900'} ${showTail ? (isOutgoing ? 'rounded-tr-none' : 'rounded-tl-none') : ''}`}>
-                        {showTail && (
-                          <div className={`absolute top-0 w-2 h-2 ${isOutgoing ? '-right-1 bg-[#dcf8c6]' : '-left-1 bg-white'}`} style={{ clipPath: isOutgoing ? 'polygon(0 0, 0 100%, 100% 0)' : 'polygon(100% 0, 100% 100%, 0 0)' }}></div>
-                        )}
+                    <React.Fragment key={msg.id || idx}>
+                      {showDateSeparator && (
+                        <div className="flex justify-center my-4 sticky top-2 z-10">
+                          <div className="bg-white/80 backdrop-blur-md px-4 py-1 rounded-lg shadow-sm text-[10px] font-bold text-gray-500 uppercase tracking-widest border border-white/50">
+                            {formatMessageDate(msg.timestamp)}
+                          </div>
+                        </div>
+                      )}
+                      <div className={`flex ${isOutgoing ? 'justify-end' : 'justify-start'} mb-1 px-2`}>
+                        <div className={`max-w-[85%] rounded-lg shadow-sm overflow-hidden relative ${isOutgoing ? 'bg-[#dcf8c6] text-gray-900' : 'bg-white text-gray-900'} ${showTail ? (isOutgoing ? 'rounded-tr-none' : 'rounded-tl-none') : ''}`}>
+                          {showTail && (
+                            <div className={`absolute top-0 w-2 h-2 ${isOutgoing ? '-right-1 bg-[#dcf8c6]' : '-left-1 bg-white'}`} style={{ clipPath: isOutgoing ? 'polygon(0 0, 0 100%, 100% 0)' : 'polygon(100% 0, 100% 100%, 0 0)' }}></div>
+                          )}
                         {msg.type === 'image' && msg.imageUrl && (
                           <div className="w-full aspect-square bg-gray-100 rounded-t-lg overflow-hidden relative group">
                             <img src={msg.imageUrl} className="w-full h-full object-cover transition-transform group-hover:scale-105" alt="media" referrerPolicy="no-referrer" />
@@ -612,11 +636,21 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                         )}
                         {msg.type === 'audio' && msg.audioUrl && (
                           <div className="w-full bg-[#f0f0f0]/50 p-3 rounded-t-lg flex items-center gap-3 border-b border-gray-100">
-                              <div className="w-10 h-10 rounded-full bg-emerald-500 flex items-center justify-center text-white shadow-sm">
-                                  <Headset size={20} />
+                              <div className="w-12 h-12 rounded-full bg-emerald-500 flex items-center justify-center text-white shadow-md flex-shrink-0">
+                                  <Headset size={24} />
                               </div>
-                              <div className="flex-1">
-                                  <audio src={msg.audioUrl} controls className="w-full h-8 custom-audio-player" />
+                              <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <div className="h-1 flex-1 bg-gray-300 rounded-full overflow-hidden">
+                                      <div className="h-full bg-emerald-500 w-1/3" />
+                                    </div>
+                                    <span className="text-[10px] font-bold text-gray-500">0:45</span>
+                                  </div>
+                                  <audio src={msg.audioUrl} controls className="w-full h-8 custom-audio-player opacity-0 absolute pointer-events-none" />
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">Voice Note</span>
+                                    <Mic size={12} className="text-emerald-500" />
+                                  </div>
                               </div>
                           </div>
                         )}
@@ -648,8 +682,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                         </div>
                       </div>
                     </div>
-                  );
-                })}
+                  </React.Fragment>
+                );
+              })}
                 {leadMessages.length === 0 && (
                   <div className="flex flex-col items-center justify-center text-center p-10 bg-white/50 backdrop-blur-sm rounded-3xl mx-4">
                     <MessageSquare size={32} className="text-gray-400 mb-2" />
