@@ -1,13 +1,13 @@
 
 import React, { useState, useEffect } from 'react';
-import { X, Cloud, Folder, Video, ArrowLeft, FileText, Image as ImageIcon } from 'lucide-react';
+import { X, Cloud, Folder, Video, ArrowLeft, FileText, Image as ImageIcon, Headset, Upload, Loader2 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface MediaSelectorModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onSelect: (url: string, type: 'image' | 'video' | 'document') => void;
-    allowedType?: 'Image' | 'Video' | 'Document' | 'All';
+    onSelect: (url: string, type: 'image' | 'video' | 'document' | 'audio') => void;
+    allowedType?: 'Image' | 'Video' | 'Document' | 'Audio' | 'All';
 }
 
 export const MediaSelectorModal: React.FC<MediaSelectorModalProps> = ({ isOpen, onClose, onSelect, allowedType = 'All' }) => {
@@ -15,6 +15,7 @@ export const MediaSelectorModal: React.FC<MediaSelectorModalProps> = ({ isOpen, 
     const [folders, setFolders] = useState<any[]>([]);
     const [currentPath, setCurrentPath] = useState('/');
     const [loading, setLoading] = useState(false);
+    const [uploading, setUploading] = useState(false);
 
     useEffect(() => {
         if (isOpen) {
@@ -36,6 +37,7 @@ export const MediaSelectorModal: React.FC<MediaSelectorModalProps> = ({ isOpen, 
                         if (allowedType === 'Image') return f.type === 'image';
                         if (allowedType === 'Video') return f.type === 'video';
                         if (allowedType === 'Document') return f.type === 'document';
+                        if (allowedType === 'Audio') return f.type === 'audio';
                         return true;
                     });
                 }
@@ -58,6 +60,24 @@ export const MediaSelectorModal: React.FC<MediaSelectorModalProps> = ({ isOpen, 
          setCurrentPath(newPath);
     };
 
+    const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        setUploading(true);
+        try {
+            const result = await liveApiService.uploadMedia(file, currentPath);
+            if (result.success) {
+                loadMedia(currentPath);
+            }
+        } catch (error) {
+            console.error('Upload failed:', error);
+            alert('Upload failed. Please try again.');
+        } finally {
+            setUploading(false);
+        }
+    };
+
     if (!isOpen) return null;
 
     return (
@@ -68,7 +88,14 @@ export const MediaSelectorModal: React.FC<MediaSelectorModalProps> = ({ isOpen, 
                         <Cloud size={18} className="text-blue-600" /> 
                         Select {allowedType === 'All' ? 'File' : allowedType} from S3
                     </h3>
-                    <button onClick={onClose}><X size={20} className="text-gray-400 hover:text-gray-600" /></button>
+                    <div className="flex items-center gap-2">
+                        <label className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all ${uploading ? 'bg-gray-100 text-gray-400' : 'bg-blue-600 text-white hover:bg-blue-700 shadow-sm'}`}>
+                            {uploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+                            {uploading ? 'Uploading...' : 'Upload New'}
+                            <input type="file" className="hidden" onChange={handleFileUpload} disabled={uploading} />
+                        </label>
+                        <button onClick={onClose} className="p-1 hover:bg-gray-200 rounded-full transition-colors"><X size={20} className="text-gray-400 hover:text-gray-600" /></button>
+                    </div>
                 </div>
                 
                 <div className="bg-white px-4 py-2 border-b border-gray-100 text-xs text-gray-500 flex items-center gap-2">
@@ -129,6 +156,11 @@ export const MediaSelectorModal: React.FC<MediaSelectorModalProps> = ({ isOpen, 
                                                         <img src={file.url} className="w-full h-full object-cover" alt="prev" />
                                                     ) : file.type === 'video' ? (
                                                         <Video size={32} className="text-purple-400" />
+                                                    ) : file.type === 'audio' ? (
+                                                        <div className="flex flex-col items-center justify-center">
+                                                            <Headset size={32} className="text-emerald-400" />
+                                                            <span className="text-[9px] font-bold text-gray-400 uppercase mt-1">AUDIO</span>
+                                                        </div>
                                                     ) : (
                                                         <div className="flex flex-col items-center justify-center">
                                                             <FileText size={32} className="text-orange-400" />

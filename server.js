@@ -4809,7 +4809,39 @@ apiRouter.patch('/drivers/:id', async (req, res) => {
         const { status, isHumanMode, name } = req.body;
         await withDb(async (client) => {
             if (status) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [status, req.params.id]);
-            if (isHumanMode !== undefined) await client.query("UPDATE candidates SET is_human_mode = $1 WHERE id = $2", [isHumanMode, req.params.id]);
+            if (isHumanMode !== undefined) {
+                const current = await client.query("SELECT is_human_mode, phone_number FROM candidates WHERE id = $1", [req.params.id]);
+                const wasHumanMode = current.rows[0]?.is_human_mode;
+                const phoneNumber = current.rows[0]?.phone_number;
+
+                await client.query("UPDATE candidates SET is_human_mode = $1 WHERE id = $2", [isHumanMode, req.params.id]);
+
+                if (isHumanMode !== wasHumanMode && phoneNumber) {
+                    let autoMsg = '';
+                    if (isHumanMode) {
+                        autoMsg = "Hi, I am Ajith, how may I help you?";
+                    } else {
+                        autoMsg = "Chatbot online";
+                    }
+
+                    // Send to Meta
+                    const payload = {
+                        type: "text",
+                        text: { body: autoMsg }
+                    };
+                    try {
+                        await sendToMeta(phoneNumber, payload, { sendType: 'manual' });
+                        // Log to DB
+                        await client.query(
+                            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
+                             VALUES ($1, $2, 'out', $3, 'text', 'sent', NOW())`,
+                            [crypto.randomUUID(), req.params.id, autoMsg]
+                        );
+                    } catch (metaErr) {
+                        console.error('[Meta AutoMsg Error]', metaErr);
+                    }
+                }
+            }
             if (name) await client.query("UPDATE candidates SET name = $1 WHERE id = $2", [name, req.params.id]);
         });
         res.json({ success: true });
