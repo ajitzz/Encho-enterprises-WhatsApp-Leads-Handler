@@ -154,8 +154,6 @@ export interface BotSettings {
   shouldRepeat: boolean;
   routingStrategy: string;
   systemInstruction?: string;
-  humanModeEntryMessage?: string;
-  botModeTransitionMessage?: string;
   nodes: any[];
   edges: any[];
   steps?: any[]; 
@@ -172,6 +170,7 @@ export interface BotVersion {
 export interface Message {
   id: string;
   sender: 'system' | 'agent' | 'driver' | 'bot';
+  senderType?: 'bot' | 'staff' | 'driver';
   text?: string;
   imageUrl?: string;
   videoUrl?: string;

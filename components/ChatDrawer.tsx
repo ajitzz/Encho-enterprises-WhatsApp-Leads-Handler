@@ -360,8 +360,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     ) : (
                         <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
                             <div className={`max-w-[80%] rounded-2xl shadow-sm overflow-hidden ${
-                              msg.sender === 'driver' 
+                              msg.senderType === 'driver' 
                                 ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' 
+                                : msg.senderType === 'bot'
+                                ? 'bg-black text-white rounded-tr-none'
                                 : 'bg-emerald-500 text-white rounded-tr-none'
                             }`}>
                                 {/* Media Rendering */}
@@ -372,17 +374,17 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                                         <video src={media.url} controls className="w-full h-auto block" />
                                       </div>
                                     ) : media.type === 'audio' ? (
-                                      <div className={`flex items-center gap-3 p-3 rounded-xl ${msg.sender === 'driver' ? 'bg-gray-100' : 'bg-emerald-600'}`}>
-                                        <div className={`w-10 h-10 rounded-full flex items-center justify-center ${msg.sender === 'driver' ? 'bg-gray-200 text-gray-500' : 'bg-emerald-700 text-white'}`}>
+                                      <div className={`flex items-center gap-3 p-3 rounded-xl ${msg.senderType === 'driver' ? 'bg-gray-100' : msg.senderType === 'bot' ? 'bg-gray-800' : 'bg-emerald-600'}`}>
+                                        <div className={`w-10 h-10 rounded-full flex items-center justify-center ${msg.senderType === 'driver' ? 'bg-gray-200 text-gray-500' : msg.senderType === 'bot' ? 'bg-gray-900 text-white' : 'bg-emerald-700 text-white'}`}>
                                           <Mic size={18} />
                                         </div>
                                         <audio src={media.url} controls className="h-8 w-48" />
                                       </div>
                                     ) : media.type === 'document' ? (
                                       <a href={media.url} target="_blank" rel="noopener noreferrer" className={`flex items-center gap-3 p-3 rounded-xl transition-colors ${
-                                        msg.sender === 'driver' ? 'bg-gray-50 hover:bg-gray-100' : 'bg-emerald-600 hover:bg-emerald-700'
+                                        msg.senderType === 'driver' ? 'bg-gray-50 hover:bg-gray-100' : msg.senderType === 'bot' ? 'bg-gray-800 hover:bg-gray-900' : 'bg-emerald-600 hover:bg-emerald-700'
                                       }`}>
-                                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${msg.sender === 'driver' ? 'bg-gray-100 text-gray-500' : 'bg-emerald-700 text-white'}`}>
+                                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${msg.senderType === 'driver' ? 'bg-gray-100 text-gray-500' : msg.senderType === 'bot' ? 'bg-gray-900 text-white' : 'bg-emerald-700 text-white'}`}>
                                           <FileText size={20} />
                                         </div>
                                         <div className="flex-1 min-w-0">
@@ -400,12 +402,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
                                 <div className="px-4 py-2">
                                     {renderMessageText(msg.text)}
-                                    <div className={`text-[10px] mt-1 text-right flex justify-end gap-1 items-center ${msg.sender === 'driver' ? 'text-gray-400' : 'text-emerald-100'}`}>
+                                    <div className={`text-[10px] mt-1 text-right flex justify-end gap-1 items-center ${msg.senderType === 'driver' ? 'text-gray-400' : msg.senderType === 'bot' ? 'text-gray-400' : 'text-emerald-100'}`}>
                                         {msg.status === 'sending' && <Clock size={10} className="animate-spin" />}
                                         {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                                        {msg.sender !== 'driver' && (
+                                        {msg.senderType !== 'driver' && (
                                           <div className="flex">
-                                            <CheckCircle size={10} className={msg.status === 'read' ? 'text-blue-200' : ''} />
+                                            <CheckCircle size={10} className={msg.status === 'read' ? (msg.senderType === 'bot' ? 'text-blue-400' : 'text-blue-200') : ''} />
                                           </div>
                                         )}
                                     </div>

@@ -9,8 +9,16 @@ const https = require('https');
 const { S3Client, GetObjectCommand, PutObjectCommand, CopyObjectCommand, DeleteObjectCommand, ListObjectsV2Command, HeadObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { OAuth2Client, JWT } = require('google-auth-library');
+const { EventEmitter } = require('events');
 
 require('dotenv').config();
+
+const updateEmitter = new EventEmitter();
+updateEmitter.setMaxListeners(100);
+
+const notifyUpdates = (candidateId = null) => {
+    updateEmitter.emit('update', { candidateId });
+};
 
 const { parseBooleanFlag, parsePercent, resolveModuleMode } = require('./backend/shared/infra/flags');
 const {
@@ -1939,14 +1947,15 @@ const logCapturedVariableResponse = async ({ client, candidateId, key, value, so
     const normalizedKey = normalizeColumnKey(key);
     if (!normalizedKey) return;
     await client.query(
-        `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, created_at)
-        VALUES ($1, $2, 'system', $3, 'variable_capture', 'captured', NOW())`,
+        `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, sender_type, created_at)
+        VALUES ($1, $2, 'system', $3, 'variable_capture', 'captured', 'bot', NOW())`,
         [
             crypto.randomUUID(),
             candidateId,
             JSON.stringify({ key: normalizedKey, value: value == null ? '' : String(value), source, capturedAt: new Date().toISOString() })
         ]
     );
+    notifyUpdates(candidateId);
 };
 
 const getDriverExcelColumnConfig = async (client) => {
@@ -2644,6 +2653,7 @@ const initDatabase = async (client) => {
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_status VARCHAR(50) DEFAULT 'new';`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMP;`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`ALTER TABLE candidate_messages ADD COLUMN IF NOT EXISTS sender_type VARCHAR(20);`);
     await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
@@ -2747,8 +2757,8 @@ const queueBotMessageSideEffects = ({ candidateId, payload, nodeType, sendResult
             const sendStatus = sendResult?.delivered ? 'sent' : 'blocked_validation';
             await withDb(async (dbClient) => {
                 await dbClient.query(
-                    `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
-                     VALUES ($1, $2, 'out', $3, $4, $5, $6, NOW())`,
+                    `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, sender_type, created_at)
+                     VALUES ($1, $2, 'out', $3, $4, $5, $6, 'bot', NOW())`,
                     [
                         crypto.randomUUID(),
                         candidateId,
@@ -2758,6 +2768,7 @@ const queueBotMessageSideEffects = ({ candidateId, payload, nodeType, sendResult
                         sendResult?.providerMessageId || null,
                     ]
                 );
+                notifyUpdates(candidateId);
             });
         } catch (error) {
             structuredLog({
@@ -4385,17 +4396,6 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                     // Extract structured location data
                     text = JSON.stringify(msg.location);
                 }
-                else if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video' || msg.type === 'audio') {
-                    text = `[${msg.type.toUpperCase()}]`;
-                    try {
-                        const mediaRes = await fetchAndStoreIncomingMedia({ msg, phoneNumber: from, candidateId: candidate.id, client });
-                        if (mediaRes?.key) {
-                            text = JSON.stringify({ url: getPublicS3Url(mediaRes.key), caption: '' });
-                        }
-                    } catch (mediaErr) {
-                        console.error('Failed to fetch/store incoming media:', mediaErr);
-                    }
-                } else text = `[${msg.type.toUpperCase()}]`;
 
                 perf.markStart('lead_upsert');
                 let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
@@ -4410,12 +4410,29 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                 }
                 perf.markEnd('lead_upsert', { candidateId: candidate.id, isNew: c.rows.length === 0 });
 
+                if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video' || msg.type === 'audio') {
+                    text = `[${msg.type.toUpperCase()}]`;
+                    try {
+                        const mediaRes = await fetchAndStoreIncomingMedia({ msg, phoneNumber: from, candidateId: candidate.id, client });
+                        if (mediaRes?.key) {
+                            text = JSON.stringify({ url: getPublicS3Url(mediaRes.key), caption: '' });
+                            // Update candidate last_message with the JSON string
+                            await client.query('UPDATE candidates SET last_message = $1 WHERE id = $2', [text, candidate.id]);
+                        }
+                    } catch (mediaErr) {
+                        console.error('Failed to fetch/store incoming media:', mediaErr);
+                    }
+                } else if (msg.type !== 'text' && msg.type !== 'interactive' && msg.type !== 'location') {
+                    text = `[${msg.type.toUpperCase()}]`;
+                }
+
                 perf.markStart('inbound_message_insert');
                 await client.query(
-                    `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
-                     VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW())`,
+                    `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, sender_type, created_at)
+                     VALUES ($1, $2, 'in', $3, $4, 'received', $5, 'driver', NOW())`,
                     [crypto.randomUUID(), candidate.id, text, messageType, msg.id]
                 );
+                notifyUpdates(candidate.id);
                 perf.markEnd('inbound_message_insert', { candidateId: candidate.id, messageType });
 
                 if (!candidate.is_human_mode) {
@@ -4715,34 +4732,53 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
             const payload = { drivers };
 
-            if (driverId) {
-                const [messagesRes, scheduledRes] = await Promise.all([
-                    client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [driverId]),
-                    client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed'])
-                ]);
+                const messagesByDriver = {};
+                if (driverId) {
+                    const [messagesRes, scheduledRes] = await Promise.all([
+                        client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [driverId]),
+                        client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed'])
+                    ]);
 
-                payload.messagesByDriver = {
-                    [driverId]: messagesRes.rows
-                        .map((row) => ({
+                    messagesByDriver[driverId] = await Promise.all(messagesRes.rows.map(async (row) => {
+                        let imageUrl, videoUrl, documentUrl, audioUrl;
+                        let text = row.text;
+                        if (row.type !== 'text' && row.type !== 'variable_capture') {
+                            try {
+                                const media = JSON.parse(row.text || '{}');
+                                text = media.caption || '';
+                                const resolvedMediaUrl = await refreshMediaUrl(media.url);
+                                if (row.type === 'video') videoUrl = resolvedMediaUrl;
+                                else if (row.type === 'document') documentUrl = resolvedMediaUrl;
+                                else if (row.type === 'audio') audioUrl = resolvedMediaUrl;
+                                else imageUrl = resolvedMediaUrl;
+                            } catch(e){}
+                        }
+                        return {
                             id: row.id,
                             sender: row.direction === 'in' ? 'driver' : 'agent',
-                            text: row.text,
+                            senderType: row.sender_type || (row.direction === 'in' ? 'driver' : 'bot'),
+                            text,
+                            imageUrl,
+                            videoUrl,
+                            documentUrl,
+                            audioUrl,
                             timestamp: new Date(row.created_at).getTime(),
                             type: row.type || 'text',
                             status: row.status,
-                        }))
-                        .sort((a, b) => a.timestamp - b.timestamp)
-                };
+                        };
+                    }));
+                    messagesByDriver[driverId].sort((a, b) => a.timestamp - b.timestamp);
 
-                payload.scheduledByDriver = {
-                    [driverId]: scheduledRes.rows.map((row) => ({
-                        id: row.id,
-                        scheduledTime: new Date(row.scheduled_time).getTime(),
-                        payload: row.payload,
-                        status: row.status,
-                    }))
-                };
-            }
+                    payload.messagesByDriver = messagesByDriver;
+                    payload.scheduledByDriver = {
+                        [driverId]: scheduledRes.rows.map((row) => ({
+                            id: row.id,
+                            scheduledTime: new Date(row.scheduled_time).getTime(),
+                            payload: row.payload,
+                            status: row.status,
+                        }))
+                    };
+                }
 
             return payload;
         });
@@ -4757,7 +4793,16 @@ apiRouter.get('/updates/stream', async (req, res) => {
         }
     };
 
-    const snapshotInterval = setInterval(streamSnapshot, 4000);
+    const onUpdate = (data) => {
+        if (closed) return;
+        // If candidateId is provided, we could optimize to only fetch that candidate,
+        // but for now, we'll just refresh the whole snapshot to keep it simple and consistent.
+        streamSnapshot();
+    };
+
+    updateEmitter.on('update', onUpdate);
+
+    const snapshotInterval = setInterval(streamSnapshot, 10000); // Polling as fallback, less frequent
     const heartbeat = setInterval(() => {
         if (!closed) res.write('data: heartbeat\n\n');
     }, 20000);
@@ -4766,6 +4811,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
     req.on('close', () => {
         closed = true;
+        updateEmitter.off('update', onUpdate);
         clearInterval(snapshotInterval);
         clearInterval(heartbeat);
         res.end();
@@ -4851,6 +4897,7 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
                 return { 
                     id: row.id,
                     sender: row.direction === 'in' ? 'driver' : 'agent',
+                    senderType: row.sender_type || (row.direction === 'in' ? 'driver' : 'bot'),
                     text,
                     imageUrl,
                     videoUrl,
@@ -4900,10 +4947,11 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
                 ? 'sent'
                 : (sendResult?.timeout ? 'timeout_fast_fail' : 'blocked_validation');
             await client.query(
-                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
-                 VALUES ($1, $2, 'out', $3, $4, $5, $6, NOW())`,
+                `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, sender_type, created_at)
+                 VALUES ($1, $2, 'out', $3, $4, $5, $6, 'staff', NOW())`,
                 [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text', sendStatus, sendResult?.providerMessageId || null]
             );
+            notifyUpdates(req.params.id);
             scheduleDriverExcelSync();
             scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'upsert' });
         });
@@ -5385,10 +5433,11 @@ const handleCronProcessQueueLegacy = async (req, res) => {
                         
                         // Log success
                         await client.query(
-                            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
-                             VALUES ($1, $2, 'out', $3, $4, $5, $6, NOW())`,
+                            `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, sender_type, created_at)
+                             VALUES ($1, $2, 'out', $3, $4, $5, $6, 'bot', NOW())`,
                             [crypto.randomUUID(), job.candidate_id, dbLogText, dbType, sendStatus, sendResult?.providerMessageId || null]
                         );
+                        notifyUpdates(job.candidate_id);
                         await client.query("UPDATE scheduled_messages SET status = $2 WHERE id = $1", [job.id, sendResult?.delivered ? 'sent' : 'blocked_validation']);
                         triggerReportingSyncDeferred({
                             candidateId: job.candidate_id,

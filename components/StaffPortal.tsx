@@ -590,8 +590,10 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                     {leadMessages.map((msg, idx) => (
                       <div key={msg.id || idx} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
                         <div className={`max-w-[85%] p-3 rounded-2xl text-sm relative shadow-sm ${
-                          msg.sender === 'driver' 
+                          msg.senderType === 'driver' 
                             ? 'bg-white text-gray-800 rounded-tl-none border border-gray-100' 
+                            : msg.senderType === 'bot'
+                            ? 'bg-black text-white rounded-tr-none'
                             : 'bg-emerald-500 text-white rounded-tr-none'
                         }`}>
                           {/* Message Content */}
@@ -611,8 +613,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                             )}
                             
                             {msg.type === 'audio' && msg.audioUrl && (
-                              <div className={`flex items-center gap-3 p-2 rounded-xl ${msg.sender === 'driver' ? 'bg-gray-200' : 'bg-emerald-600'}`}>
-                                <div className={`w-8 h-8 rounded-full flex items-center justify-center ${msg.sender === 'driver' ? 'bg-gray-300 text-gray-600' : 'bg-emerald-700 text-white'}`}>
+                              <div className={`flex items-center gap-3 p-2 rounded-xl ${msg.senderType === 'driver' ? 'bg-gray-200' : msg.senderType === 'bot' ? 'bg-gray-800' : 'bg-emerald-600'}`}>
+                                <div className={`w-8 h-8 rounded-full flex items-center justify-center ${msg.senderType === 'driver' ? 'bg-gray-300 text-gray-600' : msg.senderType === 'bot' ? 'bg-gray-900 text-white' : 'bg-emerald-700 text-white'}`}>
                                   <Mic size={16} />
                                 </div>
                                 <audio src={msg.audioUrl} controls className="h-8 w-40" />
@@ -621,27 +623,27 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                             
                             {msg.type === 'document' && msg.documentUrl && (
                               <a href={msg.documentUrl} target="_blank" rel="noopener noreferrer" className={`flex items-center gap-3 p-3 rounded-xl transition-colors ${
-                                msg.sender === 'driver' ? 'bg-gray-200 hover:bg-gray-300' : 'bg-emerald-600 hover:bg-emerald-700'
+                                msg.senderType === 'driver' ? 'bg-gray-200 hover:bg-gray-300' : msg.senderType === 'bot' ? 'bg-gray-800 hover:bg-gray-900' : 'bg-emerald-600 hover:bg-emerald-700'
                               }`}>
-                                <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${msg.sender === 'driver' ? 'bg-gray-300 text-gray-600' : 'bg-emerald-700 text-white'}`}>
+                                <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${msg.senderType === 'driver' ? 'bg-gray-300 text-gray-600' : msg.senderType === 'bot' ? 'bg-gray-900 text-white' : 'bg-emerald-700 text-white'}`}>
                                   <FileText size={20} />
                                 </div>
                                 <div className="flex-1 min-w-0">
-                                  <p className="text-xs font-bold truncate">Document</p>
-                                  <p className="text-[10px] opacity-70">Click to view</p>
+                                  <p className={`text-xs font-bold truncate ${msg.senderType === 'driver' ? 'text-gray-900' : 'text-white'}`}>Document</p>
+                                  <p className={`text-[10px] ${msg.senderType === 'driver' ? 'text-gray-500' : 'text-white/60'}`}>Click to view</p>
                                 </div>
                               </a>
                             )}
                           </div>
 
                           {/* Timestamp & Status */}
-                          <div className={`flex items-center justify-end gap-1 mt-1 ${msg.sender === 'driver' ? 'text-gray-400' : 'text-emerald-100'}`}>
+                          <div className={`flex items-center justify-end gap-1 mt-1 ${msg.senderType === 'driver' ? 'text-gray-400' : msg.senderType === 'bot' ? 'text-gray-400' : 'text-emerald-100'}`}>
                             <span className="text-[9px] font-medium">
                               {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </span>
-                            {msg.sender !== 'driver' && (
+                            {msg.senderType !== 'driver' && (
                               <div className="flex">
-                                <CheckCircle size={10} className={msg.status === 'read' ? 'text-blue-300' : ''} />
+                                <CheckCircle size={10} className={msg.status === 'read' ? (msg.senderType === 'bot' ? 'text-blue-400' : 'text-blue-300') : ''} />
                               </div>
                             )}
                           </div>
