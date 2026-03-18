@@ -180,7 +180,7 @@ export const MediaLibrary = () => {
             const confirm = window.confirm(`Enable public link for "${folder.name}"?`);
             if (!confirm) return;
             try {
-                const result = await liveApiService.setPublicFolder(folder.id);
+                const result: any = await liveApiService.setPublicFolder(folder.id);
                 await loadMedia(currentPath);
                 checkGlobalStatus();
                 setShareUrl(result?.shareUrl || `${window.location.origin}/showcase/${encodeURIComponent(folder.name)}`); 

@@ -2623,11 +2623,13 @@ const initDatabase = async (client) => {
     await client.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";');
 
     await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB);`);
-    await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS staff_members (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email VARCHAR(255) UNIQUE NOT NULL, name VARCHAR(255), role VARCHAR(50) DEFAULT 'staff', created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, lead_status VARCHAR(50) DEFAULT 'new', last_action_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS lead_activity_log (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL, action VARCHAR(100) NOT NULL, notes TEXT, created_at TIMESTAMP DEFAULT NOW());`);
     
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
 
@@ -3651,6 +3653,150 @@ const handleOperationalStatusLegacy = async (req, res) => {
 };
 
 
+const authMiddleware = async (req, res, next) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const token = authHeader.split(' ')[1];
+        const ticket = await googleClient.verifyIdToken({ idToken: token, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
+        const payload = ticket.getPayload();
+        const email = payload.email;
+
+        await withDb(async (client) => {
+            const staffRes = await client.query('SELECT id, role FROM staff_members WHERE email = $1', [email]);
+            if (staffRes.rows.length === 0) {
+                // Check if it's the super admin
+                if (email === 'ajithsabzz@gmail.com') {
+                    const insertRes = await client.query(
+                        'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id, role',
+                        [email, payload.name, 'admin']
+                    );
+                    req.user = { ...payload, staffId: insertRes.rows[0].id, role: insertRes.rows[0].role };
+                } else {
+                    throw new Error('Access denied. Not a staff member.');
+                }
+            } else {
+                req.user = { ...payload, staffId: staffRes.rows[0].id, role: staffRes.rows[0].role };
+            }
+        });
+        next();
+    } catch (e) {
+        res.status(401).json({ error: e.message });
+    }
+};
+
+// --- STAFF MANAGEMENT ---
+apiRouter.get('/auth/me', authMiddleware, (req, res) => {
+    res.json({
+        success: true,
+        user: {
+            id: req.user.id,
+            email: req.user.email,
+            name: req.user.name,
+            role: req.user.role,
+            staffId: req.user.staffId
+        }
+    });
+});
+
+apiRouter.get('/staff', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    try {
+        await withDb(async (client) => {
+            const r = await client.query('SELECT * FROM staff_members ORDER BY created_at DESC');
+            res.json(r.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/staff', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    const { email, name, role } = req.body;
+    try {
+        await withDb(async (client) => {
+            await client.query('INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) ON CONFLICT (email) DO UPDATE SET name = $2, role = $3', [email, name, role || 'staff']);
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.delete('/staff/:id', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    try {
+        await withDb(async (client) => {
+            await client.query('DELETE FROM staff_members WHERE id = $1', [req.params.id]);
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- LEAD MANAGEMENT ---
+apiRouter.get('/leads/pool', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query('SELECT * FROM candidates WHERE assigned_to IS NULL ORDER BY created_at DESC');
+            res.json(r.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/leads/my', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query('SELECT * FROM candidates WHERE assigned_to = $1 ORDER BY last_action_at DESC NULLS LAST, created_at DESC', [req.user.staffId]);
+            res.json(r.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const check = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+            if (check.rows[0]?.assigned_to) {
+                return res.status(400).json({ error: 'Lead already claimed' });
+            }
+            await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW() WHERE id = $3', [req.user.staffId, 'claimed', req.params.id]);
+            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, 'claimed', 'Lead claimed from pool']);
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
+    const { action, notes, status } = req.body;
+    try {
+        await withDb(async (client) => {
+            const check = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+            if (check.rows[0]?.assigned_to !== req.user.staffId && req.user.role !== 'admin') {
+                return res.status(403).json({ error: 'Not assigned to you' });
+            }
+            const updates = [];
+            const values = [];
+            if (status) {
+                updates.push(`lead_status = $${values.length + 1}`);
+                values.push(status);
+            }
+            updates.push(`last_action_at = NOW()`);
+            
+            await client.query(`UPDATE candidates SET ${updates.join(', ')} WHERE id = $${values.length + 1}`, [...values, req.params.id]);
+            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, action, notes]);
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/leads/:id/activity', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query('SELECT l.*, s.name as staff_name FROM lead_activity_log l LEFT JOIN staff_members s ON l.staff_id = s.id WHERE l.candidate_id = $1 ORDER BY l.created_at DESC', [req.params.id]);
+            res.json(r.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 apiRouter.get('/media', async (req, res) => {
     const requestedPath = typeof req.query.path === 'string' ? req.query.path : '/';
 
@@ -4273,7 +4419,41 @@ const handleAuthGoogleLegacy = async (req, res) => {
     try {
         const { credential } = req.body;
         const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
-        res.json({ success: true, user: ticket.getPayload() });
+        const payload = ticket.getPayload();
+        const email = payload.email;
+
+        // Super Admin check
+        const ADMIN_EMAIL = 'ajithsabzz@gmail.com';
+        let userRole = null;
+        let staffId = null;
+
+        if (email === ADMIN_EMAIL) {
+            userRole = 'admin';
+        }
+
+        await withDb(async (client) => {
+            const staffRes = await client.query('SELECT id, role FROM staff_members WHERE email = $1', [email]);
+            if (staffRes.rows.length > 0) {
+                userRole = staffRes.rows[0].role;
+                staffId = staffRes.rows[0].id;
+            } else if (email === ADMIN_EMAIL) {
+                // Auto-register super admin if not exists
+                const insertRes = await client.query(
+                    'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id',
+                    [email, payload.name, 'admin']
+                );
+                staffId = insertRes.rows[0].id;
+            }
+        });
+
+        if (!userRole) {
+            return res.status(403).json({ success: false, error: 'Access denied. You are not registered as a staff member.' });
+        }
+
+        res.json({ 
+            success: true, 
+            user: { ...payload, role: userRole, staffId } 
+        });
     } catch (e) { res.status(401).json({ success: false, error: e.message }); }
 };
 

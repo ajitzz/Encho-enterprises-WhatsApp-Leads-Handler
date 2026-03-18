@@ -1,0 +1,233 @@
+
+import React, { useState, useEffect } from 'react';
+import { Users, UserPlus, Trash2, Shield, Mail, Search, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
+import { liveApiService } from '../services/liveApiService.ts';
+
+interface StaffMember {
+  id: string;
+  email: string;
+  name: string;
+  role: 'admin' | 'staff';
+  created_at: string;
+}
+
+export const StaffManagement: React.FC = () => {
+  const [staff, setStaff] = useState<StaffMember[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [isAdding, setIsAdding] = useState(false);
+  const [newStaff, setNewStaff] = useState({ email: '', name: '', role: 'staff' as 'admin' | 'staff' });
+  const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => {
+    fetchStaff();
+  }, []);
+
+  const fetchStaff = async () => {
+    try {
+      setLoading(true);
+      const data = await liveApiService.getStaff();
+      setStaff(data);
+      setError(null);
+    } catch (err: any) {
+      setError(err.message || 'Failed to fetch staff');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAddStaff = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      setLoading(true);
+      await liveApiService.addStaff(newStaff);
+      setNewStaff({ email: '', name: '', role: 'staff' });
+      setIsAdding(false);
+      await fetchStaff();
+    } catch (err: any) {
+      setError(err.message || 'Failed to add staff');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteStaff = async (id: string) => {
+    if (!window.confirm('Are you sure you want to remove this staff member?')) return;
+    try {
+      setLoading(true);
+      await liveApiService.deleteStaff(id);
+      await fetchStaff();
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete staff');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const filteredStaff = staff.filter(s => 
+    s.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+    s.email.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  return (
+    <div className="p-6 max-w-6xl mx-auto font-sans">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
+            <Users className="text-blue-600" />
+            Staff Management
+          </h1>
+          <p className="text-gray-500 text-sm mt-1">Manage team access and lead distribution roles.</p>
+        </div>
+        <button
+          onClick={() => setIsAdding(!isAdding)}
+          className="flex items-center justify-center gap-2 bg-black text-white px-4 py-2.5 rounded-xl hover:bg-gray-900 transition-all shadow-sm font-medium"
+        >
+          {isAdding ? 'Cancel' : <><UserPlus size={18} /> Add New Staff</>}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-xl flex items-center gap-3 text-red-700 animate-in fade-in slide-in-from-top-2">
+          <AlertCircle size={20} />
+          <p className="text-sm font-medium">{error}</p>
+        </div>
+      )}
+
+      {isAdding && (
+        <div className="mb-8 bg-white p-6 rounded-2xl border border-gray-200 shadow-sm animate-in fade-in zoom-in-95 duration-200">
+          <h2 className="text-lg font-bold mb-4">Register New Staff Member</h2>
+          <form onSubmit={handleAddStaff} className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Full Name</label>
+              <input
+                type="text"
+                required
+                placeholder="e.g. John Doe"
+                className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                value={newStaff.name}
+                onChange={e => setNewStaff({ ...newStaff, name: e.target.value })}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Gmail Address</label>
+              <input
+                type="email"
+                required
+                placeholder="e.g. john@gmail.com"
+                className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                value={newStaff.email}
+                onChange={e => setNewStaff({ ...newStaff, email: e.target.value })}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Role</label>
+              <div className="flex gap-2">
+                <select
+                  className="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all bg-white"
+                  value={newStaff.role}
+                  onChange={e => setNewStaff({ ...newStaff, role: e.target.value as 'admin' | 'staff' })}
+                >
+                  <option value="staff">Staff (Lead Manager)</option>
+                  <option value="admin">Admin (Full Access)</option>
+                </select>
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="bg-blue-600 text-white px-6 py-2.5 rounded-xl hover:bg-blue-700 transition-all font-bold disabled:opacity-50 flex items-center gap-2"
+                >
+                  {loading ? <Loader2 size={18} className="animate-spin" /> : 'Save'}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      )}
+
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="p-4 border-b border-gray-100 bg-gray-50/50 flex items-center gap-3">
+          <Search size={18} className="text-gray-400" />
+          <input
+            type="text"
+            placeholder="Search staff by name or email..."
+            className="bg-transparent border-none outline-none text-sm w-full"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+          />
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-gray-50/50">
+                <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Staff Member</th>
+                <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Role</th>
+                <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Joined</th>
+                <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {loading && staff.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="px-6 py-12 text-center">
+                    <Loader2 size={32} className="animate-spin text-blue-600 mx-auto mb-2" />
+                    <p className="text-sm text-gray-500">Loading staff list...</p>
+                  </td>
+                </tr>
+              ) : filteredStaff.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="px-6 py-12 text-center">
+                    <div className="bg-gray-100 w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-3">
+                      <Users size={24} className="text-gray-400" />
+                    </div>
+                    <p className="text-gray-500 font-medium">No staff members found</p>
+                  </td>
+                </tr>
+              ) : (
+                filteredStaff.map(s => (
+                  <tr key={s.id} className="hover:bg-gray-50 transition-colors group">
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-sm">
+                          {s.name.charAt(0).toUpperCase()}
+                        </div>
+                        <div>
+                          <p className="font-bold text-gray-900">{s.name}</p>
+                          <p className="text-xs text-gray-500 flex items-center gap-1">
+                            <Mail size={12} /> {s.email}
+                          </p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                        s.role === 'admin' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+                      }`}>
+                        <Shield size={10} />
+                        {s.role}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 text-sm text-gray-500">
+                      {new Date(s.created_at).toLocaleDateString()}
+                    </td>
+                    <td className="px-6 py-4 text-right">
+                      {s.email !== 'ajithsabzz@gmail.com' && (
+                        <button
+                          onClick={() => handleDeleteStaff(s.id)}
+                          className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                          title="Remove Staff"
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};

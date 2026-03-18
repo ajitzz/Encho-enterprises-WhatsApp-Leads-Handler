@@ -104,6 +104,10 @@ export const liveApiService = {
       });
   },
 
+  getProfile: async (): Promise<{success: boolean, user: any}> => {
+      return apiRequest('/api/auth/me');
+  },
+
   subscribeToUpdates: (callback: (drivers: Driver[]) => void, options: SubscribeToUpdatesOptions = {}) => {
       const {
           driverId,
@@ -493,5 +497,45 @@ export const liveApiService = {
           method: 'POST',
           body: JSON.stringify({ orderedKeys })
       });
+  },
+
+  // Staff Management
+  getStaff: async (): Promise<any[]> => {
+    return apiRequest<any[]>('/api/staff');
+  },
+
+  addStaff: async (staff: { email: string; name: string; role: 'admin' | 'staff' }) => {
+    return apiRequest('/api/staff', {
+      method: 'POST',
+      body: JSON.stringify(staff)
+    });
+  },
+
+  deleteStaff: async (id: string) => {
+    return apiRequest(`/api/staff/${id}`, { method: 'DELETE' });
+  },
+
+  // Lead Management (Staff Portal)
+  getLeadPool: async (): Promise<Driver[]> => {
+    return apiRequest<Driver[]>('/api/leads/pool');
+  },
+
+  getMyLeads: async (): Promise<Driver[]> => {
+    return apiRequest<Driver[]>('/api/leads/my');
+  },
+
+  claimLead: async (id: string) => {
+    return apiRequest(`/api/leads/${id}/claim`, { method: 'POST' });
+  },
+
+  logLeadAction: async (id: string, data: { action: string; notes: string; status?: string }) => {
+    return apiRequest(`/api/leads/${id}/action`, {
+      method: 'POST',
+      body: JSON.stringify(data)
+    });
+  },
+
+  getLeadActivity: async (id: string): Promise<any[]> => {
+    return apiRequest<any[]>(`/api/leads/${id}/activity`);
   }
 };

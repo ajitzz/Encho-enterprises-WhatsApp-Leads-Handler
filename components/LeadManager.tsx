@@ -18,7 +18,7 @@ import {
   Timer,
   CircleDot
 } from 'lucide-react';
-import { MediaSelectorModal } from './MediaSelectorModal';
+import { MediaSelectorModal } from './MediaSelectorModal.tsx';
 import { liveApiService } from '../services/liveApiService';
 
 interface LeadManagerProps {

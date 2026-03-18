@@ -10,7 +10,8 @@ import {
   Cloud,
   ChevronLeft,
   ChevronRight,
-  Table
+  Table,
+  UserCheck
 } from 'lucide-react';
 
 interface LayoutProps {
@@ -18,9 +19,10 @@ interface LayoutProps {
   activeTab: string;
   onTabChange: (tab: string) => void;
   onOpenSettings?: () => void;
+  userRole?: 'admin' | 'staff';
 }
 
-export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange, onOpenSettings }) => {
+export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange, onOpenSettings, userRole }) => {
   const [isCollapsed, setIsCollapsed] = useState(false);
 
   return (
@@ -81,7 +83,20 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
             <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Leads & Campaigns</span>
           </button>
 
-
+          {userRole === 'admin' && (
+            <button
+              onClick={() => onTabChange('staff')}
+              title={isCollapsed ? "Staff Management" : ""}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                activeTab === 'staff' 
+                  ? 'bg-white text-black font-medium' 
+                  : 'text-gray-400 hover:bg-gray-900 hover:text-white'
+              } ${isCollapsed ? 'justify-center px-2' : ''}`}
+            >
+              <UserCheck size={20} className="shrink-0" />
+              <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Staff Management</span>
+            </button>
+          )}
 
           <button
             onClick={() => onTabChange('excel-report')}

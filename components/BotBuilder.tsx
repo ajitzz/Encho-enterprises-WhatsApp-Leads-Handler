@@ -19,7 +19,7 @@ import { useFlowStore } from '../services/flowStore';
 import { liveApiService } from '../services/liveApiService';
 import { reportUiFailure, reportUiRecovery } from '../services/uiFailureMonitor';
 import { mockBackend } from '../services/mockBackend';
-import { AITraining } from './AITraining';
+import { AITraining } from './AITraining.tsx';
 import { 
   MessageSquare, List, GitBranch, Save, Play, Trash2, X, Zap, 
   Image as ImageIcon, MousePointer, Settings, GripVertical, Plus, 

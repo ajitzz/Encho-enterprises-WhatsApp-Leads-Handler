@@ -1,7 +1,7 @@
 
 import { Type } from "@google/genai";
 import { LeadStatus, AuditReport, AuditIssue } from "../types";
-import { liveApiService } from './liveApiService';
+import { liveApiService } from './liveApiService.ts';
 
 // --- COST SAVING STRATEGY ---
 const MODELS = {

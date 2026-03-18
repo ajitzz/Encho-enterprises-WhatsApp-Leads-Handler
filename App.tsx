@@ -1,34 +1,36 @@
 
 import React, { lazy, Suspense, useState, useEffect } from 'react';
 import { GoogleOAuthProvider } from '@react-oauth/google';
-import { Layout } from './components/Layout';
-import { LeadTable } from './components/LeadTable';
-import { LeadManager } from './components/LeadManager';
-import { ChatDrawer } from './components/ChatDrawer';
-import { Simulator } from './components/Simulator';
-import { WebhookConfigModal } from './components/WebhookConfigModal';
-import { NotificationToast } from './components/NotificationToast';
-import { BotBuilder } from './components/BotBuilder';
-import { AssistantChat } from './components/AssistantChat';
-import { MediaLibrary } from './components/MediaLibrary';
-import { PublicShowcase } from './components/PublicShowcase'; 
-import { PrivacyPolicy } from './components/PrivacyPolicy'; 
-import { TermsOfService } from './components/TermsOfService'; 
-import { DataDeletion } from './components/DataDeletion'; 
-import { SystemMonitor } from './components/SystemMonitor'; 
-import { IsolatedFeatureBoundary } from './components/IsolatedFeatureBoundary'; 
-import { SettingsModal } from './components/SettingsModal'; 
-import { Login } from './components/Login'; 
-import { mockBackend } from './services/mockBackend';
-import { liveApiService, setAuthToken, UpdateConnectionState } from './services/liveApiService';
-import { reportUiFailure, reportUiRecovery } from './services/uiFailureMonitor';
-import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types';
+import { Layout } from './components/Layout.tsx';
+import { LeadTable } from './components/LeadTable.tsx';
+import { LeadManager } from './components/LeadManager.tsx';
+import { ChatDrawer } from './components/ChatDrawer.tsx';
+import { Simulator } from './components/Simulator.tsx';
+import { WebhookConfigModal } from './components/WebhookConfigModal.tsx';
+import { NotificationToast } from './components/NotificationToast.tsx';
+import { BotBuilder } from './components/BotBuilder.tsx';
+import { AssistantChat } from './components/AssistantChat.tsx';
+import { MediaLibrary } from './components/MediaLibrary.tsx';
+import { PublicShowcase } from './components/PublicShowcase.tsx'; 
+import { PrivacyPolicy } from './components/PrivacyPolicy.tsx'; 
+import { TermsOfService } from './components/TermsOfService.tsx'; 
+import { DataDeletion } from './components/DataDeletion.tsx'; 
+import { SystemMonitor } from './components/SystemMonitor.tsx'; 
+import { IsolatedFeatureBoundary } from './components/IsolatedFeatureBoundary.tsx'; 
+import { SettingsModal } from './components/SettingsModal.tsx'; 
+import { Login } from './components/Login.tsx'; 
+import { StaffPortal } from './components/StaffPortal.tsx';
+import { StaffManagement } from './components/StaffManagement.tsx';
+import { mockBackend } from './services/mockBackend.ts';
+import { liveApiService, setAuthToken, UpdateConnectionState } from './services/liveApiService.ts';
+import { reportUiFailure, reportUiRecovery } from './services/uiFailureMonitor.ts';
+import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types.ts';
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle, Wifi, WifiOff, Loader2 } from 'lucide-react';
 
 const FALLBACK_CLIENT_ID = "764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.googleusercontent.com";
 const ENV_CLIENT_ID = (import.meta as any)?.env?.VITE_GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_ID = (ENV_CLIENT_ID || FALLBACK_CLIENT_ID).replace(/^['"]|['"]$/g, '').trim();
-const DriverExcelReport = lazy(() => import('./components/DriverExcelReport').then((module) => ({ default: module.DriverExcelReport })));
+const DriverExcelReport = lazy(() => import('./components/DriverExcelReport.tsx').then((module) => ({ default: module.DriverExcelReport })));
 
 export default function App() {
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
@@ -51,7 +53,18 @@ export default function App() {
           return;
       }
       const token = localStorage.getItem('uber_fleet_auth_token');
-      if (token) { setAuthToken(token); setIsAuthenticated(true); }
+      if (token) { 
+          setAuthToken(token); 
+          setIsAuthenticated(true); 
+          liveApiService.getProfile()
+            .then(res => {
+                if (res.success) setUserProfile(res.user);
+            })
+            .catch(() => {
+                localStorage.removeItem('uber_fleet_auth_token');
+                setIsAuthenticated(false);
+            });
+      }
   }, []);
 
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -214,6 +227,20 @@ export default function App() {
           <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
               <Login onLoginSuccess={handleLoginSuccess} />
           </GoogleOAuthProvider>
+      );
+  }
+
+  // --- STAFF PORTAL VIEW ---
+  if (userProfile?.role === 'staff') {
+      return (
+          <StaffPortal 
+              user={userProfile} 
+              onLogout={() => {
+                  localStorage.removeItem('uber_fleet_auth_token');
+                  setIsAuthenticated(false);
+                  setUserProfile(null);
+              }} 
+          />
       );
   }
 
@@ -398,7 +425,12 @@ export default function App() {
 
   return (
     <>
-      <Layout activeTab={activeTab} onTabChange={setActiveTab} onOpenSettings={() => setShowSettingsModal(true)}>
+      <Layout 
+        activeTab={activeTab} 
+        onTabChange={setActiveTab} 
+        onOpenSettings={() => setShowSettingsModal(true)}
+        userRole={userProfile?.role}
+      >
         {activeTab === 'dashboard' && (
         <div className="p-8 max-w-7xl mx-auto space-y-8">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -467,6 +499,7 @@ export default function App() {
         )}
         {activeTab === 'media-library' && <MediaLibrary />}
         {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
+        {activeTab === 'staff' && <StaffManagement />}
 
         {showWebhookModal && <WebhookConfigModal onClose={() => setShowWebhookModal(false)} onSuccess={() => { addNotification({ type: 'success', title: 'Webhook Configured', message: 'Meta App settings updated successfully.' }); }} />}
         {showSettingsModal && <SettingsModal onClose={() => setShowSettingsModal(false)} />}

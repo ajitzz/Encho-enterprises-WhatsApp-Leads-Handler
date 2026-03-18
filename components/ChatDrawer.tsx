@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { liveApiService, UpdateConnectionState } from '../services/liveApiService';
 import { reportUiFailure, reportUiRecovery } from '../services/uiFailureMonitor';
-import { MediaSelectorModal } from './MediaSelectorModal';
+import { MediaSelectorModal } from './MediaSelectorModal.tsx';
 
 interface ChatDrawerProps {
   driver: Driver | null;
