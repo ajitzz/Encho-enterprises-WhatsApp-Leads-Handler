@@ -2105,8 +2105,17 @@ const ALLOWED_MEDIA_MIME_TYPES = new Set([
     'image/jpeg',
     'image/jpg',
     'image/png',
-    'application/pdf',
     'image/webp',
+    'image/gif',
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.ms-powerpoint',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'application/octet-stream',
+    'text/plain',
     'video/mp4',
     'video/quicktime',
     'video/3gpp',
@@ -2116,7 +2125,8 @@ const ALLOWED_MEDIA_MIME_TYPES = new Set([
     'audio/aac',
     'audio/amr',
     'audio/3gpp',
-    'audio/wav'
+    'audio/wav',
+    'image/webp' // for stickers
 ]);
 
 const normalizeMimeType = (mimeType = '') => String(mimeType || '').toLowerCase().split(';')[0].trim();
@@ -2125,12 +2135,18 @@ const MAX_MEDIA_FILE_BYTES = 16 * 1024 * 1024;
 
 const fetchAndStoreIncomingMedia = async ({ msg, phoneNumber, candidateId, client }) => {
     if (!candidateId) throw new Error('Candidate id is required for media upload');
-    const mediaId = msg?.image?.id || msg?.document?.id || msg?.video?.id || msg?.audio?.id;
+    const mediaId = msg?.image?.id || msg?.document?.id || msg?.video?.id || msg?.audio?.id || msg?.voice?.id;
     if (!mediaId) return null;
 
     const metaResponse = await getMetaClient().get(`https://graph.facebook.com/v18.0/${mediaId}`);
     const mediaUrl = metaResponse.data?.url;
-    const mimeType = String(metaResponse.data?.mime_type || (msg.type === 'document' ? 'application/octet-stream' : (msg.type === 'audio' ? 'audio/ogg' : `${msg.type === 'video' ? 'video' : 'image'}/${msg.type}`))).toLowerCase();
+    const mimeType = String(
+        metaResponse.data?.mime_type || 
+        (msg.type === 'document' ? 'application/octet-stream' : 
+         (msg.type === 'audio' || msg.type === 'voice' ? 'audio/ogg' : 
+          (msg.type === 'video' ? 'video/mp4' : 
+           (msg.type === 'sticker' ? 'image/webp' : 'image/jpeg'))))
+    ).toLowerCase();
     if (!mediaUrl) throw new Error('WhatsApp media URL not found');
     if (!isAllowedMediaMimeType(mimeType)) {
         throw new Error(`Unsupported media file type: ${mimeType}`);
@@ -3912,9 +3928,11 @@ apiRouter.get('/media', async (req, res) => {
                 const extension = filename.split('.').pop()?.toLowerCase() || '';
                 const fileType = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(extension)
                     ? 'image'
-                    : ['mp4', 'mov', 'avi', 'webm', 'mkv'].includes(extension)
+                    : ['mp4', 'mov', 'avi', 'webm', 'mkv', '3gp'].includes(extension)
                         ? 'video'
-                        : 'document';
+                        : ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'amr', 'opus'].includes(extension)
+                            ? 'audio'
+                            : 'document';
 
                 return {
                     id: key,
@@ -4410,9 +4428,10 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                 }
                 perf.markEnd('lead_upsert', { candidateId: candidate.id, isNew: c.rows.length === 0 });
 
-                if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video' || msg.type === 'audio') {
+                if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video' || msg.type === 'audio' || msg.type === 'voice' || msg.type === 'sticker') {
                     const caption = msg[msg.type]?.caption || '';
-                    text = `[${msg.type.toUpperCase()}]${caption ? ': ' + caption : ''}`;
+                    const displayType = (msg.type === 'voice') ? 'audio' : (msg.type === 'sticker' ? 'image' : msg.type);
+                    text = `[${displayType.toUpperCase()}]${caption ? ': ' + caption : ''}`;
                     try {
                         const mediaRes = await fetchAndStoreIncomingMedia({ msg, phoneNumber: from, candidateId: candidate.id, client });
                         if (mediaRes?.key) {
@@ -4882,17 +4901,17 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
                 let documentUrl = null;
                 let audioUrl = null;
 
-                if (['image','video','document','audio'].includes(row.type) && row.text?.startsWith('{')) {
+                if (['image','video','document','audio','voice','sticker'].includes(row.type) && row.text?.startsWith('{')) {
                     try {
                         const p = JSON.parse(row.text);
-                        text = p.caption || text;
+                        text = p.caption || '';
                         const rawMediaUrl = p.mediaUrl || p.url || (p.mediaKey ? getPublicS3Url(p.mediaKey) : null);
                         const resolvedMediaUrl = rawMediaUrl ? await refreshMediaUrl(rawMediaUrl) : null;
 
                         if (row.type === 'video') videoUrl = resolvedMediaUrl;
                         else if (row.type === 'document') documentUrl = resolvedMediaUrl;
-                        else if (row.type === 'audio') audioUrl = resolvedMediaUrl;
-                        else imageUrl = resolvedMediaUrl;
+                        else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
+                        else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
                     } catch(e){}
                 }
                 return { 
@@ -4935,7 +4954,7 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
                 const freshUrl = await refreshMediaUrl(mediaUrl);
                 const type = mediaType || 'image';
                 payload = { type, [type]: { link: freshUrl } };
-                if (type !== 'audio' && sanitizedText) {
+                if (type !== 'audio' && type !== 'sticker' && sanitizedText) {
                     payload[type].caption = sanitizedText;
                 }
                 if (type === 'document') {

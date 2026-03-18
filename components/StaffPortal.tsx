@@ -623,9 +623,15 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                         }`}>
                           {/* Message Content */}
                           <div className="space-y-2">
-                            {msg.text && <p className="leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
+                            {msg.text && (
+                              <p className="leading-relaxed whitespace-pre-wrap">
+                                {msg.text.startsWith('{"url":') ? (() => {
+                                  try { return JSON.parse(msg.text).caption || ''; } catch(e) { return ''; }
+                                })() : msg.text}
+                              </p>
+                            )}
                             
-                            {msg.type === 'image' && msg.imageUrl && (
+                            {(msg.type === 'image' || msg.type === 'sticker') && msg.imageUrl && (
                               <div className="rounded-lg overflow-hidden border border-black/5">
                                 <img src={msg.imageUrl} alt="Shared" className="max-w-full h-auto block" referrerPolicy="no-referrer" />
                               </div>
@@ -637,7 +643,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                               </div>
                             )}
                             
-                            {msg.type === 'audio' && msg.audioUrl && (
+                            {(msg.type === 'audio' || msg.type === 'voice') && msg.audioUrl && (
                               <div className={`flex items-center gap-3 p-2 rounded-xl ${msg.senderType === 'driver' ? 'bg-gray-200' : msg.senderType === 'bot' ? 'bg-gray-800' : 'bg-emerald-600'}`}>
                                 <div className={`w-8 h-8 rounded-full flex items-center justify-center ${msg.senderType === 'driver' ? 'bg-gray-300 text-gray-600' : msg.senderType === 'bot' ? 'bg-gray-900 text-white' : 'bg-emerald-700 text-white'}`}>
                                   <Mic size={16} />
