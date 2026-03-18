@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 import { Driver, Message } from '../types.ts';
+import { VoiceRecorder } from './VoiceRecorder.tsx';
 
 const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTime }) => {
   const [timeLeft, setTimeLeft] = useState<number>(0);
@@ -96,6 +97,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [isSending, setIsSending] = useState(false);
   const [selectedMedia, setSelectedMedia] = useState<{ type: 'image' | 'video' | 'document' | 'audio'; file: File; preview: string } | null>(null);
   const [isHumanModeLoading, setIsHumanModeLoading] = useState(false);
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
 
   const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
@@ -176,6 +178,29 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       console.error('Failed to send message:', err);
     } finally {
       setIsSending(false);
+    }
+  };
+
+  const handleVoiceSend = async (blob: Blob) => {
+    if (!selectedLead) return;
+    setIsSending(true);
+    try {
+      const file = new File([blob], `voice_recording_${Date.now()}.ogg`, { type: 'audio/ogg' });
+      const uploadResult = await liveApiService.uploadMedia(file, `voice_recordings/${selectedLead.id}`);
+      if (uploadResult.success) {
+        await liveApiService.sendMessage(selectedLead.id, '', { 
+          mediaUrl: uploadResult.url, 
+          mediaType: 'audio'
+        });
+        // Refresh messages
+        const messages = await liveApiService.getDriverMessages(selectedLead.id);
+        setLeadMessages(messages);
+      }
+    } catch (error) {
+      console.error('Failed to send voice recording:', error);
+    } finally {
+      setIsSending(false);
+      setIsRecordingVoice(false);
     }
   };
 
@@ -694,29 +719,47 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                         </div>
                       )}
                       <div className="flex items-center gap-2 bg-gray-100 p-1 rounded-3xl">
-                        <label className="w-10 h-10 flex items-center justify-center text-gray-500 hover:text-blue-600 hover:bg-white rounded-full cursor-pointer transition-all">
-                          <Paperclip size={20} />
-                          <input type="file" className="hidden" onChange={handleFileSelect} accept="image/*,video/*,audio/*,application/pdf,.doc,.docx,.xls,.xlsx" />
-                        </label>
-                        <textarea 
-                          placeholder="Type a message..."
-                          className="flex-1 bg-transparent border-none rounded-2xl text-sm p-2.5 focus:ring-0 resize-none h-10 max-h-32 custom-scrollbar"
-                          value={replyText}
-                          onChange={e => setReplyText(e.target.value)}
-                          onKeyDown={e => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                              e.preventDefault();
-                              handleSendReply();
-                            }
-                          }}
-                        />
-                        <button 
-                          onClick={handleSendReply}
-                          disabled={isSending || (!replyText.trim() && !selectedMedia)}
-                          className="w-10 h-10 bg-emerald-500 text-white rounded-full flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-emerald-200"
-                        >
-                          {isSending ? <Loader2 className="animate-spin" size={20} /> : <Send size={20} />}
-                        </button>
+                        {isRecordingVoice ? (
+                          <VoiceRecorder 
+                            onSend={handleVoiceSend} 
+                            onCancel={() => setIsRecordingVoice(false)} 
+                            isSending={isSending}
+                          />
+                        ) : (
+                          <>
+                            <label className="w-10 h-10 flex items-center justify-center text-gray-500 hover:text-blue-600 hover:bg-white rounded-full cursor-pointer transition-all">
+                              <Paperclip size={20} />
+                              <input type="file" className="hidden" onChange={handleFileSelect} accept="image/*,video/*,audio/*,application/pdf,.doc,.docx,.xls,.xlsx" />
+                            </label>
+                            <button 
+                              type="button" 
+                              onClick={() => setIsRecordingVoice(true)} 
+                              disabled={isSending} 
+                              className="w-10 h-10 flex items-center justify-center rounded-full text-gray-500 hover:text-emerald-600 hover:bg-white transition-all"
+                            >
+                              <Mic size={20} />
+                            </button>
+                            <textarea 
+                              placeholder="Type a message..."
+                              className="flex-1 bg-transparent border-none rounded-2xl text-sm p-2.5 focus:ring-0 resize-none h-10 max-h-32 custom-scrollbar"
+                              value={replyText}
+                              onChange={e => setReplyText(e.target.value)}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                  e.preventDefault();
+                                  handleSendReply();
+                                }
+                              }}
+                            />
+                            <button 
+                              onClick={handleSendReply}
+                              disabled={isSending || (!replyText.trim() && !selectedMedia)}
+                              className="w-10 h-10 bg-emerald-500 text-white rounded-full flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-emerald-200"
+                            >
+                              {isSending ? <Loader2 className="animate-spin" size={20} /> : <Send size={20} />}
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
                   )}

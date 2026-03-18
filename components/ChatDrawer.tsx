@@ -7,6 +7,7 @@ import {
 import { liveApiService, UpdateConnectionState } from '../services/liveApiService';
 import { reportUiFailure, reportUiRecovery } from '../services/uiFailureMonitor';
 import { MediaSelectorModal } from './MediaSelectorModal.tsx';
+import { VoiceRecorder } from './VoiceRecorder.tsx';
 
 interface ChatDrawerProps {
   driver: Driver | null;
@@ -62,6 +63,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   
   const [showMediaPicker, setShowMediaPicker] = useState(false);
   const [selectedMedia, setSelectedMedia] = useState<{url: string, type: 'image' | 'video' | 'document' | 'audio'} | null>(null);
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
 
   const [documents, setDocuments] = useState<DriverDocument[]>([]);
   const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>([]);
@@ -262,6 +264,26 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
         alert(`Failed: ${e.message}`);
     } finally {
         setIsSending(false);
+    }
+  };
+
+  const handleVoiceSend = async (blob: Blob) => {
+    if (!driver) return;
+    setIsSending(true);
+    try {
+      const file = new File([blob], `voice_recording_${Date.now()}.ogg`, { type: 'audio/ogg' });
+      const uploadResult = await liveApiService.uploadMedia(file, `voice_recordings/${driver.id}`);
+      if (uploadResult.success) {
+        await liveApiService.sendMessage(driver.id, '', { 
+          mediaUrl: uploadResult.url, 
+          mediaType: 'audio'
+        });
+      }
+    } catch (error) {
+      console.error('Failed to send voice recording:', error);
+    } finally {
+      setIsSending(false);
+      setIsRecordingVoice(false);
     }
   };
 
@@ -488,43 +510,61 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                         </div>
                     )}
                     <div className="flex items-center gap-2 bg-gray-100 p-1 rounded-3xl">
-                        <button 
-                          type="button" 
-                          onClick={() => setShowMediaPicker(true)} 
-                          disabled={isSending} 
-                          className={`w-10 h-10 flex items-center justify-center rounded-full transition-all ${selectedMedia ? 'bg-blue-100 text-blue-700' : 'text-gray-500 hover:text-blue-600 hover:bg-white'}`}
-                        >
-                          <Paperclip size={20} />
-                        </button>
-                        <button 
-                          type="button" 
-                          onClick={() => setShowSchedule(!showSchedule)} 
-                          disabled={isSending} 
-                          className={`w-10 h-10 flex items-center justify-center rounded-full transition-all ${showSchedule ? 'bg-amber-100 text-amber-700' : 'text-gray-500 hover:text-amber-600 hover:bg-white'}`}
-                        >
-                          <Clock size={20} />
-                        </button>
-                        <textarea 
-                          value={replyText} 
-                          onChange={(e) => setReplyText(e.target.value)} 
-                          placeholder="Type a message..." 
-                          className="flex-1 bg-transparent border-none rounded-2xl text-sm p-2.5 focus:ring-0 resize-none h-10 max-h-32 custom-scrollbar" 
-                          disabled={isSending} 
-                          onKeyDown={e => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                              e.preventDefault();
-                              handleSend();
-                            }
-                          }}
-                        />
-                        <button 
-                          type="button" 
-                          onClick={handleSend} 
-                          disabled={(!replyText.trim() && !selectedMedia) || isSending} 
-                          className="w-10 h-10 bg-emerald-500 text-white rounded-full flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-emerald-200"
-                        >
-                          {isSending ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
-                        </button>
+                        {isRecordingVoice ? (
+                          <VoiceRecorder 
+                            onSend={handleVoiceSend} 
+                            onCancel={() => setIsRecordingVoice(false)} 
+                            isSending={isSending}
+                          />
+                        ) : (
+                          <>
+                            <button 
+                              type="button" 
+                              onClick={() => setShowMediaPicker(true)} 
+                              disabled={isSending} 
+                              className={`w-10 h-10 flex items-center justify-center rounded-full transition-all ${selectedMedia ? 'bg-blue-100 text-blue-700' : 'text-gray-500 hover:text-blue-600 hover:bg-white'}`}
+                            >
+                              <Paperclip size={20} />
+                            </button>
+                            <button 
+                              type="button" 
+                              onClick={() => setShowSchedule(!showSchedule)} 
+                              disabled={isSending} 
+                              className={`w-10 h-10 flex items-center justify-center rounded-full transition-all ${showSchedule ? 'bg-amber-100 text-amber-700' : 'text-gray-500 hover:text-amber-600 hover:bg-white'}`}
+                            >
+                              <Clock size={20} />
+                            </button>
+                            <button 
+                              type="button" 
+                              onClick={() => setIsRecordingVoice(true)} 
+                              disabled={isSending} 
+                              className="w-10 h-10 flex items-center justify-center rounded-full text-gray-500 hover:text-emerald-600 hover:bg-white transition-all"
+                            >
+                              <Mic size={20} />
+                            </button>
+                            <textarea 
+                              value={replyText} 
+                              onChange={(e) => setReplyText(e.target.value)} 
+                              placeholder="Type a message..." 
+                              className="flex-1 bg-transparent border-none rounded-2xl text-sm p-2.5 focus:ring-0 resize-none h-10 max-h-32 custom-scrollbar" 
+                              disabled={isSending} 
+                              onKeyDown={e => {
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                  e.preventDefault();
+                                  handleSend();
+                                }
+                              }}
+                            />
+                            <button 
+                              type="button" 
+                              onClick={handleSend} 
+                              disabled={(!replyText.trim() && !selectedMedia) || isSending} 
+                              className="w-10 h-10 bg-emerald-500 text-white rounded-full flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-emerald-200"
+                            >
+                              {isSending ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
+                            </button>
+                          </>
+                        )}
                     </div>
                   </div>
                 )}
