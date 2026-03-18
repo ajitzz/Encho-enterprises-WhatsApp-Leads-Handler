@@ -40,6 +40,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [allLeads, setAllLeads] = useState<Driver[]>([]);
   const [selectedLead, setSelectedLead] = useState<Driver | null>(null);
   const [activities, setActivities] = useState<LeadActivity[]>([]);
+  const [leadMessages, setLeadMessages] = useState<Message[]>([]);
+  const [detailTab, setDetailTab] = useState<'chat' | 'activity'>('chat');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -74,11 +76,13 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         setLoading(false);
       },
       {
+        driverId: selectedLead?.id,
+        onMessages: (msgs) => setLeadMessages(msgs),
         onConnectionStateChange: (state) => setConnectionState(state)
       }
     );
     return () => unsubscribe();
-  }, []);
+  }, [selectedLead?.id]);
 
   const handleClaim = async (id: string) => {
     try {
@@ -95,9 +99,14 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const handleOpenDetail = async (lead: Driver) => {
     setSelectedLead(lead);
     setView('detail');
+    setDetailTab('chat');
     try {
-      const history = await liveApiService.getLeadActivity(lead.id);
+      const [history, messages] = await Promise.all([
+        liveApiService.getLeadActivity(lead.id),
+        liveApiService.getDriverMessages(lead.id, 50)
+      ]);
       setActivities(history);
+      setLeadMessages(messages);
     } catch (err) {
       console.error('Failed to fetch activity', err);
     }
@@ -199,7 +208,15 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                 {lead.name.charAt(0)}
               </div>
               <div className="flex-1">
-                <p className="text-sm font-bold text-gray-900">{lead.name}</p>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-bold text-gray-900">{lead.name}</p>
+                  {((lead as any).lead_score || 0) > 0 && (
+                    <div className="flex items-center gap-1 bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-lg text-[9px] font-bold">
+                      <Zap size={8} fill="currentColor" />
+                      {(lead as any).lead_score}
+                    </div>
+                  )}
+                </div>
                 <p className="text-[10px] text-gray-500 uppercase font-bold tracking-wider">{(lead as any).lead_status || 'New'}</p>
               </div>
               <div className="text-right">
@@ -264,7 +281,15 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                     {lead.name.charAt(0)}
                   </div>
                   <div>
-                    <h4 className="font-bold text-gray-900">{lead.name}</h4>
+                    <div className="flex items-center gap-2">
+                      <h4 className="font-bold text-gray-900">{lead.name}</h4>
+                      {((lead as any).lead_score || 0) > 0 && (
+                        <div className="flex items-center gap-1 bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-lg text-[10px] font-bold">
+                          <Zap size={10} fill="currentColor" />
+                          {(lead as any).lead_score}
+                        </div>
+                      )}
+                    </div>
                     <p className="text-xs text-gray-500">{(lead as any).phone_number}</p>
                   </div>
                 </div>
@@ -337,8 +362,38 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
               <div className="w-20 h-20 rounded-3xl bg-blue-600 text-white flex items-center justify-center font-bold text-3xl mb-4 shadow-lg shadow-blue-200">
                 {lead.name.charAt(0)}
               </div>
-              <h3 className="text-xl font-bold text-gray-900">{lead.name}</h3>
+              <div className="flex items-center gap-2 mb-1">
+                <h3 className="text-xl font-bold text-gray-900">{lead.name}</h3>
+                {((lead as any).lead_score || 0) > 0 && (
+                  <div className="flex items-center gap-1 bg-amber-100 text-amber-700 px-2 py-0.5 rounded-lg text-[10px] font-bold">
+                    <Zap size={12} fill="currentColor" />
+                    {(lead as any).lead_score} Score
+                  </div>
+                )}
+              </div>
               <p className="text-gray-500 mb-6">{lead.phone_number}</p>
+
+              {/* Bot Progression */}
+              <div className="w-full px-4 mb-6">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Bot Flow Progress</span>
+                  <span className="text-[10px] font-bold text-blue-600 uppercase tracking-widest">{lead.progress_percent || 0}%</span>
+                </div>
+                <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-blue-600 transition-all duration-500 ease-out"
+                    style={{ width: `${lead.progress_percent || 0}%` }}
+                  />
+                </div>
+                <div className="flex justify-between mt-1">
+                  <p className="text-[9px] text-gray-400 font-medium italic">
+                    {lead.var_count || 0} variables collected
+                  </p>
+                  <p className="text-[9px] text-gray-400 font-medium italic">
+                    {lead.user_msg_count || 0} messages sent
+                  </p>
+                </div>
+              </div>
               
               <div className="grid grid-cols-2 gap-3 w-full">
                 <a href={`tel:${lead.phone_number}`} className="flex flex-col items-center justify-center gap-2 p-4 bg-blue-50 text-blue-700 rounded-3xl border border-blue-100 active:scale-95 transition-all">
@@ -353,72 +408,139 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             </div>
           </div>
 
-          {/* Action Form */}
-          <div className="p-4">
-            <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm space-y-4">
-              <h4 className="text-sm font-bold text-gray-900 flex items-center gap-2">
-                <History size={16} className="text-blue-600" />
-                Log Interaction
-              </h4>
-              
-              <div className="space-y-3">
-                <select 
-                  className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none text-sm focus:ring-2 focus:ring-blue-500 transition-all"
-                  value={actionStatus}
-                  onChange={e => setActionStatus(e.target.value)}
-                >
-                  <option value="">Update Status...</option>
-                  <option value="followed_up">Followed Up</option>
-                  <option value="interested">Interested</option>
-                  <option value="not_interested">Not Interested</option>
-                  <option value="booked">Booked / Closed</option>
-                  <option value="no_answer">No Answer</option>
-                </select>
+          {/* Tabs */}
+          <div className="px-4 mt-6">
+            <div className="flex bg-gray-100 p-1 rounded-2xl">
+              <button 
+                onClick={() => setDetailTab('chat')}
+                className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+                  detailTab === 'chat' ? 'bg-white text-black shadow-sm' : 'text-gray-500'
+                }`}
+              >
+                <MessageSquare size={16} />
+                Chat History
+              </button>
+              <button 
+                onClick={() => setDetailTab('activity')}
+                className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+                  detailTab === 'activity' ? 'bg-white text-black shadow-sm' : 'text-gray-500'
+                }`}
+              >
+                <ClipboardList size={16} />
+                Activity & Notes
+              </button>
+            </div>
+          </div>
 
-                <textarea 
-                  placeholder="Add a note about this interaction..."
-                  className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none text-sm focus:ring-2 focus:ring-blue-500 transition-all min-h-[100px] resize-none"
-                  value={actionNote}
-                  onChange={e => setActionNote(e.target.value)}
-                />
-
-                <button 
-                  onClick={() => handleLogAction('interaction')}
-                  disabled={loading || !actionNote}
-                  className="w-full bg-black text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 transition-all"
-                >
-                  {loading ? <Loader2 className="animate-spin" size={20} /> : <><CheckCircle size={20} /> Save Interaction</>}
-                </button>
+          {detailTab === 'chat' ? (
+            <div className="p-4 space-y-4">
+              <div className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm min-h-[400px] flex flex-col">
+                <div className="flex-1 space-y-4 overflow-y-auto max-h-[500px] pr-2 custom-scrollbar">
+                  {leadMessages.map((msg, idx) => (
+                    <div key={msg.id || idx} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
+                      <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${
+                        msg.sender === 'driver' 
+                          ? 'bg-gray-100 text-gray-800 rounded-bl-none' 
+                          : 'bg-black text-white rounded-br-none'
+                      }`}>
+                        {msg.text && <p className="leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
+                        {msg.type === 'image' && msg.imageUrl && (
+                          <img src={msg.imageUrl} alt="Shared" className="rounded-lg mt-1 max-w-full h-auto border border-white/10" referrerPolicy="no-referrer" />
+                        )}
+                        {msg.type === 'document' && msg.documentUrl && (
+                          <a href={msg.documentUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 mt-1 p-2 bg-white/10 rounded-lg text-xs hover:bg-white/20 transition-colors">
+                            <ClipboardList size={14} />
+                            View Document
+                          </a>
+                        )}
+                        <p className={`text-[10px] mt-1 opacity-50 ${msg.sender === 'driver' ? 'text-gray-500' : 'text-gray-300'}`}>
+                          {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                  {leadMessages.length === 0 && (
+                    <div className="flex-1 flex flex-col items-center justify-center text-center p-10">
+                      <div className="w-16 h-16 rounded-full bg-gray-50 flex items-center justify-center mb-4">
+                        <MessageSquare size={32} className="text-gray-200" />
+                      </div>
+                      <p className="text-sm font-bold text-gray-900">No messages yet</p>
+                      <p className="text-xs text-gray-400 mt-1">The conversation hasn't started or history is unavailable.</p>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <>
+              {/* Action Form */}
+              <div className="p-4">
+                <div className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm space-y-4">
+                  <h4 className="text-sm font-bold text-gray-900 flex items-center gap-2">
+                    <History size={16} className="text-blue-600" />
+                    Log Interaction
+                  </h4>
+                  
+                  <div className="space-y-3">
+                    <select 
+                      className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none text-sm focus:ring-2 focus:ring-blue-500 transition-all"
+                      value={actionStatus}
+                      onChange={e => setActionStatus(e.target.value)}
+                    >
+                      <option value="">Update Status...</option>
+                      <option value="followed_up">Followed Up</option>
+                      <option value="interested">Interested</option>
+                      <option value="not_interested">Not Interested</option>
+                      <option value="booked">Booked / Closed</option>
+                      <option value="no_answer">No Answer</option>
+                    </select>
 
-          {/* Activity Timeline */}
-          <div className="p-4 pb-10">
-            <h4 className="text-sm font-bold text-gray-900 mb-4 px-1">Activity History</h4>
-            <div className="space-y-4 relative before:absolute before:left-[19px] before:top-2 before:bottom-2 before:w-0.5 before:bg-gray-200">
-              {activities.map((activity, idx) => (
-                <div key={activity.id} className="relative pl-10">
-                  <div className="absolute left-0 top-1 w-10 h-10 rounded-full bg-white border-2 border-gray-200 flex items-center justify-center z-10">
-                    <div className="w-2 h-2 rounded-full bg-blue-600" />
+                    <textarea 
+                      placeholder="Add a note about this interaction..."
+                      className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none text-sm focus:ring-2 focus:ring-blue-500 transition-all min-h-[100px] resize-none"
+                      value={actionNote}
+                      onChange={e => setActionNote(e.target.value)}
+                    />
+
+                    <button 
+                      onClick={() => handleLogAction('interaction')}
+                      disabled={loading || !actionNote}
+                      className="w-full bg-black text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 transition-all"
+                    >
+                      {loading ? <Loader2 className="animate-spin" size={20} /> : <><CheckCircle size={20} /> Save Interaction</>}
+                    </button>
                   </div>
-                  <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                    <div className="flex justify-between items-start mb-1">
-                      <p className="text-xs font-bold text-gray-900 uppercase tracking-wider">{activity.action}</p>
-                      <p className="text-[10px] text-gray-400">{new Date(activity.created_at).toLocaleString()}</p>
+                </div>
+              </div>
+
+              {/* Activity Timeline */}
+              <div className="p-4 pb-10">
+                <h4 className="text-sm font-bold text-gray-900 mb-4 px-1">Activity History</h4>
+                <div className="space-y-4 relative before:absolute before:left-[19px] before:top-2 before:bottom-2 before:w-0.5 before:bg-gray-200">
+                  {activities.map((activity, idx) => (
+                    <div key={activity.id} className="relative pl-10">
+                      <div className="absolute left-0 top-1 w-10 h-10 rounded-full bg-white border-2 border-gray-200 flex items-center justify-center z-10">
+                        <div className="w-2 h-2 rounded-full bg-blue-600" />
+                      </div>
+                      <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+                        <div className="flex justify-between items-start mb-1">
+                          <p className="text-xs font-bold text-gray-900 uppercase tracking-wider">{activity.action}</p>
+                          <p className="text-[10px] text-gray-400">{new Date(activity.created_at).toLocaleString()}</p>
+                        </div>
+                        <p className="text-sm text-gray-600 leading-relaxed">{activity.notes}</p>
+                        <p className="text-[10px] text-gray-400 mt-2 font-medium italic">Logged by {activity.staff_name}</p>
+                      </div>
                     </div>
-                    <p className="text-sm text-gray-600 leading-relaxed">{activity.notes}</p>
-                    <p className="text-[10px] text-gray-400 mt-2 font-medium italic">Logged by {activity.staff_name}</p>
-                  </div>
+                  ))}
+                  {activities.length === 0 && (
+                    <div className="text-center py-10 bg-white rounded-3xl border border-gray-100">
+                      <p className="text-xs text-gray-400">No activity logged yet.</p>
+                    </div>
+                  )}
                 </div>
-              ))}
-              {activities.length === 0 && (
-                <div className="text-center py-10 bg-white rounded-3xl border border-gray-100">
-                  <p className="text-xs text-gray-400">No activity logged yet.</p>
-                </div>
-              )}
-            </div>
-          </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
     );

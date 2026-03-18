@@ -4656,21 +4656,54 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
     const fetchSnapshot = async () => {
         return withDb(async (client) => {
-            const driverRows = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC NULLS LAST LIMIT 50');
-            const drivers = driverRows.rows.map((row) => ({
-                id: row.id,
-                phoneNumber: row.phone_number,
-                phone_number: row.phone_number, // Include both for compatibility
-                name: row.name,
-                status: row.stage,
-                lead_status: row.lead_status,
-                assigned_to: row.assigned_to,
-                lastMessage: row.last_message,
-                lastMessageTime: parseInt(row.last_message_at || '0'),
-                source: row.source,
-                isHumanMode: row.is_human_mode,
-                created_at: row.created_at
-            }));
+            const botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
+            const publishedBot = botRes.rows[0];
+            const totalNodes = publishedBot?.settings?.nodes?.length || 10;
+
+            const driverRows = await client.query(`
+                SELECT c.*, 
+                    (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in') as user_msg_count,
+                    (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document')) as user_media_count,
+                    (SELECT count(*) FROM jsonb_object_keys(c.variables)) as var_count
+                FROM candidates c 
+                ORDER BY last_message_at DESC NULLS LAST LIMIT 50
+            `);
+            const drivers = driverRows.rows.map((row) => {
+                const msgCount = parseInt(row.user_msg_count || '0');
+                const mediaCount = parseInt(row.user_media_count || '0');
+                const varCount = parseInt(row.var_count || '0');
+                
+                // Heuristic for lead genuineness
+                // 1. Message volume (engagement)
+                // 2. Media uploads (high effort/intent)
+                // 3. Variables collected (form completion)
+                // 4. Human mode (handoff reached)
+                let leadScore = (msgCount * 10) + (mediaCount * 50) + (varCount * 20);
+                if (row.is_human_mode) leadScore += 100; // Handoff is high value
+
+                // Progress percentage
+                const progress = Math.min(100, Math.round((varCount / Math.max(1, totalNodes)) * 100));
+
+                return {
+                    id: row.id,
+                    phoneNumber: row.phone_number,
+                    phone_number: row.phone_number,
+                    name: row.name,
+                    status: row.stage,
+                    lead_status: row.lead_status,
+                    assigned_to: row.assigned_to,
+                    lastMessage: row.last_message,
+                    lastMessageTime: parseInt(row.last_message_at || '0'),
+                    source: row.source,
+                    isHumanMode: row.is_human_mode,
+                    created_at: row.created_at,
+                    lead_score: leadScore,
+                    progress_percent: progress,
+                    user_msg_count: msgCount,
+                    user_media_count: mediaCount,
+                    var_count: varCount
+                };
+            });
 
             const payload = { drivers };
 
@@ -4734,12 +4767,39 @@ apiRouter.get('/updates/stream', async (req, res) => {
 apiRouter.get('/drivers', async (req, res) => {
     try {
         await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM candidates ORDER BY last_message_at DESC NULLS LAST LIMIT 50');
-            res.json(r.rows.map(row => ({
-                id: row.id, phoneNumber: row.phone_number, name: row.name, status: row.stage, 
-                lastMessage: row.last_message, lastMessageTime: parseInt(row.last_message_at || '0'), 
-                source: row.source, isHumanMode: row.is_human_mode
-            })));
+            const botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
+            const publishedBot = botRes.rows[0];
+            const totalNodes = publishedBot?.settings?.nodes?.length || 10;
+
+            const r = await client.query(`
+                SELECT c.*, 
+                    (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in') as user_msg_count,
+                    (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document')) as user_media_count,
+                    (SELECT count(*) FROM jsonb_object_keys(c.variables)) as var_count
+                FROM candidates c 
+                ORDER BY last_message_at DESC NULLS LAST LIMIT 50
+            `);
+            res.json(r.rows.map(row => {
+                const msgCount = parseInt(row.user_msg_count || '0');
+                const mediaCount = parseInt(row.user_media_count || '0');
+                const varCount = parseInt(row.var_count || '0');
+                
+                let leadScore = (msgCount * 10) + (mediaCount * 50) + (varCount * 20);
+                if (row.is_human_mode) leadScore += 100;
+
+                const progress = Math.min(100, Math.round((varCount / Math.max(1, totalNodes)) * 100));
+
+                return {
+                    id: row.id, phoneNumber: row.phone_number, name: row.name, status: row.stage, 
+                    lastMessage: row.last_message, lastMessageTime: parseInt(row.last_message_at || '0'), 
+                    source: row.source, isHumanMode: row.is_human_mode,
+                    lead_score: leadScore,
+                    progress_percent: progress,
+                    user_msg_count: msgCount,
+                    user_media_count: mediaCount,
+                    var_count: varCount
+                };
+            }));
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
