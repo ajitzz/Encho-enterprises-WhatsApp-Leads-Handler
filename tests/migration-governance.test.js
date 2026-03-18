@@ -96,6 +96,21 @@ test('sections 1-3 readiness check script passes', () => {
 });
 
 
+test('legacy schema self-heal includes staff lead columns and undefined-column recovery', () => {
+  const serverSource = require('node:fs').readFileSync('server.js', 'utf8');
+
+  assert.match(serverSource, /ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_to UUID/);
+  assert.match(serverSource, /ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_status VARCHAR\(50\) DEFAULT 'new'/);
+  assert.match(serverSource, /err\.code === '42P01' \|\| err\.code === '42703'/);
+});
+
+test('candidate staff portal indexes are present for pool and assignment queries', () => {
+  const serverSource = require('node:fs').readFileSync('server.js', 'utf8');
+
+  assert.match(serverSource, /CREATE INDEX IF NOT EXISTS idx_candidates_assigned_last_action_created/);
+  assert.match(serverSource, /CREATE INDEX IF NOT EXISTS idx_candidates_pool_created_at/);
+});
+
 test('auth-config route registrar uses module path when mode is not off', async () => {
   const apiRouter = createRouterMock();
   const calls = [];
