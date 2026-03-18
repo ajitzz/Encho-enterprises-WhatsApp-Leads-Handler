@@ -2637,6 +2637,14 @@ const initDatabase = async (client) => {
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS is_active_for_auto_dist BOOLEAN DEFAULT FALSE;`);
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_assigned_at TIMESTAMP;`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, lead_status VARCHAR(50) DEFAULT 'new', last_action_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS current_bot_step_id VARCHAR(100);`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS variables JSONB DEFAULT '{}';`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_status VARCHAR(50) DEFAULT 'new';`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
+    await client.query(`UPDATE candidates SET lead_status = 'new' WHERE lead_status IS NULL;`);
+    await client.query(`UPDATE candidates SET variables = '{}'::jsonb WHERE variables IS NULL;`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
@@ -2681,14 +2689,26 @@ const ensurePerformanceIndexes = async (client) => {
         ON scheduled_messages(candidate_id, scheduled_time ASC)
         WHERE status = 'pending'
     `);
+
+    // Staff portal: assigned leads and pool sorting hot-paths.
+    await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_candidates_assigned_last_action_created
+        ON candidates(assigned_to, last_action_at DESC, created_at DESC)
+    `);
+
+    await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_candidates_pool_created_at
+        ON candidates(created_at DESC)
+        WHERE assigned_to IS NULL
+    `);
 };
 
 const executeWithRetry = async (client, operation) => {
     try {
         return await operation();
     } catch (err) {
-        if (err.code === '42P01') {
-            console.warn("[Auto-Heal] Tables missing. Re-initializing database...");
+        if (err.code === '42P01' || err.code === '42703') {
+            console.warn(`[Auto-Heal] Schema drift detected (${err.code}). Re-initializing database...`);
             await initDatabase(client);
             return await operation(); 
         }
