@@ -4423,27 +4423,30 @@ const handleAuthGoogleLegacy = async (req, res) => {
         const email = payload.email;
 
         // Super Admin check
-        const ADMIN_EMAIL = 'ajithsabzz@gmail.com';
+        const ADMIN_EMAILS = ['ajithsabzz@gmail.com', 'enchoenterprises@gmail.com'];
         let userRole = null;
         let staffId = null;
 
-        if (email === ADMIN_EMAIL) {
+        const isSuperAdmin = ADMIN_EMAILS.includes(email);
+        if (isSuperAdmin) {
             userRole = 'admin';
         }
 
         await withDb(async (client) => {
-            const staffRes = await client.query('SELECT id, role FROM staff_members WHERE email = $1', [email]);
-            if (staffRes.rows.length > 0) {
-                userRole = staffRes.rows[0].role;
-                staffId = staffRes.rows[0].id;
-            } else if (email === ADMIN_EMAIL) {
-                // Auto-register super admin if not exists
-                const insertRes = await client.query(
-                    'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id',
-                    [email, payload.name, 'admin']
-                );
-                staffId = insertRes.rows[0].id;
-            }
+            await executeWithRetry(client, async () => {
+                const staffRes = await client.query('SELECT id, role FROM staff_members WHERE email = $1', [email]);
+                if (staffRes.rows.length > 0) {
+                    userRole = staffRes.rows[0].role;
+                    staffId = staffRes.rows[0].id;
+                } else if (isSuperAdmin) {
+                    // Auto-register super admin if not exists
+                    const insertRes = await client.query(
+                        'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id',
+                        [email, payload.name, 'admin']
+                    );
+                    staffId = insertRes.rows[0].id;
+                }
+            });
         });
 
         if (!userRole) {
@@ -5317,7 +5320,7 @@ apiRouter.post('/system/hard-reset', async (req, res) => {
         await withDb(async (client) => {
             await client.query('BEGIN');
             try {
-                await client.query(`DROP TABLE IF EXISTS scheduled_messages, candidate_messages, driver_documents, bot_versions, candidates, system_settings CASCADE`);
+                await client.query(`DROP TABLE IF EXISTS scheduled_messages, candidate_messages, driver_documents, lead_activity_log, bot_versions, candidates, staff_members, system_settings CASCADE`);
                 await initDatabase(client); // Uses the shared robust init function
                 await client.query('COMMIT');
             } catch (err) {
