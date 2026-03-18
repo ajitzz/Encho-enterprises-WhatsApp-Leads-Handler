@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, ScheduledMessage, DriverDocument } from '../types';
 import { 
-  X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save, AlertTriangle, History, MessageCircle, ShieldAlert
+  X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save, AlertTriangle, History, MessageCircle, ShieldAlert, User, Bot, Mic, Video, CheckCircle
 } from 'lucide-react';
 import { liveApiService, UpdateConnectionState } from '../services/liveApiService';
 import { reportUiFailure, reportUiRecovery } from '../services/uiFailureMonitor';
@@ -58,9 +58,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [isHumanModeLoading, setIsHumanModeLoading] = useState(false);
   
   const [showMediaPicker, setShowMediaPicker] = useState(false);
-  const [selectedMedia, setSelectedMedia] = useState<{url: string, type: 'image' | 'video' | 'document'} | null>(null);
+  const [selectedMedia, setSelectedMedia] = useState<{url: string, type: 'image' | 'video' | 'document' | 'audio'} | null>(null);
 
   const [documents, setDocuments] = useState<DriverDocument[]>([]);
   const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>([]);
@@ -193,6 +194,37 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       }
   };
 
+  const handleToggleHumanMode = async () => {
+    if (!driver || isHumanModeLoading) return;
+    
+    const newMode = !driver.isHumanMode;
+    setIsHumanModeLoading(true);
+    try {
+      await liveApiService.updateDriver(driver.id, { isHumanMode: newMode });
+      
+      // Predefined messages
+      if (newMode) {
+        // Entering Human Mode
+        await liveApiService.sendMessage(driver.id, `Hi, I am an agent, how may I help you?`);
+      } else {
+        // Exiting Human Mode
+        await liveApiService.sendMessage(driver.id, `Chatbot resumed. I'm back online.`);
+      }
+
+      // Update parent state
+      onUpdateDriver(driver.id, { isHumanMode: newMode });
+      
+      // Refresh messages locally
+      const messages = await liveApiService.getDriverMessages(driver.id);
+      setLocalMessages(messages);
+    } catch (err) {
+      console.error('Failed to toggle human mode:', err);
+      alert('Failed to toggle human mode');
+    } finally {
+      setIsHumanModeLoading(false);
+    }
+  };
+
   if (!driver) return null;
 
   const handleSend = async (e?: React.MouseEvent | React.FormEvent) => {
@@ -292,8 +324,20 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             </div>
             <div className="flex items-center gap-4">
                <div className="flex items-center gap-2 bg-gray-900 rounded-lg p-1 border border-gray-800">
-                    <button type="button" onClick={() => onUpdateDriver(driver.id, { isHumanMode: !driver.isHumanMode })} className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${driver.isHumanMode ? 'bg-amber-500 text-black' : 'text-gray-400 hover:text-white'}`}>
-                        {driver.isHumanMode ? <Headset size={14} /> : <MicOff size={14} />} {driver.isHumanMode ? 'Human Agent' : 'Bot Active'}
+                    <button 
+                      type="button" 
+                      onClick={handleToggleHumanMode} 
+                      disabled={isHumanModeLoading}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${driver.isHumanMode ? 'bg-amber-500 text-black' : 'text-gray-400 hover:text-white'}`}
+                    >
+                        {isHumanModeLoading ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : driver.isHumanMode ? (
+                          <User size={14} />
+                        ) : (
+                          <Bot size={14} />
+                        )}
+                        {driver.isHumanMode ? 'Human Mode ON' : 'Bot Active'}
                     </button>
                </div>
               <button type="button" onClick={onClose} className="p-2 hover:bg-gray-800 rounded-full transition-colors"><X size={20} /></button>
@@ -315,13 +359,55 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                         </div>
                     ) : (
                         <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
-                            <div className={`max-w-[80%] rounded-2xl shadow-sm overflow-hidden ${msg.sender === 'driver' ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' : 'bg-blue-600 text-white rounded-tr-none'}`}>
-                                {renderMediaPreview(media.url, media.type)}
-                                <div className="px-4 py-3">
+                            <div className={`max-w-[80%] rounded-2xl shadow-sm overflow-hidden ${
+                              msg.sender === 'driver' 
+                                ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' 
+                                : 'bg-emerald-500 text-white rounded-tr-none'
+                            }`}>
+                                {/* Media Rendering */}
+                                {media.url && (
+                                  <div className="p-1">
+                                    {media.type === 'video' ? (
+                                      <div className="rounded-xl overflow-hidden bg-black/10">
+                                        <video src={media.url} controls className="w-full h-auto block" />
+                                      </div>
+                                    ) : media.type === 'audio' ? (
+                                      <div className={`flex items-center gap-3 p-3 rounded-xl ${msg.sender === 'driver' ? 'bg-gray-100' : 'bg-emerald-600'}`}>
+                                        <div className={`w-10 h-10 rounded-full flex items-center justify-center ${msg.sender === 'driver' ? 'bg-gray-200 text-gray-500' : 'bg-emerald-700 text-white'}`}>
+                                          <Mic size={18} />
+                                        </div>
+                                        <audio src={media.url} controls className="h-8 w-48" />
+                                      </div>
+                                    ) : media.type === 'document' ? (
+                                      <a href={media.url} target="_blank" rel="noopener noreferrer" className={`flex items-center gap-3 p-3 rounded-xl transition-colors ${
+                                        msg.sender === 'driver' ? 'bg-gray-50 hover:bg-gray-100' : 'bg-emerald-600 hover:bg-emerald-700'
+                                      }`}>
+                                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${msg.sender === 'driver' ? 'bg-gray-100 text-gray-500' : 'bg-emerald-700 text-white'}`}>
+                                          <FileText size={20} />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                          <p className="text-xs font-bold truncate">Document</p>
+                                          <p className="text-[10px] opacity-70">Click to view</p>
+                                        </div>
+                                      </a>
+                                    ) : (
+                                      <div className="rounded-xl overflow-hidden border border-black/5">
+                                        <img src={media.url} className="w-full h-auto block" alt="media" referrerPolicy="no-referrer" />
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                <div className="px-4 py-2">
                                     {renderMessageText(msg.text)}
-                                    <div className="text-[10px] mt-1 text-right opacity-60 flex justify-end gap-1 items-center">
+                                    <div className={`text-[10px] mt-1 text-right flex justify-end gap-1 items-center ${msg.sender === 'driver' ? 'text-gray-400' : 'text-emerald-100'}`}>
                                         {msg.status === 'sending' && <Clock size={10} className="animate-spin" />}
                                         {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                        {msg.sender !== 'driver' && (
+                                          <div className="flex">
+                                            <CheckCircle size={10} className={msg.status === 'read' ? 'text-blue-200' : ''} />
+                                          </div>
+                                        )}
                                     </div>
                                 </div>
                             </div>
@@ -375,11 +461,20 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                     </p>
                   </div>
                 ) : (
-                  <>
+                  <div className="space-y-3">
                     {selectedMedia && (
-                        <div className="absolute bottom-full left-0 right-0 bg-blue-50 p-2 border-t border-blue-200 flex items-center justify-between px-4 animate-in slide-in-from-bottom-2">
-                            <div className="flex items-center gap-2 text-xs font-bold text-blue-700">
-                                <Paperclip size={12} /> Selected: {selectedMedia.type.toUpperCase()}
+                        <div className="flex items-center justify-between p-2 bg-blue-50 rounded-xl border border-blue-100 animate-in slide-in-from-bottom-2">
+                            <div className="flex items-center gap-2">
+                                <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center text-blue-600 border border-blue-200">
+                                    {selectedMedia.type === 'image' ? <Paperclip size={18} /> : 
+                                     selectedMedia.type === 'video' ? <Video size={18} /> : 
+                                     selectedMedia.type === 'audio' ? <Mic size={18} /> : 
+                                     <FileText size={18} />}
+                                </div>
+                                <div className="flex flex-col">
+                                    <span className="text-[10px] font-bold text-blue-700 uppercase tracking-wider">{selectedMedia.type} Selected</span>
+                                    <span className="text-[8px] text-blue-500">Ready to send</span>
+                                </div>
                             </div>
                             <button type="button" onClick={() => setSelectedMedia(null)} className="text-blue-700 hover:bg-blue-100 p-1 rounded-full transition-colors"><X size={14} /></button>
                         </div>
@@ -390,17 +485,46 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                             <input type="datetime-local" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} className="w-full p-2 border rounded-lg text-sm" />
                         </div>
                     )}
-                    <div className="flex gap-2 mb-3">
-                        <button type="button" onClick={() => setShowMediaPicker(true)} disabled={isSending} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${selectedMedia ? 'bg-blue-100 text-blue-700 border-blue-200' : 'border-gray-200 hover:bg-gray-50'}`}><Paperclip size={12} /> Attach</button>
-                        <button type="button" onClick={() => setShowSchedule(!showSchedule)} disabled={isSending} className={`px-3 py-1.5 rounded-full text-xs font-bold border flex items-center gap-1 ${showSchedule ? 'bg-amber-100 text-amber-700 border-amber-200' : 'border-gray-200 hover:bg-gray-50'}`}><Clock size={12} /> Schedule</button>
-                    </div>
-                    <div className="flex gap-3">
-                      <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Type a message..." className="flex-1 resize-none border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 h-20 shadow-inner" disabled={isSending} />
-                      <button type="button" onClick={handleSend} disabled={(!replyText.trim() && !selectedMedia) || isSending} className="self-end p-3 rounded-xl bg-black text-white hover:bg-gray-800 w-12 h-12 flex items-center justify-center disabled:opacity-50">
+                    <div className="flex items-center gap-2 bg-gray-100 p-1 rounded-3xl">
+                        <button 
+                          type="button" 
+                          onClick={() => setShowMediaPicker(true)} 
+                          disabled={isSending} 
+                          className={`w-10 h-10 flex items-center justify-center rounded-full transition-all ${selectedMedia ? 'bg-blue-100 text-blue-700' : 'text-gray-500 hover:text-blue-600 hover:bg-white'}`}
+                        >
+                          <Paperclip size={20} />
+                        </button>
+                        <button 
+                          type="button" 
+                          onClick={() => setShowSchedule(!showSchedule)} 
+                          disabled={isSending} 
+                          className={`w-10 h-10 flex items-center justify-center rounded-full transition-all ${showSchedule ? 'bg-amber-100 text-amber-700' : 'text-gray-500 hover:text-amber-600 hover:bg-white'}`}
+                        >
+                          <Clock size={20} />
+                        </button>
+                        <textarea 
+                          value={replyText} 
+                          onChange={(e) => setReplyText(e.target.value)} 
+                          placeholder="Type a message..." 
+                          className="flex-1 bg-transparent border-none rounded-2xl text-sm p-2.5 focus:ring-0 resize-none h-10 max-h-32 custom-scrollbar" 
+                          disabled={isSending} 
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              handleSend();
+                            }
+                          }}
+                        />
+                        <button 
+                          type="button" 
+                          onClick={handleSend} 
+                          disabled={(!replyText.trim() && !selectedMedia) || isSending} 
+                          className="w-10 h-10 bg-emerald-500 text-white rounded-full flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-emerald-200"
+                        >
                           {isSending ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
-                      </button>
+                        </button>
                     </div>
-                  </>
+                  </div>
                 )}
               </div>
             </div>

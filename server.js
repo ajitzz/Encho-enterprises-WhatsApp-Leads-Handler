@@ -4387,6 +4387,14 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                 }
                 else if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video' || msg.type === 'audio') {
                     text = `[${msg.type.toUpperCase()}]`;
+                    try {
+                        const mediaRes = await fetchAndStoreIncomingMedia({ msg, phoneNumber: from, candidateId: candidate.id, client });
+                        if (mediaRes?.key) {
+                            text = JSON.stringify({ url: getPublicS3Url(mediaRes.key), caption: '' });
+                        }
+                    } catch (mediaErr) {
+                        console.error('Failed to fetch/store incoming media:', mediaErr);
+                    }
                 } else text = `[${msg.type.toUpperCase()}]`;
 
                 perf.markStart('lead_upsert');
@@ -4858,7 +4866,9 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
 
 apiRouter.post('/drivers/:id/messages', async (req, res) => {
     try {
-        const { text, mediaUrl, mediaType } = req.body;
+        const { text, mediaUrl: rawMediaUrl, mediaType: rawMediaType, imageUrl, videoUrl, audioUrl, documentUrl, type: rawType } = req.body;
+        const mediaUrl = rawMediaUrl || imageUrl || videoUrl || audioUrl || documentUrl;
+        const mediaType = rawMediaType || (imageUrl ? 'image' : (videoUrl ? 'video' : (audioUrl ? 'audio' : (documentUrl ? 'document' : (rawType !== 'text' ? rawType : undefined)))));
         const normalizedText = normalizeTextBody(text);
         if (!mediaUrl) {
             const trimmed = normalizedText.trim();
@@ -4876,8 +4886,13 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
             if (mediaUrl) {
                 const freshUrl = await refreshMediaUrl(mediaUrl);
                 const type = mediaType || 'image';
-                payload = { type, [type]: { link: freshUrl, caption: sanitizedText } };
-                if (type === 'document') payload[type].filename = decodeURIComponent(new URL(freshUrl).pathname.split('/').pop() || 'file.pdf');
+                payload = { type, [type]: { link: freshUrl } };
+                if (type !== 'audio' && sanitizedText) {
+                    payload[type].caption = sanitizedText;
+                }
+                if (type === 'document') {
+                    payload[type].filename = decodeURIComponent(new URL(freshUrl).pathname.split('/').pop() || 'file.pdf');
+                }
                 dbText = JSON.stringify({ url: mediaUrl, caption: sanitizedText });
             }
             sendResult = await sendToMeta(c.rows[0].phone_number, payload, { sendType: 'manual', enableRetry: true, returnFastOnTimeout: true, requestId: req.requestId });

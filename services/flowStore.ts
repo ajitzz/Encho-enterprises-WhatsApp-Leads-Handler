@@ -21,11 +21,15 @@ import { FlowNodeData } from '../types';
 interface FlowState {
   nodes: Node<FlowNodeData>[];
   edges: Edge[];
+  humanModeEntryMessage: string;
+  botModeTransitionMessage: string;
   onNodesChange: OnNodesChange;
   onEdgesChange: OnEdgesChange;
   onConnect: OnConnect;
   setNodes: (nodes: Node<FlowNodeData>[]) => void;
   setEdges: (edges: Edge[]) => void;
+  setHumanModeEntryMessage: (msg: string) => void;
+  setBotModeTransitionMessage: (msg: string) => void;
   addNode: (node: Node<FlowNodeData>) => void;
   updateNodeData: (id: string, data: Partial<FlowNodeData>) => void;
   deleteNode: (id: string) => void;
@@ -44,6 +48,8 @@ const initialNodes: Node<FlowNodeData>[] = [
 export const useFlowStore = create<FlowState>((set, get) => ({
   nodes: initialNodes,
   edges: [],
+  humanModeEntryMessage: 'Hi, I am {{name}}, how may I help you?',
+  botModeTransitionMessage: 'our Staff will get back to you shortly',
   
   onNodesChange: (changes: NodeChange[]) => {
     set({
@@ -71,6 +77,8 @@ export const useFlowStore = create<FlowState>((set, get) => ({
 
   setNodes: (nodes) => set({ nodes }),
   setEdges: (edges) => set({ edges }),
+  setHumanModeEntryMessage: (msg) => set({ humanModeEntryMessage: msg }),
+  setBotModeTransitionMessage: (msg) => set({ botModeTransitionMessage: msg }),
 
   addNode: (node) => {
       set({ nodes: [...get().nodes, node] });

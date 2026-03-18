@@ -1,13 +1,13 @@
 
 import React, { useState, useEffect } from 'react';
-import { X, Cloud, Folder, Video, ArrowLeft, FileText, Image as ImageIcon } from 'lucide-react';
+import { X, Cloud, Folder, Video, ArrowLeft, FileText, Image as ImageIcon, Mic } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService';
 
 interface MediaSelectorModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onSelect: (url: string, type: 'image' | 'video' | 'document') => void;
-    allowedType?: 'Image' | 'Video' | 'Document' | 'All';
+    onSelect: (url: string, type: 'image' | 'video' | 'document' | 'audio') => void;
+    allowedType?: 'Image' | 'Video' | 'Document' | 'Audio' | 'All';
 }
 
 export const MediaSelectorModal: React.FC<MediaSelectorModalProps> = ({ isOpen, onClose, onSelect, allowedType = 'All' }) => {
@@ -36,6 +36,7 @@ export const MediaSelectorModal: React.FC<MediaSelectorModalProps> = ({ isOpen, 
                         if (allowedType === 'Image') return f.type === 'image';
                         if (allowedType === 'Video') return f.type === 'video';
                         if (allowedType === 'Document') return f.type === 'document';
+                        if (allowedType === 'Audio') return f.type === 'audio';
                         return true;
                     });
                 }
@@ -129,6 +130,8 @@ export const MediaSelectorModal: React.FC<MediaSelectorModalProps> = ({ isOpen, 
                                                         <img src={file.url} className="w-full h-full object-cover" alt="prev" />
                                                     ) : file.type === 'video' ? (
                                                         <Video size={32} className="text-purple-400" />
+                                                    ) : file.type === 'audio' ? (
+                                                        <Mic size={32} className="text-green-400" />
                                                     ) : (
                                                         <div className="flex flex-col items-center justify-center">
                                                             <FileText size={32} className="text-orange-400" />

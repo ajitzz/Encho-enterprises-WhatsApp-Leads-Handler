@@ -154,6 +154,8 @@ export interface BotSettings {
   shouldRepeat: boolean;
   routingStrategy: string;
   systemInstruction?: string;
+  humanModeEntryMessage?: string;
+  botModeTransitionMessage?: string;
   nodes: any[];
   edges: any[];
   steps?: any[]; 

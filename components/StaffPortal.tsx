@@ -24,7 +24,12 @@ import {
   LogOut,
   X,
   ShieldAlert,
-  Paperclip
+  Paperclip,
+  Mic,
+  Video,
+  FileText,
+  User,
+  Bot
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 import { Driver, Message } from '../types.ts';
@@ -89,16 +94,52 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [connectionState, setConnectionState] = useState<string>('connecting');
   const [replyText, setReplyText] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const [selectedMedia, setSelectedMedia] = useState<{ type: 'image' | 'video' | 'document'; file: File; preview: string } | null>(null);
+  const [selectedMedia, setSelectedMedia] = useState<{ type: 'image' | 'video' | 'document' | 'audio'; file: File; preview: string } | null>(null);
+  const [isHumanModeLoading, setIsHumanModeLoading] = useState(false);
 
   const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
+
+  const handleToggleHumanMode = async () => {
+    if (!selectedLead || isHumanModeLoading) return;
+    
+    const newMode = !selectedLead.isHumanMode;
+    setIsHumanModeLoading(true);
+    try {
+      await liveApiService.updateDriver(selectedLead.id, { isHumanMode: newMode });
+      
+      // Predefined messages
+      if (newMode) {
+        // Entering Human Mode
+        await liveApiService.sendMessage(selectedLead.id, `Hi, I am ${user.name}, how may I help you?`);
+      } else {
+        // Exiting Human Mode
+        await liveApiService.sendMessage(selectedLead.id, `Chatbot resumed. I'm back online.`);
+      }
+
+      // Update local state
+      const updatedLead = { ...selectedLead, isHumanMode: newMode };
+      setSelectedLead(updatedLead);
+      setAllLeads(prev => prev.map(l => l.id === updatedLead.id ? updatedLead : l));
+      
+      // Refresh messages
+      const messages = await liveApiService.getDriverMessages(selectedLead.id);
+      setLeadMessages(messages);
+    } catch (err) {
+      console.error('Failed to toggle human mode:', err);
+      setError('Failed to toggle human mode');
+    } finally {
+      setIsHumanModeLoading(false);
+    }
+  };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const type = file.type.startsWith('image/') ? 'image' : 
-                 file.type.startsWith('video/') ? 'video' : 'document';
+    let type: 'image' | 'video' | 'document' | 'audio' = 'document';
+    if (file.type.startsWith('image/')) type = 'image';
+    else if (file.type.startsWith('video/')) type = 'video';
+    else if (file.type.startsWith('audio/')) type = 'audio';
     
     const preview = URL.createObjectURL(file);
     setSelectedMedia({ type, file, preview });
@@ -122,7 +163,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         type: mediaType || 'text',
         imageUrl: mediaType === 'image' ? mediaUrl : undefined,
         videoUrl: mediaType === 'video' ? mediaUrl : undefined,
-        documentUrl: mediaType === 'document' ? mediaUrl : undefined
+        documentUrl: mediaType === 'document' ? mediaUrl : undefined,
+        audioUrl: mediaType === 'audio' ? mediaUrl : undefined
       });
 
       setReplyText('');
@@ -438,9 +480,29 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             </button>
             <h2 className="text-lg font-bold">Lead Details</h2>
           </div>
-          <button className="p-2 hover:bg-gray-100 rounded-full">
-            <MoreVertical size={20} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button 
+              onClick={handleToggleHumanMode}
+              disabled={isHumanModeLoading}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-2xl text-[10px] font-bold uppercase tracking-wider transition-all ${
+                selectedLead.isHumanMode 
+                  ? 'bg-amber-100 text-amber-700 border border-amber-200' 
+                  : 'bg-blue-50 text-blue-600 border border-blue-100'
+              }`}
+            >
+              {isHumanModeLoading ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : selectedLead.isHumanMode ? (
+                <User size={12} />
+              ) : (
+                <Bot size={12} />
+              )}
+              {selectedLead.isHumanMode ? 'Human Mode ON' : 'Bot Active'}
+            </button>
+            <button className="p-2 hover:bg-gray-100 rounded-full">
+              <MoreVertical size={20} />
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto">
@@ -524,30 +586,68 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           {detailTab === 'chat' ? (
             <div className="p-4 space-y-4 flex flex-col h-full">
               <div className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm flex-1 flex flex-col min-h-[400px]">
-                <div className="flex-1 space-y-4 overflow-y-auto max-h-[400px] pr-2 custom-scrollbar mb-4">
-                  {leadMessages.map((msg, idx) => (
-                    <div key={msg.id || idx} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
-                      <div className={`max-w-[85%] p-3 rounded-2xl text-sm ${
-                        msg.sender === 'driver' 
-                          ? 'bg-gray-100 text-gray-800 rounded-bl-none' 
-                          : 'bg-black text-white rounded-br-none'
-                      }`}>
-                        {msg.text && <p className="leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
-                        {msg.type === 'image' && msg.imageUrl && (
-                          <img src={msg.imageUrl} alt="Shared" className="rounded-lg mt-1 max-w-full h-auto border border-white/10" referrerPolicy="no-referrer" />
-                        )}
-                        {msg.type === 'document' && msg.documentUrl && (
-                          <a href={msg.documentUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 mt-1 p-2 bg-white/10 rounded-lg text-xs hover:bg-white/20 transition-colors">
-                            <ClipboardList size={14} />
-                            View Document
-                          </a>
-                        )}
-                        <p className={`text-[10px] mt-1 opacity-50 ${msg.sender === 'driver' ? 'text-gray-500' : 'text-gray-300'}`}>
-                          {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </p>
+                  <div className="flex-1 space-y-4 overflow-y-auto max-h-[400px] pr-2 custom-scrollbar mb-4 p-2">
+                    {leadMessages.map((msg, idx) => (
+                      <div key={msg.id || idx} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
+                        <div className={`max-w-[85%] p-3 rounded-2xl text-sm relative shadow-sm ${
+                          msg.sender === 'driver' 
+                            ? 'bg-white text-gray-800 rounded-tl-none border border-gray-100' 
+                            : 'bg-emerald-500 text-white rounded-tr-none'
+                        }`}>
+                          {/* Message Content */}
+                          <div className="space-y-2">
+                            {msg.text && <p className="leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
+                            
+                            {msg.type === 'image' && msg.imageUrl && (
+                              <div className="rounded-lg overflow-hidden border border-black/5">
+                                <img src={msg.imageUrl} alt="Shared" className="max-w-full h-auto block" referrerPolicy="no-referrer" />
+                              </div>
+                            )}
+                            
+                            {msg.type === 'video' && msg.videoUrl && (
+                              <div className="rounded-lg overflow-hidden border border-black/5 bg-black/10">
+                                <video src={msg.videoUrl} controls className="max-w-full h-auto block" />
+                              </div>
+                            )}
+                            
+                            {msg.type === 'audio' && msg.audioUrl && (
+                              <div className={`flex items-center gap-3 p-2 rounded-xl ${msg.sender === 'driver' ? 'bg-gray-200' : 'bg-emerald-600'}`}>
+                                <div className={`w-8 h-8 rounded-full flex items-center justify-center ${msg.sender === 'driver' ? 'bg-gray-300 text-gray-600' : 'bg-emerald-700 text-white'}`}>
+                                  <Mic size={16} />
+                                </div>
+                                <audio src={msg.audioUrl} controls className="h-8 w-40" />
+                              </div>
+                            )}
+                            
+                            {msg.type === 'document' && msg.documentUrl && (
+                              <a href={msg.documentUrl} target="_blank" rel="noopener noreferrer" className={`flex items-center gap-3 p-3 rounded-xl transition-colors ${
+                                msg.sender === 'driver' ? 'bg-gray-200 hover:bg-gray-300' : 'bg-emerald-600 hover:bg-emerald-700'
+                              }`}>
+                                <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${msg.sender === 'driver' ? 'bg-gray-300 text-gray-600' : 'bg-emerald-700 text-white'}`}>
+                                  <FileText size={20} />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-xs font-bold truncate">Document</p>
+                                  <p className="text-[10px] opacity-70">Click to view</p>
+                                </div>
+                              </a>
+                            )}
+                          </div>
+
+                          {/* Timestamp & Status */}
+                          <div className={`flex items-center justify-end gap-1 mt-1 ${msg.sender === 'driver' ? 'text-gray-400' : 'text-emerald-100'}`}>
+                            <span className="text-[9px] font-medium">
+                              {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                            {msg.sender !== 'driver' && (
+                              <div className="flex">
+                                <CheckCircle size={10} className={msg.status === 'read' ? 'text-blue-300' : ''} />
+                              </div>
+                            )}
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
                   {leadMessages.length === 0 && (
                     <div className="flex-1 flex flex-col items-center justify-center text-center p-10">
                       <div className="w-16 h-16 rounded-full bg-gray-50 flex items-center justify-center mb-4">
@@ -570,30 +670,35 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                   ) : (
                     <div className="space-y-3">
                       {selectedMedia && (
-                        <div className="flex items-center justify-between p-2 bg-blue-50 rounded-xl border border-blue-100">
+                        <div className="flex items-center justify-between p-2 bg-blue-50 rounded-xl border border-blue-100 animate-in slide-in-from-bottom-2">
                           <div className="flex items-center gap-2">
                             {selectedMedia.type === 'image' ? (
-                              <img src={selectedMedia.preview} className="w-8 h-8 rounded object-cover" alt="Preview" />
+                              <img src={selectedMedia.preview} className="w-10 h-10 rounded-lg object-cover border border-blue-200" alt="Preview" />
                             ) : (
-                              <div className="w-8 h-8 bg-blue-100 rounded flex items-center justify-center text-blue-600">
-                                <Paperclip size={14} />
+                              <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center text-blue-600 border border-blue-200">
+                                {selectedMedia.type === 'video' ? <Video size={18} /> : 
+                                 selectedMedia.type === 'audio' ? <Mic size={18} /> : 
+                                 <FileText size={18} />}
                               </div>
                             )}
-                            <span className="text-[10px] font-bold text-blue-700 truncate max-w-[150px]">{selectedMedia.file.name}</span>
+                            <div className="flex flex-col">
+                              <span className="text-[10px] font-bold text-blue-700 truncate max-w-[150px]">{selectedMedia.file.name}</span>
+                              <span className="text-[8px] text-blue-500 uppercase font-bold tracking-wider">{selectedMedia.type}</span>
+                            </div>
                           </div>
-                          <button onClick={() => setSelectedMedia(null)} className="text-blue-500 hover:text-blue-700">
-                            <X size={14} />
+                          <button onClick={() => setSelectedMedia(null)} className="p-1.5 text-blue-400 hover:text-blue-600 hover:bg-blue-100 rounded-full transition-all">
+                            <X size={16} />
                           </button>
                         </div>
                       )}
-                      <div className="flex items-center gap-2">
-                        <label className="w-10 h-10 flex items-center justify-center bg-gray-100 text-gray-500 rounded-2xl cursor-pointer hover:bg-gray-200 transition-colors">
-                          <Paperclip size={18} />
-                          <input type="file" className="hidden" onChange={handleFileSelect} />
+                      <div className="flex items-center gap-2 bg-gray-100 p-1 rounded-3xl">
+                        <label className="w-10 h-10 flex items-center justify-center text-gray-500 hover:text-blue-600 hover:bg-white rounded-full cursor-pointer transition-all">
+                          <Paperclip size={20} />
+                          <input type="file" className="hidden" onChange={handleFileSelect} accept="image/*,video/*,audio/*,application/pdf,.doc,.docx,.xls,.xlsx" />
                         </label>
                         <textarea 
                           placeholder="Type a message..."
-                          className="flex-1 bg-gray-50 border-none rounded-2xl text-xs p-3 focus:ring-2 focus:ring-black resize-none h-10"
+                          className="flex-1 bg-transparent border-none rounded-2xl text-sm p-2.5 focus:ring-0 resize-none h-10 max-h-32 custom-scrollbar"
                           value={replyText}
                           onChange={e => setReplyText(e.target.value)}
                           onKeyDown={e => {
@@ -606,9 +711,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                         <button 
                           onClick={handleSendReply}
                           disabled={isSending || (!replyText.trim() && !selectedMedia)}
-                          className="w-10 h-10 bg-black text-white rounded-2xl flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all"
+                          className="w-10 h-10 bg-emerald-500 text-white rounded-full flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-emerald-200"
                         >
-                          {isSending ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />}
+                          {isSending ? <Loader2 className="animate-spin" size={20} /> : <Send size={20} />}
                         </button>
                       </div>
                     </div>
