@@ -8,6 +8,8 @@ interface StaffMember {
   email: string;
   name: string;
   role: 'admin' | 'staff';
+  is_active_for_auto_dist: boolean;
+  last_assigned_at: string | null;
   created_at: string;
 }
 
@@ -18,10 +20,21 @@ export const StaffManagement: React.FC = () => {
   const [isAdding, setIsAdding] = useState(false);
   const [newStaff, setNewStaff] = useState({ email: '', name: '', role: 'staff' as 'admin' | 'staff' });
   const [searchQuery, setSearchQuery] = useState('');
+  const [autoDistSettings, setAutoDistSettings] = useState({ auto_enabled: false });
 
   useEffect(() => {
     fetchStaff();
+    fetchSettings();
   }, []);
+
+  const fetchSettings = async () => {
+    try {
+      const settings = await liveApiService.getLeadDistributionSettings();
+      setAutoDistSettings(settings);
+    } catch (err) {
+      console.error("Failed to fetch settings", err);
+    }
+  };
 
   const fetchStaff = async () => {
     try {
@@ -33,6 +46,25 @@ export const StaffManagement: React.FC = () => {
       setError(err.message || 'Failed to fetch staff');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const toggleGlobalAutoDist = async () => {
+    const newVal = !autoDistSettings.auto_enabled;
+    try {
+      await liveApiService.updateLeadDistributionSettings({ auto_enabled: newVal });
+      setAutoDistSettings({ auto_enabled: newVal });
+    } catch (err) {
+      alert("Failed to update global setting");
+    }
+  };
+
+  const toggleStaffAutoDist = async (id: string, current: boolean) => {
+    try {
+      await liveApiService.updateStaffAutoDist(id, !current);
+      setStaff(prev => prev.map(s => s.id === id ? { ...s, is_active_for_auto_dist: !current } : s));
+    } catch (err) {
+      alert("Failed to update staff setting");
     }
   };
 
@@ -85,6 +117,38 @@ export const StaffManagement: React.FC = () => {
         >
           {isAdding ? 'Cancel' : <><UserPlus size={18} /> Add New Staff</>}
         </button>
+      </div>
+
+      {/* Auto Distribution Global Toggle */}
+      <div className="mb-8 bg-gradient-to-r from-blue-600 to-indigo-700 p-6 rounded-2xl shadow-lg text-white">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center backdrop-blur-md">
+              <Users size={24} />
+            </div>
+            <div>
+              <h2 className="text-xl font-bold">Auto Lead Distribution (Round-Robin)</h2>
+              <p className="text-blue-100 text-sm">Automatically assign incoming leads to selected staff members.</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-4 bg-white/10 p-2 rounded-xl backdrop-blur-md">
+            <span className="text-sm font-bold uppercase tracking-wider ml-2">
+              Status: {autoDistSettings.auto_enabled ? 'Active' : 'Disabled'}
+            </span>
+            <button
+              onClick={toggleGlobalAutoDist}
+              className={`relative inline-flex h-8 w-14 items-center rounded-full transition-colors focus:outline-none ${
+                autoDistSettings.auto_enabled ? 'bg-green-400' : 'bg-gray-400'
+              }`}
+            >
+              <span
+                className={`inline-block h-6 w-6 transform rounded-full bg-white transition-transform ${
+                  autoDistSettings.auto_enabled ? 'translate-x-7' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
+        </div>
       </div>
 
       {error && (
@@ -162,21 +226,22 @@ export const StaffManagement: React.FC = () => {
               <tr className="bg-gray-50/50">
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Staff Member</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Role</th>
-                <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Joined</th>
+                <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider text-center">Auto-Dist</th>
+                <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Last Assigned</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading && staff.length === 0 ? (
                 <tr>
-                  <td colSpan={4} className="px-6 py-12 text-center">
+                  <td colSpan={5} className="px-6 py-12 text-center">
                     <Loader2 size={32} className="animate-spin text-blue-600 mx-auto mb-2" />
                     <p className="text-sm text-gray-500">Loading staff list...</p>
                   </td>
                 </tr>
               ) : filteredStaff.length === 0 ? (
                 <tr>
-                  <td colSpan={4} className="px-6 py-12 text-center">
+                  <td colSpan={5} className="px-6 py-12 text-center">
                     <div className="bg-gray-100 w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-3">
                       <Users size={24} className="text-gray-400" />
                     </div>
@@ -207,8 +272,29 @@ export const StaffManagement: React.FC = () => {
                         {s.role}
                       </span>
                     </td>
+                    <td className="px-6 py-4 text-center">
+                      <button
+                        onClick={() => toggleStaffAutoDist(s.id, s.is_active_for_auto_dist)}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
+                          s.is_active_for_auto_dist ? 'bg-blue-600' : 'bg-gray-200'
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            s.is_active_for_auto_dist ? 'translate-x-6' : 'translate-x-1'
+                          }`}
+                        />
+                      </button>
+                    </td>
                     <td className="px-6 py-4 text-sm text-gray-500">
-                      {new Date(s.created_at).toLocaleDateString()}
+                      {s.last_assigned_at ? (
+                        <span className="flex flex-col">
+                          <span>{new Date(s.last_assigned_at).toLocaleDateString()}</span>
+                          <span className="text-[10px] opacity-70">{new Date(s.last_assigned_at).toLocaleTimeString()}</span>
+                        </span>
+                      ) : (
+                        <span className="text-gray-300 italic">Never</span>
+                      )}
                     </td>
                     <td className="px-6 py-4 text-right">
                       {s.email !== 'ajithsabzz@gmail.com' && (

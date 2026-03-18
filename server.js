@@ -2623,7 +2623,19 @@ const initDatabase = async (client) => {
     await client.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";');
 
     await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB);`);
-    await client.query(`CREATE TABLE IF NOT EXISTS staff_members (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email VARCHAR(255) UNIQUE NOT NULL, name VARCHAR(255), role VARCHAR(50) DEFAULT 'staff', created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS staff_members (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        email VARCHAR(255) UNIQUE NOT NULL, 
+        name VARCHAR(255), 
+        role VARCHAR(50) DEFAULT 'staff', 
+        is_active_for_auto_dist BOOLEAN DEFAULT FALSE,
+        last_assigned_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+    );`);
+    
+    // Migration for existing table
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS is_active_for_auto_dist BOOLEAN DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_assigned_at TIMESTAMP;`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, lead_status VARCHAR(50) DEFAULT 'new', last_action_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
@@ -2632,6 +2644,7 @@ const initDatabase = async (client) => {
     await client.query(`CREATE TABLE IF NOT EXISTS lead_activity_log (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL, action VARCHAR(100) NOT NULL, notes TEXT, created_at TIMESTAMP DEFAULT NOW());`);
     
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
+    await client.query("INSERT INTO system_settings (key, value) VALUES ('lead_distribution', '{\"auto_enabled\": false}') ON CONFLICT DO NOTHING");
 
     const botCheck = await client.query("SELECT id FROM bot_versions WHERE status = 'published' LIMIT 1");
     if (botCheck.rows.length === 0) {
@@ -3727,6 +3740,38 @@ apiRouter.delete('/staff/:id', authMiddleware, async (req, res) => {
     try {
         await withDb(async (client) => {
             await client.query('DELETE FROM staff_members WHERE id = $1', [req.params.id]);
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.patch('/staff/:id/auto-dist', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    const { enabled } = req.body;
+    try {
+        await withDb(async (client) => {
+            await client.query('UPDATE staff_members SET is_active_for_auto_dist = $1 WHERE id = $2', [enabled, req.params.id]);
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/system/lead-distribution', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    try {
+        await withDb(async (client) => {
+            const r = await client.query("SELECT value FROM system_settings WHERE key = 'lead_distribution'");
+            res.json(r.rows[0]?.value || { auto_enabled: false });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/system/lead-distribution', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    const { auto_enabled } = req.body;
+    try {
+        await withDb(async (client) => {
+            await client.query("INSERT INTO system_settings (key, value) VALUES ('lead_distribution', $1) ON CONFLICT (key) DO UPDATE SET value = $1", [JSON.stringify({ auto_enabled })]);
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }

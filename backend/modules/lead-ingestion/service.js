@@ -254,6 +254,10 @@ class LeadIngestionService {
       }
 
       const candidate = state.candidate;
+
+      // --- AUTO DISTRIBUTION LOGIC ---
+      await this.distributeLeadAutomatically({ client, candidate, requestId, tenantId });
+
       if (!candidate.is_human_mode) {
         const elapsed = Date.now() - webhookStartedMs;
         const shouldDeferForBudget = WEBHOOK_ADAPTIVE_BOT_DEFER && elapsed >= WEBHOOK_SYNC_BUDGET_MS;
@@ -409,6 +413,75 @@ class LeadIngestionService {
     }
 
     botStage.end({ timedOut: Boolean(botResult && botResult.timedOut) });
+  }
+
+  async distributeLeadAutomatically({ client, candidate, requestId, tenantId }) {
+    try {
+      // 1. Check if auto-distribution is enabled globally
+      const settingsRes = await client.query("SELECT value FROM system_settings WHERE key = 'lead_distribution'");
+      const settings = settingsRes.rows[0]?.value || { auto_enabled: false };
+      
+      if (!settings.auto_enabled) return;
+
+      // 2. Check if candidate is already assigned
+      if (candidate.assigned_to) return;
+
+      // 3. Find the next staff member (Round Robin)
+      // We pick the staff member who is active for auto-dist and has the oldest last_assigned_at
+      const staffRes = await client.query(`
+        SELECT id, name, email 
+        FROM staff_members 
+        WHERE is_active_for_auto_dist = TRUE 
+        ORDER BY last_assigned_at ASC NULLS FIRST 
+        LIMIT 1
+      `);
+
+      if (staffRes.rows.length === 0) {
+        log({ 
+          module: 'lead-ingestion', 
+          message: 'auto_dist.no_active_staff', 
+          requestId, 
+          meta: { candidateId: candidate.id } 
+        });
+        return;
+      }
+
+      const staff = staffRes.rows[0];
+
+      // 4. Assign the lead
+      await client.query(
+        "UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2",
+        [staff.id, candidate.id]
+      );
+
+      // 5. Update staff's last_assigned_at
+      await client.query(
+        "UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1",
+        [staff.id]
+      );
+
+      // 6. Log activity
+      await client.query(
+        "INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)",
+        [candidate.id, staff.id, 'auto_assigned', `Automatically assigned to ${staff.name} via Round-Robin`]
+      );
+
+      log({ 
+        module: 'lead-ingestion', 
+        message: 'auto_dist.success', 
+        requestId, 
+        meta: { candidateId: candidate.id, staffId: staff.id, staffName: staff.name } 
+      });
+
+    } catch (error) {
+      log({ 
+        level: 'error', 
+        module: 'lead-ingestion', 
+        message: 'auto_dist.failed', 
+        requestId, 
+        meta: { error: error.message, candidateId: candidate.id } 
+      });
+    }
   }
 
   parseInboundMessage({ body, msg }) {

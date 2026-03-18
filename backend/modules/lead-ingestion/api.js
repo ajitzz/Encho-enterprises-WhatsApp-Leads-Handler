@@ -1,4 +1,5 @@
 const { LeadIngestionService } = require('./service');
+const { LeadAssignmentService } = require('./assignment');
 
 const buildLeadIngestionFacade = ({
   legacyProcessor,
@@ -7,12 +8,18 @@ const buildLeadIngestionFacade = ({
   runBotEngine,
   triggerReportingSyncDeferred,
 }) => {
+  const assignmentService = new LeadAssignmentService({
+    withDb,
+    executeWithRetry,
+  });
+
   const service = new LeadIngestionService({
     legacyProcessor,
     withDb,
     executeWithRetry,
     runBotEngine,
     triggerReportingSyncDeferred,
+    assignmentService,
   });
 
   return async ({ body, req, res, context }) => {

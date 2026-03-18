@@ -515,6 +515,24 @@ export const liveApiService = {
     return apiRequest(`/api/staff/${id}`, { method: 'DELETE' });
   },
 
+  updateStaffAutoDist: async (id: string, enabled: boolean) => {
+    return apiRequest(`/api/staff/${id}/auto-dist`, {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled })
+    });
+  },
+
+  getLeadDistributionSettings: async () => {
+    return apiRequest<any>('/api/system/lead-distribution');
+  },
+
+  updateLeadDistributionSettings: async (settings: { auto_enabled: boolean }) => {
+    return apiRequest('/api/system/lead-distribution', {
+      method: 'POST',
+      body: JSON.stringify(settings)
+    });
+  },
+
   // Lead Management (Staff Portal)
   getLeadPool: async (): Promise<Driver[]> => {
     return apiRequest<Driver[]>('/api/leads/pool');
