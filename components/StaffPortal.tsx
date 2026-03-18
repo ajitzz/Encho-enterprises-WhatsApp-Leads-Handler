@@ -37,7 +37,7 @@ interface LeadActivity {
 
 export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ user, onLogout }) => {
   const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail'>('dashboard');
-  const [leads, setLeads] = useState<Driver[]>([]);
+  const [allLeads, setAllLeads] = useState<Driver[]>([]);
   const [selectedLead, setSelectedLead] = useState<Driver | null>(null);
   const [activities, setActivities] = useState<LeadActivity[]>([]);
   const [loading, setLoading] = useState(true);
@@ -45,44 +45,40 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [searchQuery, setSearchQuery] = useState('');
   const [actionNote, setActionNote] = useState('');
   const [actionStatus, setActionStatus] = useState('');
+  const [connectionState, setConnectionState] = useState<string>('connecting');
+
+  const myLeads = React.useMemo(() => 
+    allLeads.filter(l => (l as any).assigned_to === user.staffId),
+    [allLeads, user.staffId]
+  );
+
+  const poolLeads = React.useMemo(() => 
+    allLeads.filter(l => !(l as any).assigned_to),
+    [allLeads]
+  );
 
   const filteredLeads = React.useMemo(() => {
-    if (!searchQuery) return leads;
+    const activeLeads = view === 'pool' ? poolLeads : (view === 'my-leads' || view === 'dashboard' ? myLeads : []);
+    if (!searchQuery) return activeLeads;
     const query = searchQuery.toLowerCase();
-    return leads.filter(l => 
-      l.name.toLowerCase().includes(query) || 
-      l.phoneNumber.includes(query)
+    return activeLeads.filter(l => 
+      (l.name || '').toLowerCase().includes(query) || 
+      ((l as any).phone_number || '').includes(query)
     );
-  }, [leads, searchQuery]);
+  }, [view, poolLeads, myLeads, searchQuery]);
 
   useEffect(() => {
-    if (view === 'pool') fetchPool();
-    if (view === 'my-leads' || view === 'dashboard') fetchMyLeads();
-  }, [view]);
-
-  const fetchPool = async () => {
-    try {
-      setLoading(true);
-      const data = await liveApiService.getLeadPool();
-      setLeads(data);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchMyLeads = async () => {
-    try {
-      setLoading(true);
-      const data = await liveApiService.getMyLeads();
-      setLeads(data);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+    const unsubscribe = liveApiService.subscribeToUpdates(
+      (drivers) => {
+        setAllLeads(drivers);
+        setLoading(false);
+      },
+      {
+        onConnectionStateChange: (state) => setConnectionState(state)
+      }
+    );
+    return () => unsubscribe();
+  }, []);
 
   const handleClaim = async (id: string) => {
     try {
@@ -121,10 +117,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       // Refresh activity
       const history = await liveApiService.getLeadActivity(selectedLead.id);
       setActivities(history);
-      // Refresh lead data
-      const updatedLeads = await liveApiService.getMyLeads();
-      setLeads(updatedLeads);
-      const updated = updatedLeads.find(l => l.id === selectedLead.id);
+      // Lead data will be updated via the stream
+      const updated = allLeads.find(l => l.id === selectedLead.id);
       if (updated) setSelectedLead(updated);
     } catch (err: any) {
       setError(err.message);
@@ -136,17 +130,26 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const renderDashboard = () => (
     <div className="p-4 space-y-6 animate-in fade-in duration-300">
       <div className="bg-black text-white p-6 rounded-3xl shadow-xl relative overflow-hidden">
+        <div className="absolute top-4 right-4 flex items-center gap-2">
+          <div className={`w-2 h-2 rounded-full ${
+            connectionState === 'connected' ? 'bg-green-500 animate-pulse' : 
+            connectionState === 'connecting' || connectionState === 'reconnecting' ? 'bg-yellow-500' : 'bg-red-500'
+          }`} />
+          <span className="text-[10px] font-bold uppercase tracking-widest opacity-50">
+            {connectionState === 'connected' ? 'Live' : connectionState}
+          </span>
+        </div>
         <div className="relative z-10">
           <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-1">Welcome back,</p>
           <h2 className="text-2xl font-bold">{user.name.split(' ')[0]}</h2>
           <div className="mt-6 grid grid-cols-2 gap-4">
             <div className="bg-white/10 backdrop-blur-md p-4 rounded-2xl border border-white/10">
               <p className="text-[10px] font-bold text-gray-400 uppercase">My Leads</p>
-              <p className="text-2xl font-bold mt-1">{leads.length}</p>
+              <p className="text-2xl font-bold mt-1">{myLeads.length}</p>
             </div>
             <div className="bg-white/10 backdrop-blur-md p-4 rounded-2xl border border-white/10">
               <p className="text-[10px] font-bold text-gray-400 uppercase">Follow-ups</p>
-              <p className="text-2xl font-bold mt-1">{leads.filter(l => (l as any).lead_status === 'followed_up').length}</p>
+              <p className="text-2xl font-bold mt-1">{myLeads.filter(l => (l as any).lead_status === 'followed_up').length}</p>
             </div>
           </div>
         </div>
@@ -188,11 +191,11 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       </div>
 
       <div className="pt-4">
-        <h3 className="text-sm font-bold text-gray-900 mb-4 px-1">Recent Activity</h3>
+        <h3 className="text-sm font-bold text-gray-900 mb-4 px-1">Recent Leads</h3>
         <div className="space-y-3">
-          {leads.slice(0, 3).map(lead => (
-            <div key={lead.id} onClick={() => handleOpenDetail(lead)} className="bg-white p-4 rounded-2xl border border-gray-100 flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center font-bold text-gray-600">
+          {myLeads.slice(0, 3).map(lead => (
+            <div key={lead.id} onClick={() => handleOpenDetail(lead)} className="bg-white p-4 rounded-2xl border border-gray-100 flex items-center gap-3 cursor-pointer hover:bg-gray-50 transition-colors">
+              <div className="w-10 h-10 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center font-bold">
                 {lead.name.charAt(0)}
               </div>
               <div className="flex-1">
@@ -204,9 +207,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
               </div>
             </div>
           ))}
-          {leads.length === 0 && (
+          {myLeads.length === 0 && (
             <div className="text-center py-8 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
-              <p className="text-xs text-gray-400">No active leads yet. Claim some from the pool!</p>
+              <p className="text-xs text-gray-400">You have no assigned leads yet. Claim some from the pool!</p>
             </div>
           )}
         </div>

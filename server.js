@@ -2687,6 +2687,30 @@ const ensurePerformanceIndexes = async (client) => {
         ON scheduled_messages(candidate_id, scheduled_time ASC)
         WHERE status = 'pending'
     `);
+
+    // Staff Portal: My Leads and Pool queries.
+    await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_candidates_assigned_to
+        ON candidates(assigned_to)
+    `);
+
+    await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_candidates_unassigned_pool
+        ON candidates(created_at DESC)
+        WHERE assigned_to IS NULL
+    `);
+
+    // Real-time updates: fetch by last message activity.
+    await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_candidates_last_message_at
+        ON candidates(last_message_at DESC NULLS LAST)
+    `);
+
+    // Lead status filtering.
+    await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_candidates_lead_status
+        ON candidates(lead_status)
+    `);
 };
 
 const executeWithRetry = async (client, operation) => {
@@ -4636,12 +4660,16 @@ apiRouter.get('/updates/stream', async (req, res) => {
             const drivers = driverRows.rows.map((row) => ({
                 id: row.id,
                 phoneNumber: row.phone_number,
+                phone_number: row.phone_number, // Include both for compatibility
                 name: row.name,
                 status: row.stage,
+                lead_status: row.lead_status,
+                assigned_to: row.assigned_to,
                 lastMessage: row.last_message,
                 lastMessageTime: parseInt(row.last_message_at || '0'),
                 source: row.source,
                 isHumanMode: row.is_human_mode,
+                created_at: row.created_at
             }));
 
             const payload = { drivers };
@@ -5490,14 +5518,15 @@ const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
                     const client = await pgPool.connect();
                     try {
                         const res = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'candidates'`);
-                        if (res.rows.length === 0) {
-                            console.log("[Auto-Init] Database schema missing. Initializing...");
-                            await initDatabase(client);
-                            console.log("[Auto-Init] Database ready.");
-                        } else {
-                            await ensurePerformanceIndexes(client);
-                            console.log("[Auto-Init] Performance indexes verified.");
-                        }
+                        
+                        // Always run initDatabase to ensure columns and extensions exist (safe due to IF NOT EXISTS)
+                        console.log("[Auto-Init] Verifying database schema...");
+                        await initDatabase(client);
+                        console.log("[Auto-Init] Database schema verified.");
+
+                        await ensurePerformanceIndexes(client);
+                        console.log("[Auto-Init] Performance indexes verified.");
+                        
                         await prewarmHotPathCaches(client);
                         console.log("[Auto-Init] Hot-path caches prewarmed.");
                     } finally {
