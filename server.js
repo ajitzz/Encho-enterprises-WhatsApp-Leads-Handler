@@ -4411,11 +4411,12 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                 perf.markEnd('lead_upsert', { candidateId: candidate.id, isNew: c.rows.length === 0 });
 
                 if (msg.type === 'image' || msg.type === 'document' || msg.type === 'video' || msg.type === 'audio') {
-                    text = `[${msg.type.toUpperCase()}]`;
+                    const caption = msg[msg.type]?.caption || '';
+                    text = `[${msg.type.toUpperCase()}]${caption ? ': ' + caption : ''}`;
                     try {
                         const mediaRes = await fetchAndStoreIncomingMedia({ msg, phoneNumber: from, candidateId: candidate.id, client });
                         if (mediaRes?.key) {
-                            text = JSON.stringify({ url: getPublicS3Url(mediaRes.key), caption: '' });
+                            text = JSON.stringify({ url: getPublicS3Url(mediaRes.key), caption: caption });
                             // Update candidate last_message with the JSON string
                             await client.query('UPDATE candidates SET last_message = $1 WHERE id = $2', [text, candidate.id]);
                         }

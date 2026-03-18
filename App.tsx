@@ -332,15 +332,37 @@ export default function App() {
       addNotification({ type: 'success', title: 'Bulk Update Complete', message: `Moved ${ids.length} leads to ${status}` });
   };
 
-  const handleSendMessage = async (text: string) => {
+  const handleSendMessage = async (text: string, options?: { mediaUrl?: string, mediaType?: string }) => {
     if (!selectedDriver) return;
     if (dataSource === 'mock') {
-        mockBackend.addMessage(selectedDriver.id, { id: Date.now().toString(), sender: 'agent', text: text, timestamp: Date.now(), type: 'text' });
+        const msg: Message = { 
+            id: Date.now().toString(), 
+            sender: 'agent', 
+            text: text, 
+            timestamp: Date.now(), 
+            type: options?.mediaType as any || 'text',
+            imageUrl: options?.mediaType === 'image' ? options.mediaUrl : undefined,
+            videoUrl: options?.mediaType === 'video' ? options.mediaUrl : undefined,
+            audioUrl: options?.mediaType === 'audio' ? options.mediaUrl : undefined,
+            documentUrl: options?.mediaType === 'document' ? options.mediaUrl : undefined
+        };
+        mockBackend.addMessage(selectedDriver.id, msg);
     } else {
         try {
-            await liveApiService.sendMessage(selectedDriver.id, text);
-            const msg: Message = { id: Date.now().toString(), sender: 'agent', text: text, timestamp: Date.now(), type: 'text', status: 'sent' };
-            const updatedDriver = { ...selectedDriver, lastMessage: text, lastMessageTime: Date.now(), messages: [...(selectedDriver.messages || []), msg] };
+            await liveApiService.sendMessage(selectedDriver.id, text, options);
+            const msg: Message = { 
+                id: Date.now().toString(), 
+                sender: 'agent', 
+                text: text, 
+                timestamp: Date.now(), 
+                type: options?.mediaType as any || 'text', 
+                status: 'sent',
+                imageUrl: options?.mediaType === 'image' ? options.mediaUrl : undefined,
+                videoUrl: options?.mediaType === 'video' ? options.mediaUrl : undefined,
+                audioUrl: options?.mediaType === 'audio' ? options.mediaUrl : undefined,
+                documentUrl: options?.mediaType === 'document' ? options.mediaUrl : undefined
+            };
+            const updatedDriver = { ...selectedDriver, lastMessage: text || `[${options?.mediaType?.toUpperCase()}]`, lastMessageTime: Date.now(), messages: [...(selectedDriver.messages || []), msg] };
             setSelectedDriver(updatedDriver);
             setDrivers(prev => prev.map(d => d.id === selectedDriver.id ? updatedDriver : d));
         } catch (e) { alert("Failed to send message via WhatsApp API"); }

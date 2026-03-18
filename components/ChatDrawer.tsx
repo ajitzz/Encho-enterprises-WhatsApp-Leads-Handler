@@ -2,20 +2,31 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Driver, Message, ScheduledMessage, DriverDocument } from '../types';
 import { 
-  X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save, AlertTriangle, History, MessageCircle, ShieldAlert, User, Bot, Mic, Video, CheckCircle
+  X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save, AlertTriangle, History, MessageCircle, ShieldAlert, User, Bot, Mic, Video, CheckCircle, Search, Activity, ChevronDown, Check, Copy, Reply, Forward, Maximize2, MoreVertical, Info
 } from 'lucide-react';
 import { liveApiService, UpdateConnectionState } from '../services/liveApiService';
 import { reportUiFailure, reportUiRecovery } from '../services/uiFailureMonitor';
 import { MediaSelectorModal } from './MediaSelectorModal.tsx';
 import { VoiceRecorder } from './VoiceRecorder.tsx';
+import { QuickReply } from '../types';
 
 interface ChatDrawerProps {
   driver: Driver | null;
   onClose: () => void;
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string, options?: { mediaUrl?: string, mediaType?: string }) => void;
   onUpdateDriver: (id: string, updates: Partial<Driver>) => void;
   updateConnectionState?: UpdateConnectionState;
+  userName?: string;
+  botSettings?: any;
 }
+
+const QUICK_REPLIES: QuickReply[] = [
+  { id: '1', title: 'Welcome', text: 'Hi, welcome to our platform! How can I help you today?', category: 'Greeting' },
+  { id: '2', title: 'Human Mode', text: 'I am taking over this chat to assist you personally.', category: 'Agent' },
+  { id: '3', title: 'Doc Request', text: 'Could you please upload a clear photo of your driving license?', category: 'Onboarding' },
+  { id: '4', title: 'Approved', text: 'Great news! Your documents have been approved. You are ready to start.', category: 'Status' },
+  { id: '5', title: 'Rejected', text: 'Unfortunately, your document was rejected. Please re-upload a clearer version.', category: 'Status' },
+];
 
 const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTime }) => {
   const [timeLeft, setTimeLeft] = useState<number>(0);
@@ -54,7 +65,7 @@ const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTim
   );
 };
 
-export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver, updateConnectionState = 'disconnected' }) => {
+export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendMessage, onUpdateDriver, updateConnectionState = 'disconnected', userName, botSettings }) => {
   const [replyText, setReplyText] = useState('');
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleTime, setScheduleTime] = useState('');
@@ -69,6 +80,11 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [scheduledMessages, setScheduledMessages] = useState<ScheduledMessage[]>([]);
   const [localMessages, setLocalMessages] = useState<Message[]>([]);
   
+  const [activeTab, setActiveTab] = useState<'chat' | 'docs' | 'logs'>('chat');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showQuickReplies, setShowQuickReplies] = useState(false);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+
   // EDIT STATE
   const [editingMessage, setEditingMessage] = useState<ScheduledMessage | null>(null);
   const [editTime, setEditTime] = useState('');
@@ -227,6 +243,26 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     }
   };
 
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    setIsAtBottom(scrollHeight - scrollTop - clientHeight < 50);
+  };
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const filteredMessages = localMessages.filter(msg => 
+    !searchQuery || msg.text?.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  const groupedMessages = filteredMessages.reduce((groups: { [key: string]: Message[] }, message) => {
+    const date = new Date(message.timestamp).toLocaleDateString();
+    if (!groups[date]) groups[date] = [];
+    groups[date].push(message);
+    return groups;
+  }, {});
+
   if (!driver) return null;
 
   const handleSend = async (e?: React.MouseEvent | React.FormEvent) => {
@@ -253,13 +289,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             ); 
             setShowSchedule(false); setScheduleTime('');
             await loadScheduledMessages(driver.id); 
-        } else if (selectedMedia) {
-            await liveApiService.sendMessage(driver.id, replyText, { mediaUrl: selectedMedia.url, mediaType: selectedMedia.type }); 
         } else {
-            await onSendMessage(replyText);
+            await onSendMessage(replyText, selectedMedia ? { mediaUrl: selectedMedia.url, mediaType: selectedMedia.type } : undefined);
         }
         setReplyText('');
         setSelectedMedia(null);
+        setShowQuickReplies(false);
     } catch(e: any) {
         alert(`Failed: ${e.message}`);
     } finally {
@@ -323,90 +358,143 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   };
 
   return (
-    <div className="fixed inset-0 z-50 overflow-hidden">
-      <div className="absolute inset-0 bg-black/30 backdrop-blur-sm transition-opacity" onClick={onClose} />
-      <div className="absolute inset-y-0 right-0 flex max-w-full pl-10 pointer-events-none">
-        <div className="pointer-events-auto w-screen max-w-5xl bg-white shadow-2xl flex flex-col h-full">
-          
-          <div className="bg-black text-white px-6 py-4 flex items-center justify-between shadow-md z-10">
-            <div className="flex items-center gap-4">
-               <div className="h-10 w-10 bg-gray-800 rounded-full flex items-center justify-center text-lg font-bold">{driver.name.charAt(0)}</div>
-               <div>
-                 <div className="flex items-center gap-2">
-                    <h2 className="text-xl font-semibold">{driver.name}</h2>
-                    <MetaWindowTimer lastMessageTime={driver.lastMessageTime} />
-                 </div>
-                 <div className="flex items-center gap-2">
-                   <p className="text-gray-400 text-sm font-mono">{driver.phoneNumber}</p>
-                   <span className={`text-[10px] uppercase tracking-wide px-2 py-0.5 rounded-full ${updateConnectionState === 'connected' ? 'bg-green-600/30 text-green-200' : 'bg-amber-500/30 text-amber-100'}`}>
-                     {updateConnectionState === 'connected' ? 'Push Live' : updateConnectionState}
-                   </span>
-                 </div>
-               </div>
+    <div className="fixed inset-0 z-50 overflow-hidden flex items-center justify-center p-4 sm:p-6">
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-md transition-opacity" onClick={onClose} />
+      
+      <div className="relative w-full max-w-6xl h-full bg-white shadow-2xl rounded-3xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-300">
+        {/* Header */}
+        <div className="bg-white border-b border-gray-100 px-6 py-4 flex items-center justify-between z-20">
+          <div className="flex items-center gap-4">
+            <div className="relative">
+              <div className="h-12 w-12 bg-gradient-to-br from-emerald-400 to-emerald-600 rounded-2xl flex items-center justify-center text-white text-xl font-bold shadow-lg shadow-emerald-100">
+                {driver.name.charAt(0)}
+              </div>
+              <div className={`absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2 border-white ${updateConnectionState === 'connected' ? 'bg-green-500' : 'bg-amber-500'}`} />
             </div>
-            <div className="flex items-center gap-4">
-               <div className="flex items-center gap-2 bg-gray-900 rounded-lg p-1 border border-gray-800">
-                    <button 
-                      type="button" 
-                      onClick={handleToggleHumanMode} 
-                      disabled={isHumanModeLoading}
-                      className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${driver.isHumanMode ? 'bg-amber-500 text-black' : 'text-gray-400 hover:text-white'}`}
-                    >
-                        {isHumanModeLoading ? (
-                          <Loader2 size={14} className="animate-spin" />
-                        ) : driver.isHumanMode ? (
-                          <User size={14} />
-                        ) : (
-                          <Bot size={14} />
-                        )}
-                        {driver.isHumanMode ? 'Human Mode ON' : 'Bot Active'}
-                    </button>
-               </div>
-              <button type="button" onClick={onClose} className="p-2 hover:bg-gray-800 rounded-full transition-colors"><X size={20} /></button>
+            <div>
+              <div className="flex items-center gap-3">
+                <h2 className="text-lg font-bold text-gray-900">{driver.name}</h2>
+                <MetaWindowTimer lastMessageTime={driver.lastMessageTime} />
+              </div>
+              <div className="flex items-center gap-2 text-gray-500 text-xs">
+                <span className="font-mono">{driver.phoneNumber}</span>
+                <span className="w-1 h-1 bg-gray-300 rounded-full" />
+                <span className="capitalize">{driver.source} Lead</span>
+              </div>
             </div>
           </div>
 
-          <div className="flex-1 flex overflow-hidden">
-            <div className="flex-1 flex flex-col border-r border-gray-200 min-w-[400px] relative">
-              <div className="flex-1 overflow-y-auto p-4 bg-gray-50 space-y-4">
-                {localMessages.map((msg) => {
-                    const media = getMessageMedia(msg);
-                    return msg.type === 'system_error' ? (
-                        <div key={msg.id} className="flex justify-center my-4 animate-pulse">
-                            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center gap-2 text-sm max-w-[90%] shadow-sm">
-                                <AlertTriangle size={18} />
-                                <span className="font-bold">SYSTEM ERROR:</span>
-                                <span>{msg.text}</span>
-                            </div>
-                        </div>
-                    ) : (
-                        <div key={msg.id} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
-                            <div className={`max-w-[80%] rounded-2xl shadow-sm overflow-hidden ${
-                              msg.senderType === 'driver' 
-                                ? 'bg-white text-gray-900 rounded-tl-none border border-gray-200' 
-                                : msg.senderType === 'bot'
-                                ? 'bg-black text-white rounded-tr-none'
-                                : 'bg-emerald-500 text-white rounded-tr-none'
-                            }`}>
-                                {/* Media Rendering */}
+          <div className="flex items-center gap-3">
+            <div className="hidden md:flex items-center bg-gray-50 rounded-xl px-3 py-1.5 border border-gray-100">
+              <Search size={16} className="text-gray-400 mr-2" />
+              <input 
+                type="text" 
+                placeholder="Search messages..." 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="bg-transparent border-none text-sm focus:ring-0 w-40"
+              />
+            </div>
+
+            <div className="h-8 w-px bg-gray-100 mx-2" />
+
+            <button 
+              onClick={handleToggleHumanMode}
+              disabled={isHumanModeLoading}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+                driver.isHumanMode 
+                  ? 'bg-amber-100 text-amber-700 border border-amber-200 shadow-sm shadow-amber-100' 
+                  : 'bg-gray-100 text-gray-600 border border-gray-200 hover:bg-gray-200'
+              }`}
+            >
+              {isHumanModeLoading ? <Loader2 size={14} className="animate-spin" /> : driver.isHumanMode ? <User size={14} /> : <Bot size={14} />}
+              {driver.isHumanMode ? 'Human Mode' : 'Bot Active'}
+            </button>
+
+            <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-xl transition-colors text-gray-400">
+              <X size={20} />
+            </button>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex px-6 border-b border-gray-100 bg-white">
+          {[
+            { id: 'chat', label: 'Chat', icon: MessageCircle },
+            { id: 'docs', label: 'Documents', icon: FileText },
+            { id: 'logs', label: 'Activity Logs', icon: Activity },
+          ].map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id as any)}
+              className={`flex items-center gap-2 px-6 py-3 text-sm font-bold transition-all relative ${
+                activeTab === tab.id ? 'text-emerald-600' : 'text-gray-400 hover:text-gray-600'
+              }`}
+            >
+              <tab.icon size={16} />
+              {tab.label}
+              {activeTab === tab.id && (
+                <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-500 rounded-t-full" />
+              )}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex-1 flex overflow-hidden bg-gray-50/50">
+          {/* Main Content Area */}
+          <div className="flex-1 flex flex-col relative overflow-hidden">
+            {activeTab === 'chat' ? (
+              <>
+                <div 
+                  className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar"
+                  onScroll={handleScroll}
+                >
+                  {Object.entries(groupedMessages).map(([date, msgs]) => (
+                    <div key={date} className="space-y-6">
+                      <div className="flex justify-center">
+                        <span className="px-3 py-1 bg-white border border-gray-100 rounded-full text-[10px] font-bold text-gray-400 uppercase tracking-widest shadow-sm">
+                          {date === new Date().toLocaleDateString() ? 'Today' : date}
+                        </span>
+                      </div>
+                      
+                      {msgs.map((msg) => {
+                        const media = getMessageMedia(msg);
+                        const isOwn = msg.sender !== 'driver';
+                        
+                        return (
+                          <div key={msg.id} className={`flex ${isOwn ? 'justify-end' : 'justify-start'} group`}>
+                            <div className={`flex flex-col max-w-[75%] ${isOwn ? 'items-end' : 'items-start'}`}>
+                              <div className={`relative p-1 rounded-2xl shadow-sm transition-all hover:shadow-md ${
+                                isOwn 
+                                  ? 'bg-emerald-500 text-white rounded-tr-none' 
+                                  : 'bg-white text-gray-900 rounded-tl-none border border-gray-100'
+                              }`}>
+                                {/* Hover Actions */}
+                                <div className={`absolute top-0 ${isOwn ? '-left-12' : '-right-12'} opacity-0 group-hover:opacity-100 transition-opacity flex flex-col gap-1`}>
+                                  <button className="p-1.5 bg-white border border-gray-100 rounded-lg text-gray-400 hover:text-emerald-500 shadow-sm"><Reply size={14}/></button>
+                                  <button className="p-1.5 bg-white border border-gray-100 rounded-lg text-gray-400 hover:text-blue-500 shadow-sm"><Forward size={14}/></button>
+                                  <button className="p-1.5 bg-white border border-gray-100 rounded-lg text-gray-400 hover:text-red-500 shadow-sm"><Trash2 size={14}/></button>
+                                </div>
+
                                 {media.url && (
-                                  <div className="p-1">
+                                  <div className="mb-1 overflow-hidden rounded-xl">
                                     {media.type === 'video' ? (
-                                      <div className="rounded-xl overflow-hidden bg-black/10">
-                                        <video src={media.url} controls className="w-full h-auto block" />
+                                      <div className="relative group/media">
+                                        <video src={media.url} className="w-full max-h-64 object-cover" />
+                                        <div className="absolute inset-0 bg-black/20 flex items-center justify-center opacity-0 group-hover/media:opacity-100 transition-opacity">
+                                          <button className="p-3 bg-white/20 backdrop-blur-md rounded-full text-white"><Maximize2 size={24}/></button>
+                                        </div>
                                       </div>
                                     ) : media.type === 'audio' ? (
-                                      <div className={`flex items-center gap-3 p-3 rounded-xl ${msg.senderType === 'driver' ? 'bg-gray-100' : msg.senderType === 'bot' ? 'bg-gray-800' : 'bg-emerald-600'}`}>
-                                        <div className={`w-10 h-10 rounded-full flex items-center justify-center ${msg.senderType === 'driver' ? 'bg-gray-200 text-gray-500' : msg.senderType === 'bot' ? 'bg-gray-900 text-white' : 'bg-emerald-700 text-white'}`}>
+                                      <div className={`flex items-center gap-3 p-3 ${isOwn ? 'bg-emerald-600' : 'bg-gray-50'}`}>
+                                        <div className={`w-10 h-10 rounded-full flex items-center justify-center ${isOwn ? 'bg-emerald-700' : 'bg-gray-200 text-gray-500'}`}>
                                           <Mic size={18} />
                                         </div>
-                                        <audio src={media.url} controls className="h-8 w-48" />
+                                        <audio src={media.url} controls className="h-8 w-40" />
                                       </div>
                                     ) : media.type === 'document' ? (
-                                      <a href={media.url} target="_blank" rel="noopener noreferrer" className={`flex items-center gap-3 p-3 rounded-xl transition-colors ${
-                                        msg.senderType === 'driver' ? 'bg-gray-50 hover:bg-gray-100' : msg.senderType === 'bot' ? 'bg-gray-800 hover:bg-gray-900' : 'bg-emerald-600 hover:bg-emerald-700'
-                                      }`}>
-                                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${msg.senderType === 'driver' ? 'bg-gray-100 text-gray-500' : msg.senderType === 'bot' ? 'bg-gray-900 text-white' : 'bg-emerald-700 text-white'}`}>
+                                      <a href={media.url} target="_blank" rel="noopener noreferrer" className={`flex items-center gap-3 p-3 transition-colors ${isOwn ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-gray-50 hover:bg-gray-100'}`}>
+                                        <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${isOwn ? 'bg-emerald-700' : 'bg-gray-200 text-gray-500'}`}>
                                           <FileText size={20} />
                                         </div>
                                         <div className="flex-1 min-w-0">
@@ -415,185 +503,330 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                                         </div>
                                       </a>
                                     ) : (
-                                      <div className="rounded-xl overflow-hidden border border-black/5">
-                                        <img src={media.url} className="w-full h-auto block" alt="media" referrerPolicy="no-referrer" />
-                                      </div>
+                                      <img src={media.url} className="w-full max-h-80 object-cover cursor-pointer hover:scale-105 transition-transform" alt="media" referrerPolicy="no-referrer" />
                                     )}
                                   </div>
                                 )}
 
                                 <div className="px-4 py-2">
-                                    {renderMessageText(msg.text)}
-                                    <div className={`text-[10px] mt-1 text-right flex justify-end gap-1 items-center ${msg.senderType === 'driver' ? 'text-gray-400' : msg.senderType === 'bot' ? 'text-gray-400' : 'text-emerald-100'}`}>
-                                        {msg.status === 'sending' && <Clock size={10} className="animate-spin" />}
-                                        {new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                                        {msg.senderType !== 'driver' && (
-                                          <div className="flex">
-                                            <CheckCircle size={10} className={msg.status === 'read' ? (msg.senderType === 'bot' ? 'text-blue-400' : 'text-blue-200') : ''} />
-                                          </div>
-                                        )}
-                                    </div>
+                                  {renderMessageText(msg.text)}
+                                  <div className={`flex items-center justify-end gap-1.5 mt-1 text-[10px] ${isOwn ? 'text-emerald-100' : 'text-gray-400'}`}>
+                                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                    {isOwn && (
+                                      <div className="flex">
+                                        <CheckCircle size={10} className={msg.status === 'read' ? 'text-blue-300' : ''} />
+                                      </div>
+                                    )}
+                                  </div>
                                 </div>
+                              </div>
+                              <span className="text-[10px] text-gray-400 mt-1 px-1">
+                                {msg.senderType === 'bot' ? 'AI Assistant' : msg.senderType === 'staff' ? (userName || 'Staff') : ''}
+                              </span>
                             </div>
-                        </div>
-                    );
-                })}
-                
-                {scheduledMessages.length > 0 && (
-                    <div className="flex flex-col gap-4 mt-6">
-                        <div className="flex items-center gap-2 justify-center opacity-50">
-                            <div className="h-px bg-gray-300 w-12"></div>
-                            <span className="text-xs font-bold text-gray-500 uppercase tracking-wider flex items-center gap-1"><CalendarClock size={12}/> Scheduled Queue</span>
-                            <div className="h-px bg-gray-300 w-12"></div>
-                        </div>
-                        {scheduledMessages.map(msg => (
-                            <div key={msg.id} className="flex justify-end animate-in slide-in-from-bottom-2">
-                                <div className="max-w-[85%] bg-amber-50 border-2 border-dashed border-amber-300 rounded-2xl rounded-tr-none p-1 relative group transition-all hover:bg-amber-100/50">
-                                    <div className="flex items-center justify-between px-3 py-2 border-b border-amber-200/50 mb-2">
-                                        <div className="flex items-center gap-1.5 text-xs font-bold text-amber-700">
-                                            <Clock size={12} /> {new Date(msg.scheduledTime).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})}
-                                        </div>
-                                        <div className="flex items-center gap-1">
-                                            <button type="button" onClick={() => handleSendNowScheduled(msg.id)} className="p-1.5 bg-green-100 text-green-700 rounded hover:bg-green-200 transition-colors" title="Send Now"><Zap size={14}/></button>
-                                            <button type="button" onClick={() => openEditModal(msg)} className="p-1.5 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition-colors" title="Edit"><Edit2 size={14}/></button>
-                                            <button type="button" onClick={() => handleCancelScheduled(msg.id)} className="p-1.5 bg-red-100 text-red-700 rounded hover:bg-red-200 transition-colors" title="Delete"><Trash2 size={14}/></button>
-                                        </div>
-                                    </div>
-                                    <div className="px-3 pb-3">
-                                        {msg.payload?.mediaUrl && renderMediaPreview(msg.payload.mediaUrl, msg.payload.mediaType)}
-                                        <p className="text-sm text-gray-800 whitespace-pre-wrap">
-                                            {typeof msg.payload?.text === 'string' ? msg.payload.text : ''}
-                                        </p>
-                                    </div>
-                                </div>
-                            </div>
-                        ))}
+                          </div>
+                        );
+                      })}
                     </div>
-                )}
-                <div ref={messagesEndRef} />
-              </div>
+                  ))}
 
-              <div className="p-4 bg-white border-t border-gray-200 relative">
-                {!isWindowActive ? (
-                  <div className="flex flex-col items-center justify-center py-8 px-4 bg-gray-50 rounded-2xl border border-dashed border-gray-300 animate-in fade-in zoom-in duration-300">
-                    <div className="w-12 h-12 bg-gray-200 rounded-full flex items-center justify-center mb-3 text-gray-500">
-                      <History size={24} />
-                    </div>
-                    <h4 className="text-sm font-bold text-gray-900 mb-1">Chat History Mode</h4>
-                    <p className="text-xs text-gray-500 text-center max-w-xs leading-relaxed">
-                      The 24-hour Meta response window has expired. You can only view the history until the customer sends a new message.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {selectedMedia && (
-                        <div className="flex items-center justify-between p-2 bg-blue-50 rounded-xl border border-blue-100 animate-in slide-in-from-bottom-2">
-                            <div className="flex items-center gap-2">
-                                <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center text-blue-600 border border-blue-200">
-                                    {selectedMedia.type === 'image' ? <Paperclip size={18} /> : 
-                                     selectedMedia.type === 'video' ? <Video size={18} /> : 
-                                     selectedMedia.type === 'audio' ? <Mic size={18} /> : 
-                                     <FileText size={18} />}
-                                </div>
-                                <div className="flex flex-col">
-                                    <span className="text-[10px] font-bold text-blue-700 uppercase tracking-wider">{selectedMedia.type} Selected</span>
-                                    <span className="text-[8px] text-blue-500">Ready to send</span>
-                                </div>
+                  {scheduledMessages.length > 0 && (
+                    <div className="space-y-4 pt-6">
+                      <div className="flex items-center gap-3 justify-center">
+                        <div className="h-px bg-gray-200 flex-1" />
+                        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                          <CalendarClock size={14} /> Scheduled Queue
+                        </span>
+                        <div className="h-px bg-gray-200 flex-1" />
+                      </div>
+                      {scheduledMessages.map(msg => (
+                        <div key={msg.id} className="flex justify-end">
+                          <div className="max-w-[80%] bg-amber-50/50 border-2 border-dashed border-amber-200 rounded-2xl p-4 relative group">
+                            <div className="flex items-center justify-between mb-3">
+                              <div className="flex items-center gap-2 text-[10px] font-bold text-amber-600 uppercase">
+                                <Clock size={12} /> {new Date(msg.scheduledTime).toLocaleString()}
+                              </div>
+                              <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button onClick={() => handleSendNowScheduled(msg.id)} className="p-1.5 bg-white text-green-600 rounded-lg shadow-sm hover:bg-green-50"><Zap size={14}/></button>
+                                <button onClick={() => openEditModal(msg)} className="p-1.5 bg-white text-blue-600 rounded-lg shadow-sm hover:bg-blue-50"><Edit2 size={14}/></button>
+                                <button onClick={() => handleCancelScheduled(msg.id)} className="p-1.5 bg-white text-red-600 rounded-lg shadow-sm hover:bg-red-50"><Trash2 size={14}/></button>
+                              </div>
                             </div>
-                            <button type="button" onClick={() => setSelectedMedia(null)} className="text-blue-700 hover:bg-blue-100 p-1 rounded-full transition-colors"><X size={14} /></button>
+                            {msg.payload?.mediaUrl && renderMediaPreview(msg.payload.mediaUrl, msg.payload.mediaType)}
+                            <p className="text-sm text-gray-700 leading-relaxed">{msg.payload?.text}</p>
+                          </div>
                         </div>
-                    )}
-                    {showSchedule && (
-                        <div className="absolute bottom-[calc(100%+10px)] left-4 right-4 bg-white rounded-xl shadow-2xl border border-gray-200 p-4 z-20 animate-in slide-in-from-bottom-2">
-                            <div className="flex justify-between mb-2"><h4 className="font-bold text-gray-800">Schedule Message</h4><button type="button" onClick={() => setShowSchedule(false)}><X size={16} /></button></div>
-                            <input type="datetime-local" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} className="w-full p-2 border rounded-lg text-sm" />
+                      ))}
+                    </div>
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
+
+                {/* Scroll to bottom button */}
+                {!isAtBottom && (
+                  <button 
+                    onClick={scrollToBottom}
+                    className="absolute bottom-28 right-8 p-3 bg-white text-emerald-500 rounded-full shadow-xl border border-gray-100 hover:bg-emerald-50 transition-all animate-bounce"
+                  >
+                    <ChevronDown size={20} />
+                  </button>
+                )}
+
+                {/* Input Area */}
+                <div className="p-6 bg-white border-t border-gray-100">
+                  {!isWindowActive ? (
+                    <div className="bg-gray-50 rounded-2xl p-6 text-center border border-dashed border-gray-200">
+                      <History size={32} className="mx-auto text-gray-300 mb-3" />
+                      <h4 className="text-sm font-bold text-gray-900 mb-1">Window Expired</h4>
+                      <p className="text-xs text-gray-500">The 24h response window has closed. Wait for a new message from the customer.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {/* Quick Replies Bar */}
+                      <div className="flex items-center gap-2 overflow-x-auto pb-2 no-scrollbar">
+                        <button 
+                          onClick={() => setShowQuickReplies(!showQuickReplies)}
+                          className={`flex-shrink-0 flex items-center gap-2 px-3 py-1.5 rounded-full text-[10px] font-bold transition-all ${
+                            showQuickReplies ? 'bg-emerald-500 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                          }`}
+                        >
+                          <Zap size={12} />
+                          Quick Replies
+                        </button>
+                        {QUICK_REPLIES.map(qr => (
+                          <button
+                            key={qr.id}
+                            onClick={() => setReplyText(qr.text)}
+                            className="flex-shrink-0 px-3 py-1.5 bg-white border border-gray-200 rounded-full text-[10px] font-medium text-gray-600 hover:border-emerald-300 hover:text-emerald-600 transition-all"
+                          >
+                            {qr.title}
+                          </button>
+                        ))}
+                      </div>
+
+                      {selectedMedia && (
+                        <div className="flex items-center justify-between p-3 bg-emerald-50 rounded-2xl border border-emerald-100 animate-in slide-in-from-bottom-2">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 bg-emerald-100 rounded-xl flex items-center justify-center text-emerald-600">
+                              {selectedMedia.type === 'image' ? <Paperclip size={20} /> : <FileText size={20} />}
+                            </div>
+                            <div>
+                              <p className="text-xs font-bold text-emerald-900 capitalize">{selectedMedia.type} Selected</p>
+                              <p className="text-[10px] text-emerald-600">Ready to send with message</p>
+                            </div>
+                          </div>
+                          <button onClick={() => setSelectedMedia(null)} className="p-1.5 hover:bg-emerald-100 rounded-full text-emerald-600">
+                            <X size={16} />
+                          </button>
                         </div>
-                    )}
-                    <div className="flex items-center gap-2 bg-gray-100 p-1 rounded-3xl">
-                        {isRecordingVoice ? (
-                          <VoiceRecorder 
-                            onSend={handleVoiceSend} 
-                            onCancel={() => setIsRecordingVoice(false)} 
-                            isSending={isSending}
-                          />
-                        ) : (
-                          <>
-                            <button 
-                              type="button" 
-                              onClick={() => setShowMediaPicker(true)} 
-                              disabled={isSending} 
-                              className={`w-10 h-10 flex items-center justify-center rounded-full transition-all ${selectedMedia ? 'bg-blue-100 text-blue-700' : 'text-gray-500 hover:text-blue-600 hover:bg-white'}`}
-                            >
-                              <Paperclip size={20} />
-                            </button>
-                            <button 
-                              type="button" 
-                              onClick={() => setShowSchedule(!showSchedule)} 
-                              disabled={isSending} 
-                              className={`w-10 h-10 flex items-center justify-center rounded-full transition-all ${showSchedule ? 'bg-amber-100 text-amber-700' : 'text-gray-500 hover:text-amber-600 hover:bg-white'}`}
-                            >
-                              <Clock size={20} />
-                            </button>
-                            <button 
-                              type="button" 
-                              onClick={() => setIsRecordingVoice(true)} 
-                              disabled={isSending} 
-                              className="w-10 h-10 flex items-center justify-center rounded-full text-gray-500 hover:text-emerald-600 hover:bg-white transition-all"
-                            >
-                              <Mic size={20} />
-                            </button>
-                            <textarea 
-                              value={replyText} 
-                              onChange={(e) => setReplyText(e.target.value)} 
-                              placeholder="Type a message..." 
-                              className="flex-1 bg-transparent border-none rounded-2xl text-sm p-2.5 focus:ring-0 resize-none h-10 max-h-32 custom-scrollbar" 
-                              disabled={isSending} 
-                              onKeyDown={e => {
-                                if (e.key === 'Enter' && !e.shiftKey) {
-                                  e.preventDefault();
-                                  handleSend();
-                                }
-                              }}
-                            />
-                            <button 
-                              type="button" 
-                              onClick={handleSend} 
-                              disabled={(!replyText.trim() && !selectedMedia) || isSending} 
-                              className="w-10 h-10 bg-emerald-500 text-white rounded-full flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-emerald-200"
-                            >
-                              {isSending ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
-                            </button>
-                          </>
+                      )}
+
+                      <div className="flex items-end gap-3">
+                        <div className="flex-1 bg-gray-50 rounded-2xl border border-gray-200 focus-within:border-emerald-500 focus-within:ring-4 focus-within:ring-emerald-500/10 transition-all">
+                          {isRecordingVoice ? (
+                            <div className="p-2">
+                              <VoiceRecorder 
+                                onSend={handleVoiceSend} 
+                                onCancel={() => setIsRecordingVoice(false)} 
+                                isSending={isSending}
+                              />
+                            </div>
+                          ) : (
+                            <div className="flex flex-col">
+                              <textarea
+                                value={replyText}
+                                onChange={(e) => setReplyText(e.target.value)}
+                                placeholder="Type your message here..."
+                                className="w-full bg-transparent border-none focus:ring-0 p-4 text-sm min-h-[60px] max-h-40 custom-scrollbar resize-none"
+                                onKeyDown={e => {
+                                  if (e.key === 'Enter' && !e.shiftKey) {
+                                    e.preventDefault();
+                                    handleSend();
+                                  }
+                                }}
+                              />
+                              <div className="flex items-center justify-between px-3 py-2 border-t border-gray-100">
+                                <div className="flex items-center gap-1">
+                                  <button onClick={() => setShowMediaPicker(true)} className="p-2 text-gray-400 hover:text-emerald-500 hover:bg-emerald-50 rounded-xl transition-all">
+                                    <Paperclip size={18} />
+                                  </button>
+                                  <button onClick={() => setIsRecordingVoice(true)} className="p-2 text-gray-400 hover:text-emerald-500 hover:bg-emerald-50 rounded-xl transition-all">
+                                    <Mic size={18} />
+                                  </button>
+                                  <button onClick={() => setShowSchedule(!showSchedule)} className={`p-2 rounded-xl transition-all ${showSchedule ? 'text-amber-500 bg-amber-50' : 'text-gray-400 hover:text-amber-500 hover:bg-amber-50'}`}>
+                                    <Clock size={18} />
+                                  </button>
+                                </div>
+                                
+                                {showSchedule && (
+                                  <div className="flex items-center gap-2 animate-in slide-in-from-right-2">
+                                    <input 
+                                      type="datetime-local" 
+                                      value={scheduleTime} 
+                                      onChange={(e) => setScheduleTime(e.target.value)}
+                                      className="text-[10px] font-bold border-none bg-amber-50 text-amber-700 rounded-lg p-1 focus:ring-0"
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        
+                        {!isRecordingVoice && (
+                          <button
+                            onClick={handleSend}
+                            disabled={(!replyText.trim() && !selectedMedia) || isSending}
+                            className="w-14 h-14 bg-emerald-500 text-white rounded-2xl flex items-center justify-center shadow-lg shadow-emerald-200 hover:bg-emerald-600 active:scale-95 transition-all disabled:opacity-50 disabled:shadow-none"
+                          >
+                            {isSending ? <Loader2 size={24} className="animate-spin" /> : <Send size={24} />}
+                          </button>
                         )}
+                      </div>
                     </div>
+                  )}
+                </div>
+              </>
+            ) : activeTab === 'docs' ? (
+              <div className="flex-1 overflow-y-auto p-8 space-y-6">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-lg font-bold text-gray-900">Driver Documents</h3>
+                  <button className="text-xs font-bold text-emerald-600 hover:underline">Request New Document</button>
+                </div>
+                
+                {documents.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-20 bg-white rounded-3xl border border-dashed border-gray-200">
+                    <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mb-4 text-gray-300">
+                      <FileText size={32} />
+                    </div>
+                    <p className="text-gray-500 font-medium">No documents found</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {documents.map(doc => (
+                      <div key={doc.id} className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm hover:shadow-md transition-all group">
+                        <div className="flex items-start justify-between mb-4">
+                          <div className="flex items-center gap-3">
+                            <div className="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center text-blue-600">
+                              <FileText size={24} />
+                            </div>
+                            <div>
+                              <h4 className="text-sm font-bold text-gray-900 capitalize">{doc.docType.replace('_', ' ')}</h4>
+                              <p className="text-[10px] text-gray-400">{new Date(doc.timestamp).toLocaleDateString()}</p>
+                            </div>
+                          </div>
+                          <span className={`text-[10px] font-bold px-2 py-1 rounded-lg ${
+                            doc.verificationStatus === 'approved' ? 'bg-green-50 text-green-600' :
+                            doc.verificationStatus === 'rejected' ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-600'
+                          }`}>
+                            {doc.verificationStatus.toUpperCase()}
+                          </span>
+                        </div>
+                        <div className="flex gap-2">
+                          <a href={doc.url} target="_blank" rel="noreferrer" className="flex-1 flex items-center justify-center gap-2 py-2 bg-gray-50 text-gray-600 rounded-xl text-xs font-bold hover:bg-gray-100 transition-colors">
+                            <Maximize2 size={14} /> View
+                          </a>
+                          <a href={doc.url} download className="p-2 bg-gray-50 text-gray-600 rounded-xl hover:bg-gray-100 transition-colors">
+                            <Download size={14} />
+                          </a>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
-            </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto p-8 space-y-4">
+                <h3 className="text-lg font-bold text-gray-900 mb-4">System Activity Logs</h3>
+                <div className="space-y-3">
+                  {[
+                    { id: 1, type: 'status', text: 'Lead status changed to "Qualified"', time: '2 hours ago', icon: Zap, color: 'text-amber-500 bg-amber-50' },
+                    { id: 2, type: 'bot', text: 'Bot flow "Onboarding" completed successfully', time: '5 hours ago', icon: Bot, color: 'text-blue-500 bg-blue-50' },
+                    { id: 3, type: 'doc', text: 'New document "Driving License" uploaded', time: 'Yesterday', icon: FileText, color: 'text-emerald-500 bg-emerald-50' },
+                    { id: 4, type: 'system', text: 'Chat session initiated via Meta API', time: '2 days ago', icon: Activity, color: 'text-gray-500 bg-gray-50' },
+                  ].map(log => (
+                    <div key={log.id} className="flex items-start gap-4 p-4 bg-white rounded-2xl border border-gray-100 shadow-sm">
+                      <div className={`p-2 rounded-xl ${log.color}`}>
+                        <log.icon size={18} />
+                      </div>
+                      <div className="flex-1">
+                        <p className="text-sm text-gray-800 font-medium">{log.text}</p>
+                        <p className="text-[10px] text-gray-400 mt-1">{log.time}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
 
-            <div className="w-[400px] bg-white border-l border-gray-200 p-6">
-                <h3 className="text-xs font-bold text-gray-500 uppercase mb-3">Documents</h3>
-                {documents.length === 0 ? (
-                    <div className="text-center p-6 border-2 border-dashed border-gray-100 rounded-xl bg-gray-50">
-                        <FileText size={24} className="mx-auto text-gray-300 mb-2" />
-                        <p className="text-xs text-gray-400">No documents uploaded yet.</p>
-                    </div>
-                ) : (
-                    <div className="space-y-3">
-                        {documents.map(doc => (
-                            <div key={doc.id} className="bg-white p-3 rounded-xl border border-gray-200 shadow-sm flex justify-between items-center group hover:border-blue-200 transition-colors">
-                                <div className="flex items-center gap-2">
-                                    <div className="bg-blue-50 p-2 rounded-lg text-blue-600"><FileText size={16} /></div>
-                                    <div className="flex flex-col">
-                                        <span className="text-xs font-bold capitalize text-gray-800">{doc.docType.replace('_', ' ')}</span>
-                                        <span className="text-[9px] text-gray-400">{new Date(doc.timestamp).toLocaleDateString()}</span>
-                                    </div>
-                                </div>
-                                <a href={doc.url} target="_blank" rel="noreferrer" className="text-gray-400 hover:text-blue-600 p-1"><Download size={14}/></a>
-                            </div>
-                        ))}
-                    </div>
-                )}
+          {/* Right Sidebar - Driver Details */}
+          <div className="hidden lg:flex w-80 flex-col bg-white border-l border-gray-100 overflow-y-auto custom-scrollbar">
+            <div className="p-8 space-y-8">
+              {/* Profile Section */}
+              <div className="text-center">
+                <div className="w-24 h-24 bg-gradient-to-br from-gray-50 to-gray-100 rounded-3xl mx-auto mb-4 flex items-center justify-center text-3xl font-bold text-gray-300 border border-gray-100 shadow-inner">
+                  {driver.name.charAt(0)}
+                </div>
+                <h3 className="text-xl font-bold text-gray-900 mb-1">{driver.name}</h3>
+                <p className="text-sm text-gray-500 mb-4">{driver.phoneNumber}</p>
+                <div className="flex justify-center gap-2">
+                  <span className="px-3 py-1 bg-emerald-50 text-emerald-600 rounded-full text-[10px] font-bold uppercase tracking-wider border border-emerald-100">
+                    {driver.status}
+                  </span>
+                  <span className="px-3 py-1 bg-blue-50 text-blue-600 rounded-full text-[10px] font-bold uppercase tracking-wider border border-blue-100">
+                    {driver.source}
+                  </span>
+                </div>
+              </div>
+
+              <div className="h-px bg-gray-100" />
+
+              {/* Quick Info */}
+              <div className="space-y-4">
+                <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Quick Details</h4>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="p-3 bg-gray-50 rounded-2xl border border-gray-100">
+                    <p className="text-[10px] text-gray-400 mb-1">Last Active</p>
+                    <p className="text-xs font-bold text-gray-900">{new Date(driver.lastMessageTime).toLocaleDateString()}</p>
+                  </div>
+                  <div className="p-3 bg-gray-50 rounded-2xl border border-gray-100">
+                    <p className="text-[10px] text-gray-400 mb-1">Messages</p>
+                    <p className="text-xs font-bold text-gray-900">{localMessages.length}</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Bot Context */}
+              <div className="space-y-4">
+                <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Bot Context</h4>
+                <div className="p-4 bg-gray-900 rounded-2xl text-white">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Bot size={16} className="text-emerald-400" />
+                    <span className="text-xs font-bold">Current Flow</span>
+                  </div>
+                  <p className="text-xs text-gray-400 mb-2">Onboarding Flow v2.1</p>
+                  <div className="w-full bg-gray-800 h-1.5 rounded-full overflow-hidden">
+                    <div className="bg-emerald-500 h-full w-2/3" />
+                  </div>
+                  <p className="text-[10px] text-gray-500 mt-2">Step 4 of 6: Document Upload</p>
+                </div>
+              </div>
+
+              {/* Quick Actions */}
+              <div className="space-y-4">
+                <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Quick Actions</h4>
+                <div className="space-y-2">
+                  <button className="w-full flex items-center justify-between p-3 bg-white border border-gray-100 rounded-2xl text-xs font-bold text-gray-700 hover:bg-gray-50 transition-all">
+                    <span className="flex items-center gap-2"><Zap size={14} className="text-amber-500" /> Qualify Lead</span>
+                    <ChevronDown size={14} />
+                  </button>
+                  <button className="w-full flex items-center justify-between p-3 bg-white border border-gray-100 rounded-2xl text-xs font-bold text-gray-700 hover:bg-gray-50 transition-all">
+                    <span className="flex items-center gap-2"><ShieldAlert size={14} className="text-red-500" /> Flag for Review</span>
+                    <ChevronDown size={14} />
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>

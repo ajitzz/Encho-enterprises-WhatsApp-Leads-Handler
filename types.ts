@@ -242,6 +242,13 @@ export interface DriverDocument {
   timestamp: number;
 }
 
+export interface QuickReply {
+  id: string;
+  title: string;
+  text: string;
+  category?: string;
+}
+
 export interface ScheduledMessage {
   id: string;
   scheduledTime: number;
