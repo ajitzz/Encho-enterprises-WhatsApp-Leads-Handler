@@ -125,7 +125,6 @@ export const liveApiService = {
       let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
       let pollInterval: ReturnType<typeof setInterval> | null = null;
       let eventSource: EventSource | null = null;
-      let lastReportedPushFailureStreak = 0;
 
       const setConnectionState = (state: UpdateConnectionState) => onConnectionStateChange?.(state);
 
@@ -171,19 +170,13 @@ export const liveApiService = {
       const scheduleReconnect = () => {
           if (isClosed) return;
           reconnectAttempts += 1;
-          const cappedExponent = Math.min(reconnectAttempts, 5);
-          const backoffMs = Math.min(45000, 1000 * (2 ** cappedExponent));
+          const backoffMs = Math.min(30000, 1000 * (2 ** Math.min(reconnectAttempts, 5)));
           setConnectionState('reconnecting');
           startPolling();
 
-          if (reconnectTimer) {
-              clearTimeout(reconnectTimer);
-              reconnectTimer = null;
-          }
-
           reconnectTimer = setTimeout(() => {
               if (!isClosed) connectPush();
-          }, backoffMs + Math.floor(Math.random() * 1000));
+          }, backoffMs + Math.floor(Math.random() * 400));
       };
 
       const connectPush = () => {
@@ -203,7 +196,6 @@ export const liveApiService = {
                       onSyncRecovery?.({ channel: 'push', endpoint: '/api/updates/stream', previousStreak: consecutiveFailures });
                   }
                   consecutiveFailures = 0;
-                  lastReportedPushFailureStreak = 0;
                   stopPolling();
                   setConnectionState('connected');
               };
@@ -226,20 +218,14 @@ export const liveApiService = {
 
               eventSource.onerror = () => {
                   consecutiveFailures += 1;
-                  if (consecutiveFailures === 1 || consecutiveFailures >= lastReportedPushFailureStreak + 3) {
-                      onSyncFailure?.({ channel: 'push', endpoint: '/api/updates/stream', streak: consecutiveFailures, error: new Error('EventSource disconnected') });
-                      lastReportedPushFailureStreak = consecutiveFailures;
-                  }
+                  onSyncFailure?.({ channel: 'push', endpoint: '/api/updates/stream', streak: consecutiveFailures, error: new Error('EventSource disconnected') });
                   eventSource?.close();
                   eventSource = null;
                   scheduleReconnect();
               };
           } catch {
               consecutiveFailures += 1;
-              if (consecutiveFailures === 1 || consecutiveFailures >= lastReportedPushFailureStreak + 3) {
-                  onSyncFailure?.({ channel: 'push', endpoint: '/api/updates/stream', streak: consecutiveFailures, error: new Error('Failed to connect EventSource') });
-                  lastReportedPushFailureStreak = consecutiveFailures;
-              }
+              onSyncFailure?.({ channel: 'push', endpoint: '/api/updates/stream', streak: consecutiveFailures, error: new Error('Failed to connect EventSource') });
               scheduleReconnect();
           }
       };

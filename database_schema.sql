@@ -31,10 +31,34 @@ CREATE TABLE candidates (
     is_human_mode BOOLEAN DEFAULT FALSE,
     current_bot_step_id VARCHAR(100),
     variables JSONB DEFAULT '{}'::jsonb,
+    assigned_to UUID,
+    lead_status VARCHAR(50) DEFAULT 'new',
+    last_action_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 3. Messages
+-- 3. Staff
+CREATE TABLE staff_members (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    name VARCHAR(255),
+    role VARCHAR(50) DEFAULT 'staff',
+    is_active_for_auto_dist BOOLEAN DEFAULT FALSE,
+    last_assigned_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 4. Activity Log
+CREATE TABLE lead_activity_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+    staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+    action VARCHAR(100) NOT NULL,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 5. Messages
 CREATE TABLE candidate_messages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
@@ -46,7 +70,7 @@ CREATE TABLE candidate_messages (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 4. Scheduled
+-- 6. Scheduled
 CREATE TABLE scheduled_messages (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
@@ -57,7 +81,7 @@ CREATE TABLE scheduled_messages (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 5. Bot
+-- 7. Bot
 CREATE TABLE bot_versions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     status VARCHAR(20) DEFAULT 'draft',
@@ -65,7 +89,7 @@ CREATE TABLE bot_versions (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 6. Documents
+-- 8. Documents
 CREATE TABLE driver_documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,

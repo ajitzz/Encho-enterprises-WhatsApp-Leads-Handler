@@ -20,7 +20,9 @@ import {
   UserCheck,
   Zap,
   Calendar,
-  ClipboardList
+  ClipboardList,
+  LogOut,
+  X
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 import { Driver, Message } from '../types.ts';
@@ -43,6 +45,15 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [searchQuery, setSearchQuery] = useState('');
   const [actionNote, setActionNote] = useState('');
   const [actionStatus, setActionStatus] = useState('');
+
+  const filteredLeads = React.useMemo(() => {
+    if (!searchQuery) return leads;
+    const query = searchQuery.toLowerCase();
+    return leads.filter(l => 
+      l.name.toLowerCase().includes(query) || 
+      l.phoneNumber.includes(query)
+    );
+  }, [leads, searchQuery]);
 
   useEffect(() => {
     if (view === 'pool') fetchPool();
@@ -230,7 +241,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             <Loader2 className="animate-spin text-blue-600 mb-2" size={32} />
             <p className="text-sm text-gray-500">Fetching leads...</p>
           </div>
-        ) : leads.length === 0 ? (
+        ) : filteredLeads.length === 0 ? (
           <div className="text-center py-20">
             <div className="bg-gray-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
               <Users size={32} className="text-gray-300" />
@@ -238,7 +249,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             <p className="text-gray-500 font-medium">{isPool ? 'Pool is empty' : 'You have no assigned leads'}</p>
           </div>
         ) : (
-          leads.filter(l => l.name.toLowerCase().includes(searchQuery.toLowerCase())).map(lead => (
+          filteredLeads.map(lead => (
             <div 
               key={lead.id} 
               onClick={() => isPool ? null : handleOpenDetail(lead)}
@@ -481,12 +492,3 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     </div>
   );
 };
-
-// Missing icons for the component
-const LogOut = ({ size, className }: { size: number; className?: string }) => (
-  <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
-);
-
-const X = ({ size, className }: { size: number; className?: string }) => (
-  <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-);
