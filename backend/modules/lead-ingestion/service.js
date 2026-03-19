@@ -77,12 +77,14 @@ const withBotExecutionSlot = async (handler) => {
 };
 
 class LeadIngestionService {
-  constructor({ legacyProcessor, withDb, executeWithRetry, runBotEngine, triggerReportingSyncDeferred }) {
+  constructor({ legacyProcessor, withDb, executeWithRetry, runBotEngine, triggerReportingSyncDeferred, assignmentService, fetchAndStoreIncomingMedia }) {
     this.legacyProcessor = legacyProcessor;
     this.withDb = withDb;
     this.executeWithRetry = executeWithRetry;
     this.runBotEngine = runBotEngine;
     this.triggerReportingSyncDeferred = triggerReportingSyncDeferred;
+    this.assignmentService = assignmentService;
+    this.fetchAndStoreIncomingMedia = fetchAndStoreIncomingMedia;
   }
 
   async handleIncomingMessage({ body, req, res, context }) {
@@ -220,18 +222,35 @@ class LeadIngestionService {
         const existing = await findInboundMessageByWhatsappId({ client, whatsappMessageId: msg.id });
         if (existing) return { duplicate: true };
 
+        let finalMessageText = parsed.text;
         const candidate = await upsertCandidateFromInbound({
           client,
           phoneNumber: parsed.from,
           name: parsed.name,
-          lastMessage: parsed.text,
+          lastMessage: finalMessageText,
           nowMs: Date.now(),
         });
+
+        // Handle Media Storage if applicable
+        if (this.fetchAndStoreIncomingMedia && ['image', 'document', 'video', 'audio', 'voice', 'sticker'].includes(msg.type)) {
+          try {
+            const mediaRes = await this.fetchAndStoreIncomingMedia({ msg, phoneNumber: parsed.from, candidateId: candidate.id, client });
+            if (mediaRes?.key) {
+              const caption = msg[msg.type]?.caption || '';
+              finalMessageText = JSON.stringify({ url: mediaRes.url || mediaRes.key, caption: caption });
+              
+              // Update candidate last_message with the JSON string
+              await client.query('UPDATE candidates SET last_message = $1 WHERE id = $2', [finalMessageText, candidate.id]);
+            }
+          } catch (mediaErr) {
+            log({ level: 'error', module: 'lead-ingestion', message: 'media_storage.failed', requestId, meta: { error: mediaErr.message, candidateId: candidate.id } });
+          }
+        }
 
         await insertInboundMessage({
           client,
           candidateId: candidate.id,
-          text: parsed.text,
+          text: finalMessageText,
           type: parsed.messageType,
           whatsappMessageId: msg.id,
         });
@@ -505,8 +524,14 @@ class LeadIngestionService {
       }
     } else if (msg.type === 'location') {
       text = JSON.stringify(msg.location || {});
-    } else if (['image', 'document', 'video', 'audio'].includes(msg.type)) {
-      text = `[${msg.type.toUpperCase()}]`;
+    } else if (msg.type === 'sticker') {
+      text = '[STICKER]';
+    } else if (msg.type === 'audio' || msg.type === 'voice') {
+      const caption = msg[msg.type]?.caption || '';
+      text = msg.voice ? `[VOICE NOTE]${caption ? ': ' + caption : ''}` : `[AUDIO]${caption ? ': ' + caption : ''}`;
+    } else if (['image', 'document', 'video'].includes(msg.type)) {
+      const caption = msg[msg.type]?.caption || '';
+      text = `[${msg.type.toUpperCase()}]${caption ? ': ' + caption : ''}`;
     } else {
       text = `[${String(msg.type || 'UNKNOWN').toUpperCase()}]`;
     }

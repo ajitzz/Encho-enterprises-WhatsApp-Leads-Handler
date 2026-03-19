@@ -7,6 +7,7 @@ const buildLeadIngestionFacade = ({
   executeWithRetry,
   runBotEngine,
   triggerReportingSyncDeferred,
+  fetchAndStoreIncomingMedia,
 }) => {
   const assignmentService = new LeadAssignmentService({
     withDb,
@@ -20,6 +21,7 @@ const buildLeadIngestionFacade = ({
     runBotEngine,
     triggerReportingSyncDeferred,
     assignmentService,
+    fetchAndStoreIncomingMedia,
   });
 
   return async ({ body, req, res, context }) => {

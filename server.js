@@ -2741,15 +2741,31 @@ const ensurePerformanceIndexes = async (client) => {
 };
 
 const executeWithRetry = async (client, operation) => {
-    try {
-        return await operation();
-    } catch (err) {
-        if (err.code === '42P01') {
-            console.warn("[Auto-Heal] Tables missing. Re-initializing database...");
-            await initDatabase(client);
-            return await operation(); 
+    let attempts = 0;
+    const maxAttempts = 3;
+    while (attempts < maxAttempts) {
+        try {
+            return await operation();
+        } catch (err) {
+            attempts++;
+            const isRetryable = ['57P01', '57P03', '53300', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', '08006'].includes(err.code) || 
+                               (err.message && err.message.includes('database not initialized'));
+            
+            if (err.code === '42P01') {
+                console.warn("[Auto-Heal] Tables missing. Re-initializing database...");
+                await initDatabase(client);
+                // After re-init, try the operation again immediately
+                continue;
+            }
+
+            if (isRetryable && attempts < maxAttempts) {
+                const delay = Math.pow(2, attempts) * 100;
+                console.warn(`[DB RETRY] Attempt ${attempts}/${maxAttempts} failed. Retrying in ${delay}ms...`, err.message);
+                await new Promise(r => setTimeout(r, delay));
+                continue;
+            }
+            throw err;
         }
-        throw err;
     }
 };
 
@@ -4497,6 +4513,7 @@ const leadIngestionFacade = buildLeadIngestionFacade({
     executeWithRetry,
     runBotEngine,
     triggerReportingSyncDeferred,
+    fetchAndStoreIncomingMedia,
 });
 
 apiRouter.post('/webhook', async (req, res) => {
@@ -4839,9 +4856,17 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
     const snapshotInterval = setInterval(streamSnapshot, 10000); // Polling as fallback, less frequent
     const heartbeat = setInterval(() => {
-        if (!closed) res.write('data: heartbeat\n\n');
-    }, 15000); // 15 Seconds heartbeat for better connectivity
+        if (!closed) {
+            // Standard SSE heartbeat/keep-alive comment
+            res.write(': heartbeat\n\n');
+            // Also send a data heartbeat for client-side tracking if needed
+            res.write('data: {"type":"heartbeat"}\n\n');
+            if (res.flush) res.flush();
+        }
+    }, 20000); // 20 Seconds heartbeat
 
+    // Tell client to reconnect after 3 seconds if disconnected
+    res.write('retry: 3000\n\n');
     streamSnapshot();
 
     req.on('close', () => {

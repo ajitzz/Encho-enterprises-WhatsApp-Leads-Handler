@@ -201,9 +201,11 @@ export const liveApiService = {
               };
 
               eventSource.onmessage = (event) => {
-                  if (!event.data || event.data === 'heartbeat') return;
+                  if (!event.data) return;
+                  if (event.data === 'heartbeat') return; // Legacy heartbeat
                   try {
                       const payload = JSON.parse(event.data);
+                      if (payload?.type === 'heartbeat') return; // New heartbeat format
                       if (Array.isArray(payload?.drivers)) callback(payload.drivers);
                       if (driverId && payload?.messagesByDriver?.[driverId] && onMessages) {
                           onMessages(payload.messagesByDriver[driverId]);
@@ -217,8 +219,14 @@ export const liveApiService = {
               };
 
               eventSource.onerror = () => {
+                  // In serverless environments (like Vercel), disconnections are normal and expected.
+                  // We only report a "failure" if we've failed to connect multiple times in a row.
                   consecutiveFailures += 1;
-                  onSyncFailure?.({ channel: 'push', endpoint: '/api/updates/stream', streak: consecutiveFailures, error: new Error('EventSource disconnected') });
+                  if (consecutiveFailures >= 3) {
+                      onSyncFailure?.({ channel: 'push', endpoint: '/api/updates/stream', streak: consecutiveFailures, error: new Error('EventSource disconnected repeatedly') });
+                  } else {
+                      console.info('[liveApiService] EventSource disconnected, attempting reconnect...', { streak: consecutiveFailures });
+                  }
                   eventSource?.close();
                   eventSource = null;
                   scheduleReconnect();
