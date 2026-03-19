@@ -152,3 +152,60 @@ test('system-health route registrar falls back to legacy when mode is off', asyn
   assert.deepEqual(calls, ['legacy']);
 });
 
+
+const {
+  normalizeLeadIngestedPayload,
+  toLegacyLeadIngestedPayload,
+} = require('../backend/modules/lead-ingestion/contracts');
+const {
+  normalizeReminderTaskDispatchedPayload,
+  toLegacyReminderTaskDispatchedPayload,
+} = require('../backend/modules/reminders-escalations/contracts');
+const { buildEventEnvelope, assertEventEnvelope } = require('../backend/shared/contracts/internalEvents');
+
+test('lead ingestion producer/consumer compatibility mapper roundtrip is stable', () => {
+  const normalized = normalizeLeadIngestedPayload({
+    eventId: 'evt-1',
+    received_at: '2026-03-15T00:00:00.000Z',
+    source: 'whatsapp-meta',
+    phone_number: '+123',
+    message_type: 'text',
+    message_id: 'wamid-1',
+    dedupeKey: 'whatsapp:wamid-1',
+    leadId: 'lead-1',
+  });
+
+  const legacy = toLegacyLeadIngestedPayload(normalized);
+  assert.equal(legacy.phone_number, '+123');
+  assert.equal(legacy.message_id, 'wamid-1');
+});
+
+test('reminder dispatch producer/consumer compatibility mapper roundtrip is stable', () => {
+  const normalized = normalizeReminderTaskDispatchedPayload({
+    taskId: 'task-1',
+    leadId: 'lead-1',
+    dispatched_at: '2026-03-15T00:00:00.000Z',
+    provider_message_id: 'provider-1',
+    success: true,
+  });
+
+  const legacy = toLegacyReminderTaskDispatchedPayload(normalized);
+  assert.equal(legacy.dispatched_at, '2026-03-15T00:00:00.000Z');
+  assert.equal(legacy.provider_message_id, 'provider-1');
+});
+
+test('internal event envelope includes required metadata contract', () => {
+  const envelope = buildEventEnvelope({
+    eventType: 'lead.ingested.v1',
+    payload: { leadId: 'lead-1' },
+    sourceModule: 'lead-ingestion',
+    correlationId: 'corr-1',
+    causationId: 'cause-1',
+    tenantId: 'tenant-1',
+  });
+
+  assert.equal(assertEventEnvelope(envelope), true);
+  assert.equal(typeof envelope.eventId, 'string');
+  assert.equal(typeof envelope.occurredAt, 'string');
+  assert.equal(envelope.sourceModule, 'lead-ingestion');
+});

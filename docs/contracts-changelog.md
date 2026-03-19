@@ -6,3 +6,4 @@
 - Added governance checks for schema version presence and changelog enforcement.
 - Expanded schema-versioned contract validators for bot-conversation, agent-workspace, campaign-broadcast, system-health, and auth-config modules.
 - Expanded critical-flow contract tests to cover the above module boundaries and stricter ingress validation paths.
+- Added producer/consumer compatibility mapper roundtrip tests and envelope metadata enforcement in governance gates.

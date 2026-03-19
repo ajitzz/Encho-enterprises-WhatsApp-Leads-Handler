@@ -16,9 +16,21 @@ if (!fs.existsSync(evidencePath)) {
   problems.push('Missing canary rollout evidence doc: docs/release-evidence/canary-rollout-stages-2026-03-15.md');
 } else {
   const evidence = fs.readFileSync(evidencePath, 'utf8');
-  for (const token of ['Stage 0', 'Stage 1', 'Stage 2', 'Stage 3', 'threshold', 'rollback']) {
+  for (const token of ['Stage 0', 'Stage 1', 'Stage 2', 'Stage 3', 'threshold', 'rollback', 'parity']) {
     if (!evidence.toLowerCase().includes(token.toLowerCase())) {
       problems.push(`canary rollout evidence missing token: ${token}`);
+    }
+  }
+}
+
+const parityPath = path.join(root, 'docs/release-evidence/parity-log-latest.md');
+if (!fs.existsSync(parityPath)) {
+  problems.push('Missing parity evidence doc: docs/release-evidence/parity-log-latest.md');
+} else {
+  const parity = fs.readFileSync(parityPath, 'utf8');
+  for (const token of ['legacy', 'shadow', 'canary', 'full', 'delta', 'rollback proof']) {
+    if (!parity.toLowerCase().includes(token.toLowerCase())) {
+      problems.push(`parity evidence missing token: ${token}`);
     }
   }
 }
@@ -29,4 +41,4 @@ if (problems.length) {
   process.exit(1);
 }
 
-console.log('Rollout mode check passed (legacy/shadow/canary/full controls and staged evidence are present).');
+console.log('Rollout mode check passed (legacy/shadow/canary/full controls, parity logs, and staged evidence are present).');
