@@ -350,10 +350,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   };
 
   const getMessageMedia = (msg: Message): { url?: string; type?: string } => {
-      if (msg.audioUrl) return { url: msg.audioUrl, type: 'audio' };
+      if (msg.audioUrl) return { url: msg.audioUrl, type: msg.type === 'voice' ? 'voice' : 'audio' };
       if (msg.videoUrl) return { url: msg.videoUrl, type: 'video' };
       if (msg.documentUrl) return { url: msg.documentUrl, type: 'document' };
-      if (msg.imageUrl) return { url: msg.imageUrl, type: 'image' };
+      if (msg.imageUrl) return { url: msg.imageUrl, type: msg.type === 'sticker' ? 'sticker' : 'image' };
       return {};
   };
 
@@ -485,7 +485,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                                           <button className="p-3 bg-white/20 backdrop-blur-md rounded-full text-white"><Maximize2 size={24}/></button>
                                         </div>
                                       </div>
-                                    ) : media.type === 'audio' ? (
+                                    ) : (media.type === 'audio' || media.type === 'voice') ? (
                                       <div className={`flex items-center gap-3 p-3 ${isOwn ? 'bg-emerald-600' : 'bg-gray-50'}`}>
                                         <div className={`w-10 h-10 rounded-full flex items-center justify-center ${isOwn ? 'bg-emerald-700' : 'bg-gray-200 text-gray-500'}`}>
                                           <Mic size={18} />
@@ -503,7 +503,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                                         </div>
                                       </a>
                                     ) : (
-                                      <img src={media.url} className="w-full max-h-80 object-cover cursor-pointer hover:scale-105 transition-transform" alt="media" referrerPolicy="no-referrer" />
+                                      <img src={media.url} className={`w-full ${media.type === 'sticker' ? 'max-h-40 object-contain' : 'max-h-80 object-cover'} cursor-pointer hover:scale-105 transition-transform`} alt="media" referrerPolicy="no-referrer" />
                                     )}
                                   </div>
                                 )}

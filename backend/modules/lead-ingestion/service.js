@@ -13,7 +13,7 @@ const {
 
 const WEBHOOK_REPLY_WARN_MS = parsePositiveInt(process.env.WEBHOOK_REPLY_WARN_MS, 1200);
 const BOT_ENGINE_HARD_TIMEOUT_MS = parsePositiveInt(process.env.BOT_ENGINE_HARD_TIMEOUT_MS, 1800);
-const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, false);
+const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, true);
 const WEBHOOK_DEFER_BOT_ENGINE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_BOT_ENGINE, false);
 const WEBHOOK_ADAPTIVE_BOT_DEFER = parseBooleanFlag(process.env.FF_WEBHOOK_ADAPTIVE_BOT_DEFER, false);
 const WEBHOOK_BACKPRESSURE_DEFER = parseBooleanFlag(process.env.FF_WEBHOOK_BACKPRESSURE_DEFER, true);

@@ -51,7 +51,7 @@ const AUTH_CONFIG_MODULE_FLAG = String(process.env.FF_AUTH_CONFIG_MODULE || 'off
 const AUTH_CONFIG_CANARY_PERCENT = parsePercent(process.env.FF_AUTH_CONFIG_MODULE_PERCENT || 0);
 const SYSTEM_HEALTH_MODULE_FLAG = String(process.env.FF_SYSTEM_HEALTH_MODULE || 'off').toLowerCase();
 const SYSTEM_HEALTH_CANARY_PERCENT = parsePercent(process.env.FF_SYSTEM_HEALTH_MODULE_PERCENT || 0);
-const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, false);
+const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, true);
 const MODULE_CANARY_TENANTS = String(process.env.FF_CANARY_TENANTS || '')
     .split(',')
     .map((item) => item.trim())
@@ -2135,7 +2135,7 @@ const MAX_MEDIA_FILE_BYTES = 16 * 1024 * 1024;
 
 const fetchAndStoreIncomingMedia = async ({ msg, phoneNumber, candidateId, client }) => {
     if (!candidateId) throw new Error('Candidate id is required for media upload');
-    const mediaId = msg?.image?.id || msg?.document?.id || msg?.video?.id || msg?.audio?.id || msg?.voice?.id;
+    const mediaId = msg?.image?.id || msg?.document?.id || msg?.video?.id || msg?.audio?.id || msg?.voice?.id || msg?.sticker?.id;
     if (!mediaId) return null;
 
     const metaResponse = await getMetaClient().get(`https://graph.facebook.com/v18.0/${mediaId}`);
@@ -4692,6 +4692,17 @@ apiRouter.get('/updates/stream', async (req, res) => {
     res.flushHeaders?.();
 
     let closed = false;
+
+    // Vercel timeout guard: close connection before 60s limit
+    const vercelTimeout = setTimeout(() => {
+        if (!closed) {
+            closed = true;
+            updateEmitter.off('update', onUpdate);
+            clearInterval(snapshotInterval);
+            clearInterval(heartbeat);
+            res.end();
+        }
+    }, 55000); 
     const driverId = typeof req.query.driverId === 'string' ? req.query.driverId : null;
 
     const sendEvent = (data) => {
@@ -4708,7 +4719,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
             const driverRows = await client.query(`
                 SELECT c.*, 
                     (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in') as user_msg_count,
-                    (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document')) as user_media_count,
+                    (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document', 'voice', 'sticker')) as user_media_count,
                     (SELECT count(*) FROM jsonb_object_keys(c.variables)) as var_count
                 FROM candidates c 
                 ORDER BY last_message_at DESC NULLS LAST LIMIT 50
@@ -4769,8 +4780,8 @@ apiRouter.get('/updates/stream', async (req, res) => {
                                 const resolvedMediaUrl = await refreshMediaUrl(media.url);
                                 if (row.type === 'video') videoUrl = resolvedMediaUrl;
                                 else if (row.type === 'document') documentUrl = resolvedMediaUrl;
-                                else if (row.type === 'audio') audioUrl = resolvedMediaUrl;
-                                else imageUrl = resolvedMediaUrl;
+                                else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
+                                else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
                             } catch(e){}
                         }
                         return {
@@ -4831,6 +4842,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
     req.on('close', () => {
         closed = true;
+        clearTimeout(vercelTimeout);
         updateEmitter.off('update', onUpdate);
         clearInterval(snapshotInterval);
         clearInterval(heartbeat);
@@ -4848,7 +4860,7 @@ apiRouter.get('/drivers', async (req, res) => {
             const r = await client.query(`
                 SELECT c.*, 
                     (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in') as user_msg_count,
-                    (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document')) as user_media_count,
+                    (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document', 'voice', 'sticker')) as user_media_count,
                     (SELECT count(*) FROM jsonb_object_keys(c.variables)) as var_count
                 FROM candidates c 
                 ORDER BY last_message_at DESC NULLS LAST LIMIT 50
