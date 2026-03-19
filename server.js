@@ -4714,7 +4714,8 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
     let closed = false;
 
-    // Vercel timeout guard: close connection before 60s limit
+    // Vercel/Cloud Run timeout guard: close connection before platform limit
+    // Cloud Run default is 5m, so we close at 4m 50s to allow graceful reconnect
     const vercelTimeout = setTimeout(() => {
         if (!closed) {
             closed = true;
@@ -4723,7 +4724,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
             clearInterval(heartbeat);
             res.end();
         }
-    }, 1800000); // 30 Minutes for Cloud Run (Vercel was 55s) 
+    }, 290000); // 4 Minutes 50 Seconds 
     const driverId = typeof req.query.driverId === 'string' ? req.query.driverId : null;
 
     const sendEvent = (data) => {
@@ -4863,7 +4864,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
             res.write('data: {"type":"heartbeat"}\n\n');
             if (res.flush) res.flush();
         }
-    }, 20000); // 20 Seconds heartbeat
+    }, 15000); // 15 Seconds heartbeat
 
     // Tell client to reconnect after 3 seconds if disconnected
     res.write('retry: 3000\n\n');
@@ -5725,6 +5726,20 @@ const startServer = async ({ port = 3000 } = {}) => {
     return app.listen(port, () => {
         console.log(`Server running on ${port}`);
         logLeadIngestionRuntimePosture();
+
+        // Self-ping to keep instance warm in Cloud Run/Vercel
+        if (process.env.NODE_ENV === 'production') {
+            const healthUrl = `http://localhost:${port}/api/health`;
+            console.log(`[Self-Ping] Starting keep-alive to ${healthUrl}`);
+            setInterval(async () => {
+                try {
+                    await axios.get(healthUrl, { timeout: 5000 });
+                } catch (e) {
+                    // Silent fail for self-ping
+                }
+            }, 240000); // Every 4 minutes
+        }
+
         // Auto-Init Check on Start (For Local/VPS, NOT Vercel)
         (async () => {
             try {
