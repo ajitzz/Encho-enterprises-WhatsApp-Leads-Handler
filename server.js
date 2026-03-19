@@ -1,5 +1,6 @@
 
 const express = require('express');
+const path = require('path');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Pool } = require('pg');
@@ -162,7 +163,7 @@ const SYSTEM_CONFIG = {
     GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || '',
     CACHE_TTL: 60 * 1000, // 60 Seconds Cache for Bot Settings
     RUNTIME_CONFIG_CACHE_TTL: Number.parseInt(process.env.RUNTIME_CONFIG_CACHE_TTL_MS || '2000', 10),
-    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
+    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
 };
 
 const applyRuntimeGoogleSheetsConfig = (rawConfig = {}) => {
@@ -304,7 +305,7 @@ const buildPoolConfig = () => {
     const baseConfig = {
         connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
         idleTimeoutMillis: 30000,
-        max: 20,
+        max: 50,
         keepAlive: true
     };
 
@@ -4386,6 +4387,10 @@ const processWebhookLegacy = async ({ body, req, res }) => {
         const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
         if (!msg) { res.sendStatus(200); return; }
 
+        if (WEBHOOK_DEFER_POST_RESPONSE) {
+            res.sendStatus(200);
+        }
+
         const processPromise = withDb(async (client) => {
             // WRAPPER: Retry logic for cold starts / missing tables
             await executeWithRetry(client, async () => {
@@ -4470,8 +4475,6 @@ const processWebhookLegacy = async ({ body, req, res }) => {
             });
         });
 
-        res.sendStatus(200);
-
         if (WEBHOOK_DEFER_POST_RESPONSE) {
             trackBackgroundTask({
                 taskName: 'webhook.post_response_processing',
@@ -4481,6 +4484,7 @@ const processWebhookLegacy = async ({ body, req, res }) => {
             return;
         }
 
+        res.sendStatus(200);
         await processPromise;
     } catch (e) {
         console.error('Webhook processing error:', e);
@@ -4702,7 +4706,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
             clearInterval(heartbeat);
             res.end();
         }
-    }, 55000); 
+    }, 1800000); // 30 Minutes for Cloud Run (Vercel was 55s) 
     const driverId = typeof req.query.driverId === 'string' ? req.query.driverId : null;
 
     const sendEvent = (data) => {
@@ -4836,7 +4840,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
     const snapshotInterval = setInterval(streamSnapshot, 10000); // Polling as fallback, less frequent
     const heartbeat = setInterval(() => {
         if (!closed) res.write('data: heartbeat\n\n');
-    }, 20000);
+    }, 15000); // 15 Seconds heartbeat for better connectivity
 
     streamSnapshot();
 
@@ -5609,6 +5613,31 @@ apiRouter.get('/system/meta-send-metrics', async (_req, res) => {
 
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
+
+// --- VITE MIDDLEWARE / STATIC ASSETS ---
+const setupFrontend = async (app) => {
+    if (process.env.NODE_ENV !== 'production') {
+        try {
+            const { createServer: createViteServer } = require('vite');
+            const vite = await createViteServer({
+                server: { middlewareMode: true },
+                appType: 'spa'
+            });
+            app.use(vite.middlewares);
+            console.log("[VITE] Middleware mounted.");
+        } catch (e) {
+            console.error("[VITE] Failed to mount middleware:", e.message);
+        }
+    } else {
+        const distPath = path.join(process.cwd(), 'dist');
+        app.use(express.static(distPath));
+        app.get('*', (req, res) => {
+            res.sendFile(path.join(distPath, 'index.html'));
+        });
+        console.log("[PROD] Static assets mounted from", distPath);
+    }
+};
+
 app.use((err, req, res, next) => {
     structuredLog({
         level: 'error',
@@ -5623,7 +5652,6 @@ app.use((err, req, res, next) => {
     });
     res.status(500).json({ error: 'Internal server error' });
 });
-app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
 // --- LEAD AUTO-DISTRIBUTION ---
 async function startLeadAutoDistributor() {
@@ -5662,7 +5690,12 @@ async function startLeadAutoDistributor() {
     }, 30000); // Run every 30 seconds
 }
 
-const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
+apiRouter.get('/system/ping', (req, res) => {
+    res.json({ status: 'ok', timestamp: Date.now(), environment: process.env.NODE_ENV || 'development' });
+});
+
+const startServer = async ({ port = 3000 } = {}) => {
+    await setupFrontend(app);
     startLeadAutoDistributor();
     return app.listen(port, () => {
         console.log(`Server running on ${port}`);
@@ -5695,7 +5728,10 @@ const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
 };
 
 if (require.main === module) {
-    startServer();
+    startServer().catch(err => {
+        console.error("Failed to start server:", err);
+        process.exit(1);
+    });
 }
 
 module.exports = { app, startServer };

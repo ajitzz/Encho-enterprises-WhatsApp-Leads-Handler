@@ -151,6 +151,8 @@ class LeadIngestionService {
 
     if (WEBHOOK_DEFER_POST_RESPONSE) {
       safeSendStatus(res, 200);
+      latency.end({ path: 'module-service', deferred: true });
+      
       processPromise.catch((error) => {
         log({
           level: 'error',
@@ -160,7 +162,7 @@ class LeadIngestionService {
           meta: { error: error?.message || String(error) },
         });
       });
-      latency.end({ path: 'module-service', deferred: true });
+      
       return { accepted: true, path: 'module-service', deferred: true };
     }
 
