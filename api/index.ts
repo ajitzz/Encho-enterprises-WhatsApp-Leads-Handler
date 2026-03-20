@@ -1,8 +1,20 @@
-const { app } = require('../server');
+import * as serverModule from '../server';
 
-export default (req: any, res: any) => {
-  if (typeof app !== 'function') {
-    throw new TypeError('Invalid server export: expected an Express app function.');
+const resolveExpressApp = () => {
+  const moduleCandidate: any = serverModule as any;
+  const appCandidate =
+    moduleCandidate?.app ??
+    moduleCandidate?.default?.app ??
+    moduleCandidate?.default;
+
+  if (typeof appCandidate !== 'function') {
+    const exportedKeys = Object.keys(moduleCandidate || {});
+    throw new TypeError(
+      `Invalid server export: expected an Express app function, received keys [${exportedKeys.join(', ')}]`
+    );
   }
-  return app(req, res);
+
+  return appCandidate;
 };
+
+export default (req: any, res: any) => resolveExpressApp()(req, res);

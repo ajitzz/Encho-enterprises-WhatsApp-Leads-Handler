@@ -1,5 +1,9 @@
-
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "installCommand": "npm ci",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
   "rewrites": [
     {
       "source": "/api/(.*)",
@@ -22,23 +26,23 @@
   "crons": [
     {
       "path": "/api/health",
-      "schedule": "* * * * *"
-    },
-    {
-      "path": "/api/cron/process-queue",
-      "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/cron/reminders",
-      "schedule": "0 * * * *"
-    },
-    {
-      "path": "/api/cron/escalations",
       "schedule": "0 0 * * *"
     },
     {
+      "path": "/api/cron/process-queue",
+      "schedule": "5 0 * * *"
+    },
+    {
+      "path": "/api/cron/reminders",
+      "schedule": "10 0 * * *"
+    },
+    {
+      "path": "/api/cron/escalations",
+      "schedule": "15 0 * * *"
+    },
+    {
       "path": "/api/cron/lead-ingestion",
-      "schedule": "*/15 * * * *"
+      "schedule": "20 0 * * *"
     }
   ]
 }
