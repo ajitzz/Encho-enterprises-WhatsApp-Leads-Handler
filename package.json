@@ -2,10 +2,10 @@
   "name": "uber-fleet-recruiter",
   "version": "1.0.0",
   "description": "WhatsApp Recruitment Automation for Uber Fleet",
-  "main": "server.ts",
+  "main": "server.js",
   "scripts": {
-    "start": "tsx server.ts",
-    "dev": "tsx server.ts",
+    "start": "node server.js",
+    "dev": "node server.js",
     "lint": "tsc --noEmit",
     "build": "vite build",
     "preview": "vite preview",
