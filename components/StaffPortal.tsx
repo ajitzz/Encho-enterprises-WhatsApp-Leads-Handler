@@ -29,11 +29,31 @@ import {
   Video,
   FileText,
   User,
-  Bot
+  Bot,
+  Bell,
+  BarChart3,
+  Library,
+  ImageIcon,
+  Check,
+  Copy,
+  Star
 } from 'lucide-react';
+import { 
+  BarChart, 
+  Bar, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell
+} from 'recharts';
 import { liveApiService } from '../services/liveApiService.ts';
 import { Driver, Message } from '../types.ts';
 import { VoiceRecorder } from './VoiceRecorder.tsx';
+import { MediaLibrary } from './MediaLibrary.tsx';
 
 const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTime }) => {
   const [timeLeft, setTimeLeft] = useState<number>(0);
@@ -81,7 +101,7 @@ interface LeadActivity {
 }
 
 export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ user, onLogout }) => {
-  const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail' | 'team'>('dashboard');
+  const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail' | 'team' | 'media'>('dashboard');
   const [allLeads, setAllLeads] = useState<Driver[]>([]);
   const [selectedLead, setSelectedLead] = useState<Driver | null>(null);
   const [activities, setActivities] = useState<LeadActivity[]>([]);
@@ -108,6 +128,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [clockStatus, setClockStatus] = useState<{ is_clocked_in: boolean; last_clock_in_at?: string; last_clock_out_at?: string }>({ is_clocked_in: false });
   const [selectedStaffMember, setSelectedStaffMember] = useState<any | null>(null);
   const [staffLeads, setStaffLeads] = useState<any[]>([]);
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [reportStats, setReportStats] = useState<any | null>(null);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [showReports, setShowReports] = useState(false);
+  const [quickAssets, setQuickAssets] = useState<any[]>([]);
+  const [copiedAssetId, setCopiedAssetId] = useState<string | null>(null);
 
   const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
@@ -222,7 +248,48 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
   useEffect(() => {
     fetchClockStatus();
+    fetchNotifications();
+    fetchQuickAssets();
   }, []);
+
+  const fetchNotifications = async () => {
+    try {
+      const data = await liveApiService.getNotifications();
+      setNotifications(data);
+    } catch (err) {
+      console.error('Failed to fetch notifications', err);
+    }
+  };
+
+  const fetchReportStats = async () => {
+    try {
+      setLoading(true);
+      const data = await liveApiService.getReportStats();
+      setReportStats(data);
+    } catch (err) {
+      console.error('Failed to fetch report stats', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleMarkNotificationRead = async (id: string) => {
+    try {
+      await liveApiService.markNotificationRead(id);
+      setNotifications(prev => prev.map(n => n.id === id ? { ...n, is_read: true } : n));
+    } catch (err) {
+      console.error('Failed to mark notification as read', err);
+    }
+  };
+
+  const handleMarkAllRead = async () => {
+    try {
+      await liveApiService.markAllNotificationsRead();
+      setNotifications(prev => prev.map(n => ({ ...n, is_read: true })));
+    } catch (err) {
+      console.error('Failed to mark all notifications as read', err);
+    }
+  };
 
   const fetchClockStatus = async () => {
     try {
@@ -231,6 +298,23 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     } catch (err) {
       console.error('Failed to fetch clock status', err);
     }
+  };
+
+  const fetchQuickAssets = async () => {
+    try {
+      const data = await liveApiService.getMediaLibrary('/Quick Assets');
+      if (data && data.files) {
+        setQuickAssets(data.files.slice(0, 4));
+      }
+    } catch (err) {
+      console.error('Failed to fetch quick assets:', err);
+    }
+  };
+
+  const handleCopyAssetLink = (url: string, id: string) => {
+    navigator.clipboard.writeText(url);
+    setCopiedAssetId(id);
+    setTimeout(() => setCopiedAssetId(null), 2000);
   };
 
   const handleClockIn = async () => {
@@ -799,6 +883,34 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           )}
         </div>
       </div>
+
+      {quickAssets.length > 0 && (
+        <div className="pt-2">
+          <div className="flex items-center justify-between mb-4 px-1">
+            <h3 className="text-sm font-bold text-gray-900">Quick Assets</h3>
+            <button onClick={() => setView('media')} className="text-[10px] font-bold text-blue-600 uppercase tracking-widest">View All</button>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            {quickAssets.map(asset => (
+              <div key={asset.id} className="bg-white p-3 rounded-2xl border border-gray-100 flex items-center gap-3 group">
+                <div className="w-8 h-8 rounded-lg bg-gray-50 flex items-center justify-center text-gray-400">
+                  {asset.type.startsWith('image') ? <ImageIcon size={16} /> : <FileText size={16} />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[10px] font-bold text-gray-900 truncate">{asset.filename}</p>
+                  <button 
+                    onClick={() => handleCopyAssetLink(asset.url, asset.id)}
+                    className="text-[8px] font-bold text-blue-600 uppercase tracking-widest flex items-center gap-1 mt-0.5"
+                  >
+                    {copiedAssetId === asset.id ? <Check size={8} /> : <Copy size={8} />}
+                    {copiedAssetId === asset.id ? 'Copied' : 'Copy Link'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -917,6 +1029,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
               <ArrowLeft size={20} />
             </button>
             <h2 className="text-lg font-bold">Lead Details</h2>
+            {selectedLead.lead_score !== undefined && (
+              <div className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1">
+                <Star size={10} fill="currentColor" />
+                {selectedLead.lead_score} pts
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <button 
@@ -1400,19 +1518,186 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
               </p>
             </div>
           </div>
-          <button onClick={onLogout} className="p-2 text-gray-400 hover:text-red-600 transition-colors">
-            <LogOut size={20} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button 
+              onClick={() => {
+                setShowNotifications(!showNotifications);
+                setShowReports(false);
+              }}
+              className="p-2 text-gray-400 hover:text-blue-600 transition-colors relative"
+            >
+              <Bell size={20} />
+              {notifications.some(n => !n.is_read) && (
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full border-2 border-white" />
+              )}
+            </button>
+            {(user.role === 'manager' || user.role === 'admin') && (
+              <button 
+                onClick={() => {
+                  setShowReports(!showReports);
+                  setShowNotifications(false);
+                  if (!showReports) fetchReportStats();
+                }}
+                className="p-2 text-gray-400 hover:text-blue-600 transition-colors"
+              >
+                <BarChart3 size={20} />
+              </button>
+            )}
+            <button onClick={onLogout} className="p-2 text-gray-400 hover:text-red-600 transition-colors">
+              <LogOut size={20} />
+            </button>
+          </div>
         </header>
       )}
 
       {/* Content Area */}
-      <main className="flex-1 overflow-hidden">
+      <main className="flex-1 overflow-hidden relative">
+        {showNotifications && (
+          <div className="absolute inset-0 z-50 bg-white animate-in slide-in-from-top duration-300 flex flex-col">
+            <div className="p-4 border-b flex items-center justify-between">
+              <h3 className="font-bold">Notifications</h3>
+              <div className="flex items-center gap-2">
+                <button onClick={handleMarkAllRead} className="text-[10px] font-bold text-blue-600 uppercase tracking-widest">Mark all read</button>
+                <button onClick={() => setShowNotifications(false)} className="p-1 hover:bg-gray-100 rounded-full"><X size={20} /></button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              {notifications.length === 0 ? (
+                <div className="text-center py-20 text-gray-400">No notifications</div>
+              ) : (
+                notifications.map(n => (
+                  <div 
+                    key={n.id} 
+                    onClick={() => handleMarkNotificationRead(n.id)}
+                    className={`p-4 rounded-2xl border transition-all ${n.is_read ? 'bg-white border-gray-100 opacity-60' : 'bg-blue-50 border-blue-100 shadow-sm'}`}
+                  >
+                    <div className="flex justify-between items-start mb-1">
+                      <p className="text-xs font-bold text-gray-900">{n.title}</p>
+                      <p className="text-[8px] text-gray-400">{new Date(n.created_at).toLocaleString()}</p>
+                    </div>
+                    <p className="text-xs text-gray-600">{n.message}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {showReports && (
+          <div className="absolute inset-0 z-50 bg-white animate-in slide-in-from-top duration-300 flex flex-col">
+            <div className="p-4 border-b flex items-center justify-between">
+              <h3 className="font-bold">Performance Analytics</h3>
+              <button onClick={() => setShowReports(false)} className="p-1 hover:bg-gray-100 rounded-full"><X size={20} /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-8">
+              {loading ? (
+                <div className="flex items-center justify-center py-20"><Loader2 className="animate-spin text-blue-600" /></div>
+              ) : reportStats ? (
+                <>
+                  {/* Daily Conversions Chart */}
+                  <div className="space-y-4">
+                    <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">7-Day Conversion Trend</h4>
+                    <div className="h-64 w-full bg-white rounded-3xl border border-gray-100 p-4 shadow-sm">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={reportStats.conversions}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+                          <XAxis 
+                            dataKey="date" 
+                            tickFormatter={(str) => new Date(str).toLocaleDateString([], { weekday: 'short' })}
+                            axisLine={false}
+                            tickLine={false}
+                            tick={{ fontSize: 10, fontWeight: 600, fill: '#9ca3af' }}
+                          />
+                          <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fontWeight: 600, fill: '#9ca3af' }} />
+                          <Tooltip 
+                            contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                            labelFormatter={(str) => new Date(str).toLocaleDateString()}
+                          />
+                          <Bar dataKey="count" fill="#2563eb" radius={[6, 6, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+
+                  {/* Lead Sources Pie */}
+                  <div className="grid grid-cols-1 gap-6">
+                    <div className="space-y-4">
+                      <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Lead Source Distribution</h4>
+                      <div className="h-64 w-full bg-white rounded-3xl border border-gray-100 p-4 shadow-sm flex items-center">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <PieChart>
+                            <Pie
+                              data={reportStats.sources}
+                              cx="50%"
+                              cy="50%"
+                              innerRadius={60}
+                              outerRadius={80}
+                              paddingAngle={5}
+                              dataKey="count"
+                              nameKey="source"
+                            >
+                              {reportStats.sources.map((entry: any, index: number) => (
+                                <Cell key={`cell-${index}`} fill={['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'][index % 5]} />
+                              ))}
+                            </Pie>
+                            <Tooltip />
+                          </PieChart>
+                        </ResponsiveContainer>
+                        <div className="w-1/3 space-y-2">
+                          {reportStats.sources.map((s: any, i: number) => (
+                            <div key={i} className="flex items-center gap-2">
+                              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'][i % 5] }} />
+                              <span className="text-[10px] font-bold text-gray-600 truncate">{s.source || 'Direct'}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Staff Performance */}
+                  <div className="space-y-4">
+                    <h4 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Top Performers</h4>
+                    <div className="space-y-3">
+                      {reportStats.performance.map((s: any, i: number) => (
+                        <div key={i} className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm flex items-center justify-between hover:border-blue-200 transition-colors">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-2xl bg-gray-50 flex items-center justify-center font-bold text-sm text-gray-700 border border-gray-100">
+                              {s.name.charAt(0)}
+                            </div>
+                            <div>
+                              <p className="text-sm font-bold text-gray-900">{s.name}</p>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[9px] text-emerald-600 font-bold uppercase tracking-widest">Top Closer</span>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <div className="text-right">
+                              <p className="text-[10px] font-bold text-gray-900">{s.closures}</p>
+                              <p className="text-[8px] text-gray-400 uppercase font-bold tracking-widest">Deals</p>
+                            </div>
+                            <div className="w-10 h-10 rounded-full border-4 border-emerald-100 flex items-center justify-center">
+                              <span className="text-[10px] font-bold text-emerald-600">{(s.closures / (reportStats.performance.reduce((a:any,b:any)=>a+(b.closures||0),0)||1) * 100).toFixed(0)}%</span>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="text-center py-20 text-gray-400">No data available</div>
+              )}
+            </div>
+          </div>
+        )}
         {view === 'dashboard' && renderDashboard()}
         {view === 'pool' && renderLeadList(true)}
         {view === 'my-leads' && renderLeadList(false)}
         {view === 'detail' && renderDetail()}
         {view === 'team' && renderTeam()}
+        {view === 'media' && <div className="h-full overflow-y-auto"><MediaLibrary /></div>}
       </main>
 
       {/* Bottom Navigation */}
@@ -1438,6 +1723,13 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           >
             <Users size={20} />
             <span className="text-[10px] font-bold uppercase tracking-widest">Leads</span>
+          </button>
+          <button 
+            onClick={() => setView('media')}
+            className={`flex flex-col items-center gap-1 transition-all ${view === 'media' ? 'text-blue-600' : 'text-gray-400'}`}
+          >
+            <Library size={20} />
+            <span className="text-[10px] font-bold uppercase tracking-widest">Assets</span>
           </button>
           {(user.role === 'manager' || user.role === 'admin') && (
             <button 

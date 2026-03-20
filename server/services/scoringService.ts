@@ -1,0 +1,21 @@
+
+import { withDb } from '../db';
+
+export const updateLeadScore = async (candidateId: string, points: number, reason: string = '') => {
+    try {
+        await withDb(async (client) => {
+            await client.query(
+                'UPDATE candidates SET lead_score = lead_score + $1 WHERE id = $2',
+                [points, candidateId]
+            );
+            if (reason) {
+                await client.query(
+                    'INSERT INTO lead_activity_log (candidate_id, action, notes) VALUES ($1, $2, $3)',
+                    [candidateId, 'score_update', `Score +${points}: ${reason}`]
+                );
+            }
+        });
+    } catch (err) {
+        console.error('Failed to update lead score:', err);
+    }
+};

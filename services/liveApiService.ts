@@ -633,5 +633,23 @@ export const liveApiService = {
 
   rejectLeadReview: async (id: string) => {
     return apiRequest(`/api/leads/${id}/reject-review`, { method: 'POST' });
+  },
+
+  // Notifications
+  getNotifications: async (): Promise<any[]> => {
+    return apiRequest<any[]>('/api/notifications');
+  },
+
+  markNotificationRead: async (id: string) => {
+    return apiRequest(`/api/notifications/${id}/read`, { method: 'POST' });
+  },
+
+  markAllNotificationsRead: async () => {
+    return apiRequest('/api/notifications/read-all', { method: 'POST' });
+  },
+
+  // Reports
+  getReportStats: async (): Promise<any> => {
+    return apiRequest<any>('/api/reports/stats');
   }
 };

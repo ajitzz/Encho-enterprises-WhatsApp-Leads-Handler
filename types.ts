@@ -200,6 +200,7 @@ export interface Candidate {
   review_status?: 'none' | 'pending' | 'approved' | 'rejected';
   closing_notes?: string;
   closing_attachments?: string[];
+  lead_score?: number;
 }
 
 export interface Driver extends Candidate {

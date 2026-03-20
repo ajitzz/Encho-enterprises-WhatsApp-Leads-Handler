@@ -2697,12 +2697,29 @@ const initDatabase = async (client) => {
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closing_notes TEXT;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closing_attachments JSONB DEFAULT '[]';`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_score INTEGER DEFAULT 0;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_response_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_staff_message_at TIMESTAMP;`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`ALTER TABLE candidate_messages ADD COLUMN IF NOT EXISTS sender_type VARCHAR(20);`);
     await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS lead_activity_log (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL, action VARCHAR(100) NOT NULL, notes TEXT, created_at TIMESTAMP DEFAULT NOW());`);
+    
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_score INTEGER DEFAULT 0;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_response_at TIMESTAMP;`);
+    
+    await client.query(`CREATE TABLE IF NOT EXISTS notifications (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
+        title VARCHAR(255) NOT NULL,
+        message TEXT NOT NULL,
+        type VARCHAR(50) DEFAULT 'info',
+        is_read BOOLEAN DEFAULT FALSE,
+        link VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW()
+    );`);
     
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
     await client.query("INSERT INTO system_settings (key, value) VALUES ('lead_distribution', '{\"auto_enabled\": false}') ON CONFLICT DO NOTHING");
@@ -3847,6 +3864,18 @@ apiRouter.post('/staff/clock-in', authMiddleware, async (req, res) => {
     try {
         await withDb(async (client) => {
             await client.query('UPDATE staff_members SET is_clocked_in = TRUE, last_clock_in_at = NOW(), last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            
+            // Notify manager
+            const staff = await client.query('SELECT name, manager_id FROM staff_members WHERE id = $1', [req.user.staffId]);
+            if (staff.rows[0]?.manager_id) {
+                await createNotification(
+                    staff.rows[0].manager_id,
+                    'Staff Clocked In',
+                    `${staff.rows[0].name} has clocked in.`,
+                    'info'
+                );
+            }
+            
             res.json({ success: true });
         });
     } catch (err) {
@@ -3858,6 +3887,18 @@ apiRouter.post('/staff/clock-out', authMiddleware, async (req, res) => {
     try {
         await withDb(async (client) => {
             await client.query('UPDATE staff_members SET is_clocked_in = FALSE, last_clock_out_at = NOW(), last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            
+            // Notify manager
+            const staff = await client.query('SELECT name, manager_id FROM staff_members WHERE id = $1', [req.user.staffId]);
+            if (staff.rows[0]?.manager_id) {
+                await createNotification(
+                    staff.rows[0].manager_id,
+                    'Staff Clocked Out',
+                    `${staff.rows[0].name} has clocked out.`,
+                    'info'
+                );
+            }
+            
             res.json({ success: true });
         });
     } catch (err) {
@@ -3988,6 +4029,23 @@ apiRouter.post('/leads/:id/submit-review', authMiddleware, async (req, res) => {
                 ['pending', notes, JSON.stringify(attachments || []), req.params.id]
             );
             await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            
+            // Notify manager
+            const leadResult = await client.query('SELECT name, assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+            const lead = leadResult.rows[0];
+            const staffResult = await client.query('SELECT manager_id, name FROM staff_members WHERE id = $1', [req.user.staffId]);
+            const staff = staffResult.rows[0];
+            
+            if (staff.manager_id) {
+                await createNotification(
+                    staff.manager_id,
+                    'Review Required',
+                    `${staff.name} submitted ${lead.name} for closing review.`,
+                    'warning',
+                    `/leads/${req.params.id}`
+                );
+            }
+
             await client.query(
                 'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)',
                 [req.params.id, req.user.staffId, 'submitted_for_review', notes]
@@ -4020,6 +4078,22 @@ apiRouter.post('/leads/:id/approve-review', authMiddleware, async (req, res) => 
                 ['approved', req.params.id]
             );
             await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            
+            // Boost score for successful closing
+            await updateLeadScore(req.params.id, 50, 'Closing approved');
+
+            // Notify assigned staff member
+            const lead = await client.query('SELECT name, assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+            if (lead.rows[0]?.assigned_to) {
+                await createNotification(
+                    lead.rows[0].assigned_to,
+                    'Closing Approved',
+                    `Your closing for ${lead.rows[0].name} has been approved!`,
+                    'success',
+                    `/leads/${req.params.id}`
+                );
+            }
+
             await client.query(
                 'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)',
                 [req.params.id, req.user.staffId, 'approved_closing', notes || 'Closing approved']
@@ -4052,6 +4126,19 @@ apiRouter.post('/leads/:id/reject-review', authMiddleware, async (req, res) => {
                 ['rejected', req.params.id]
             );
             await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            
+            // Notify assigned staff member
+            const lead = await client.query('SELECT name, assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+            if (lead.rows[0]?.assigned_to) {
+                await createNotification(
+                    lead.rows[0].assigned_to,
+                    'Closing Rejected',
+                    `Your closing for ${lead.rows[0].name} was rejected. Reason: ${notes || 'No reason provided'}`,
+                    'error',
+                    `/leads/${req.params.id}`
+                );
+            }
+
             await client.query(
                 'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)',
                 [req.params.id, req.user.staffId, 'rejected_closing', notes]
@@ -4131,6 +4218,10 @@ apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
             }
             await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW() WHERE id = $3', [req.user.staffId, 'claimed', req.params.id]);
             await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            
+            // Boost score for claiming
+            await updateLeadScore(req.params.id, 5, 'Lead claimed by staff');
+
             await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, 'claimed', 'Lead claimed from pool']);
             res.json({ success: true });
         });
@@ -4144,6 +4235,17 @@ apiRouter.post('/leads/:id/assign', authMiddleware, async (req, res) => {
         await withDb(async (client) => {
             await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW() WHERE id = $3', [staffId, 'claimed', req.params.id]);
             await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            
+            // Notify staff member
+            const lead = await client.query('SELECT name FROM candidates WHERE id = $1', [req.params.id]);
+            await createNotification(
+                staffId,
+                'New Lead Assigned',
+                `You have been assigned a new lead: ${lead.rows[0].name}`,
+                'info',
+                `/leads/${req.params.id}`
+            );
+
             await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, 'reassigned', `Lead reassigned to staff ID: ${staffId}`]);
             res.json({ success: true });
         });
@@ -4182,6 +4284,133 @@ apiRouter.get('/leads/:id/activity', authMiddleware, async (req, res) => {
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// --- Notifications API ---
+apiRouter.get('/notifications', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const result = await client.query(
+                'SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50',
+                [req.user.staffId]
+            );
+            res.json(result.rows);
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+apiRouter.post('/notifications/:id/read', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query(
+                'UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2',
+                [req.params.id, req.user.staffId]
+            );
+            res.json({ success: true });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+apiRouter.post('/notifications/read-all', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query(
+                'UPDATE notifications SET is_read = TRUE WHERE user_id = $1',
+                [req.user.staffId]
+            );
+            res.json({ success: true });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Helper to create notifications
+const createNotification = async (userId, title, message, type = 'info', link = null) => {
+    try {
+        await withDb(async (client) => {
+            await client.query(
+                'INSERT INTO notifications (user_id, title, message, type, link) VALUES ($1, $2, $3, $4, $5)',
+                [userId, title, message, type, link]
+            );
+            updateEmitter.emit('notification', { userId });
+        });
+    } catch (err) {
+        console.error('Failed to create notification:', err);
+    }
+};
+
+// --- Reports API ---
+apiRouter.get('/reports/stats', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+        return res.status(403).json({ error: 'Access denied' });
+    }
+    try {
+        await withDb(async (client) => {
+            // Daily conversions (last 7 days)
+            const conversions = await client.query(`
+                SELECT 
+                    DATE_TRUNC('day', created_at) as date,
+                    COUNT(*) as count
+                FROM lead_activity_log
+                WHERE action = 'approved_closing'
+                AND created_at > NOW() - INTERVAL '7 days'
+                GROUP BY 1
+                ORDER BY 1 ASC
+            `);
+
+            // Lead sources
+            const sources = await client.query(`
+                SELECT source, COUNT(*) as count
+                FROM candidates
+                GROUP BY 1
+            `);
+
+            // Staff performance
+            const performance = await client.query(`
+                SELECT 
+                    s.name,
+                    COUNT(l.id) as closures
+                FROM staff_members s
+                LEFT JOIN lead_activity_log l ON s.id = l.staff_id AND l.action = 'approved_closing'
+                GROUP BY 1
+                ORDER BY 2 DESC
+            `);
+
+            res.json({
+                conversions: conversions.rows,
+                sources: sources.rows,
+                performance: performance.rows
+            });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- Lead Scoring Helper ---
+const updateLeadScore = async (candidateId, points, reason = '') => {
+    try {
+        await withDb(async (client) => {
+            await client.query(
+                'UPDATE candidates SET lead_score = lead_score + $1 WHERE id = $2',
+                [points, candidateId]
+            );
+            if (reason) {
+                await client.query(
+                    'INSERT INTO lead_activity_log (candidate_id, action, notes) VALUES ($1, $2, $3)',
+                    [candidateId, 'score_update', `Score +${points}: ${reason}`]
+                );
+            }
+            notifyUpdates(candidateId);
+        });
+    } catch (err) {
+        console.error('Failed to update lead score:', err);
+    }
+};
 
 apiRouter.get('/media', async (req, res) => {
     const requestedPath = typeof req.query.path === 'string' ? req.query.path : '/';
@@ -4704,7 +4933,7 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                 }
 
                 perf.markStart('lead_upsert');
-                let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
+                let c = await client.query('SELECT id, name, phone_number, assigned_to, is_human_mode, last_staff_message_at FROM candidates WHERE phone_number = $1', [from]);
                 let candidate;
                 if (c.rows.length === 0) {
                     const id = crypto.randomUUID();
@@ -4740,6 +4969,39 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                      VALUES ($1, $2, 'in', $3, $4, 'received', $5, 'driver', NOW())`,
                     [crypto.randomUUID(), candidate.id, text, messageType, msg.id]
                 );
+
+                // Update lead score for response
+                let responsePoints = 5;
+                let responseReason = 'Lead responded';
+                
+                if (candidate.last_staff_message_at) {
+                    const lastStaffMsg = new Date(candidate.last_staff_message_at).getTime();
+                    const now = Date.now();
+                    const diffMinutes = (now - lastStaffMsg) / (1000 * 60);
+                    
+                    if (diffMinutes < 5) {
+                        responsePoints += 10;
+                        responseReason = 'Lead responded within 5 minutes';
+                    } else if (diffMinutes < 30) {
+                        responsePoints += 5;
+                        responseReason = 'Lead responded within 30 minutes';
+                    }
+                }
+                
+                await client.query('UPDATE candidates SET last_response_at = NOW() WHERE id = $1', [candidate.id]);
+                await updateLeadScore(candidate.id, responsePoints, responseReason);
+
+                // Notify assigned staff member
+                if (candidate.assigned_to) {
+                    await createNotification(
+                        candidate.assigned_to,
+                        'New Message',
+                        `Lead ${candidate.name} sent a message: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
+                        'message',
+                        `/leads/${candidate.id}`
+                    );
+                }
+
                 notifyUpdates(candidate.id);
                 perf.markEnd('inbound_message_insert', { candidateId: candidate.id, messageType });
 
@@ -5280,6 +5542,13 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
                  VALUES ($1, $2, 'out', $3, $4, $5, $6, 'staff', NOW())`,
                 [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text', sendStatus, sendResult?.providerMessageId || null]
             );
+            
+            // Update lead score for staff engagement
+            if (sendStatus === 'sent') {
+                await client.query('UPDATE candidates SET last_staff_message_at = NOW() WHERE id = $1', [req.params.id]);
+                await updateLeadScore(req.params.id, 2, 'Staff sent a message');
+            }
+            
             notifyUpdates(req.params.id);
             scheduleDriverExcelSync();
             scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'upsert' });
