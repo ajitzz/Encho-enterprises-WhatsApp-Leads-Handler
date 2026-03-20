@@ -6275,9 +6275,15 @@ apiRouter.get('/system/ping', (req, res) => {
     res.json({ status: 'ok', timestamp: Date.now(), environment: process.env.NODE_ENV || 'development' });
 });
 
+// --- START SERVER ---
 const startServer = async ({ port = 3000 } = {}) => {
     await setupFrontend(app);
-    startLeadAutoDistributor();
+    
+    // Only start background intervals if NOT in a serverless environment
+    if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+        startLeadAutoDistributor();
+    }
+
     return app.listen(port, () => {
         console.log(`Server running on ${port}`);
         logLeadIngestionRuntimePosture();
@@ -6329,6 +6335,7 @@ if (require.main === module) {
     });
 }
 
-module.exports = { app, startServer };
-export { app, startServer };
+// --- EXPORTS ---
+module.exports = app;
 export default app;
+export { app, startServer };

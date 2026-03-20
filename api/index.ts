@@ -1,7 +1,7 @@
 const server = require('../server');
-let app = server.default || server.app;
+let app = server.default || server.app || server;
 
-if (!app && typeof server === 'function') {
+if (typeof app !== 'function' && server && typeof server === 'function') {
   app = server;
 }
 
