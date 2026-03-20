@@ -6286,4 +6286,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { app, startServer };
+export { app, startServer };
