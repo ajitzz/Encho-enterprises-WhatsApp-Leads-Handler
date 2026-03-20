@@ -6289,7 +6289,7 @@ const startServer = async ({ port = 3000 } = {}) => {
         logLeadIngestionRuntimePosture();
 
         // Self-ping to keep instance warm in Cloud Run/Vercel
-        if (process.env.NODE_ENV === 'production') {
+        if (process.env.NODE_ENV === 'production' && !process.env.VERCEL) {
             const healthUrl = `http://localhost:${port}/api/health`;
             console.log(`[Self-Ping] Starting keep-alive to ${healthUrl}`);
             setInterval(async () => {
@@ -6336,6 +6336,5 @@ if (require.main === module) {
 }
 
 // --- EXPORTS ---
-module.exports = app;
-export default app;
 export { app, startServer };
+export default app;
