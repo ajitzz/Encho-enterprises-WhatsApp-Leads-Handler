@@ -1,7 +1,7 @@
 const serverModule = require('../server');
 
 const resolveExpressApp = () => {
-  const moduleCandidate: any = serverModule as any;
+  const moduleCandidate = serverModule;
   const appCandidate =
     moduleCandidate?.app ??
     moduleCandidate?.default?.app ??
@@ -17,4 +17,4 @@ const resolveExpressApp = () => {
   return appCandidate;
 };
 
-module.exports = (req: any, res: any) => resolveExpressApp()(req, res);
+module.exports = (req, res) => resolveExpressApp()(req, res);
