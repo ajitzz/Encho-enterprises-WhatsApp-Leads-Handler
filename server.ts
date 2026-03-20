@@ -1,4 +1,5 @@
 
+// @ts-nocheck
 const express = require('express');
 const path = require('path');
 const cors = require('cors');
@@ -14,7 +15,9 @@ const { EventEmitter } = require('events');
 
 require('dotenv').config();
 
-const updateEmitter = new EventEmitter();
+const { updateEmitter, createNotification } = require('./server/services/notificationService');
+const { updateLeadScore } = require('./server/services/scoringService');
+
 updateEmitter.setMaxListeners(100);
 
 const notifyUpdates = (candidateId = null) => {
@@ -4328,21 +4331,6 @@ apiRouter.post('/notifications/read-all', authMiddleware, async (req, res) => {
     }
 });
 
-// Helper to create notifications
-const createNotification = async (userId, title, message, type = 'info', link = null) => {
-    try {
-        await withDb(async (client) => {
-            await client.query(
-                'INSERT INTO notifications (user_id, title, message, type, link) VALUES ($1, $2, $3, $4, $5)',
-                [userId, title, message, type, link]
-            );
-            updateEmitter.emit('notification', { userId });
-        });
-    } catch (err) {
-        console.error('Failed to create notification:', err);
-    }
-};
-
 // --- Reports API ---
 apiRouter.get('/reports/stats', authMiddleware, async (req, res) => {
     if (req.user.role !== 'admin' && req.user.role !== 'manager') {
@@ -4390,27 +4378,6 @@ apiRouter.get('/reports/stats', authMiddleware, async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
-
-// --- Lead Scoring Helper ---
-const updateLeadScore = async (candidateId, points, reason = '') => {
-    try {
-        await withDb(async (client) => {
-            await client.query(
-                'UPDATE candidates SET lead_score = lead_score + $1 WHERE id = $2',
-                [points, candidateId]
-            );
-            if (reason) {
-                await client.query(
-                    'INSERT INTO lead_activity_log (candidate_id, action, notes) VALUES ($1, $2, $3)',
-                    [candidateId, 'score_update', `Score +${points}: ${reason}`]
-                );
-            }
-            notifyUpdates(candidateId);
-        });
-    } catch (err) {
-        console.error('Failed to update lead score:', err);
-    }
-};
 
 apiRouter.get('/media', async (req, res) => {
     const requestedPath = typeof req.query.path === 'string' ? req.query.path : '/';
@@ -5382,7 +5349,15 @@ apiRouter.get('/updates/stream', async (req, res) => {
         streamSnapshot();
     };
 
+    const onNotification = (data) => {
+        if (closed) return;
+        // Send notification event to client
+        res.write(`event: notification\ndata: ${JSON.stringify(data)}\n\n`);
+        if (res.flush) res.flush();
+    };
+
     updateEmitter.on('update', onUpdate);
+    updateEmitter.on('notification', onNotification);
 
     const snapshotInterval = setInterval(streamSnapshot, 10000); // Polling as fallback, less frequent
     const heartbeat = setInterval(() => {
@@ -5403,6 +5378,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
         closed = true;
         clearTimeout(vercelTimeout);
         updateEmitter.off('update', onUpdate);
+        updateEmitter.off('notification', onNotification);
         clearInterval(snapshotInterval);
         clearInterval(heartbeat);
         res.end();

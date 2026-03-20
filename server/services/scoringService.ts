@@ -1,5 +1,6 @@
 
 import { withDb } from '../db';
+import { updateEmitter } from './notificationService';
 
 export const updateLeadScore = async (candidateId: string, points: number, reason: string = '') => {
     try {
@@ -14,6 +15,7 @@ export const updateLeadScore = async (candidateId: string, points: number, reaso
                     [candidateId, 'score_update', `Score +${points}: ${reason}`]
                 );
             }
+            updateEmitter.emit('update', { candidateId });
         });
     } catch (err) {
         console.error('Failed to update lead score:', err);
