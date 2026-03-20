@@ -528,10 +528,17 @@ export const liveApiService = {
     return apiRequest<any[]>('/api/staff');
   },
 
-  addStaff: async (staff: { email: string; name: string; role: 'admin' | 'staff' }) => {
+  addStaff: async (staff: { email: string; name: string; role: 'admin' | 'manager' | 'staff'; manager_id?: string | null }) => {
     return apiRequest('/api/staff', {
       method: 'POST',
       body: JSON.stringify(staff)
+    });
+  },
+
+  updateStaff: async (id: string, updates: { name?: string; role?: 'admin' | 'manager' | 'staff'; manager_id?: string | null; is_active_for_auto_dist?: boolean }) => {
+    return apiRequest(`/api/staff/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates)
     });
   },
 
@@ -557,6 +564,31 @@ export const liveApiService = {
     });
   },
 
+  getClockStatus: async () => {
+    return apiRequest<any>('/api/staff/clock-status');
+  },
+
+  clockIn: async () => {
+    return apiRequest<any>('/api/staff/clock-in', { method: 'POST' });
+  },
+
+  clockOut: async () => {
+    return apiRequest<any>('/api/staff/clock-out', { method: 'POST' });
+  },
+
+  // Team Management
+  getTeamStaff: async (): Promise<any[]> => {
+    return apiRequest<any[]>('/api/team/staff');
+  },
+
+  getTeamLeads: async (): Promise<any[]> => {
+    return apiRequest<any[]>('/api/team/leads');
+  },
+
+  getTeamActivity: async (): Promise<any[]> => {
+    return apiRequest<any[]>('/api/team/activity');
+  },
+
   // Lead Management (Staff Portal)
   getLeadPool: async (): Promise<Driver[]> => {
     return apiRequest<Driver[]>('/api/leads/pool');
@@ -570,6 +602,13 @@ export const liveApiService = {
     return apiRequest(`/api/leads/${id}/claim`, { method: 'POST' });
   },
 
+  updateLeadAssignment: async (id: string, staffId: string) => {
+    return apiRequest(`/api/leads/${id}/assign`, {
+      method: 'POST',
+      body: JSON.stringify({ staffId })
+    });
+  },
+
   logLeadAction: async (id: string, data: { action: string; notes: string; status?: string }) => {
     return apiRequest(`/api/leads/${id}/action`, {
       method: 'POST',
@@ -579,5 +618,20 @@ export const liveApiService = {
 
   getLeadActivity: async (id: string): Promise<any[]> => {
     return apiRequest<any[]>(`/api/leads/${id}/activity`);
+  },
+
+  submitLeadReview: async (id: string, data: { notes: string; attachments: any[] }) => {
+    return apiRequest(`/api/leads/${id}/submit-review`, {
+      method: 'POST',
+      body: JSON.stringify(data)
+    });
+  },
+
+  approveLeadReview: async (id: string) => {
+    return apiRequest(`/api/leads/${id}/approve-review`, { method: 'POST' });
+  },
+
+  rejectLeadReview: async (id: string) => {
+    return apiRequest(`/api/leads/${id}/reject-review`, { method: 'POST' });
   }
 };

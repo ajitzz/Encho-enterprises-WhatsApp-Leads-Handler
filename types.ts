@@ -197,6 +197,9 @@ export interface Candidate {
   messages?: Message[];
   currentBotStepId?: string; 
   isHumanMode?: boolean;
+  review_status?: 'none' | 'pending' | 'approved' | 'rejected';
+  closing_notes?: string;
+  closing_attachments?: string[];
 }
 
 export interface Driver extends Candidate {

@@ -2654,20 +2654,48 @@ const initDatabase = async (client) => {
         email VARCHAR(255) UNIQUE NOT NULL, 
         name VARCHAR(255), 
         role VARCHAR(50) DEFAULT 'staff', 
+        manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
         is_active_for_auto_dist BOOLEAN DEFAULT FALSE,
         last_assigned_at TIMESTAMP,
+        last_activity_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT NOW()
     );`);
     
     // Migration for existing table
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS is_active_for_auto_dist BOOLEAN DEFAULT FALSE;`);
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_assigned_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS is_clocked_in BOOLEAN DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_clock_in_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_clock_out_at TIMESTAMP;`);
     
-    await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, lead_status VARCHAR(50) DEFAULT 'new', last_action_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS candidates (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        phone_number VARCHAR(50) UNIQUE, 
+        name VARCHAR(255), 
+        stage VARCHAR(50), 
+        last_message TEXT, 
+        last_message_at BIGINT, 
+        source VARCHAR(50), 
+        is_human_mode BOOLEAN DEFAULT FALSE, 
+        current_bot_step_id VARCHAR(100), 
+        variables JSONB DEFAULT '{}', 
+        assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, 
+        lead_status VARCHAR(50) DEFAULT 'new', 
+        review_status VARCHAR(50) DEFAULT 'none',
+        closing_notes TEXT,
+        closing_attachments JSONB DEFAULT '[]',
+        last_action_at TIMESTAMP, 
+        created_at TIMESTAMP DEFAULT NOW()
+    );`);
     
     // Ensure candidates has the new columns if it already existed
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_status VARCHAR(50) DEFAULT 'new';`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'none';`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closing_notes TEXT;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closing_attachments JSONB DEFAULT '[]';`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMP;`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`ALTER TABLE candidate_messages ADD COLUMN IF NOT EXISTS sender_type VARCHAR(20);`);
@@ -3752,26 +3780,42 @@ const authMiddleware = async (req, res, next) => {
         const email = payload.email;
 
         await withDb(async (client) => {
-            const staffRes = await client.query('SELECT id, role FROM staff_members WHERE email = $1', [email]);
+            const staffRes = await client.query('SELECT id, role, manager_id FROM staff_members WHERE email = $1', [email]);
             if (staffRes.rows.length === 0) {
                 // Check if it's the super admin
                 if (email === 'ajithsabzz@gmail.com') {
                     const insertRes = await client.query(
-                        'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id, role',
+                        'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id, role, manager_id',
                         [email, payload.name, 'admin']
                     );
-                    req.user = { ...payload, staffId: insertRes.rows[0].id, role: insertRes.rows[0].role };
+                    req.user = { ...payload, staffId: insertRes.rows[0].id, role: insertRes.rows[0].role, managerId: insertRes.rows[0].manager_id };
                 } else {
                     throw new Error('Access denied. Not a staff member.');
                 }
             } else {
-                req.user = { ...payload, staffId: staffRes.rows[0].id, role: staffRes.rows[0].role };
+                req.user = { ...payload, staffId: staffRes.rows[0].id, role: staffRes.rows[0].role, managerId: staffRes.rows[0].manager_id };
             }
+
+            // Track activity
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
         });
         next();
     } catch (e) {
         res.status(401).json({ error: e.message });
     }
+};
+
+const updateActivityMiddleware = async (req, res, next) => {
+    if (req.user?.staffId) {
+        try {
+            await withDb(async (client) => {
+                await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            });
+        } catch (e) {
+            console.error('Failed to update last_activity_at:', e);
+        }
+    }
+    next();
 };
 
 // --- STAFF MANAGEMENT ---
@@ -3788,6 +3832,39 @@ apiRouter.get('/auth/me', authMiddleware, (req, res) => {
     });
 });
 
+apiRouter.get('/staff/clock-status', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query('SELECT is_clocked_in, last_clock_in_at, last_clock_out_at FROM staff_members WHERE id = $1', [req.user.staffId]);
+            res.json(r.rows[0] || { is_clocked_in: false });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+apiRouter.post('/staff/clock-in', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query('UPDATE staff_members SET is_clocked_in = TRUE, last_clock_in_at = NOW(), last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            res.json({ success: true });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+apiRouter.post('/staff/clock-out', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query('UPDATE staff_members SET is_clocked_in = FALSE, last_clock_out_at = NOW(), last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            res.json({ success: true });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 apiRouter.get('/staff', authMiddleware, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
     try {
@@ -3800,10 +3877,185 @@ apiRouter.get('/staff', authMiddleware, async (req, res) => {
 
 apiRouter.post('/staff', authMiddleware, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-    const { email, name, role } = req.body;
+    const { email, name, role, manager_id } = req.body;
     try {
         await withDb(async (client) => {
-            await client.query('INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) ON CONFLICT (email) DO UPDATE SET name = $2, role = $3', [email, name, role || 'staff']);
+            await client.query('INSERT INTO staff_members (email, name, role, manager_id) VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO UPDATE SET name = $2, role = $3, manager_id = $4', [email, name, role || 'staff', manager_id || null]);
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.patch('/staff/:id', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    const { name, role, manager_id, is_active_for_auto_dist } = req.body;
+    try {
+        await withDb(async (client) => {
+            const updates = [];
+            const values = [];
+            if (name !== undefined) { updates.push(`name = $${values.length + 1}`); values.push(name); }
+            if (role !== undefined) { updates.push(`role = $${values.length + 1}`); values.push(role); }
+            if (manager_id !== undefined) { updates.push(`manager_id = $${values.length + 1}`); values.push(manager_id); }
+            if (is_active_for_auto_dist !== undefined) { updates.push(`is_active_for_auto_dist = $${values.length + 1}`); values.push(is_active_for_auto_dist); }
+            
+            if (updates.length > 0) {
+                await client.query(`UPDATE staff_members SET ${updates.join(', ')} WHERE id = $${values.length + 1}`, [...values, req.params.id]);
+            }
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- TEAM MANAGEMENT ---
+apiRouter.get('/team/staff', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'manager' && req.user.role !== 'admin') return res.status(403).json({ error: 'Manager/Admin only' });
+    try {
+        await withDb(async (client) => {
+            let query = `
+                SELECT 
+                    s.*,
+                    (SELECT COUNT(*) FROM lead_activity_log WHERE staff_id = s.id AND created_at >= CURRENT_DATE AND action IN ('claimed', 'auto_assigned')) as leads_claimed_today,
+                    (SELECT COUNT(*) FROM lead_activity_log WHERE staff_id = s.id AND created_at >= CURRENT_DATE AND action IN ('interaction', 'Lead Action')) as interactions_today,
+                    (SELECT COUNT(*) FROM lead_activity_log WHERE staff_id = s.id AND created_at >= CURRENT_DATE AND action IN ('submitted_for_review', 'Lead Closed')) as closings_today
+                FROM staff_members s
+            `;
+            let values = [];
+            if (req.user.role === 'manager') {
+                query += ' WHERE s.manager_id = $1 OR s.id = $1';
+                values = [req.user.staffId];
+            }
+            query += ' ORDER BY s.name ASC';
+            const r = await client.query(query, values);
+            res.json(r.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/team/leads', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'manager' && req.user.role !== 'admin') return res.status(403).json({ error: 'Manager/Admin only' });
+    try {
+        await withDb(async (client) => {
+            let query = `
+                SELECT c.*, s.name as staff_name 
+                FROM candidates c 
+                LEFT JOIN staff_members s ON c.assigned_to = s.id
+            `;
+            let values = [];
+            if (req.user.role === 'manager') {
+                query += ' WHERE s.manager_id = $1 OR c.assigned_to = $1';
+                values = [req.user.staffId];
+            }
+            query += ' ORDER BY c.last_action_at DESC NULLS LAST';
+            const r = await client.query(query, values);
+            res.json(r.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/team/activity', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'manager' && req.user.role !== 'admin') return res.status(403).json({ error: 'Manager/Admin only' });
+    try {
+        await withDb(async (client) => {
+            let query = `
+                SELECT l.*, s.name as staff_name, c.name as candidate_name 
+                FROM lead_activity_log l 
+                LEFT JOIN staff_members s ON l.staff_id = s.id 
+                LEFT JOIN candidates c ON l.candidate_id = c.id
+            `;
+            let values = [];
+            if (req.user.role === 'manager') {
+                query += ' WHERE s.manager_id = $1 OR l.staff_id = $1';
+                values = [req.user.staffId];
+            }
+            query += ' ORDER BY l.created_at DESC LIMIT 100';
+            const r = await client.query(query, values);
+            res.json(r.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- CLOSING REVIEW ---
+apiRouter.post('/leads/:id/submit-review', authMiddleware, async (req, res) => {
+    const { notes, attachments } = req.body;
+    try {
+        await withDb(async (client) => {
+            const check = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+            if (check.rows[0]?.assigned_to !== req.user.staffId && req.user.role !== 'admin') {
+                return res.status(403).json({ error: 'Not assigned to you' });
+            }
+            await client.query(
+                'UPDATE candidates SET review_status = $1, closing_notes = $2, closing_attachments = $3, last_action_at = NOW() WHERE id = $4',
+                ['pending', notes, JSON.stringify(attachments || []), req.params.id]
+            );
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            await client.query(
+                'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)',
+                [req.params.id, req.user.staffId, 'submitted_for_review', notes]
+            );
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/leads/:id/approve-review', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'manager' && req.user.role !== 'admin') return res.status(403).json({ error: 'Manager/Admin only' });
+    const { notes } = req.body;
+    try {
+        await withDb(async (client) => {
+            // Check if manager is allowed to approve (must be manager of the assigned staff)
+            if (req.user.role === 'manager') {
+                const check = await client.query(`
+                    SELECT s.manager_id 
+                    FROM candidates c 
+                    JOIN staff_members s ON c.assigned_to = s.id 
+                    WHERE c.id = $1
+                `, [req.params.id]);
+                if (check.rows[0]?.manager_id !== req.user.staffId && req.user.staffId !== check.rows[0]?.assigned_to) {
+                    return res.status(403).json({ error: 'Not your team member' });
+                }
+            }
+
+            await client.query(
+                "UPDATE candidates SET review_status = $1, lead_status = 'closed', last_action_at = NOW() WHERE id = $2",
+                ['approved', req.params.id]
+            );
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            await client.query(
+                'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)',
+                [req.params.id, req.user.staffId, 'approved_closing', notes || 'Closing approved']
+            );
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/leads/:id/reject-review', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'manager' && req.user.role !== 'admin') return res.status(403).json({ error: 'Manager/Admin only' });
+    const { notes } = req.body;
+    try {
+        await withDb(async (client) => {
+            // Check if manager is allowed to reject
+            if (req.user.role === 'manager') {
+                const check = await client.query(`
+                    SELECT s.manager_id 
+                    FROM candidates c 
+                    JOIN staff_members s ON c.assigned_to = s.id 
+                    WHERE c.id = $1
+                `, [req.params.id]);
+                if (check.rows[0]?.manager_id !== req.user.staffId && req.user.staffId !== check.rows[0]?.assigned_to) {
+                    return res.status(403).json({ error: 'Not your team member' });
+                }
+            }
+
+            await client.query(
+                "UPDATE candidates SET review_status = $1, last_action_at = NOW() WHERE id = $2",
+                ['rejected', req.params.id]
+            );
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            await client.query(
+                'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)',
+                [req.params.id, req.user.staffId, 'rejected_closing', notes]
+            );
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3878,7 +4130,21 @@ apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
                 return res.status(400).json({ error: 'Lead already claimed' });
             }
             await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW() WHERE id = $3', [req.user.staffId, 'claimed', req.params.id]);
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
             await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, 'claimed', 'Lead claimed from pool']);
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/leads/:id/assign', authMiddleware, async (req, res) => {
+    const { staffId } = req.body;
+    if (req.user.role !== 'admin' && req.user.role !== 'manager') return res.status(403).json({ error: 'Admin/Manager only' });
+    try {
+        await withDb(async (client) => {
+            await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW() WHERE id = $3', [staffId, 'claimed', req.params.id]);
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, 'reassigned', `Lead reassigned to staff ID: ${staffId}`]);
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3901,6 +4167,7 @@ apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
             updates.push(`last_action_at = NOW()`);
             
             await client.query(`UPDATE candidates SET ${updates.join(', ')} WHERE id = $${values.length + 1}`, [...values, req.params.id]);
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
             await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, action, notes]);
             res.json({ success: true });
         });

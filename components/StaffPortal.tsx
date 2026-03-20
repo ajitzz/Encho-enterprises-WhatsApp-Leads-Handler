@@ -81,12 +81,12 @@ interface LeadActivity {
 }
 
 export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ user, onLogout }) => {
-  const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail'>('dashboard');
+  const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail' | 'team'>('dashboard');
   const [allLeads, setAllLeads] = useState<Driver[]>([]);
   const [selectedLead, setSelectedLead] = useState<Driver | null>(null);
   const [activities, setActivities] = useState<LeadActivity[]>([]);
   const [leadMessages, setLeadMessages] = useState<Message[]>([]);
-  const [detailTab, setDetailTab] = useState<'chat' | 'activity'>('chat');
+  const [detailTab, setDetailTab] = useState<'chat' | 'activity' | 'review'>('chat');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -98,6 +98,16 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [selectedMedia, setSelectedMedia] = useState<{ type: 'image' | 'video' | 'document' | 'audio'; file: File; preview: string } | null>(null);
   const [isHumanModeLoading, setIsHumanModeLoading] = useState(false);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+
+  const [teamStaff, setTeamStaff] = useState<any[]>([]);
+  const [teamLeads, setTeamLeads] = useState<any[]>([]);
+  const [teamActivity, setTeamActivity] = useState<any[]>([]);
+  const [closingNotes, setClosingNotes] = useState('');
+  const [closingFiles, setClosingFiles] = useState<File[]>([]);
+  const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+  const [clockStatus, setClockStatus] = useState<{ is_clocked_in: boolean; last_clock_in_at?: string; last_clock_out_at?: string }>({ is_clocked_in: false });
+  const [selectedStaffMember, setSelectedStaffMember] = useState<any | null>(null);
+  const [staffLeads, setStaffLeads] = useState<any[]>([]);
 
   const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
@@ -204,6 +214,67 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     }
   };
 
+  useEffect(() => {
+    if (view === 'team' && (user.role === 'manager' || user.role === 'admin')) {
+      fetchTeamData();
+    }
+  }, [view, user.role]);
+
+  useEffect(() => {
+    fetchClockStatus();
+  }, []);
+
+  const fetchClockStatus = async () => {
+    try {
+      const status = await liveApiService.getClockStatus();
+      setClockStatus(status);
+    } catch (err) {
+      console.error('Failed to fetch clock status', err);
+    }
+  };
+
+  const handleClockIn = async () => {
+    try {
+      setLoading(true);
+      await liveApiService.clockIn();
+      await fetchClockStatus();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleClockOut = async () => {
+    try {
+      setLoading(true);
+      await liveApiService.clockOut();
+      await fetchClockStatus();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchTeamData = async () => {
+    try {
+      setLoading(true);
+      const [staff, leads, activity] = await Promise.all([
+        liveApiService.getTeamStaff(),
+        liveApiService.getTeamLeads(),
+        liveApiService.getTeamActivity()
+      ]);
+      setTeamStaff(staff);
+      setTeamLeads(leads);
+      setTeamActivity(activity);
+    } catch (err: any) {
+      setError(err.message || 'Failed to fetch team data');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const myLeads = React.useMemo(() => 
     allLeads.filter(l => (l as any).assigned_to === user.staffId),
     [allLeads, user.staffId]
@@ -267,6 +338,30 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     }
   };
 
+  const handleViewStaffLeads = (staff: any) => {
+    setSelectedStaffMember(staff);
+    const leads = teamLeads.filter(l => l.assigned_to === staff.id);
+    setStaffLeads(leads);
+  };
+
+  const handleTakeover = async () => {
+    if (!selectedLead) return;
+    try {
+      setLoading(true);
+      await liveApiService.updateLeadAssignment(selectedLead.id, user.staffId!);
+      const updatedLead = { ...selectedLead, assigned_to: user.staffId };
+      setSelectedLead(updatedLead);
+      // Refresh leads list
+      if (view === 'team') {
+        await fetchTeamData();
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleLogAction = async (action: string) => {
     if (!selectedLead) return;
     try {
@@ -291,6 +386,303 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     }
   };
 
+  const handleSubmitReview = async () => {
+    if (!selectedLead || !closingNotes.trim()) return;
+    setIsSubmittingReview(true);
+    try {
+      const attachmentUrls: string[] = [];
+      for (const file of closingFiles) {
+        const upload = await liveApiService.uploadMedia(file, `reviews/${selectedLead.id}`);
+        attachmentUrls.push(upload.url);
+      }
+      
+      await liveApiService.submitLeadReview(selectedLead.id, {
+        notes: closingNotes,
+        attachments: attachmentUrls
+      });
+      
+      const updatedLeads = await liveApiService.getMyLeads();
+      setAllLeads(updatedLeads);
+      const updatedLead = updatedLeads.find(l => l.id === selectedLead.id);
+      if (updatedLead) setSelectedLead(updatedLead);
+      
+      setClosingNotes('');
+      setClosingFiles([]);
+      setDetailTab('activity');
+    } catch (err: any) {
+      setError(err.message || 'Failed to submit review');
+    } finally {
+      setIsSubmittingReview(false);
+    }
+  };
+
+  const handleApproveReview = async () => {
+    if (!selectedLead) return;
+    setLoading(true);
+    try {
+      await liveApiService.approveLeadReview(selectedLead.id);
+      const updatedLeads = await liveApiService.getMyLeads();
+      setAllLeads(updatedLeads);
+      const updatedLead = updatedLeads.find(l => l.id === selectedLead.id);
+      if (updatedLead) setSelectedLead(updatedLead);
+    } catch (err: any) {
+      setError(err.message || 'Failed to approve review');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRejectReview = async () => {
+    if (!selectedLead) return;
+    setLoading(true);
+    try {
+      await liveApiService.rejectLeadReview(selectedLead.id);
+      const updatedLeads = await liveApiService.getMyLeads();
+      setAllLeads(updatedLeads);
+      const updatedLead = updatedLeads.find(l => l.id === selectedLead.id);
+      if (updatedLead) setSelectedLead(updatedLead);
+    } catch (err: any) {
+      setError(err.message || 'Failed to reject review');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const renderTeam = () => {
+    if (selectedStaffMember) {
+      return (
+        <div className="flex flex-col h-full animate-in slide-in-from-right duration-300">
+          <div className="p-4 bg-white border-b border-gray-100 sticky top-0 z-10">
+            <div className="flex items-center gap-3 mb-4">
+              <button onClick={() => setSelectedStaffMember(null)} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
+                <ArrowLeft size={20} />
+              </button>
+              <div>
+                <h2 className="text-lg font-bold">{selectedStaffMember.name}'s Leads</h2>
+                <p className="text-[10px] text-gray-400 uppercase font-bold tracking-widest">Team Member Monitoring</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {staffLeads.length === 0 ? (
+              <div className="text-center py-20">
+                <div className="bg-gray-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <Users size={32} className="text-gray-300" />
+                </div>
+                <p className="text-gray-500 font-medium">No leads assigned to this staff member</p>
+              </div>
+            ) : (
+              staffLeads.map(lead => (
+                <div 
+                  key={lead.id} 
+                  onClick={() => handleOpenDetail(lead)}
+                  className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm active:scale-[0.98] transition-all"
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold text-lg">
+                        {lead.name.charAt(0)}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h4 className="font-bold text-gray-900">{lead.name}</h4>
+                          {((lead as any).lead_score || 0) > 0 && (
+                            <div className="flex items-center gap-1 bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-lg text-[10px] font-bold">
+                              <Zap size={10} fill="currentColor" />
+                              {(lead as any).lead_score}
+                            </div>
+                          )}
+                        </div>
+                        <p className="text-xs text-gray-500">{(lead as any).phone_number}</p>
+                      </div>
+                    </div>
+                    <div className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                      (lead as any).lead_status === 'new' ? 'bg-green-100 text-green-700' : 
+                      (lead as any).lead_status === 'claimed' ? 'bg-blue-100 text-blue-700' :
+                      'bg-gray-100 text-gray-700'
+                    }`}>
+                      {(lead as any).lead_status || 'New'}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between mt-4 text-[10px] text-gray-400 font-bold uppercase tracking-widest">
+                    <span>Last Action: {lead.last_action_at ? new Date(lead.last_action_at).toLocaleDateString() : 'Never'}</span>
+                    <ChevronRight size={14} />
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="p-4 space-y-6 animate-in fade-in duration-300">
+        <div className="bg-gradient-to-br from-indigo-600 to-blue-700 text-white p-6 rounded-3xl shadow-xl">
+          <h2 className="text-xl font-bold">Team Performance</h2>
+          <p className="text-indigo-100 text-xs mt-1">Monitoring {teamStaff.length} staff members</p>
+          
+          <div className="mt-6 grid grid-cols-3 gap-2">
+            <div className="bg-white/10 p-3 rounded-2xl border border-white/10 text-center">
+              <p className="text-[8px] font-bold text-indigo-200 uppercase">Total Leads</p>
+              <p className="text-lg font-bold">{teamLeads.length}</p>
+            </div>
+            <div className="bg-white/10 p-3 rounded-2xl border border-white/10 text-center">
+              <p className="text-[8px] font-bold text-indigo-200 uppercase">Pending Review</p>
+              <p className="text-lg font-bold">{teamLeads.filter(l => l.review_status === 'pending').length}</p>
+            </div>
+            <div className="bg-white/10 p-3 rounded-2xl border border-white/10 text-center">
+              <p className="text-[8px] font-bold text-indigo-200 uppercase">Active Staff</p>
+              <p className="text-lg font-bold">
+                {teamStaff.filter(s => {
+                  const lastActive = s.last_active_at ? new Date(s.last_active_at).getTime() : 0;
+                  return Date.now() - lastActive < 5 * 60 * 1000;
+                }).length}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Team Members */}
+        <div className="space-y-4">
+          <h3 className="text-sm font-bold text-gray-900 uppercase tracking-widest flex items-center gap-2">
+            <Users size={16} className="text-blue-600" />
+            Team Members
+          </h3>
+          <div className="grid grid-cols-1 gap-3">
+            {teamStaff.map(member => (
+              <div 
+                key={member.id} 
+                onClick={() => handleViewStaffLeads(member)}
+                className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm flex items-center justify-between cursor-pointer hover:bg-gray-50 transition-all"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="relative">
+                    <div className="w-10 h-10 rounded-2xl bg-gray-100 flex items-center justify-center font-bold text-gray-600">
+                      {member.name.charAt(0)}
+                    </div>
+                    <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${
+                      member.is_clocked_in ? 'bg-green-500' : 'bg-gray-300'
+                    }`} />
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-gray-900">{member.name}</p>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <p className="text-[10px] text-gray-400">
+                        {member.is_clocked_in 
+                          ? `Clocked in at ${new Date(member.last_clock_in_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` 
+                          : member.last_clock_out_at 
+                            ? `Clocked out ${new Date(member.last_clock_out_at).toLocaleDateString()}`
+                            : 'Never clocked in'}
+                      </p>
+                      {member.last_active_at && (
+                        <div className="flex items-center gap-1">
+                          <div className={`w-1 h-1 rounded-full ${
+                            Date.now() - new Date(member.last_active_at).getTime() < 5 * 60 * 1000 ? 'bg-green-500' : 'bg-gray-300'
+                          }`} />
+                          <p className="text-[9px] text-gray-400">
+                            {Date.now() - new Date(member.last_active_at).getTime() < 60 * 1000 ? 'Just now' : `${Math.floor((Date.now() - new Date(member.last_active_at).getTime()) / 60000)}m ago`}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <div className="flex gap-2">
+                    <div className="text-center px-2 py-1 bg-blue-50 rounded-lg border border-blue-100">
+                      <p className="text-[8px] font-bold text-blue-600 uppercase">Leads</p>
+                      <p className="text-xs font-bold text-blue-700">{member.leads_claimed_today || 0}</p>
+                    </div>
+                    <div className="text-center px-2 py-1 bg-emerald-50 rounded-lg border border-emerald-100">
+                      <p className="text-[8px] font-bold text-emerald-600 uppercase">Acts</p>
+                      <p className="text-xs font-bold text-emerald-700">{member.interactions_today || 0}</p>
+                    </div>
+                    <div className="text-center px-2 py-1 bg-purple-50 rounded-lg border border-purple-100">
+                      <p className="text-[8px] font-bold text-purple-600 uppercase">Closes</p>
+                      <p className="text-xs font-bold text-purple-700">{member.closings_today || 0}</p>
+                    </div>
+                  </div>
+                  <div className="text-right min-w-[60px]">
+                    <p className="text-xs font-bold text-gray-900">{teamLeads.filter(l => l.assigned_to === member.id).length} Total</p>
+                    <p className="text-[10px] text-gray-400">Assigned</p>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Pending Reviews */}
+        <div className="space-y-4">
+          <h3 className="text-sm font-bold text-gray-900 uppercase tracking-widest flex items-center gap-2">
+            <AlertCircle size={16} className="text-amber-500" />
+            Pending Reviews
+          </h3>
+          <div className="bg-white rounded-3xl border border-gray-100 shadow-sm overflow-hidden divide-y divide-gray-50">
+            {teamLeads.filter(l => l.review_status === 'pending').length === 0 ? (
+              <div className="p-8 text-center">
+                <p className="text-sm text-gray-400">No leads pending review</p>
+              </div>
+            ) : (
+              teamLeads.filter(l => l.review_status === 'pending').map(lead => (
+                <div 
+                  key={lead.id} 
+                  className="p-4 hover:bg-gray-50 transition-colors cursor-pointer group flex items-center justify-between"
+                  onClick={() => {
+                    setSelectedLead(lead);
+                    setView('detail');
+                  }}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center font-bold">
+                      {lead.name.charAt(0)}
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-gray-900 group-hover:text-blue-600 transition-colors">{lead.name}</p>
+                      <p className="text-[10px] text-gray-500">
+                        Assigned to: {teamStaff.find(s => s.id === lead.assigned_to)?.name || 'Unknown'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] text-gray-400 mb-1">
+                      {new Date(lead.last_action_at || lead.updated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </p>
+                    <button className="text-[10px] font-bold text-blue-600 uppercase tracking-wider bg-blue-50 px-2 py-1 rounded-lg">
+                      Review
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Recent Team Activity */}
+        <div className="space-y-4">
+          <h3 className="text-sm font-bold text-gray-900 uppercase tracking-widest flex items-center gap-2">
+            <History size={16} className="text-blue-600" />
+            Recent Activity
+          </h3>
+          <div className="space-y-3">
+            {teamActivity.slice(0, 10).map(act => (
+              <div key={act.id} className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+                <div className="flex justify-between items-start mb-1">
+                  <p className="text-[10px] font-bold text-blue-600 uppercase tracking-wider">{act.staff_name}</p>
+                  <p className="text-[8px] text-gray-400">{new Date(act.created_at).toLocaleTimeString()}</p>
+                </div>
+                <p className="text-xs font-bold text-gray-900 mb-1">{act.action}</p>
+                <p className="text-[10px] text-gray-500 line-clamp-2">{act.notes}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderDashboard = () => (
     <div className="p-4 space-y-6 animate-in fade-in duration-300">
       <div className="bg-black text-white p-6 rounded-3xl shadow-xl relative overflow-hidden">
@@ -305,7 +697,28 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         </div>
         <div className="relative z-10">
           <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-1">Welcome back,</p>
-          <h2 className="text-2xl font-bold">{user.name.split(' ')[0]}</h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-2xl font-bold">{user.name.split(' ')[0]}</h2>
+            <div className="flex items-center gap-2">
+              {clockStatus.is_clocked_in ? (
+                <button 
+                  onClick={handleClockOut}
+                  className="bg-red-500/20 text-red-400 px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-widest border border-red-500/30 flex items-center gap-2 active:scale-95 transition-all"
+                >
+                  <div className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                  Clock Out
+                </button>
+              ) : (
+                <button 
+                  onClick={handleClockIn}
+                  className="bg-emerald-500/20 text-emerald-400 px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-widest border border-emerald-500/30 flex items-center gap-2 active:scale-95 transition-all"
+                >
+                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  Clock In
+                </button>
+              )}
+            </div>
+          </div>
           <div className="mt-6 grid grid-cols-2 gap-4">
             <div className="bg-white/10 backdrop-blur-md p-4 rounded-2xl border border-white/10">
               <p className="text-[10px] font-bold text-gray-400 uppercase">My Leads</p>
@@ -527,6 +940,16 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             <button className="p-2 hover:bg-gray-100 rounded-full">
               <MoreVertical size={20} />
             </button>
+            {(selectedLead as any).assigned_to !== user.staffId && (user.role === 'manager' || user.role === 'admin') && (
+              <button 
+                onClick={handleTakeover}
+                disabled={loading}
+                className="bg-black text-white px-3 py-1.5 rounded-xl text-[10px] font-bold uppercase tracking-widest active:scale-95 transition-all flex items-center gap-2"
+              >
+                <Zap size={12} fill="currentColor" />
+                Takeover
+              </button>
+            )}
           </div>
         </div>
 
@@ -594,7 +1017,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                 }`}
               >
                 <MessageSquare size={16} />
-                Chat History
+                Chat
               </button>
               <button 
                 onClick={() => setDetailTab('activity')}
@@ -602,13 +1025,22 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                   detailTab === 'activity' ? 'bg-white text-black shadow-sm' : 'text-gray-500'
                 }`}
               >
-                <ClipboardList size={16} />
-                Activity & Notes
+                <History size={16} />
+                Activity
+              </button>
+              <button 
+                onClick={() => setDetailTab('review')}
+                className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+                  detailTab === 'review' ? 'bg-white text-black shadow-sm' : 'text-gray-500'
+                }`}
+              >
+                <CheckCircle size={16} />
+                Review
               </button>
             </div>
           </div>
 
-          {detailTab === 'chat' ? (
+          {detailTab === 'chat' && (
             <div className="p-4 space-y-4 flex flex-col h-full">
               <div className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm flex-1 flex flex-col min-h-[400px]">
                   <div className="flex-1 space-y-4 overflow-y-auto max-h-[400px] pr-2 custom-scrollbar mb-4 p-2">
@@ -772,7 +1204,111 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                 </div>
               </div>
             </div>
-          ) : (
+          )}
+
+          {detailTab === 'review' && (
+            <div className="p-4 space-y-6 animate-in fade-in duration-300">
+              {/* Review Status Banner */}
+              {selectedLead.review_status && selectedLead.review_status !== 'none' && (
+                <div className={`p-4 rounded-2xl flex items-center gap-3 ${
+                  selectedLead.review_status === 'pending' ? 'bg-amber-50 text-amber-700 border border-amber-100' :
+                  selectedLead.review_status === 'approved' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' :
+                  'bg-red-50 text-red-700 border border-red-100'
+                }`}>
+                  <AlertCircle size={20} />
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-wider">Review Status: {selectedLead.review_status}</p>
+                    {selectedLead.review_status === 'pending' && <p className="text-[10px] opacity-80">Waiting for Manager/Admin approval</p>}
+                  </div>
+                </div>
+              )}
+
+              {/* Submit Review Form (for Staff) */}
+              {(!selectedLead.review_status || selectedLead.review_status === 'none' || selectedLead.review_status === 'rejected') && (
+                <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
+                  <h4 className="text-sm font-bold text-gray-900 mb-4">Submit for Closing Review</h4>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2 block">Final Closing Notes</label>
+                      <textarea 
+                        placeholder="Add final notes for Manager and Admin..."
+                        className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none text-sm focus:ring-2 focus:ring-blue-500 transition-all min-h-[120px] resize-none"
+                        value={closingNotes}
+                        onChange={e => setClosingNotes(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2 block">Attachments (Screenshots)</label>
+                      <div className="flex items-center gap-2">
+                        <label className="flex-1 flex items-center justify-center gap-2 p-4 bg-gray-50 border-2 border-dashed border-gray-200 rounded-2xl cursor-pointer hover:bg-gray-100 transition-all">
+                          <Paperclip size={20} className="text-gray-400" />
+                          <span className="text-xs text-gray-500 font-medium">
+                            {closingFiles.length > 0 ? `${closingFiles.length} files selected` : 'Upload Screenshots'}
+                          </span>
+                          <input 
+                            type="file" 
+                            multiple 
+                            className="hidden" 
+                            onChange={e => e.target.files && setClosingFiles(Array.from(e.target.files))}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                    <button 
+                      onClick={handleSubmitReview}
+                      disabled={isSubmittingReview || !closingNotes.trim()}
+                      className="w-full bg-blue-600 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-blue-100"
+                    >
+                      {isSubmittingReview ? <Loader2 className="animate-spin" size={20} /> : <><Send size={20} /> Submit to Manager</>}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Manager/Admin Review Actions */}
+              {selectedLead.review_status === 'pending' && (user.role === 'admin' || user.role === 'manager') && (
+                <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
+                  <h4 className="text-sm font-bold text-gray-900 mb-4">Review Lead Closing</h4>
+                  <div className="mb-6 p-4 bg-gray-50 rounded-2xl">
+                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">Staff Notes</p>
+                    <p className="text-sm text-gray-700 leading-relaxed">{selectedLead.closing_notes}</p>
+                  </div>
+                  
+                  {selectedLead.closing_attachments && selectedLead.closing_attachments.length > 0 && (
+                    <div className="mb-6">
+                      <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-3">Attachments</p>
+                      <div className="grid grid-cols-2 gap-2">
+                        {selectedLead.closing_attachments.map((url, idx) => (
+                          <a key={idx} href={url} target="_blank" rel="noopener noreferrer" className="block rounded-xl overflow-hidden border border-gray-100">
+                            <img src={url} alt={`Attachment ${idx + 1}`} className="w-full h-24 object-cover" />
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <button 
+                      onClick={handleRejectReview}
+                      disabled={loading}
+                      className="flex items-center justify-center gap-2 py-4 bg-red-50 text-red-600 rounded-2xl font-bold text-sm border border-red-100 active:scale-95 transition-all"
+                    >
+                      <X size={20} /> Reject
+                    </button>
+                    <button 
+                      onClick={handleApproveReview}
+                      disabled={loading}
+                      className="flex items-center justify-center gap-2 py-4 bg-emerald-600 text-white rounded-2xl font-bold text-sm shadow-lg shadow-emerald-100 active:scale-95 transition-all"
+                    >
+                      <CheckCircle size={20} /> Approve
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {detailTab === 'activity' && (
             <>
               {/* Action Form */}
               <div className="p-4">
@@ -876,6 +1412,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         {view === 'pool' && renderLeadList(true)}
         {view === 'my-leads' && renderLeadList(false)}
         {view === 'detail' && renderDetail()}
+        {view === 'team' && renderTeam()}
       </main>
 
       {/* Bottom Navigation */}
@@ -902,6 +1439,15 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             <Users size={20} />
             <span className="text-[10px] font-bold uppercase tracking-widest">Leads</span>
           </button>
+          {(user.role === 'manager' || user.role === 'admin') && (
+            <button 
+              onClick={() => setView('team')}
+              className={`flex flex-col items-center gap-1 transition-all ${view === 'team' ? 'text-blue-600' : 'text-gray-400'}`}
+            >
+              <ClipboardList size={20} />
+              <span className="text-[10px] font-bold uppercase tracking-widest">Team</span>
+            </button>
+          )}
         </nav>
       )}
 
