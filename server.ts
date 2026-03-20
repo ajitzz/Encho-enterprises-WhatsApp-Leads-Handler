@@ -6087,6 +6087,24 @@ apiRouter.get('/cron/lead-ingestion', async (req, res) => {
     res.json({ status: 'ok', message: 'Lead ingestion cron triggered' });
 });
 
+apiRouter.get('/cron/auto-distribute', async (req, res) => {
+    try {
+        await processLeadAutoDistribution();
+        res.json({ status: 'ok', message: 'Lead auto-distribution completed' });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: e.message });
+    }
+});
+
+apiRouter.get('/cron/sync-reporting', async (req, res) => {
+    try {
+        await syncDriverExcelToS3();
+        res.json({ status: 'ok', message: 'Reporting sync triggered' });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: e.message });
+    }
+});
+
 apiRouter.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: Date.now() });
 });
@@ -6208,38 +6226,47 @@ app.use((err, req, res, next) => {
 });
 
 // --- LEAD AUTO-DISTRIBUTION ---
+async function processLeadAutoDistribution() {
+    try {
+        await withDb(async (client) => {
+            // Check if auto-distribution is enabled
+            const settingsRes = await client.query("SELECT value FROM system_settings WHERE key = 'lead_distribution'");
+            const settings = settingsRes.rows[0]?.value || { auto_enabled: false };
+            if (!settings.auto_enabled) return;
+
+            // Get unassigned leads
+            const unassignedLeads = await client.query("SELECT id FROM candidates WHERE assigned_to IS NULL AND lead_status = 'new' LIMIT 10");
+            if (unassignedLeads.rows.length === 0) return;
+
+            // Get active staff members for auto-dist, ordered by last_assigned_at (round-robin)
+            const activeStaff = await client.query("SELECT id FROM staff_members WHERE is_active_for_auto_dist = TRUE ORDER BY last_assigned_at ASC NULLS FIRST");
+            if (activeStaff.rows.length === 0) return;
+
+            let staffIndex = 0;
+            for (const lead of unassignedLeads.rows) {
+                const staff = activeStaff.rows[staffIndex];
+                await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [staff.id, lead.id]);
+                await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [staff.id]);
+                await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead auto-assigned via distributor')", [lead.id, staff.id]);
+                
+                console.log(`Auto-assigned lead ${lead.id} to staff ${staff.id}`);
+                
+                staffIndex = (staffIndex + 1) % activeStaff.rows.length;
+            }
+        });
+    } catch (e) {
+        console.error("Lead Auto-Distributor Error:", e);
+        throw e;
+    }
+}
+
 async function startLeadAutoDistributor() {
     console.log("Starting Lead Auto-Distributor...");
     setInterval(async () => {
         try {
-            await withDb(async (client) => {
-                // Check if auto-distribution is enabled
-                const settingsRes = await client.query("SELECT value FROM system_settings WHERE key = 'lead_distribution'");
-                const settings = settingsRes.rows[0]?.value || { auto_enabled: false };
-                if (!settings.auto_enabled) return;
-
-                // Get unassigned leads
-                const unassignedLeads = await client.query("SELECT id FROM candidates WHERE assigned_to IS NULL AND lead_status = 'new' LIMIT 10");
-                if (unassignedLeads.rows.length === 0) return;
-
-                // Get active staff members for auto-dist, ordered by last_assigned_at (round-robin)
-                const activeStaff = await client.query("SELECT id FROM staff_members WHERE is_active_for_auto_dist = TRUE ORDER BY last_assigned_at ASC NULLS FIRST");
-                if (activeStaff.rows.length === 0) return;
-
-                let staffIndex = 0;
-                for (const lead of unassignedLeads.rows) {
-                    const staff = activeStaff.rows[staffIndex];
-                    await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [staff.id, lead.id]);
-                    await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [staff.id]);
-                    await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead auto-assigned via distributor')", [lead.id, staff.id]);
-                    
-                    console.log(`Auto-assigned lead ${lead.id} to staff ${staff.id}`);
-                    
-                    staffIndex = (staffIndex + 1) % activeStaff.rows.length;
-                }
-            });
+            await processLeadAutoDistribution();
         } catch (e) {
-            console.error("Lead Auto-Distributor Error:", e);
+            // Error logged in processLeadAutoDistribution
         }
     }, 30000); // Run every 30 seconds
 }
@@ -6303,3 +6330,5 @@ if (require.main === module) {
 }
 
 module.exports = { app, startServer };
+export { app, startServer };
+export default app;

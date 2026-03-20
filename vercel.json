@@ -1,17 +1,13 @@
+
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "vite",
-  "installCommand": "npm install",
-  "buildCommand": "npm run build",
-  "outputDirectory": "dist",
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "/api/handler.js"
+      "destination": "/api/index.ts"
     },
     {
       "source": "/webhook",
-      "destination": "/api/handler.js"
+      "destination": "/api/index.ts"
     },
     {
       "source": "/(.*)",
@@ -19,30 +15,38 @@
     }
   ],
   "functions": {
-    "api/handler.js": {
+    "api/index.ts": {
       "maxDuration": 60
     }
   },
   "crons": [
     {
       "path": "/api/health",
-      "schedule": "0 0 * * *"
+      "schedule": "* * * * *"
     },
     {
       "path": "/api/cron/process-queue",
-      "schedule": "5 0 * * *"
+      "schedule": "*/5 * * * *"
     },
     {
       "path": "/api/cron/reminders",
-      "schedule": "10 0 * * *"
+      "schedule": "0 * * * *"
     },
     {
       "path": "/api/cron/escalations",
-      "schedule": "15 0 * * *"
+      "schedule": "0 0 * * *"
     },
     {
       "path": "/api/cron/lead-ingestion",
-      "schedule": "20 0 * * *"
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/auto-distribute",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/sync-reporting",
+      "schedule": "0 */4 * * *"
     }
   ]
 }
