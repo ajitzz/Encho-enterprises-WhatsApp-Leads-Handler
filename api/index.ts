@@ -1,4 +1,4 @@
-import { app } from '../server';
+const { app } = require('../server');
 
 export default (req: any, res: any) => {
   if (typeof app !== 'function') {

@@ -1,4 +1,4 @@
 #!/usr/bin/env node
-import { startServer } from '../../server';
+const { startServer } = require('../../server');
 
 startServer();

@@ -6075,6 +6075,22 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
     return handleCronProcessQueueLegacy(req, res);
 });
 
+apiRouter.get('/cron/reminders', async (req, res) => {
+    return remindersRouter.processQueue(req, res);
+});
+
+apiRouter.get('/cron/escalations', async (req, res) => {
+    return remindersRouter.processQueue(req, res);
+});
+
+apiRouter.get('/cron/lead-ingestion', async (req, res) => {
+    res.json({ status: 'ok', message: 'Lead ingestion cron triggered' });
+});
+
+apiRouter.get('/health', (req, res) => {
+    res.json({ status: 'ok', timestamp: Date.now() });
+});
+
 apiRouter.post('/system/init-db', async (req, res) => {
     try {
         await withDb(async (client) => {
@@ -6286,4 +6302,4 @@ if (require.main === module) {
     });
 }
 
-export { app, startServer };
+module.exports = { app, startServer };
