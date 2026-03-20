@@ -1,4 +1,4 @@
-import * as serverModule from '../server';
+const serverModule = require('../server');
 
 const resolveExpressApp = () => {
   const moduleCandidate: any = serverModule as any;
@@ -17,4 +17,4 @@ const resolveExpressApp = () => {
   return appCandidate;
 };
 
-export default (req: any, res: any) => resolveExpressApp()(req, res);
+module.exports = (req: any, res: any) => resolveExpressApp()(req, res);
