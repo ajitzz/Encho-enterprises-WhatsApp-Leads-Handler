@@ -332,7 +332,6 @@ export const liveApiService = {
 
   uploadMedia: async (file: File, path: string) => {
       const isLocalDev = ['localhost', '127.0.0.1'].includes(window.location.hostname);
-      const maxProxyUploadBytes = 4 * 1024 * 1024; // Keep below common serverless body limits.
 
       try {
           const init = await apiRequest<any>('/api/media/upload/init', {
@@ -359,13 +358,13 @@ export const liveApiService = {
       } catch (directUploadError) {
           const directUploadMessage = String((directUploadError as Error)?.message || directUploadError || 'Upload failed');
 
-          // In production, allow proxy fallback only for small files (like lead closing screenshots),
-          // otherwise payload limits can fail large uploads.
-          if (!isLocalDev && file.size > maxProxyUploadBytes) {
-              throw new Error(`Direct S3 upload failed. ${directUploadMessage}. File too large for safe proxy fallback; check S3 CORS for PUT and allowed headers.`);
+          // Vercel serverless functions have request payload limits, so never fallback to proxy upload
+          // in non-local environments (it triggers FUNCTION_PAYLOAD_TOO_LARGE for larger files).
+          if (!isLocalDev) {
+              throw new Error(`Direct S3 upload failed. ${directUploadMessage}. Check S3 CORS for PUT and allowed headers.`);
           }
 
-          // Fallback where pre-signed upload is blocked by networking/CORS.
+          // Local/dev fallback where pre-signed upload may be blocked by local networking/CORS.
           const formData = new FormData();
           formData.append('file', file);
           formData.append('path', path);
@@ -383,7 +382,7 @@ export const liveApiService = {
 
           if (!response.ok) {
               const errorBody = await response.text();
-              throw new Error(errorBody || `Fallback upload failed after direct S3 upload error: ${directUploadMessage}`);
+              throw new Error(errorBody || directUploadMessage || 'Upload failed');
           }
 
           return response.json();
