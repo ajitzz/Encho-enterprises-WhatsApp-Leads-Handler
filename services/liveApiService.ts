@@ -599,7 +599,11 @@ export const liveApiService = {
   submitLeadReview: async (id: string, data: { closing_date: string; notes: string; screenshot_url?: string }) => {
     return apiRequest(`/api/reviews/${id}/submit`, {
       method: 'POST',
-      body: JSON.stringify(data)
+      body: JSON.stringify({
+        closingDate: data.closing_date,
+        notes: data.notes,
+        screenshotUrl: data.screenshot_url
+      })
     });
   },
 
@@ -610,7 +614,10 @@ export const liveApiService = {
   reviewDecision: async (reviewId: string, data: { decision: 'approved' | 'rejected'; feedback?: string }) => {
     return apiRequest(`/api/reviews/${reviewId}/decision`, {
       method: 'POST',
-      body: JSON.stringify(data)
+      body: JSON.stringify({
+        status: data.decision,
+        feedback: data.feedback || ''
+      })
     });
   }
 };
