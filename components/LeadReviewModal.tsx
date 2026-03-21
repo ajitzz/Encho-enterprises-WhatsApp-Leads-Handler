@@ -34,7 +34,10 @@ export const LeadReviewModal: React.FC<LeadReviewModalProps> = ({ lead, onClose,
       let screenshot_url = undefined;
       
       if (screenshot) {
-        const upload = await liveApiService.uploadMedia(screenshot.file, `reviews/${lead.id}`);
+        const upload = await liveApiService.uploadMedia(
+          screenshot.file,
+          `leads/${lead.id}/screenshots/review`
+        );
         screenshot_url = upload.url;
       }
 
