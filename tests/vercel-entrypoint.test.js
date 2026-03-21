@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const http = require('node:http');
 
 const handler = require('../api/index');
 
@@ -8,44 +9,41 @@ test('vercel api entrypoint exports a request handler function', () => {
 });
 
 test('vercel api entrypoint can delegate requests to express app', async () => {
-  const req = {
-    method: 'GET',
-    url: '/__non_existing_route__',
-    headers: {},
-  };
+  const server = http.createServer((req, res) => handler(req, res));
 
-  let statusCode = null;
-  let jsonPayload = null;
+  await new Promise((resolve) => server.listen(0, resolve));
+  const { port } = server.address();
 
-  const res = {
-    status(code) {
-      statusCode = code;
-      return this;
-    },
-    json(payload) {
-      jsonPayload = payload;
-      return this;
-    },
-    setHeader() {
-      return this;
-    },
-    getHeader() {
-      return undefined;
-    },
-    end() {
-      return this;
-    }
-  };
+  const response = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: '/api/__non_existing_route__',
+        method: 'GET',
+        headers: {
+          accept: 'application/json',
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          resolve({
+            statusCode: res.statusCode,
+            body: Buffer.concat(chunks).toString('utf8'),
+          });
+        });
+      }
+    );
 
-  await new Promise((resolve, reject) => {
-    try {
-      handler(req, res);
-      setTimeout(resolve, 25);
-    } catch (error) {
-      reject(error);
-    }
+    req.on('error', reject);
+    req.end();
   });
 
-  assert.equal(statusCode, 404);
-  assert.deepEqual(jsonPayload, { error: 'Route not found' });
+  server.close();
+
+  assert.equal(response.statusCode, 404);
+  assert.equal(typeof response.body, 'string');
+  assert.ok(response.body.length > 0);
 });

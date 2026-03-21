@@ -6336,5 +6336,8 @@ if (require.main === module) {
 }
 
 // --- EXPORTS ---
-export { app, startServer };
-export default app;
+module.exports = {
+    app,
+    startServer,
+    default: app,
+};
