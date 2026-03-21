@@ -3938,6 +3938,8 @@ apiRouter.post('/leads/:id/reassign', authMiddleware, async (req, res) => {
 
 apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
     const { action, notes, status, media_url, next_followup_at } = req.body;
+    if (!action) return res.status(400).json({ error: 'Action required' });
+
     try {
         await withDb(async (client) => {
             const check = await client.query(`
@@ -3948,6 +3950,8 @@ apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
             `, [req.params.id]);
             
             const lead = check.rows[0];
+            if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
             const isAssignedToMe = lead?.assigned_to === req.user.staffId;
             const isManagerOfStaff = lead?.manager_id === req.user.staffId;
             const isAdmin = req.user.role === 'admin';
@@ -3962,14 +3966,27 @@ apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
                 updates.push(`lead_status = $${values.length + 1}`);
                 values.push(status);
             }
+            if (next_followup_at) {
+                updates.push(`follow_up_date = $${values.length + 1}`);
+                values.push(next_followup_at);
+            }
+            if (notes) {
+                updates.push(`follow_up_note = $${values.length + 1}`);
+                values.push(notes);
+            }
             updates.push(`last_action_at = NOW()`);
             
             await client.query(`UPDATE candidates SET ${updates.join(', ')} WHERE id = $${values.length + 1}`, [...values, req.params.id]);
+            
+            // 2. Log Activity
             await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes, media_url, next_followup_at) VALUES ($1, $2, $3, $4, $5, $6)', 
                 [req.params.id, req.user.staffId, action, notes, media_url, next_followup_at || null]);
             
-            // If next_followup_at is provided, create a reminder
+            // 3. Create Reminder if needed
             if (next_followup_at) {
+                // Clear existing pending reminders for this lead/staff to avoid duplicates
+                await client.query("UPDATE lead_reminders SET status = 'cancelled' WHERE candidate_id = $1 AND staff_id = $2 AND status = 'pending'", [req.params.id, req.user.staffId]);
+                
                 await client.query(`
                     INSERT INTO lead_reminders (candidate_id, staff_id, scheduled_at)
                     VALUES ($1, $2, $3)

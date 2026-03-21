@@ -546,7 +546,7 @@ export const liveApiService = {
     return apiRequest(`/api/leads/${id}/claim`, { method: 'POST' });
   },
 
-  logLeadAction: async (id: string, data: { action: string; notes: string; status?: string; media_url?: string }) => {
+  logLeadAction: async (id: string, data: { action: string; notes: string; status?: string; media_url?: string; next_followup_at?: string }) => {
     return apiRequest(`/api/leads/${id}/action`, {
       method: 'POST',
       body: JSON.stringify(data)

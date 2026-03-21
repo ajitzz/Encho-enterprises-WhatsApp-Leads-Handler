@@ -6,11 +6,15 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
+DROP TABLE IF EXISTS audit_logs CASCADE;
+DROP TABLE IF EXISTS lead_reminders CASCADE;
+DROP TABLE IF EXISTS lead_activity_log CASCADE;
 DROP TABLE IF EXISTS scheduled_messages CASCADE;
 DROP TABLE IF EXISTS candidate_messages CASCADE;
 DROP TABLE IF EXISTS driver_documents CASCADE;
 DROP TABLE IF EXISTS bot_versions CASCADE;
 DROP TABLE IF EXISTS candidates CASCADE;
+DROP TABLE IF EXISTS staff_members CASCADE;
 DROP TABLE IF EXISTS system_settings CASCADE;
 
 -- 1. System Config
@@ -19,31 +23,7 @@ CREATE TABLE system_settings (
     value JSONB
 );
 
--- 2. Candidates
-CREATE TABLE candidates (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    phone_number VARCHAR(50) UNIQUE NOT NULL,
-    name VARCHAR(255),
-    stage VARCHAR(50) DEFAULT 'New',
-    last_message TEXT,
-    last_message_at BIGINT,
-    source VARCHAR(50) DEFAULT 'Organic',
-    is_human_mode BOOLEAN DEFAULT FALSE,
-    current_bot_step_id VARCHAR(100),
-    variables JSONB DEFAULT '{}'::jsonb,
-    assigned_to UUID,
-    assigned_manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
-    follow_up_date TIMESTAMP WITH TIME ZONE,
-    follow_up_note TEXT,
-    is_pushed_to_closing BOOLEAN DEFAULT FALSE,
-    closing_notes TEXT,
-    closing_screenshot_url TEXT,
-    lead_status VARCHAR(50) DEFAULT 'new',
-    last_action_at TIMESTAMP WITH TIME ZONE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- 3. Staff
+-- 2. Staff
 CREATE TABLE staff_members (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email VARCHAR(255) UNIQUE NOT NULL,
@@ -55,6 +35,30 @@ CREATE TABLE staff_members (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- 3. Candidates
+CREATE TABLE candidates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    phone_number VARCHAR(50) UNIQUE NOT NULL,
+    name VARCHAR(255),
+    stage VARCHAR(50) DEFAULT 'New',
+    last_message TEXT,
+    last_message_at BIGINT,
+    source VARCHAR(50) DEFAULT 'Organic',
+    is_human_mode BOOLEAN DEFAULT FALSE,
+    current_bot_step_id VARCHAR(100),
+    variables JSONB DEFAULT '{}'::jsonb,
+    assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+    assigned_manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+    follow_up_date TIMESTAMP WITH TIME ZONE,
+    follow_up_note TEXT,
+    is_pushed_to_closing BOOLEAN DEFAULT FALSE,
+    closing_notes TEXT,
+    closing_screenshot_url TEXT,
+    lead_status VARCHAR(50) DEFAULT 'new',
+    last_action_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 -- 4. Activity Log
 CREATE TABLE lead_activity_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -62,6 +66,8 @@ CREATE TABLE lead_activity_log (
     staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
     action VARCHAR(100) NOT NULL,
     notes TEXT,
+    media_url TEXT,
+    next_followup_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -74,6 +80,7 @@ CREATE TABLE candidate_messages (
     type VARCHAR(50) DEFAULT 'text',
     status VARCHAR(50) DEFAULT 'sent',
     whatsapp_message_id VARCHAR(255),
+    sender_type VARCHAR(50),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -103,6 +110,29 @@ CREATE TABLE driver_documents (
     type VARCHAR(50),
     url TEXT,
     status VARCHAR(50) DEFAULT 'pending',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 9. Audit Logs
+CREATE TABLE audit_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    actor_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+    action VARCHAR(100) NOT NULL,
+    entity_type VARCHAR(50) NOT NULL,
+    entity_id UUID,
+    previous_state JSONB,
+    new_state JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 10. Reminders
+CREATE TABLE lead_reminders (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+    staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
+    scheduled_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    status VARCHAR(20) DEFAULT 'pending',
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
