@@ -132,19 +132,6 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     return parsed.toLocaleString();
   };
 
-  const formatTimelineTime = (value?: string | null) => {
-    if (!value) return '—';
-    const parsed = new Date(value);
-    if (Number.isNaN(parsed.getTime())) return '—';
-    return parsed.toLocaleString(undefined, {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  };
-
   const toLabel = (value?: string | null) => {
     if (!value) return '—';
     return value.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
