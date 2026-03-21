@@ -83,6 +83,7 @@ interface LeadActivity {
 export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ user, onLogout }) => {
   const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail'>('dashboard');
   const [allLeads, setAllLeads] = useState<Driver[]>([]);
+  const [teamStaff, setTeamStaff] = useState<any[]>([]);
   const [selectedLead, setSelectedLead] = useState<Driver | null>(null);
   const [activities, setActivities] = useState<LeadActivity[]>([]);
   const [leadMessages, setLeadMessages] = useState<Message[]>([]);
@@ -98,6 +99,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [selectedMedia, setSelectedMedia] = useState<{ type: 'image' | 'video' | 'document' | 'audio'; file: File; preview: string } | null>(null);
   const [isHumanModeLoading, setIsHumanModeLoading] = useState(false);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [closingScreenshot, setClosingScreenshot] = useState<{ file: File; preview: string } | null>(null);
 
   const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
@@ -239,6 +241,18 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     return () => unsubscribe();
   }, [selectedLead?.id]);
 
+  useEffect(() => {
+    if (user.role === 'manager' || user.role === 'admin') {
+      liveApiService.getStaff().then(staff => {
+        if (user.role === 'manager') {
+          setTeamStaff(staff.filter(s => s.manager_id === user.staffId));
+        } else {
+          setTeamStaff(staff);
+        }
+      }).catch(err => console.error('Failed to fetch team', err));
+    }
+  }, [user.role, user.staffId]);
+
   const handleClaim = async (id: string) => {
     try {
       setLoading(true);
@@ -271,13 +285,24 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     if (!selectedLead) return;
     try {
       setLoading(true);
+      
+      let media_url = undefined;
+      if (action === 'submitted_for_closing' && closingScreenshot) {
+        const upload = await liveApiService.uploadMedia(closingScreenshot.file, `closing/${selectedLead.id}`);
+        media_url = upload.url;
+      }
+
       await liveApiService.logLeadAction(selectedLead.id, {
         action,
         notes: actionNote,
-        status: actionStatus || undefined
+        status: actionStatus || (action === 'submitted_for_closing' ? 'booked' : undefined),
+        media_url
       });
+      
       setActionNote('');
       setActionStatus('');
+      setClosingScreenshot(null);
+      
       // Refresh activity
       const history = await liveApiService.getLeadActivity(selectedLead.id);
       setActivities(history);
@@ -321,6 +346,24 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       </div>
 
       <div className="grid grid-cols-1 gap-4">
+        {(user.role === 'manager' || user.role === 'admin') && (
+          <button 
+            onClick={() => setView('team' as any)}
+            className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center justify-between group active:scale-95 transition-all"
+          >
+            <div className="flex items-center gap-4">
+              <div className="bg-purple-100 text-purple-600 p-3 rounded-2xl">
+                <Users size={24} />
+              </div>
+              <div className="text-left">
+                <h3 className="font-bold text-gray-900">Team Management</h3>
+                <p className="text-xs text-gray-500">Supervise and monitor your staff</p>
+              </div>
+            </div>
+            <ChevronRight className="text-gray-300 group-hover:text-gray-900 transition-colors" />
+          </button>
+        )}
+
         <button 
           onClick={() => setView('pool')}
           className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center justify-between group active:scale-95 transition-all"
@@ -803,13 +846,60 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       onChange={e => setActionNote(e.target.value)}
                     />
 
-                    <button 
-                      onClick={() => handleLogAction('interaction')}
-                      disabled={loading || !actionNote}
-                      className="w-full bg-black text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 transition-all"
-                    >
-                      {loading ? <Loader2 className="animate-spin" size={20} /> : <><CheckCircle size={20} /> Save Interaction</>}
-                    </button>
+                    {actionStatus === 'booked' && (
+                      <div className="space-y-2 animate-in slide-in-from-top-2">
+                        <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Closing Screenshot Required</p>
+                        <div className="flex items-center gap-3">
+                          <label className="flex-1 flex flex-col items-center justify-center gap-2 p-4 border-2 border-dashed border-gray-200 rounded-2xl hover:border-blue-400 hover:bg-blue-50 transition-all cursor-pointer">
+                            {closingScreenshot ? (
+                              <div className="relative w-full h-20">
+                                <img src={closingScreenshot.preview} className="w-full h-full object-cover rounded-xl" alt="Closing" />
+                                <button 
+                                  onClick={(e) => { e.preventDefault(); setClosingScreenshot(null); }}
+                                  className="absolute -top-2 -right-2 bg-red-500 text-white p-1 rounded-full shadow-lg"
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
+                            ) : (
+                              <>
+                                <Paperclip size={24} className="text-gray-400" />
+                                <span className="text-[10px] font-bold text-gray-500 uppercase">Attach Screenshot</span>
+                              </>
+                            )}
+                            <input 
+                              type="file" 
+                              className="hidden" 
+                              accept="image/*" 
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (file) setClosingScreenshot({ file, preview: URL.createObjectURL(file) });
+                              }} 
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 gap-2">
+                      <button 
+                        onClick={() => handleLogAction('interaction')}
+                        disabled={loading || !actionNote}
+                        className="w-full bg-black text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 transition-all"
+                      >
+                        {loading ? <Loader2 className="animate-spin" size={20} /> : <><CheckCircle size={20} /> Save Interaction</>}
+                      </button>
+                      
+                      {actionStatus === 'booked' && (
+                        <button 
+                          onClick={() => handleLogAction('submitted_for_closing')}
+                          disabled={loading || !actionNote || !closingScreenshot}
+                          className="w-full bg-blue-600 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-blue-200"
+                        >
+                          {loading ? <Loader2 className="animate-spin" size={20} /> : <><Zap size={20} /> Submit for Closing</>}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -825,10 +915,15 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       </div>
                       <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
                         <div className="flex justify-between items-start mb-1">
-                          <p className="text-xs font-bold text-gray-900 uppercase tracking-wider">{activity.action}</p>
+                          <p className="text-xs font-bold text-gray-900 uppercase tracking-wider">{activity.action.replace(/_/g, ' ')}</p>
                           <p className="text-[10px] text-gray-400">{new Date(activity.created_at).toLocaleString()}</p>
                         </div>
                         <p className="text-sm text-gray-600 leading-relaxed">{activity.notes}</p>
+                        {(activity as any).media_url && (
+                          <div className="mt-3 rounded-xl overflow-hidden border border-gray-100">
+                            <img src={(activity as any).media_url} alt="Activity Media" className="max-w-full h-auto" referrerPolicy="no-referrer" />
+                          </div>
+                        )}
                         <p className="text-[10px] text-gray-400 mt-2 font-medium italic">Logged by {activity.staff_name}</p>
                       </div>
                     </div>
@@ -846,6 +941,72 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       </div>
     );
   };
+
+  const renderTeam = () => (
+    <div className="flex flex-col h-full animate-in slide-in-from-right duration-300">
+      <div className="p-4 bg-white border-b border-gray-100 sticky top-0 z-10">
+        <div className="flex items-center gap-3 mb-4">
+          <button onClick={() => setView('dashboard')} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
+            <ArrowLeft size={20} />
+          </button>
+          <h2 className="text-lg font-bold">My Team</h2>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {teamStaff.map(staff => {
+          const staffLeads = allLeads.filter(l => (l as any).assigned_to === staff.id);
+          const closedLeads = staffLeads.filter(l => (l as any).lead_status === 'booked');
+          
+          return (
+            <div key={staff.id} className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-2xl bg-gray-100 text-gray-600 flex items-center justify-center font-bold text-xl">
+                    {staff.name.charAt(0)}
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-gray-900">{staff.name}</h4>
+                    <p className="text-[10px] text-gray-500 uppercase font-bold tracking-wider">{staff.role}</p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="flex items-center gap-1 text-emerald-600 font-bold text-xs">
+                    <CheckCircle size={12} />
+                    {closedLeads.length} Closed
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-0.5">{staffLeads.length} Active Leads</p>
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-2 gap-2">
+                <div className="bg-gray-50 p-3 rounded-2xl text-center">
+                  <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest">Performance</p>
+                  <p className="text-sm font-bold text-gray-900 mt-1">
+                    {staffLeads.length > 0 ? Math.round((closedLeads.length / staffLeads.length) * 100) : 0}%
+                  </p>
+                </div>
+                <div className="bg-gray-50 p-3 rounded-2xl text-center">
+                  <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest">Status</p>
+                  <p className={`text-sm font-bold mt-1 ${staff.is_active_for_auto_dist ? 'text-emerald-600' : 'text-gray-400'}`}>
+                    {staff.is_active_for_auto_dist ? 'Online' : 'Offline'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {teamStaff.length === 0 && (
+          <div className="text-center py-20">
+            <div className="bg-gray-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+              <Users size={32} className="text-gray-300" />
+            </div>
+            <p className="text-gray-500 font-medium">No staff members assigned to your team.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col font-sans max-w-md mx-auto border-x border-gray-200 shadow-2xl">
@@ -876,6 +1037,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         {view === 'pool' && renderLeadList(true)}
         {view === 'my-leads' && renderLeadList(false)}
         {view === 'detail' && renderDetail()}
+        {(view as any) === 'team' && renderTeam()}
       </main>
 
       {/* Bottom Navigation */}

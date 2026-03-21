@@ -7,7 +7,7 @@ const problems = [];
 
 const read = (relPath) => fs.readFileSync(path.join(root, relPath), 'utf8');
 
-const serverJs = read('server.js');
+const serverTs = read('server.ts');
 
 const requiredSignals = [
   "registerSystemHealthRoutes({",
@@ -17,8 +17,8 @@ const requiredSignals = [
 ];
 
 for (const signal of requiredSignals) {
-  if (!serverJs.includes(signal)) {
-    problems.push(`server.js missing section-1 hardening signal: ${signal}`);
+  if (!serverTs.includes(signal)) {
+    problems.push(`server.ts missing section-1 hardening signal: ${signal}`);
   }
 }
 
@@ -34,8 +34,8 @@ const forbiddenDirectRoutePatterns = [
 ];
 
 for (const pattern of forbiddenDirectRoutePatterns) {
-  if (serverJs.includes(pattern)) {
-    problems.push(`server.js still declares direct route that should be module-registered: ${pattern}`);
+  if (serverTs.includes(pattern)) {
+    problems.push(`server.ts still declares direct route that should be module-registered: ${pattern}`);
   }
 }
 

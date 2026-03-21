@@ -1,5 +1,7 @@
 
+// @ts-nocheck
 const express = require('express');
+const path = require('path');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Pool } = require('pg');
@@ -13,7 +15,9 @@ const { EventEmitter } = require('events');
 
 require('dotenv').config();
 
-const updateEmitter = new EventEmitter();
+const { updateEmitter, createNotification } = require('./server/services/notificationService');
+const { updateLeadScore } = require('./server/services/scoringService');
+
 updateEmitter.setMaxListeners(100);
 
 const notifyUpdates = (candidateId = null) => {
@@ -31,6 +35,7 @@ const { buildLeadIngestionFacade } = require('./backend/modules/lead-ingestion/a
 const { buildRemindersRouter } = require('./backend/modules/reminders-escalations/api');
 const { buildAuthConfigRouter, registerAuthConfigRoutes } = require('./backend/modules/auth-config/api');
 const { buildSystemHealthRouter, registerSystemHealthRoutes } = require('./backend/modules/system-health/api');
+const { redis } = require('./backend/shared/infra/redis');
 
 process.on('unhandledRejection', (reason) => {
     console.error('[UNHANDLED REJECTION]', reason);
@@ -162,7 +167,7 @@ const SYSTEM_CONFIG = {
     GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || '',
     CACHE_TTL: 60 * 1000, // 60 Seconds Cache for Bot Settings
     RUNTIME_CONFIG_CACHE_TTL: Number.parseInt(process.env.RUNTIME_CONFIG_CACHE_TTL_MS || '2000', 10),
-    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
+    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
 };
 
 const applyRuntimeGoogleSheetsConfig = (rawConfig = {}) => {
@@ -304,7 +309,7 @@ const buildPoolConfig = () => {
     const baseConfig = {
         connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
         idleTimeoutMillis: 30000,
-        max: 20,
+        max: 50,
         keepAlive: true
     };
 
@@ -2394,7 +2399,9 @@ ${link}`.trim();
                 displayVal = `${parsed.label || 'Pinned Location'} (${parsed.lat}, ${parsed.long})`;
             }
         }
-    } catch (e) {}
+    } catch (e) {
+        console.error('Error in formatText:', e);
+    }
 
     if (displayVal === null || displayVal === undefined) return '';
     if (typeof displayVal === 'object') return JSON.stringify(displayVal);
@@ -2656,6 +2663,7 @@ const initDatabase = async (client) => {
         manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
         is_active_for_auto_dist BOOLEAN DEFAULT FALSE,
         last_assigned_at TIMESTAMP,
+        last_activity_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT NOW()
     );`);
     
@@ -2663,20 +2671,61 @@ const initDatabase = async (client) => {
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS is_active_for_auto_dist BOOLEAN DEFAULT FALSE;`);
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_assigned_at TIMESTAMP;`);
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS is_clocked_in BOOLEAN DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_clock_in_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_clock_out_at TIMESTAMP;`);
     
-    await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, lead_status VARCHAR(50) DEFAULT 'new', last_action_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS candidates (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        phone_number VARCHAR(50) UNIQUE, 
+        name VARCHAR(255), 
+        stage VARCHAR(50), 
+        last_message TEXT, 
+        last_message_at BIGINT, 
+        source VARCHAR(50), 
+        is_human_mode BOOLEAN DEFAULT FALSE, 
+        current_bot_step_id VARCHAR(100), 
+        variables JSONB DEFAULT '{}', 
+        assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, 
+        lead_status VARCHAR(50) DEFAULT 'new', 
+        review_status VARCHAR(50) DEFAULT 'none',
+        closing_notes TEXT,
+        closing_attachments JSONB DEFAULT '[]',
+        last_action_at TIMESTAMP, 
+        created_at TIMESTAMP DEFAULT NOW()
+    );`);
     
     // Ensure candidates has the new columns if it already existed
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_status VARCHAR(50) DEFAULT 'new';`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'none';`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closing_notes TEXT;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closing_attachments JSONB DEFAULT '[]';`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_score INTEGER DEFAULT 0;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_response_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_staff_message_at TIMESTAMP;`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`ALTER TABLE candidate_messages ADD COLUMN IF NOT EXISTS sender_type VARCHAR(20);`);
     await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`CREATE TABLE IF NOT EXISTS lead_activity_log (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL, action VARCHAR(100) NOT NULL, notes TEXT, media_url TEXT, created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS media_url TEXT;`);
+    await client.query(`CREATE TABLE IF NOT EXISTS lead_activity_log (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL, action VARCHAR(100) NOT NULL, notes TEXT, created_at TIMESTAMP DEFAULT NOW());`);
+    
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_score INTEGER DEFAULT 0;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_response_at TIMESTAMP;`);
+    
+    await client.query(`CREATE TABLE IF NOT EXISTS notifications (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
+        title VARCHAR(255) NOT NULL,
+        message TEXT NOT NULL,
+        type VARCHAR(50) DEFAULT 'info',
+        is_read BOOLEAN DEFAULT FALSE,
+        link VARCHAR(255),
+        created_at TIMESTAMP DEFAULT NOW()
+    );`);
     
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
     await client.query("INSERT INTO system_settings (key, value) VALUES ('lead_distribution', '{\"auto_enabled\": false}') ON CONFLICT DO NOTHING");
@@ -2743,15 +2792,31 @@ const ensurePerformanceIndexes = async (client) => {
 };
 
 const executeWithRetry = async (client, operation) => {
-    try {
-        return await operation();
-    } catch (err) {
-        if (err.code === '42P01') {
-            console.warn("[Auto-Heal] Tables missing. Re-initializing database...");
-            await initDatabase(client);
-            return await operation(); 
+    let attempts = 0;
+    const maxAttempts = 3;
+    while (attempts < maxAttempts) {
+        try {
+            return await operation();
+        } catch (err) {
+            attempts++;
+            const isRetryable = ['57P01', '57P03', '53300', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', '08006'].includes(err.code) || 
+                               (err.message && err.message.includes('database not initialized'));
+            
+            if (err.code === '42P01') {
+                console.warn("[Auto-Heal] Tables missing. Re-initializing database...");
+                await initDatabase(client);
+                // After re-init, try the operation again immediately
+                continue;
+            }
+
+            if (isRetryable && attempts < maxAttempts) {
+                const delay = Math.pow(2, attempts) * 100;
+                console.warn(`[DB RETRY] Attempt ${attempts}/${maxAttempts} failed. Retrying in ${delay}ms...`, err.message);
+                await new Promise(r => setTimeout(r, delay));
+                continue;
+            }
+            throw err;
         }
-        throw err;
     }
 };
 
@@ -3728,36 +3793,58 @@ const handleOperationalStatusLegacy = async (req, res) => {
 
 const authMiddleware = async (req, res, next) => {
     try {
+        let token = null;
         const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            token = authHeader.split(' ')[1];
+        } else if (typeof req.query.token === 'string') {
+            token = req.query.token;
+        }
+
+        if (!token) {
             return res.status(401).json({ error: 'Unauthorized' });
         }
-        const token = authHeader.split(' ')[1];
         const ticket = await googleClient.verifyIdToken({ idToken: token, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
         const payload = ticket.getPayload();
         const email = payload.email;
 
         await withDb(async (client) => {
-            const staffRes = await client.query('SELECT id, role FROM staff_members WHERE email = $1', [email]);
+            const staffRes = await client.query('SELECT id, role, manager_id FROM staff_members WHERE email = $1', [email]);
             if (staffRes.rows.length === 0) {
                 // Check if it's the super admin
                 if (email === 'ajithsabzz@gmail.com') {
                     const insertRes = await client.query(
-                        'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id, role',
+                        'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id, role, manager_id',
                         [email, payload.name, 'admin']
                     );
-                    req.user = { ...payload, staffId: insertRes.rows[0].id, role: insertRes.rows[0].role };
+                    req.user = { ...payload, staffId: insertRes.rows[0].id, role: insertRes.rows[0].role, managerId: insertRes.rows[0].manager_id };
                 } else {
                     throw new Error('Access denied. Not a staff member.');
                 }
             } else {
-                req.user = { ...payload, staffId: staffRes.rows[0].id, role: staffRes.rows[0].role };
+                req.user = { ...payload, staffId: staffRes.rows[0].id, role: staffRes.rows[0].role, managerId: staffRes.rows[0].manager_id };
             }
+
+            // Track activity
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
         });
         next();
     } catch (e) {
         res.status(401).json({ error: e.message });
     }
+};
+
+const updateActivityMiddleware = async (req, res, next) => {
+    if (req.user?.staffId) {
+        try {
+            await withDb(async (client) => {
+                await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            });
+        } catch (e) {
+            console.error('Failed to update last_activity_at:', e);
+        }
+    }
+    next();
 };
 
 // --- STAFF MANAGEMENT ---
@@ -3772,6 +3859,63 @@ apiRouter.get('/auth/me', authMiddleware, (req, res) => {
             staffId: req.user.staffId
         }
     });
+});
+
+apiRouter.get('/staff/clock-status', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query('SELECT is_clocked_in, last_clock_in_at, last_clock_out_at FROM staff_members WHERE id = $1', [req.user.staffId]);
+            res.json(r.rows[0] || { is_clocked_in: false });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+apiRouter.post('/staff/clock-in', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query('UPDATE staff_members SET is_clocked_in = TRUE, last_clock_in_at = NOW(), last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            
+            // Notify manager
+            const staff = await client.query('SELECT name, manager_id FROM staff_members WHERE id = $1', [req.user.staffId]);
+            if (staff.rows[0]?.manager_id) {
+                await createNotification(
+                    staff.rows[0].manager_id,
+                    'Staff Clocked In',
+                    `${staff.rows[0].name} has clocked in.`,
+                    'info'
+                );
+            }
+            
+            res.json({ success: true });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+apiRouter.post('/staff/clock-out', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query('UPDATE staff_members SET is_clocked_in = FALSE, last_clock_out_at = NOW(), last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            
+            // Notify manager
+            const staff = await client.query('SELECT name, manager_id FROM staff_members WHERE id = $1', [req.user.staffId]);
+            if (staff.rows[0]?.manager_id) {
+                await createNotification(
+                    staff.rows[0].manager_id,
+                    'Staff Clocked Out',
+                    `${staff.rows[0].name} has clocked out.`,
+                    'info'
+                );
+            }
+            
+            res.json({ success: true });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 apiRouter.get('/staff', authMiddleware, async (req, res) => {
@@ -3789,12 +3933,228 @@ apiRouter.post('/staff', authMiddleware, async (req, res) => {
     const { email, name, role, manager_id } = req.body;
     try {
         await withDb(async (client) => {
-            await client.query(`
-                INSERT INTO staff_members (email, name, role, manager_id) 
-                VALUES ($1, $2, $3, $4) 
-                ON CONFLICT (email) 
-                DO UPDATE SET name = $2, role = $3, manager_id = $4
-            `, [email, name, role || 'staff', manager_id || null]);
+            await client.query('INSERT INTO staff_members (email, name, role, manager_id) VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO UPDATE SET name = $2, role = $3, manager_id = $4', [email, name, role || 'staff', manager_id || null]);
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.patch('/staff/:id', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    const { name, role, manager_id, is_active_for_auto_dist } = req.body;
+    try {
+        await withDb(async (client) => {
+            const updates = [];
+            const values = [];
+            if (name !== undefined) { updates.push(`name = $${values.length + 1}`); values.push(name); }
+            if (role !== undefined) { updates.push(`role = $${values.length + 1}`); values.push(role); }
+            if (manager_id !== undefined) { updates.push(`manager_id = $${values.length + 1}`); values.push(manager_id); }
+            if (is_active_for_auto_dist !== undefined) { updates.push(`is_active_for_auto_dist = $${values.length + 1}`); values.push(is_active_for_auto_dist); }
+            
+            if (updates.length > 0) {
+                await client.query(`UPDATE staff_members SET ${updates.join(', ')} WHERE id = $${values.length + 1}`, [...values, req.params.id]);
+            }
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- TEAM MANAGEMENT ---
+apiRouter.get('/team/staff', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'manager' && req.user.role !== 'admin') return res.status(403).json({ error: 'Manager/Admin only' });
+    try {
+        await withDb(async (client) => {
+            let query = `
+                SELECT 
+                    s.*,
+                    (SELECT COUNT(*) FROM lead_activity_log WHERE staff_id = s.id AND created_at >= CURRENT_DATE AND action IN ('claimed', 'auto_assigned')) as leads_claimed_today,
+                    (SELECT COUNT(*) FROM lead_activity_log WHERE staff_id = s.id AND created_at >= CURRENT_DATE AND action IN ('interaction', 'Lead Action')) as interactions_today,
+                    (SELECT COUNT(*) FROM lead_activity_log WHERE staff_id = s.id AND created_at >= CURRENT_DATE AND action IN ('submitted_for_review', 'Lead Closed')) as closings_today
+                FROM staff_members s
+            `;
+            let values = [];
+            if (req.user.role === 'manager') {
+                query += ' WHERE s.manager_id = $1 OR s.id = $1';
+                values = [req.user.staffId];
+            }
+            query += ' ORDER BY s.name ASC';
+            const r = await client.query(query, values);
+            res.json(r.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/team/leads', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'manager' && req.user.role !== 'admin') return res.status(403).json({ error: 'Manager/Admin only' });
+    try {
+        await withDb(async (client) => {
+            let query = `
+                SELECT c.*, s.name as staff_name 
+                FROM candidates c 
+                LEFT JOIN staff_members s ON c.assigned_to = s.id
+            `;
+            let values = [];
+            if (req.user.role === 'manager') {
+                query += ' WHERE s.manager_id = $1 OR c.assigned_to = $1';
+                values = [req.user.staffId];
+            }
+            query += ' ORDER BY c.last_action_at DESC NULLS LAST';
+            const r = await client.query(query, values);
+            res.json(r.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/team/activity', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'manager' && req.user.role !== 'admin') return res.status(403).json({ error: 'Manager/Admin only' });
+    try {
+        await withDb(async (client) => {
+            let query = `
+                SELECT l.*, s.name as staff_name, c.name as candidate_name 
+                FROM lead_activity_log l 
+                LEFT JOIN staff_members s ON l.staff_id = s.id 
+                LEFT JOIN candidates c ON l.candidate_id = c.id
+            `;
+            let values = [];
+            if (req.user.role === 'manager') {
+                query += ' WHERE s.manager_id = $1 OR l.staff_id = $1';
+                values = [req.user.staffId];
+            }
+            query += ' ORDER BY l.created_at DESC LIMIT 100';
+            const r = await client.query(query, values);
+            res.json(r.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- CLOSING REVIEW ---
+apiRouter.post('/leads/:id/submit-review', authMiddleware, async (req, res) => {
+    const { notes, attachments } = req.body;
+    try {
+        await withDb(async (client) => {
+            const check = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+            if (check.rows[0]?.assigned_to !== req.user.staffId && req.user.role !== 'admin') {
+                return res.status(403).json({ error: 'Not assigned to you' });
+            }
+            await client.query(
+                'UPDATE candidates SET review_status = $1, closing_notes = $2, closing_attachments = $3, last_action_at = NOW() WHERE id = $4',
+                ['pending', notes, JSON.stringify(attachments || []), req.params.id]
+            );
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            
+            // Notify manager
+            const leadResult = await client.query('SELECT name, assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+            const lead = leadResult.rows[0];
+            const staffResult = await client.query('SELECT manager_id, name FROM staff_members WHERE id = $1', [req.user.staffId]);
+            const staff = staffResult.rows[0];
+            
+            if (staff.manager_id) {
+                await createNotification(
+                    staff.manager_id,
+                    'Review Required',
+                    `${staff.name} submitted ${lead.name} for closing review.`,
+                    'warning',
+                    `/leads/${req.params.id}`
+                );
+            }
+
+            await client.query(
+                'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)',
+                [req.params.id, req.user.staffId, 'submitted_for_review', notes]
+            );
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/leads/:id/approve-review', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'manager' && req.user.role !== 'admin') return res.status(403).json({ error: 'Manager/Admin only' });
+    const { notes } = req.body;
+    try {
+        await withDb(async (client) => {
+            // Check if manager is allowed to approve (must be manager of the assigned staff)
+            if (req.user.role === 'manager') {
+                const check = await client.query(`
+                    SELECT s.manager_id 
+                    FROM candidates c 
+                    JOIN staff_members s ON c.assigned_to = s.id 
+                    WHERE c.id = $1
+                `, [req.params.id]);
+                if (check.rows[0]?.manager_id !== req.user.staffId && req.user.staffId !== check.rows[0]?.assigned_to) {
+                    return res.status(403).json({ error: 'Not your team member' });
+                }
+            }
+
+            await client.query(
+                "UPDATE candidates SET review_status = $1, lead_status = 'closed', last_action_at = NOW() WHERE id = $2",
+                ['approved', req.params.id]
+            );
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            
+            // Boost score for successful closing
+            await updateLeadScore(req.params.id, 50, 'Closing approved');
+
+            // Notify assigned staff member
+            const lead = await client.query('SELECT name, assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+            if (lead.rows[0]?.assigned_to) {
+                await createNotification(
+                    lead.rows[0].assigned_to,
+                    'Closing Approved',
+                    `Your closing for ${lead.rows[0].name} has been approved!`,
+                    'success',
+                    `/leads/${req.params.id}`
+                );
+            }
+
+            await client.query(
+                'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)',
+                [req.params.id, req.user.staffId, 'approved_closing', notes || 'Closing approved']
+            );
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/leads/:id/reject-review', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'manager' && req.user.role !== 'admin') return res.status(403).json({ error: 'Manager/Admin only' });
+    const { notes } = req.body;
+    try {
+        await withDb(async (client) => {
+            // Check if manager is allowed to reject
+            if (req.user.role === 'manager') {
+                const check = await client.query(`
+                    SELECT s.manager_id 
+                    FROM candidates c 
+                    JOIN staff_members s ON c.assigned_to = s.id 
+                    WHERE c.id = $1
+                `, [req.params.id]);
+                if (check.rows[0]?.manager_id !== req.user.staffId && req.user.staffId !== check.rows[0]?.assigned_to) {
+                    return res.status(403).json({ error: 'Not your team member' });
+                }
+            }
+
+            await client.query(
+                "UPDATE candidates SET review_status = $1, last_action_at = NOW() WHERE id = $2",
+                ['rejected', req.params.id]
+            );
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            
+            // Notify assigned staff member
+            const lead = await client.query('SELECT name, assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+            if (lead.rows[0]?.assigned_to) {
+                await createNotification(
+                    lead.rows[0].assigned_to,
+                    'Closing Rejected',
+                    `Your closing for ${lead.rows[0].name} was rejected. Reason: ${notes || 'No reason provided'}`,
+                    'error',
+                    `/leads/${req.params.id}`
+                );
+            }
+
+            await client.query(
+                'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)',
+                [req.params.id, req.user.staffId, 'rejected_closing', notes]
+            );
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3855,26 +4215,7 @@ apiRouter.get('/leads/pool', authMiddleware, async (req, res) => {
 apiRouter.get('/leads/my', authMiddleware, async (req, res) => {
     try {
         await withDb(async (client) => {
-            let query;
-            let params;
-            
-            if (req.user.role === 'admin') {
-                query = 'SELECT c.*, s.name as staff_name FROM candidates c LEFT JOIN staff_members s ON c.assigned_to = s.id WHERE c.assigned_to IS NOT NULL';
-                params = [];
-            } else if (req.user.role === 'manager') {
-                query = `
-                    SELECT c.*, s.name as staff_name 
-                    FROM candidates c 
-                    LEFT JOIN staff_members s ON c.assigned_to = s.id 
-                    WHERE c.assigned_to = $1 OR s.manager_id = $1
-                `;
-                params = [req.user.staffId];
-            } else {
-                query = 'SELECT * FROM candidates WHERE assigned_to = $1';
-                params = [req.user.staffId];
-            }
-            
-            const r = await client.query(`${query} ORDER BY last_action_at DESC NULLS LAST, created_at DESC`, params);
+            const r = await client.query('SELECT * FROM candidates WHERE assigned_to = $1 ORDER BY last_action_at DESC NULLS LAST, created_at DESC', [req.user.staffId]);
             res.json(r.rows);
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3888,32 +4229,49 @@ apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
                 return res.status(400).json({ error: 'Lead already claimed' });
             }
             await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW() WHERE id = $3', [req.user.staffId, 'claimed', req.params.id]);
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            
+            // Boost score for claiming
+            await updateLeadScore(req.params.id, 5, 'Lead claimed by staff');
+
             await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, 'claimed', 'Lead claimed from pool']);
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
-    const { action, notes, status, media_url } = req.body;
+apiRouter.post('/leads/:id/assign', authMiddleware, async (req, res) => {
+    const { staffId } = req.body;
+    if (req.user.role !== 'admin' && req.user.role !== 'manager') return res.status(403).json({ error: 'Admin/Manager only' });
     try {
         await withDb(async (client) => {
-            const check = await client.query(`
-                SELECT c.assigned_to, s.manager_id 
-                FROM candidates c 
-                LEFT JOIN staff_members s ON c.assigned_to = s.id 
-                WHERE c.id = $1
-            `, [req.params.id]);
+            await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW() WHERE id = $3', [staffId, 'claimed', req.params.id]);
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
             
-            const lead = check.rows[0];
-            const isAssignedToMe = lead?.assigned_to === req.user.staffId;
-            const isManagerOfStaff = lead?.manager_id === req.user.staffId;
-            const isAdmin = req.user.role === 'admin';
+            // Notify staff member
+            const lead = await client.query('SELECT name FROM candidates WHERE id = $1', [req.params.id]);
+            await createNotification(
+                staffId,
+                'New Lead Assigned',
+                `You have been assigned a new lead: ${lead.rows[0].name}`,
+                'info',
+                `/leads/${req.params.id}`
+            );
 
-            if (!isAssignedToMe && !isManagerOfStaff && !isAdmin) {
-                return res.status(403).json({ error: 'Not authorized to act on this lead' });
+            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, 'reassigned', `Lead reassigned to staff ID: ${staffId}`]);
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
+    const { action, notes, status } = req.body;
+    try {
+        await withDb(async (client) => {
+            const check = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+            if (check.rows[0]?.assigned_to !== req.user.staffId && req.user.role !== 'admin') {
+                return res.status(403).json({ error: 'Not assigned to you' });
             }
-            
             const updates = [];
             const values = [];
             if (status) {
@@ -3923,7 +4281,8 @@ apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
             updates.push(`last_action_at = NOW()`);
             
             await client.query(`UPDATE candidates SET ${updates.join(', ')} WHERE id = $${values.length + 1}`, [...values, req.params.id]);
-            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes, media_url) VALUES ($1, $2, $3, $4, $5)', [req.params.id, req.user.staffId, action, notes, media_url]);
+            await client.query('UPDATE staff_members SET last_activity_at = NOW() WHERE id = $1', [req.user.staffId]);
+            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, action, notes]);
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3936,6 +4295,97 @@ apiRouter.get('/leads/:id/activity', authMiddleware, async (req, res) => {
             res.json(r.rows);
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- Notifications API ---
+apiRouter.get('/notifications', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const result = await client.query(
+                'SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50',
+                [req.user.staffId]
+            );
+            res.json(result.rows);
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+apiRouter.post('/notifications/:id/read', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query(
+                'UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2',
+                [req.params.id, req.user.staffId]
+            );
+            res.json({ success: true });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+apiRouter.post('/notifications/read-all', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query(
+                'UPDATE notifications SET is_read = TRUE WHERE user_id = $1',
+                [req.user.staffId]
+            );
+            res.json({ success: true });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- Reports API ---
+apiRouter.get('/reports/stats', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+        return res.status(403).json({ error: 'Access denied' });
+    }
+    try {
+        await withDb(async (client) => {
+            // Daily conversions (last 7 days)
+            const conversions = await client.query(`
+                SELECT 
+                    DATE_TRUNC('day', created_at) as date,
+                    COUNT(*) as count
+                FROM lead_activity_log
+                WHERE action = 'approved_closing'
+                AND created_at > NOW() - INTERVAL '7 days'
+                GROUP BY 1
+                ORDER BY 1 ASC
+            `);
+
+            // Lead sources
+            const sources = await client.query(`
+                SELECT source, COUNT(*) as count
+                FROM candidates
+                GROUP BY 1
+            `);
+
+            // Staff performance
+            const performance = await client.query(`
+                SELECT 
+                    s.name,
+                    COUNT(l.id) as closures
+                FROM staff_members s
+                LEFT JOIN lead_activity_log l ON s.id = l.staff_id AND l.action = 'approved_closing'
+                GROUP BY 1
+                ORDER BY 2 DESC
+            `);
+
+            res.json({
+                conversions: conversions.rows,
+                sources: sources.rows,
+                performance: performance.rows
+            });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 apiRouter.get('/media', async (req, res) => {
@@ -4425,6 +4875,10 @@ const processWebhookLegacy = async ({ body, req, res }) => {
         const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
         if (!msg) { res.sendStatus(200); return; }
 
+        if (WEBHOOK_DEFER_POST_RESPONSE) {
+            res.sendStatus(200);
+        }
+
         const processPromise = withDb(async (client) => {
             // WRAPPER: Retry logic for cold starts / missing tables
             await executeWithRetry(client, async () => {
@@ -4455,7 +4909,7 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                 }
 
                 perf.markStart('lead_upsert');
-                let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
+                let c = await client.query('SELECT id, name, phone_number, assigned_to, is_human_mode, last_staff_message_at FROM candidates WHERE phone_number = $1', [from]);
                 let candidate;
                 if (c.rows.length === 0) {
                     const id = crypto.randomUUID();
@@ -4491,6 +4945,39 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                      VALUES ($1, $2, 'in', $3, $4, 'received', $5, 'driver', NOW())`,
                     [crypto.randomUUID(), candidate.id, text, messageType, msg.id]
                 );
+
+                // Update lead score for response
+                let responsePoints = 5;
+                let responseReason = 'Lead responded';
+                
+                if (candidate.last_staff_message_at) {
+                    const lastStaffMsg = new Date(candidate.last_staff_message_at).getTime();
+                    const now = Date.now();
+                    const diffMinutes = (now - lastStaffMsg) / (1000 * 60);
+                    
+                    if (diffMinutes < 5) {
+                        responsePoints += 10;
+                        responseReason = 'Lead responded within 5 minutes';
+                    } else if (diffMinutes < 30) {
+                        responsePoints += 5;
+                        responseReason = 'Lead responded within 30 minutes';
+                    }
+                }
+                
+                await client.query('UPDATE candidates SET last_response_at = NOW() WHERE id = $1', [candidate.id]);
+                await updateLeadScore(candidate.id, responsePoints, responseReason);
+
+                // Notify assigned staff member
+                if (candidate.assigned_to) {
+                    await createNotification(
+                        candidate.assigned_to,
+                        'New Message',
+                        `Lead ${candidate.name} sent a message: ${text.substring(0, 50)}${text.length > 50 ? '...' : ''}`,
+                        'message',
+                        `/leads/${candidate.id}`
+                    );
+                }
+
                 notifyUpdates(candidate.id);
                 perf.markEnd('inbound_message_insert', { candidateId: candidate.id, messageType });
 
@@ -4509,8 +4996,6 @@ const processWebhookLegacy = async ({ body, req, res }) => {
             });
         });
 
-        res.sendStatus(200);
-
         if (WEBHOOK_DEFER_POST_RESPONSE) {
             trackBackgroundTask({
                 taskName: 'webhook.post_response_processing',
@@ -4520,6 +5005,7 @@ const processWebhookLegacy = async ({ body, req, res }) => {
             return;
         }
 
+        res.sendStatus(200);
         await processPromise;
     } catch (e) {
         console.error('Webhook processing error:', e);
@@ -4532,6 +5018,7 @@ const leadIngestionFacade = buildLeadIngestionFacade({
     executeWithRetry,
     runBotEngine,
     triggerReportingSyncDeferred,
+    fetchAndStoreIncomingMedia,
 });
 
 apiRouter.post('/webhook', async (req, res) => {
@@ -4545,7 +5032,7 @@ apiRouter.post('/webhook', async (req, res) => {
     });
 
     if (mode !== 'off') {
-        await leadIngestionFacade({ body: req.body, req, res, context: { requestId: req.requestId || null, tenantId } });
+        await leadIngestionFacade.handleIncomingMessage({ body: req.body, req, res, context: { requestId: req.requestId || null, tenantId } });
         return;
     }
 
@@ -4724,7 +5211,7 @@ registerAuthConfigRoutes({
     },
 });
 
-apiRouter.get('/updates/stream', async (req, res) => {
+apiRouter.get('/updates/stream', authMiddleware, async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
@@ -4732,7 +5219,8 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
     let closed = false;
 
-    // Vercel timeout guard: close connection before 60s limit
+    // Vercel/Cloud Run timeout guard: close connection before platform limit
+    // Cloud Run default is 5m, so we close at 4m 50s to allow graceful reconnect
     const vercelTimeout = setTimeout(() => {
         if (!closed) {
             closed = true;
@@ -4741,7 +5229,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
             clearInterval(heartbeat);
             res.end();
         }
-    }, 55000); 
+    }, 290000); // 4 Minutes 50 Seconds 
     const driverId = typeof req.query.driverId === 'string' ? req.query.driverId : null;
 
     const sendEvent = (data) => {
@@ -4804,10 +5292,8 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
                 const messagesByDriver = {};
                 if (driverId) {
-                    const [messagesRes, scheduledRes] = await Promise.all([
-                        client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [driverId]),
-                        client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed'])
-                    ]);
+                    const messagesRes = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [driverId]);
+                    const scheduledRes = await client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed']);
 
                     messagesByDriver[driverId] = await Promise.all(messagesRes.rows.map(async (row) => {
                         let imageUrl, videoUrl, documentUrl, audioUrl;
@@ -4821,7 +5307,9 @@ apiRouter.get('/updates/stream', async (req, res) => {
                                 else if (row.type === 'document') documentUrl = resolvedMediaUrl;
                                 else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
                                 else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
-                            } catch(e){}
+                            } catch(e){
+                                console.error('Error in fetchSnapshot loop:', e);
+                            }
                         }
                         return {
                             id: row.id,
@@ -4863,26 +5351,46 @@ apiRouter.get('/updates/stream', async (req, res) => {
         }
     };
 
+    let debounceTimer = null;
     const onUpdate = (data) => {
         if (closed) return;
-        // If candidateId is provided, we could optimize to only fetch that candidate,
-        // but for now, we'll just refresh the whole snapshot to keep it simple and consistent.
-        streamSnapshot();
+        if (debounceTimer) return;
+        debounceTimer = setTimeout(() => {
+            debounceTimer = null;
+            if (!closed) streamSnapshot();
+        }, 500); // 500ms debounce
+    };
+
+    const onNotification = (data) => {
+        if (closed) return;
+        // Send notification event to client
+        res.write(`event: notification\ndata: ${JSON.stringify(data)}\n\n`);
+        if (res.flush) res.flush();
     };
 
     updateEmitter.on('update', onUpdate);
+    updateEmitter.on('notification', onNotification);
 
     const snapshotInterval = setInterval(streamSnapshot, 10000); // Polling as fallback, less frequent
     const heartbeat = setInterval(() => {
-        if (!closed) res.write('data: heartbeat\n\n');
-    }, 20000);
+        if (!closed) {
+            // Standard SSE heartbeat/keep-alive comment
+            res.write(': heartbeat\n\n');
+            // Also send a data heartbeat for client-side tracking if needed
+            res.write('data: {"type":"heartbeat"}\n\n');
+            if (res.flush) res.flush();
+        }
+    }, 15000); // 15 Seconds heartbeat
 
+    // Tell client to reconnect after 3 seconds if disconnected
+    res.write('retry: 3000\n\n');
     streamSnapshot();
 
     req.on('close', () => {
         closed = true;
         clearTimeout(vercelTimeout);
         updateEmitter.off('update', onUpdate);
+        updateEmitter.off('notification', onNotification);
         clearInterval(snapshotInterval);
         clearInterval(heartbeat);
         res.end();
@@ -4963,7 +5471,9 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
                         else if (row.type === 'document') documentUrl = resolvedMediaUrl;
                         else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
                         else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
-                    } catch(e){}
+                    } catch(e){
+                        console.error('Error in message mapping loop:', e);
+                    }
                 }
                 return { 
                     id: row.id,
@@ -5022,6 +5532,13 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
                  VALUES ($1, $2, 'out', $3, $4, $5, $6, 'staff', NOW())`,
                 [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text', sendStatus, sendResult?.providerMessageId || null]
             );
+            
+            // Update lead score for staff engagement
+            if (sendStatus === 'sent') {
+                await client.query('UPDATE candidates SET last_staff_message_at = NOW() WHERE id = $1', [req.params.id]);
+                await updateLeadScore(req.params.id, 2, 'Staff sent a message');
+            }
+            
             notifyUpdates(req.params.id);
             scheduleDriverExcelSync();
             scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'upsert' });
@@ -5524,14 +6041,12 @@ const handleCronProcessQueueLegacy = async (req, res) => {
                     }
                 };
 
-                // PARALLEL EXECUTION (Batch of 5 concurrently)
-                const BATCH_SIZE = 5;
+                // SEQUENTIAL EXECUTION (To avoid concurrent queries on the same client)
                 perf.markStart('jobs_dispatch');
-                for (let i = 0; i < jobs.rows.length; i += BATCH_SIZE) {
-                    const chunk = jobs.rows.slice(i, i + BATCH_SIZE);
-                    await Promise.all(chunk.map(job => processJob(job)));
+                for (const job of jobs.rows) {
+                    await processJob(job);
                 }
-                perf.markEnd('jobs_dispatch', { processed, errors, batchSize: BATCH_SIZE });
+                perf.markEnd('jobs_dispatch', { processed, errors });
             });
         });
         res.json({ status: 'ok', processed, errors, queueSize: processed + errors });
@@ -5570,6 +6085,40 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
 
     if (mode !== 'off') return remindersRouter.processQueue(req, res);
     return handleCronProcessQueueLegacy(req, res);
+});
+
+apiRouter.get('/cron/reminders', async (req, res) => {
+    return remindersRouter.processQueue(req, res);
+});
+
+apiRouter.get('/cron/escalations', async (req, res) => {
+    return remindersRouter.processQueue(req, res);
+});
+
+apiRouter.get('/cron/lead-ingestion', async (req, res) => {
+    res.json({ status: 'ok', message: 'Lead ingestion cron triggered' });
+});
+
+apiRouter.get('/cron/auto-distribute', async (req, res) => {
+    try {
+        await processLeadAutoDistribution();
+        res.json({ status: 'ok', message: 'Lead auto-distribution completed' });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: e.message });
+    }
+});
+
+apiRouter.get('/cron/sync-reporting', async (req, res) => {
+    try {
+        await syncDriverExcelToS3();
+        res.json({ status: 'ok', message: 'Reporting sync triggered' });
+    } catch (e) {
+        res.status(500).json({ status: 'error', message: e.message });
+    }
+});
+
+apiRouter.get('/health', (req, res) => {
+    res.json({ status: 'ok', timestamp: Date.now() });
 });
 
 apiRouter.post('/system/init-db', async (req, res) => {
@@ -5648,6 +6197,31 @@ apiRouter.get('/system/meta-send-metrics', async (_req, res) => {
 
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
+
+// --- VITE MIDDLEWARE / STATIC ASSETS ---
+const setupFrontend = async (app) => {
+    if (process.env.NODE_ENV !== 'production') {
+        try {
+            const { createServer: createViteServer } = require('vite');
+            const vite = await createViteServer({
+                server: { middlewareMode: true },
+                appType: 'spa'
+            });
+            app.use(vite.middlewares);
+            console.log("[VITE] Middleware mounted.");
+        } catch (e) {
+            console.error("[VITE] Failed to mount middleware:", e.message);
+        }
+    } else {
+        const distPath = path.join(process.cwd(), 'dist');
+        app.use(express.static(distPath));
+        app.get('*', (req, res) => {
+            res.sendFile(path.join(distPath, 'index.html'));
+        });
+        console.log("[PROD] Static assets mounted from", distPath);
+    }
+};
+
 app.use((err, req, res, next) => {
     structuredLog({
         level: 'error',
@@ -5662,50 +6236,113 @@ app.use((err, req, res, next) => {
     });
     res.status(500).json({ error: 'Internal server error' });
 });
-app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
 // --- LEAD AUTO-DISTRIBUTION ---
+async function processLeadAutoDistribution() {
+    try {
+        await withDb(async (client) => {
+            // Check if auto-distribution is enabled
+            const settingsRes = await client.query("SELECT value FROM system_settings WHERE key = 'lead_distribution'");
+            const settings = settingsRes.rows[0]?.value || { auto_enabled: false };
+            if (!settings.auto_enabled) return;
+
+            // Get unassigned leads
+            const unassignedLeads = await client.query("SELECT id FROM candidates WHERE assigned_to IS NULL AND lead_status = 'new' LIMIT 10 FOR UPDATE SKIP LOCKED");
+            if (unassignedLeads.rows.length === 0) return;
+
+            // Get active staff members for auto-dist, ordered by last_assigned_at (round-robin)
+            const activeStaff = await client.query("SELECT id FROM staff_members WHERE is_active_for_auto_dist = TRUE ORDER BY last_assigned_at ASC NULLS FIRST");
+            if (activeStaff.rows.length === 0) return;
+
+            let staffIndex = 0;
+            for (const lead of unassignedLeads.rows) {
+                const staff = activeStaff.rows[staffIndex];
+                await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [staff.id, lead.id]);
+                await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [staff.id]);
+                await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead auto-assigned via distributor')", [lead.id, staff.id]);
+                
+                console.log(`Auto-assigned lead ${lead.id} to staff ${staff.id}`);
+                
+                staffIndex = (staffIndex + 1) % activeStaff.rows.length;
+            }
+        });
+    } catch (e) {
+        console.error("Lead Auto-Distributor Error:", e);
+        throw e;
+    }
+}
+
 async function startLeadAutoDistributor() {
     console.log("Starting Lead Auto-Distributor...");
     setInterval(async () => {
         try {
-            await withDb(async (client) => {
-                // Check if auto-distribution is enabled
-                const settingsRes = await client.query("SELECT value FROM system_settings WHERE key = 'lead_distribution'");
-                const settings = settingsRes.rows[0]?.value || { auto_enabled: false };
-                if (!settings.auto_enabled) return;
-
-                // Get unassigned leads
-                const unassignedLeads = await client.query("SELECT id FROM candidates WHERE assigned_to IS NULL AND lead_status = 'new' LIMIT 10");
-                if (unassignedLeads.rows.length === 0) return;
-
-                // Get active staff members for auto-dist, ordered by last_assigned_at (round-robin)
-                const activeStaff = await client.query("SELECT id FROM staff_members WHERE is_active_for_auto_dist = TRUE ORDER BY last_assigned_at ASC NULLS FIRST");
-                if (activeStaff.rows.length === 0) return;
-
-                let staffIndex = 0;
-                for (const lead of unassignedLeads.rows) {
-                    const staff = activeStaff.rows[staffIndex];
-                    await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [staff.id, lead.id]);
-                    await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [staff.id]);
-                    await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead auto-assigned via distributor')", [lead.id, staff.id]);
-                    
-                    console.log(`Auto-assigned lead ${lead.id} to staff ${staff.id}`);
-                    
-                    staffIndex = (staffIndex + 1) % activeStaff.rows.length;
-                }
-            });
+            await processLeadAutoDistribution();
         } catch (e) {
-            console.error("Lead Auto-Distributor Error:", e);
+            // Error logged in processLeadAutoDistribution
         }
     }, 30000); // Run every 30 seconds
 }
 
-const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
-    startLeadAutoDistributor();
-    return app.listen(port, () => {
+apiRouter.get('/system/ping', (req, res) => {
+    res.json({ status: 'ok', timestamp: Date.now(), environment: process.env.NODE_ENV || 'development' });
+});
+
+apiRouter.post('/webhooks/deferred-bot', async (req, res) => {
+    const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
+    try {
+        await leadIngestionFacade.handleDeferredBot({ body: req.body, req, res, context: { requestId: req.requestId || null, tenantId } });
+        res.sendStatus(200);
+    } catch (e) {
+        console.error('Deferred bot processing error:', e);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// --- START SERVER ---
+const startServer = async ({ port = 3000 } = {}) => {
+    await setupFrontend(app);
+    
+    // Only start background intervals if NOT in a serverless environment
+    if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+        startLeadAutoDistributor();
+    }
+
+    return app.listen(port, async () => {
         console.log(`Server running on ${port}`);
         logLeadIngestionRuntimePosture();
+
+        // Reset active bot executions count on startup
+        if (redis) {
+            try {
+                // Use a short timeout for the startup reset to avoid blocking
+                await Promise.race([
+                    redis.set('active_bot_executions', '0'),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('Redis reset timeout')), 2000))
+                ]);
+                console.log("[Redis] active_bot_executions reset to 0.");
+            } catch (e) {
+                // Only log if it's not a common placeholder/network failure to reduce noise
+                if (!e.message?.includes('fetch failed') && !e.message?.includes('timeout')) {
+                    console.error("[Redis] Failed to reset active_bot_executions:", e.message);
+                } else {
+                    console.warn("[Redis] Startup reset skipped (connection issue or placeholder credentials).");
+                }
+            }
+        }
+
+        // Self-ping to keep instance warm in Cloud Run/Vercel
+        if (process.env.NODE_ENV === 'production' && !process.env.VERCEL) {
+            const healthUrl = `http://localhost:${port}/api/health`;
+            console.log(`[Self-Ping] Starting keep-alive to ${healthUrl}`);
+            setInterval(async () => {
+                try {
+                    await axios.get(healthUrl, { timeout: 5000 });
+                } catch (e) {
+                    // Silent fail for self-ping
+                }
+            }, 240000); // Every 4 minutes
+        }
+
         // Auto-Init Check on Start (For Local/VPS, NOT Vercel)
         (async () => {
             try {
@@ -5734,7 +6371,12 @@ const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
 };
 
 if (require.main === module) {
-    startServer();
+    startServer().catch(err => {
+        console.error("Failed to start server:", err);
+        process.exit(1);
+    });
 }
 
-module.exports = { app, startServer };
+// --- EXPORTS ---
+export { app, startServer };
+export default app;

@@ -2,23 +2,14 @@
 import React, { useState, useEffect } from 'react';
 import { Users, UserPlus, Trash2, Shield, Mail, Search, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
-
-interface StaffMember {
-  id: string;
-  email: string;
-  name: string;
-  role: 'admin' | 'staff';
-  is_active_for_auto_dist: boolean;
-  last_assigned_at: string | null;
-  created_at: string;
-}
+import { StaffMember, UserRole } from '../types';
 
 export const StaffManagement: React.FC = () => {
   const [staff, setStaff] = useState<StaffMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isAdding, setIsAdding] = useState(false);
-  const [newStaff, setNewStaff] = useState({ email: '', name: '', role: 'staff' as 'admin' | 'staff' });
+  const [newStaff, setNewStaff] = useState({ email: '', name: '', role: 'staff' as UserRole, manager_id: null as string | null });
   const [searchQuery, setSearchQuery] = useState('');
   const [autoDistSettings, setAutoDistSettings] = useState({ auto_enabled: false });
 
@@ -73,7 +64,7 @@ export const StaffManagement: React.FC = () => {
     try {
       setLoading(true);
       await liveApiService.addStaff(newStaff);
-      setNewStaff({ email: '', name: '', role: 'staff' });
+      setNewStaff({ email: '', name: '', role: 'staff', manager_id: null });
       setIsAdding(false);
       await fetchStaff();
     } catch (err: any) {
@@ -190,11 +181,24 @@ export const StaffManagement: React.FC = () => {
                 <select
                   className="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all bg-white"
                   value={newStaff.role}
-                  onChange={e => setNewStaff({ ...newStaff, role: e.target.value as 'admin' | 'staff' })}
+                  onChange={e => setNewStaff({ ...newStaff, role: e.target.value as UserRole })}
                 >
                   <option value="staff">Staff (Lead Manager)</option>
+                  <option value="manager">Manager (Team Supervisor)</option>
                   <option value="admin">Admin (Full Access)</option>
                 </select>
+                {newStaff.role === 'staff' && (
+                  <select
+                    className="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all bg-white"
+                    value={newStaff.manager_id || ''}
+                    onChange={e => setNewStaff({ ...newStaff, manager_id: e.target.value || null })}
+                  >
+                    <option value="">No Manager</option>
+                    {staff.filter(s => s.role === 'manager').map(m => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
+                  </select>
+                )}
                 <button
                   type="submit"
                   disabled={loading}
@@ -266,11 +270,18 @@ export const StaffManagement: React.FC = () => {
                     </td>
                     <td className="px-6 py-4">
                       <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                        s.role === 'admin' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+                        s.role === 'admin' ? 'bg-purple-100 text-purple-700' : 
+                        s.role === 'manager' ? 'bg-emerald-100 text-emerald-700' :
+                        'bg-blue-100 text-blue-700'
                       }`}>
                         <Shield size={10} />
                         {s.role}
                       </span>
+                      {s.role === 'staff' && s.manager_id && (
+                        <p className="text-[9px] text-gray-400 mt-1 italic">
+                          Managed by: {staff.find(m => m.id === s.manager_id)?.name || 'Unknown'}
+                        </p>
+                      )}
                     </td>
                     <td className="px-6 py-4 text-center">
                       <button

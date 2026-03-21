@@ -1,5 +1,5 @@
 
-import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage, DriverExcelColumn, DriverExcelRow } from '../types';
+import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage, DriverExcelColumn, DriverExcelRow, UserRole } from '../types';
 
 // Use relative path so the Vercel proxy/rewrite handles the domain automatically.
 const API_BASE_URL = ''; 
@@ -504,7 +504,7 @@ export const liveApiService = {
     return apiRequest<any[]>('/api/staff');
   },
 
-  addStaff: async (staff: { email: string; name: string; role: 'admin' | 'staff' }) => {
+  addStaff: async (staff: { email: string; name: string; role: UserRole; manager_id?: string | null }) => {
     return apiRequest('/api/staff', {
       method: 'POST',
       body: JSON.stringify(staff)
@@ -546,7 +546,7 @@ export const liveApiService = {
     return apiRequest(`/api/leads/${id}/claim`, { method: 'POST' });
   },
 
-  logLeadAction: async (id: string, data: { action: string; notes: string; status?: string }) => {
+  logLeadAction: async (id: string, data: { action: string; notes: string; status?: string; media_url?: string }) => {
     return apiRequest(`/api/leads/${id}/action`, {
       method: 'POST',
       body: JSON.stringify(data)

@@ -16,6 +16,19 @@ export enum OnboardingStep {
 
 export type LeadSource = 'Organic' | 'Meta Ad' | 'Referral' | 'Manual';
 
+export type UserRole = 'admin' | 'manager' | 'staff';
+
+export interface StaffMember {
+  id: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  manager_id?: string | null;
+  is_active_for_auto_dist: boolean;
+  last_assigned_at: string | null;
+  created_at: string;
+}
+
 export interface MessageButton {
   id: string;
   title: string;
@@ -275,6 +288,17 @@ export interface DriverExcelRow {
   createdAt: string;
   lastMessageAt: string;
   variables: Record<string, any>;
+}
+
+export interface LeadActivityLog {
+  id: string;
+  candidate_id: string;
+  staff_id: string;
+  action: string;
+  notes: string;
+  media_url?: string;
+  created_at: string;
+  staff_name?: string;
 }
 
 export interface AuditIssue {
