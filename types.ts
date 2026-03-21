@@ -207,6 +207,12 @@ export interface Candidate {
   tags: string[];
   lastMessageAt: number;
   assignedAgent?: string;
+  assignedManager?: string;
+  followUpDate?: string | null;
+  followUpNote?: string | null;
+  isPushedToClosing?: boolean;
+  closingNotes?: string;
+  closingScreenshotUrl?: string;
   messages?: Message[];
   currentBotStepId?: string; 
   isHumanMode?: boolean;

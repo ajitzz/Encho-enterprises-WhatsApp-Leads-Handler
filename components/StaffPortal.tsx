@@ -99,7 +99,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [selectedMedia, setSelectedMedia] = useState<{ type: 'image' | 'video' | 'document' | 'audio'; file: File; preview: string } | null>(null);
   const [isHumanModeLoading, setIsHumanModeLoading] = useState(false);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
-  const [closingScreenshot, setClosingScreenshot] = useState<{ file: File; preview: string } | null>(null);
+  const [reminders, setReminders] = useState<any[]>([]);
+  const [nextFollowup, setNextFollowup] = useState('');
+  const [assigningTo, setAssigningTo] = useState<string | null>(null);
 
   const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
@@ -281,6 +283,53 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     }
   };
 
+  useEffect(() => {
+    liveApiService.getReminders().then(setReminders).catch(err => console.error('Failed to fetch reminders', err));
+  }, []);
+
+  const handleMarkReminderDone = async (id: string) => {
+    try {
+      await liveApiService.markReminderDone(id);
+      setReminders(prev => prev.filter(r => r.id !== id));
+    } catch (err) {
+      console.error('Failed to mark reminder done', err);
+    }
+  };
+
+  const handleAssignLead = async (leadId: string, staffId: string) => {
+    try {
+      setLoading(true);
+      await liveApiService.assignLead(leadId, staffId);
+      setAssigningTo(null);
+      // Refresh leads
+      const drivers = await liveApiService.getDrivers();
+      setAllLeads(drivers);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleReassignLead = async (leadId: string, staffId: string) => {
+    try {
+      setLoading(true);
+      await liveApiService.reassignLead(leadId, staffId);
+      setAssigningTo(null);
+      // Refresh leads
+      const drivers = await liveApiService.getDrivers();
+      setAllLeads(drivers);
+      if (selectedLead?.id === leadId) {
+        const updated = drivers.find(d => d.id === leadId);
+        if (updated) setSelectedLead(updated);
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleLogAction = async (action: string) => {
     if (!selectedLead) return;
     try {
@@ -296,11 +345,13 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         action,
         notes: actionNote,
         status: actionStatus || (action === 'submitted_for_closing' ? 'booked' : undefined),
-        media_url
+        media_url,
+        next_followup_at: nextFollowup || undefined
       });
       
       setActionNote('');
       setActionStatus('');
+      setNextFollowup('');
       setClosingScreenshot(null);
       
       // Refresh activity
@@ -344,6 +395,39 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         </div>
         <div className="absolute -right-10 -bottom-10 w-40 h-40 bg-blue-600/20 rounded-full blur-3xl" />
       </div>
+
+      {reminders.length > 0 && (
+        <div className="bg-amber-50 border border-amber-100 rounded-3xl p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-amber-900 flex items-center gap-2">
+              <Clock size={16} />
+              Upcoming Reminders
+            </h3>
+            <span className="bg-amber-200 text-amber-800 text-[10px] font-bold px-2 py-0.5 rounded-full">
+              {reminders.length}
+            </span>
+          </div>
+          <div className="space-y-2">
+            {reminders.map(reminder => (
+              <div key={reminder.id} className="bg-white/60 p-3 rounded-2xl flex items-center justify-between gap-3">
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-bold text-gray-900 truncate">{reminder.lead_name}</p>
+                  <p className="text-[10px] text-gray-500 truncate">{reminder.title || 'Follow-up'}</p>
+                  <p className="text-[9px] text-amber-600 font-bold mt-0.5">
+                    {new Date(reminder.scheduled_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                  </p>
+                </div>
+                <button 
+                  onClick={() => handleMarkReminderDone(reminder.id)}
+                  className="p-2 bg-white text-emerald-600 rounded-xl border border-emerald-100 hover:bg-emerald-50 transition-colors"
+                >
+                  <CheckCircle size={16} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4">
         {(user.role === 'manager' || user.role === 'admin') && (
@@ -502,12 +586,30 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
               
               <div className="flex items-center gap-2 mt-4">
                 {isPool ? (
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); handleClaim(lead.id); }}
-                    className="flex-1 bg-black text-white py-3 rounded-2xl text-xs font-bold flex items-center justify-center gap-2"
-                  >
-                    <UserCheck size={14} /> Claim Lead
-                  </button>
+                  <div className="flex flex-col w-full gap-2">
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); handleClaim(lead.id); }}
+                      className="flex-1 bg-black text-white py-3 rounded-2xl text-xs font-bold flex items-center justify-center gap-2"
+                    >
+                      <UserCheck size={14} /> Claim Lead
+                    </button>
+                    {(user.role === 'manager' || user.role === 'admin') && (
+                      <div className="flex flex-col gap-1">
+                        <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest px-1">Assign to Team</p>
+                        <div className="flex flex-wrap gap-1">
+                          {teamStaff.filter(s => s.id !== user.staffId).map(staff => (
+                            <button
+                              key={staff.id}
+                              onClick={(e) => { e.stopPropagation(); handleAssignLead(lead.id, staff.id); }}
+                              className="bg-gray-100 hover:bg-blue-100 hover:text-blue-700 text-gray-600 px-3 py-1.5 rounded-xl text-[10px] font-bold transition-all"
+                            >
+                              {staff.name.split(' ')[0]}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   <>
                     <a 
@@ -624,6 +726,23 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                   <span className="text-[10px] font-bold uppercase tracking-widest">WhatsApp</span>
                 </a>
               </div>
+
+              {(user.role === 'manager' || user.role === 'admin') && (
+                <div className="w-full mt-4 p-4 bg-gray-100 rounded-3xl">
+                  <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2 px-1">Reassign Lead</p>
+                  <div className="flex flex-wrap gap-2">
+                    {teamStaff.filter(s => s.id !== lead.assigned_to).map(staff => (
+                      <button
+                        key={staff.id}
+                        onClick={() => handleReassignLead(lead.id, staff.id)}
+                        className="bg-white hover:bg-blue-600 hover:text-white text-gray-700 px-4 py-2 rounded-2xl text-xs font-bold transition-all shadow-sm"
+                      >
+                        {staff.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -845,6 +964,16 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       value={actionNote}
                       onChange={e => setActionNote(e.target.value)}
                     />
+
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest px-1">Next Follow-up (Optional)</p>
+                      <input 
+                        type="datetime-local"
+                        className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none text-sm focus:ring-2 focus:ring-blue-500 transition-all"
+                        value={nextFollowup}
+                        onChange={e => setNextFollowup(e.target.value)}
+                      />
+                    </div>
 
                     {actionStatus === 'booked' && (
                       <div className="space-y-2 animate-in slide-in-from-top-2">

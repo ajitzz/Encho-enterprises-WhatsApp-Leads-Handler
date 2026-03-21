@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 
-const updateEmitter = new EventEmitter();
+export const updateEmitter = new EventEmitter();
 updateEmitter.setMaxListeners(100);
 
 export const broadcastUpdate = (candidateId?: string) => {

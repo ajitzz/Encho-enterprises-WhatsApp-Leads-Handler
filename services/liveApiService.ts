@@ -555,5 +555,27 @@ export const liveApiService = {
 
   getLeadActivity: async (id: string): Promise<any[]> => {
     return apiRequest<any[]>(`/api/leads/${id}/activity`);
+  },
+
+  assignLead: async (id: string, staffId: string) => {
+    return apiRequest(`/api/leads/${id}/assign`, {
+      method: 'POST',
+      body: JSON.stringify({ staff_id: staffId })
+    });
+  },
+
+  reassignLead: async (id: string, staffId: string) => {
+    return apiRequest(`/api/leads/${id}/reassign`, {
+      method: 'POST',
+      body: JSON.stringify({ staff_id: staffId })
+    });
+  },
+
+  getReminders: async (): Promise<any[]> => {
+    return apiRequest<any[]>('/api/leads/reminders');
+  },
+
+  markReminderDone: async (id: string) => {
+    return apiRequest(`/api/leads/reminders/${id}/done`, { method: 'POST' });
   }
 };

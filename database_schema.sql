@@ -32,6 +32,12 @@ CREATE TABLE candidates (
     current_bot_step_id VARCHAR(100),
     variables JSONB DEFAULT '{}'::jsonb,
     assigned_to UUID,
+    assigned_manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+    follow_up_date TIMESTAMP WITH TIME ZONE,
+    follow_up_note TEXT,
+    is_pushed_to_closing BOOLEAN DEFAULT FALSE,
+    closing_notes TEXT,
+    closing_screenshot_url TEXT,
     lead_status VARCHAR(50) DEFAULT 'new',
     last_action_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -43,6 +49,7 @@ CREATE TABLE staff_members (
     email VARCHAR(255) UNIQUE NOT NULL,
     name VARCHAR(255),
     role VARCHAR(50) DEFAULT 'staff',
+    manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
     is_active_for_auto_dist BOOLEAN DEFAULT FALSE,
     last_assigned_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()

@@ -3718,10 +3718,22 @@ apiRouter.get('/auth/me', authMiddleware, (req, res) => {
 });
 
 apiRouter.get('/staff', authMiddleware, async (req, res) => {
-    if ((req as any).user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
     try {
         await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM staff_members ORDER BY created_at DESC');
+            let query;
+            let params;
+            
+            if (req.user.role === 'admin') {
+                query = 'SELECT * FROM staff_members ORDER BY created_at DESC';
+                params = [];
+            } else if (req.user.role === 'manager') {
+                query = 'SELECT * FROM staff_members WHERE manager_id = $1 OR id = $1 ORDER BY created_at DESC';
+                params = [req.user.staffId];
+            } else {
+                return res.status(403).json({ error: 'Access denied' });
+            }
+            
+            const r = await client.query(query, params);
             res.json(r.rows);
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3832,13 +3844,94 @@ apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
             }
             await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW() WHERE id = $3', [req.user.staffId, 'claimed', req.params.id]);
             await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, 'claimed', 'Lead claimed from pool']);
+            
+            // Audit log
+            await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, new_state) VALUES ($1, $2, $3, $4, $5)', 
+                [req.user.staffId, 'lead_claim', 'candidate', req.params.id, JSON.stringify({ staff_id: req.user.staffId })]);
+            
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/leads/:id/assign', authMiddleware, async (req, res) => {
+    const { staff_id } = req.body;
+    if (!staff_id) return res.status(400).json({ error: 'Staff ID required' });
+
+    try {
+        await withDb(async (client) => {
+            // Check permissions
+            if (req.user.role !== 'admin') {
+                if (req.user.role === 'manager') {
+                    const staffCheck = await client.query('SELECT manager_id FROM staff_members WHERE id = $1', [staff_id]);
+                    if (staffCheck.rows[0]?.manager_id !== req.user.staffId && staff_id !== req.user.staffId) {
+                        return res.status(403).json({ error: 'Can only assign to your team members' });
+                    }
+                } else {
+                    return res.status(403).json({ error: 'Only admins and managers can assign leads' });
+                }
+            }
+
+            await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW() WHERE id = $3', [staff_id, 'assigned', req.params.id]);
+            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', 
+                [req.params.id, req.user.staffId, 'assigned', `Lead assigned to staff member by ${req.user.role}`]);
+            
+            // Audit log
+            await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, new_state) VALUES ($1, $2, $3, $4, $5)', 
+                [req.user.staffId, 'lead_assign', 'candidate', req.params.id, JSON.stringify({ assigned_to: staff_id })]);
+            
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/leads/:id/reassign', authMiddleware, async (req, res) => {
+    const { staff_id } = req.body;
+    if (!staff_id) return res.status(400).json({ error: 'Staff ID required' });
+
+    try {
+        await withDb(async (client) => {
+            const leadCheck = await client.query(`
+                SELECT c.assigned_to, s.manager_id 
+                FROM candidates c 
+                LEFT JOIN staff_members s ON c.assigned_to = s.id 
+                WHERE c.id = $1
+            `, [req.params.id]);
+            
+            const lead = leadCheck.rows[0];
+            
+            // Check permissions
+            if (req.user.role !== 'admin') {
+                if (req.user.role === 'manager') {
+                    // Manager can reassign if they manage the CURRENTLY assigned staff OR the NEW staff
+                    const newStaffCheck = await client.query('SELECT manager_id FROM staff_members WHERE id = $1', [staff_id]);
+                    const isManagerOfCurrent = lead?.manager_id === req.user.staffId || lead?.assigned_to === req.user.staffId;
+                    const isManagerOfNew = newStaffCheck.rows[0]?.manager_id === req.user.staffId || staff_id === req.user.staffId;
+                    
+                    if (!isManagerOfCurrent || !isManagerOfNew) {
+                        return res.status(403).json({ error: 'Can only reassign leads within your team' });
+                    }
+                } else {
+                    return res.status(403).json({ error: 'Only admins and managers can reassign leads' });
+                }
+            }
+
+            const oldStaffId = lead?.assigned_to;
+            await client.query('UPDATE candidates SET assigned_to = $1, last_action_at = NOW() WHERE id = $2', [staff_id, req.params.id]);
+            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', 
+                [req.params.id, req.user.staffId, 'reassigned', `Lead reassigned from ${oldStaffId} to ${staff_id}`]);
+            
+            // Audit log
+            await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, previous_state, new_state) VALUES ($1, $2, $3, $4, $5, $6)', 
+                [req.user.staffId, 'lead_reassign', 'candidate', req.params.id, JSON.stringify({ assigned_to: oldStaffId }), JSON.stringify({ assigned_to: staff_id })]);
+            
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
-    const { action, notes, status, media_url } = req.body;
+    const { action, notes, status, media_url, next_followup_at } = req.body;
     try {
         await withDb(async (client) => {
             const check = await client.query(`
@@ -3866,7 +3959,41 @@ apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
             updates.push(`last_action_at = NOW()`);
             
             await client.query(`UPDATE candidates SET ${updates.join(', ')} WHERE id = $${values.length + 1}`, [...values, req.params.id]);
-            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes, media_url) VALUES ($1, $2, $3, $4, $5)', [req.params.id, req.user.staffId, action, notes, media_url]);
+            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes, media_url, next_followup_at) VALUES ($1, $2, $3, $4, $5, $6)', 
+                [req.params.id, req.user.staffId, action, notes, media_url, next_followup_at || null]);
+            
+            // If next_followup_at is provided, create a reminder
+            if (next_followup_at) {
+                await client.query(`
+                    INSERT INTO lead_reminders (candidate_id, staff_id, scheduled_at)
+                    VALUES ($1, $2, $3)
+                `, [req.params.id, req.user.staffId, next_followup_at]);
+            }
+
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/leads/reminders', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query(`
+                SELECT r.*, c.name as lead_name 
+                FROM lead_reminders r 
+                JOIN candidates c ON r.candidate_id = c.id 
+                WHERE r.staff_id = $1 AND r.status = 'pending' AND r.scheduled_at > NOW() - INTERVAL '1 day'
+                ORDER BY r.scheduled_at ASC
+            `, [req.user.staffId]);
+            res.json(r.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/leads/reminders/:id/done', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await client.query("UPDATE lead_reminders SET status = 'done', updated_at = NOW() WHERE id = $1 AND staff_id = $2", [req.params.id, req.user.staffId]);
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
