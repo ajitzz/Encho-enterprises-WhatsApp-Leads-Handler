@@ -41,6 +41,8 @@ import { ActionCenter } from './ActionCenter.tsx';
 import { CommandCenter } from './CommandCenter.tsx';
 import { PendingReviews } from './PendingReviews.tsx';
 import { LeadReviewModal } from './LeadReviewModal.tsx';
+import { ScheduledAlertPopup } from './ScheduledAlertPopup.tsx';
+import { DueAlertItem } from '../services/liveApiService.ts';
 
 const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTime }) => {
   const [timeLeft, setTimeLeft] = useState<number>(0);
@@ -111,6 +113,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [assigningTo, setAssigningTo] = useState<string | null>(null);
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [closingScreenshot, setClosingScreenshot] = useState<{ file: File; preview: string } | null>(null);
+  const [dueAlertQueue, setDueAlertQueue] = useState<DueAlertItem[]>([]);
+  const [activeDueAlert, setActiveDueAlert] = useState<DueAlertItem | null>(null);
 
   const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
@@ -295,6 +299,54 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   useEffect(() => {
     liveApiService.getReminders().then(setReminders).catch(err => console.error('Failed to fetch reminders', err));
   }, []);
+
+  useEffect(() => {
+    const seenKey = `due_alerts_seen:${user.staffId || user.email || 'staff'}`;
+    const seenIds = new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
+
+    const syncDueAlerts = async () => {
+      try {
+        const alerts = await liveApiService.getDueAlerts();
+        const fresh = alerts.filter(alert => !seenIds.has(alert.event_id));
+        if (fresh.length > 0) {
+          setDueAlertQueue(prev => {
+            const existing = new Set(prev.map(item => item.event_id));
+            return [...prev, ...fresh.filter(item => !existing.has(item.event_id))];
+          });
+        }
+      } catch (err) {
+        console.error('Failed to fetch due alerts', err);
+      }
+    };
+
+    syncDueAlerts();
+    const timer = setInterval(syncDueAlerts, 30000);
+    return () => clearInterval(timer);
+  }, [user.staffId, user.email]);
+
+  useEffect(() => {
+    if (activeDueAlert || dueAlertQueue.length === 0) return;
+    const next = dueAlertQueue[0];
+    setActiveDueAlert(next);
+    setDueAlertQueue(prev => prev.slice(1));
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(`Lead Alert: ${next.lead_name}`, {
+        body: `Scheduled time reached at ${new Date(next.scheduled_at).toLocaleString()}`
+      });
+    }
+  }, [dueAlertQueue, activeDueAlert]);
+
+  const dismissDueAlert = (eventId?: string) => {
+    if (!eventId) {
+      setActiveDueAlert(null);
+      return;
+    }
+    const seenKey = `due_alerts_seen:${user.staffId || user.email || 'staff'}`;
+    const seenIds = new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
+    seenIds.add(eventId);
+    localStorage.setItem(seenKey, JSON.stringify(Array.from(seenIds)));
+    setActiveDueAlert(null);
+  };
 
   const handleMarkReminderDone = async (id: string) => {
     try {
@@ -1303,6 +1355,17 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           </button>
         </div>
       )}
+
+      <ScheduledAlertPopup
+        alert={activeDueAlert}
+        onDismiss={() => dismissDueAlert(activeDueAlert?.event_id)}
+        onOpenLead={(leadId) => {
+          const lead = allLeads.find(l => l.id === leadId);
+          if (lead) {
+            handleOpenDetail(lead);
+          }
+        }}
+      />
     </div>
   );
 };

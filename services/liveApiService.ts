@@ -14,6 +14,16 @@ const resolveProxyUploadMaxBytes = () => {
 let authToken: string | null = localStorage.getItem('uber_fleet_auth_token');
 
 export type UpdateConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'polling' | 'disconnected';
+export interface DueAlertItem {
+  event_id: string;
+  event_type: 'followup_due' | 'review_due';
+  lead_id: string;
+  lead_name: string;
+  scheduled_at: string;
+  owner_staff_id: string | null;
+  owner_staff_name: string | null;
+  review_status?: string | null;
+}
 
 interface SubscribeToUpdatesOptions {
     driverId?: string;
@@ -577,6 +587,10 @@ export const liveApiService = {
 
   markReminderDone: async (id: string) => {
     return apiRequest(`/api/leads/reminders/${id}/done`, { method: 'POST' });
+  },
+
+  getDueAlerts: async (): Promise<DueAlertItem[]> => {
+    return apiRequest<DueAlertItem[]>('/api/notifications/due');
   },
 
   // Action Center & Analytics

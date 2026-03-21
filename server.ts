@@ -4086,6 +4086,76 @@ apiRouter.post('/leads/reminders/:id/done', authMiddleware, async (req, res) => 
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+apiRouter.get('/notifications/due', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            await withSchemaRetry(client, async () => {
+                const role = req.user.role;
+                const staffId = req.user.staffId;
+                const params: any[] = [];
+                let followupScope = '';
+                let reviewScope = '';
+
+                if (role === 'staff') {
+                    params.push(staffId);
+                    followupScope = `AND r.staff_id = $${params.length}`;
+                    reviewScope = `AND lr.staff_id = $${params.length}`;
+                } else if (role === 'manager') {
+                    params.push(staffId);
+                    followupScope = `AND sm.manager_id = $${params.length}`;
+                    reviewScope = `AND lr.manager_id = $${params.length}`;
+                } else if (role !== 'admin') {
+                    return res.status(403).json({ error: 'Forbidden' });
+                }
+
+                const dueAlerts = await client.query(`
+                    WITH due_followups AS (
+                        SELECT
+                            'followup:' || r.id::text AS event_id,
+                            'followup_due' AS event_type,
+                            c.id AS lead_id,
+                            c.name AS lead_name,
+                            r.scheduled_at,
+                            r.staff_id AS owner_staff_id,
+                            sm.name AS owner_staff_name,
+                            NULL::text AS review_status
+                        FROM lead_reminders r
+                        JOIN candidates c ON c.id = r.candidate_id
+                        LEFT JOIN staff_members sm ON sm.id = r.staff_id
+                        WHERE r.status = 'pending'
+                          AND r.scheduled_at <= NOW()
+                          ${followupScope}
+                    ),
+                    due_reviews AS (
+                        SELECT
+                            'review:' || lr.id::text AS event_id,
+                            'review_due' AS event_type,
+                            c.id AS lead_id,
+                            c.name AS lead_name,
+                            lr.closing_date AS scheduled_at,
+                            lr.staff_id AS owner_staff_id,
+                            sm.name AS owner_staff_name,
+                            lr.status::text AS review_status
+                        FROM lead_reviews lr
+                        JOIN candidates c ON c.id = lr.candidate_id
+                        LEFT JOIN staff_members sm ON sm.id = lr.staff_id
+                        WHERE lr.status = 'pending'
+                          AND lr.closing_date <= NOW()
+                          ${reviewScope}
+                    )
+                    SELECT * FROM due_followups
+                    UNION ALL
+                    SELECT * FROM due_reviews
+                    ORDER BY scheduled_at ASC
+                    LIMIT 100
+                `, params);
+
+                res.json(dueAlerts.rows);
+            });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 apiRouter.get('/leads/:id/activity', authMiddleware, async (req, res) => {
     try {
         await withDb(async (client) => {
