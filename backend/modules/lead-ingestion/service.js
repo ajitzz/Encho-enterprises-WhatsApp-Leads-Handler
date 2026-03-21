@@ -426,14 +426,19 @@ export class LeadIngestionService {
       // 2. Check if candidate is already assigned
       if (candidate.assigned_to) return;
 
-      // 3. Find the next staff member (Round Robin)
-      // We pick the staff member who is active for auto-dist and has the oldest last_assigned_at
+      // 3. Find the next staff member (Round Robin + Capacity Check)
+      // We pick the staff member who:
+      // - is active for auto-dist
+      // - is NOT on leave
+      // - has NOT reached their max_capacity
+      // - has the oldest last_assigned_at
       const staffRes = await client.query(`
-        SELECT id, name, email 
-        FROM staff_members 
-        WHERE is_active_for_auto_dist = TRUE 
-        ORDER BY last_assigned_at ASC NULLS FIRST 
-        LIMIT 1
+        SELECT s.id, s.name, s.email, s.max_capacity,
+               (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('closed', 'archived', 'rejected')) as active_leads
+        FROM staff_members s
+        WHERE s.is_active_for_auto_dist = TRUE 
+          AND s.is_on_leave = FALSE
+        ORDER BY s.last_assigned_at ASC NULLS FIRST
       `);
 
       if (staffRes.rows.length === 0) {
@@ -446,7 +451,18 @@ export class LeadIngestionService {
         return;
       }
 
-      const staff = staffRes.rows[0];
+      // Find first staff with capacity
+      const staff = staffRes.rows.find(s => s.active_leads < (s.max_capacity || 20));
+
+      if (!staff) {
+        log({ 
+          module: 'lead-ingestion', 
+          message: 'auto_dist.all_staff_at_capacity', 
+          requestId, 
+          meta: { candidateId: candidate.id } 
+        });
+        return;
+      }
 
       // 4. Assign the lead
       await client.query(

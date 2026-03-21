@@ -26,6 +26,9 @@ import { buildLeadIngestionFacade } from './backend/modules/lead-ingestion/api.j
 import { buildRemindersRouter } from './backend/modules/reminders-escalations/api.js';
 import { buildAuthConfigRouter, registerAuthConfigRoutes } from './backend/modules/auth-config/api.js';
 import { buildSystemHealthRouter, registerSystemHealthRoutes } from './backend/modules/system-health/api.js';
+import leadReviewRouter from './backend/modules/lead-review/api.js';
+import analyticsRouter from './backend/modules/analytics/api.js';
+import { runNurtureTriggers } from './backend/modules/automation/nurture.js';
 
 const notifyUpdates = (candidateId = null) => {
     broadcastUpdate(candidateId);
@@ -3704,6 +3707,9 @@ const authMiddleware = async (req, res, next) => {
 };
 
 // --- STAFF MANAGEMENT ---
+apiRouter.use('/reviews', leadReviewRouter);
+apiRouter.use('/analytics', analyticsRouter);
+
 apiRouter.get('/auth/me', authMiddleware, (req, res) => {
     res.json({
         success: true,
@@ -5775,6 +5781,12 @@ async function startLeadAutoDistributor() {
 
 const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
     startLeadAutoDistributor();
+    
+    // Start background jobs
+    setInterval(() => {
+        runNurtureTriggers().catch(err => console.error('[NURTURE JOB ERROR]', err));
+    }, 1000 * 60 * 60); // Run every hour
+
     return app.listen(port, () => {
         console.log(`Server running on ${port}`);
         logLeadIngestionRuntimePosture();

@@ -577,5 +577,33 @@ export const liveApiService = {
 
   markReminderDone: async (id: string) => {
     return apiRequest(`/api/leads/reminders/${id}/done`, { method: 'POST' });
+  },
+
+  // Action Center & Analytics
+  getActionCenter: async (staffId: string) => {
+    return apiRequest<any>(`/api/analytics/action-center/${staffId}`);
+  },
+
+  getCommandCenter: async (managerId: string) => {
+    return apiRequest<any>(`/api/analytics/command-center/${managerId}`);
+  },
+
+  // Lead Reviews
+  submitLeadReview: async (id: string, data: { closing_date: string; notes: string; screenshot_url?: string }) => {
+    return apiRequest(`/api/reviews/${id}/submit`, {
+      method: 'POST',
+      body: JSON.stringify(data)
+    });
+  },
+
+  getPendingReviews: async (managerId: string) => {
+    return apiRequest<any[]>(`/api/reviews/pending/${managerId}`);
+  },
+
+  reviewDecision: async (reviewId: string, data: { decision: 'approved' | 'rejected'; feedback?: string }) => {
+    return apiRequest(`/api/reviews/${reviewId}/decision`, {
+      method: 'POST',
+      body: JSON.stringify(data)
+    });
   }
 };

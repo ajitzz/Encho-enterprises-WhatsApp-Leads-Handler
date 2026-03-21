@@ -29,11 +29,18 @@ import {
   Video,
   FileText,
   User,
-  Bot
+  Bot,
+  Inbox,
+  BarChart3,
+  ShieldCheck
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 import { Driver, Message } from '../types.ts';
 import { VoiceRecorder } from './VoiceRecorder.tsx';
+import { ActionCenter } from './ActionCenter.tsx';
+import { CommandCenter } from './CommandCenter.tsx';
+import { PendingReviews } from './PendingReviews.tsx';
+import { LeadReviewModal } from './LeadReviewModal.tsx';
 
 const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTime }) => {
   const [timeLeft, setTimeLeft] = useState<number>(0);
@@ -81,7 +88,7 @@ interface LeadActivity {
 }
 
 export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ user, onLogout }) => {
-  const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail' | 'team'>('dashboard');
+  const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail' | 'team' | 'action-center' | 'command-center' | 'pending-reviews'>('dashboard');
   const [allLeads, setAllLeads] = useState<Driver[]>([]);
   const [teamStaff, setTeamStaff] = useState<any[]>([]);
   const [selectedLead, setSelectedLead] = useState<Driver | null>(null);
@@ -102,6 +109,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [reminders, setReminders] = useState<any[]>([]);
   const [nextFollowup, setNextFollowup] = useState('');
   const [assigningTo, setAssigningTo] = useState<string | null>(null);
+  const [showReviewModal, setShowReviewModal] = useState(false);
+  const [closingScreenshot, setClosingScreenshot] = useState<{ file: File; preview: string } | null>(null);
 
   const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
@@ -430,6 +439,45 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       )}
 
       <div className="grid grid-cols-1 gap-4">
+        <button 
+          onClick={() => setView('action-center')}
+          className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center justify-between group active:scale-95 transition-all"
+        >
+          <div className="flex items-center gap-4">
+            <div className="bg-emerald-100 text-emerald-600 p-3 rounded-2xl">
+              <Inbox size={24} />
+            </div>
+            <div className="text-left">
+              <h3 className="font-bold text-gray-900">Action Center</h3>
+              <p className="text-xs text-gray-500">Your unified productivity inbox</p>
+            </div>
+          </div>
+          <ChevronRight className="text-gray-300 group-hover:text-gray-900 transition-colors" />
+        </button>
+
+        {(user.role === 'manager' || user.role === 'admin') && (
+          <div className="grid grid-cols-2 gap-3">
+            <button 
+              onClick={() => setView('command-center')}
+              className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex flex-col items-center justify-center gap-2 group active:scale-95 transition-all"
+            >
+              <div className="bg-blue-100 text-blue-600 p-3 rounded-2xl">
+                <BarChart3 size={24} />
+              </div>
+              <h3 className="font-bold text-gray-900 text-xs">Command Center</h3>
+            </button>
+            <button 
+              onClick={() => setView('pending-reviews')}
+              className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex flex-col items-center justify-center gap-2 group active:scale-95 transition-all"
+            >
+              <div className="bg-purple-100 text-purple-600 p-3 rounded-2xl">
+                <ShieldCheck size={24} />
+              </div>
+              <h3 className="font-bold text-gray-900 text-xs">Pending Reviews</h3>
+            </button>
+          </div>
+        )}
+
         {(user.role === 'manager' || user.role === 'admin') && (
           <button 
             onClick={() => setView('team' as any)}
@@ -1021,11 +1069,10 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       
                       {actionStatus === 'booked' && (
                         <button 
-                          onClick={() => handleLogAction('submitted_for_closing')}
-                          disabled={loading || !actionNote || !closingScreenshot}
+                          onClick={() => setShowReviewModal(true)}
                           className="w-full bg-blue-600 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-blue-200"
                         >
-                          {loading ? <Loader2 className="animate-spin" size={20} /> : <><Zap size={20} /> Submit for Closing</>}
+                          <Zap size={20} /> Submit for Closing Review
                         </button>
                       )}
                     </div>
@@ -1167,7 +1214,48 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         {view === 'my-leads' && renderLeadList(false)}
         {view === 'detail' && renderDetail()}
         {view === 'team' && renderTeam()}
+        {view === 'action-center' && (
+          <div className="flex flex-col h-full animate-in slide-in-from-right duration-300">
+            <div className="p-4 bg-white border-b border-gray-100 sticky top-0 z-10">
+              <div className="flex items-center gap-3 mb-4">
+                <button onClick={() => setView('dashboard')} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
+                  <ArrowLeft size={20} />
+                </button>
+                <h2 className="text-lg font-bold">Action Center</h2>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <ActionCenter 
+                staffId={user.staffId} 
+                onSelectLead={(id) => {
+                  const lead = allLeads.find(l => l.id === id);
+                  if (lead) handleOpenDetail(lead);
+                }} 
+              />
+            </div>
+          </div>
+        )}
+        {view === 'command-center' && (
+          <CommandCenter managerId={user.staffId} onBack={() => setView('dashboard')} />
+        )}
+        {view === 'pending-reviews' && (
+          <PendingReviews managerId={user.staffId} onBack={() => setView('dashboard')} />
+        )}
       </main>
+
+      {/* Modals */}
+      {showReviewModal && selectedLead && (
+        <LeadReviewModal 
+          lead={selectedLead} 
+          onClose={() => setShowReviewModal(false)}
+          onSuccess={() => {
+            setShowReviewModal(false);
+            setView('my-leads');
+            // Refresh leads
+            liveApiService.getDrivers().then(setAllLeads);
+          }}
+        />
+      )}
 
       {/* Bottom Navigation */}
       {view !== 'detail' && (
