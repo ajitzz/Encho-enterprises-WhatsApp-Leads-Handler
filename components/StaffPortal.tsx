@@ -95,6 +95,7 @@ interface LeadActivity {
     new_followup_at?: string | null;
     status_changed?: boolean;
     followup_changed?: boolean;
+    interaction_followup_at?: string | null;
   };
 }
 
@@ -138,6 +139,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   };
 
   const getActivityDetails = (activity: LeadActivity) => {
+    const scheduledForInteraction = activity.metadata?.interaction_followup_at ?? activity.metadata?.new_followup_at ?? activity.next_followup_at ?? null;
+
     return [
       {
         label: 'Status',
@@ -146,9 +149,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       },
       {
         label: 'Scheduled Date',
-        value: formatDateTime(activity.metadata?.new_followup_at || activity.next_followup_at) === '—'
+        value: formatDateTime(scheduledForInteraction) === '—'
           ? 'Not scheduled'
-          : formatDateTime(activity.metadata?.new_followup_at || activity.next_followup_at),
+          : formatDateTime(scheduledForInteraction),
         tone: 'violet' as const
       }
     ];
@@ -1199,7 +1202,10 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                           <p className="text-xs font-bold text-gray-900 uppercase tracking-wider">{activity.action.replace(/_/g, ' ')}</p>
                           <p className="text-[10px] text-gray-400">{formatTimelineTime(activity.created_at)}</p>
                         </div>
-                        <p className="text-sm text-gray-600 leading-relaxed">{activity.notes || 'No notes added.'}</p>
+                        <div className="mt-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Note</p>
+                          <p className="text-sm text-gray-700 leading-relaxed mt-1">{activity.notes || 'No notes added.'}</p>
+                        </div>
                         <div className="mt-3 space-y-2">
                           {activityDetails.map((detail) => (
                             <div
