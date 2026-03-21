@@ -1,33 +1,13 @@
 
 import React, { useState, useEffect } from 'react';
 import { 
-  BarChart3, 
   TrendingUp, 
   Users, 
-  Zap, 
-  Clock, 
-  AlertTriangle, 
-  CheckCircle, 
-  ChevronRight, 
   Loader2, 
   ArrowLeft,
-  Activity,
-  Calendar,
-  MessageSquare
+  Activity
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
-import { 
-  BarChart, 
-  Bar, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  ResponsiveContainer, 
-  Cell,
-  PieChart,
-  Pie
-} from 'recharts';
 
 interface CommandCenterProps {
   managerId: string;
@@ -77,6 +57,19 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({ managerId, onBack 
   const { teamStats, conversionVelocity, distributionHeatmap } = data || { teamStats: [], conversionVelocity: [], distributionHeatmap: [] };
 
   const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
+  const maxVelocity = Math.max(...conversionVelocity.map((entry: any) => entry.count), 1);
+  const totalDistribution = distributionHeatmap.reduce((sum: number, entry: any) => sum + entry.count, 0);
+  const pieStops = distributionHeatmap.reduce((acc: string[], entry: any, index: number) => {
+    const previousPct = distributionHeatmap
+      .slice(0, index)
+      .reduce((sum: number, current: any) => sum + ((current.count / Math.max(totalDistribution, 1)) * 100), 0);
+    const currentPct = previousPct + ((entry.count / Math.max(totalDistribution, 1)) * 100);
+    acc.push(`${COLORS[index % COLORS.length]} ${previousPct}% ${currentPct}%`);
+    return acc;
+  }, []);
+  const pieBackground = pieStops.length
+    ? `conic-gradient(${pieStops.join(', ')})`
+    : 'conic-gradient(#e5e7eb 0% 100%)';
 
   return (
     <div className="flex flex-col h-full bg-gray-50 animate-in slide-in-from-right duration-300">
@@ -123,25 +116,27 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({ managerId, onBack 
             <TrendingUp size={14} className="text-emerald-600" />
             Conversion Velocity (Leads Closed)
           </h3>
-          <div className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={conversionVelocity}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
-                <XAxis 
-                  dataKey="date" 
-                  axisLine={false} 
-                  tickLine={false} 
-                  tick={{ fontSize: 10, fill: '#9ca3af' }} 
-                  tickFormatter={(val) => new Date(val).toLocaleDateString([], { month: 'short', day: 'numeric' })}
-                />
-                <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#9ca3af' }} />
-                <Tooltip 
-                  contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                  labelStyle={{ fontWeight: 'bold', marginBottom: '4px' }}
-                />
-                <Bar dataKey="count" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+          <div className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm h-64 overflow-y-auto">
+            <div className="flex h-full items-end gap-3 min-w-max">
+              {conversionVelocity.map((entry: any) => {
+                const heightPct = (entry.count / maxVelocity) * 100;
+                return (
+                  <div key={entry.date} className="flex flex-col items-center justify-end h-full w-12 gap-2">
+                    <span className="text-[10px] font-bold text-gray-500">{entry.count}</span>
+                    <div className="w-full h-40 flex items-end bg-slate-100 rounded-xl overflow-hidden">
+                      <div
+                        className="w-full bg-blue-500 rounded-xl transition-all duration-300"
+                        style={{ height: `${Math.max(heightPct, 6)}%` }}
+                        title={`${entry.count} leads closed`}
+                      />
+                    </div>
+                    <span className="text-[10px] text-gray-400 font-bold">
+                      {new Date(entry.date).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
 
@@ -152,28 +147,20 @@ export const CommandCenter: React.FC<CommandCenterProps> = ({ managerId, onBack 
             Lead Distribution Heatmap
           </h3>
           <div className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm flex flex-col items-center">
-            <div className="h-48 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={distributionHeatmap}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={60}
-                    outerRadius={80}
-                    paddingAngle={5}
-                    dataKey="count"
-                    nameKey="name"
-                  >
-                    {distributionHeatmap.map((entry: any, index: number) => (
-                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip 
-                    contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
+            <div className="h-48 w-full flex items-center justify-center">
+              <div
+                className="w-40 h-40 rounded-full relative"
+                style={{ background: pieBackground }}
+                role="img"
+                aria-label="Lead distribution chart"
+              >
+                <div className="absolute inset-8 bg-white rounded-full flex items-center justify-center">
+                  <div className="text-center">
+                    <p className="text-[10px] uppercase font-bold tracking-widest text-gray-400">Total</p>
+                    <p className="text-lg font-bold text-gray-900">{totalDistribution}</p>
+                  </div>
+                </div>
+              </div>
             </div>
             <div className="grid grid-cols-2 gap-x-8 gap-y-2 mt-4 w-full px-4">
               {distributionHeatmap.map((entry: any, index: number) => (
