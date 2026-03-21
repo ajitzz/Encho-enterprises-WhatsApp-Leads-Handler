@@ -1,5 +1,6 @@
 const { LeadIngestionService } = require('./service');
 const { LeadAssignmentService } = require('./assignment');
+const { redis } = require('../../shared/infra/redis');
 
 const buildLeadIngestionFacade = ({
   legacyProcessor,
@@ -22,11 +23,18 @@ const buildLeadIngestionFacade = ({
     triggerReportingSyncDeferred,
     assignmentService,
     fetchAndStoreIncomingMedia,
+    redis,
   });
 
-  return async ({ body, req, res, context }) => {
+  const handleIncomingMessage = async ({ body, req, res, context }) => {
     return service.handleIncomingMessage({ body, req, res, context });
   };
+
+  const handleDeferredBot = async ({ body, req, res, context }) => {
+    return service.handleDeferredBot({ body, requestId: context?.requestId || req?.requestId, tenantId: context?.tenantId });
+  };
+
+  return { handleIncomingMessage, handleDeferredBot };
 };
 
 module.exports = { buildLeadIngestionFacade };

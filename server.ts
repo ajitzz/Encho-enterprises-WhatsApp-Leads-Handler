@@ -35,6 +35,7 @@ const { buildLeadIngestionFacade } = require('./backend/modules/lead-ingestion/a
 const { buildRemindersRouter } = require('./backend/modules/reminders-escalations/api');
 const { buildAuthConfigRouter, registerAuthConfigRoutes } = require('./backend/modules/auth-config/api');
 const { buildSystemHealthRouter, registerSystemHealthRoutes } = require('./backend/modules/system-health/api');
+const { redis } = require('./backend/shared/infra/redis');
 
 process.on('unhandledRejection', (reason) => {
     console.error('[UNHANDLED REJECTION]', reason);
@@ -2398,7 +2399,9 @@ ${link}`.trim();
                 displayVal = `${parsed.label || 'Pinned Location'} (${parsed.lat}, ${parsed.long})`;
             }
         }
-    } catch (e) {}
+    } catch (e) {
+        console.error('Error in formatText:', e);
+    }
 
     if (displayVal === null || displayVal === undefined) return '';
     if (typeof displayVal === 'object') return JSON.stringify(displayVal);
@@ -3790,11 +3793,17 @@ const handleOperationalStatusLegacy = async (req, res) => {
 
 const authMiddleware = async (req, res, next) => {
     try {
+        let token = null;
         const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            token = authHeader.split(' ')[1];
+        } else if (typeof req.query.token === 'string') {
+            token = req.query.token;
+        }
+
+        if (!token) {
             return res.status(401).json({ error: 'Unauthorized' });
         }
-        const token = authHeader.split(' ')[1];
         const ticket = await googleClient.verifyIdToken({ idToken: token, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
         const payload = ticket.getPayload();
         const email = payload.email;
@@ -5023,7 +5032,7 @@ apiRouter.post('/webhook', async (req, res) => {
     });
 
     if (mode !== 'off') {
-        await leadIngestionFacade({ body: req.body, req, res, context: { requestId: req.requestId || null, tenantId } });
+        await leadIngestionFacade.handleIncomingMessage({ body: req.body, req, res, context: { requestId: req.requestId || null, tenantId } });
         return;
     }
 
@@ -5202,7 +5211,7 @@ registerAuthConfigRoutes({
     },
 });
 
-apiRouter.get('/updates/stream', async (req, res) => {
+apiRouter.get('/updates/stream', authMiddleware, async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
@@ -5283,10 +5292,8 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
                 const messagesByDriver = {};
                 if (driverId) {
-                    const [messagesRes, scheduledRes] = await Promise.all([
-                        client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [driverId]),
-                        client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed'])
-                    ]);
+                    const messagesRes = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [driverId]);
+                    const scheduledRes = await client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed']);
 
                     messagesByDriver[driverId] = await Promise.all(messagesRes.rows.map(async (row) => {
                         let imageUrl, videoUrl, documentUrl, audioUrl;
@@ -5300,7 +5307,9 @@ apiRouter.get('/updates/stream', async (req, res) => {
                                 else if (row.type === 'document') documentUrl = resolvedMediaUrl;
                                 else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
                                 else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
-                            } catch(e){}
+                            } catch(e){
+                                console.error('Error in fetchSnapshot loop:', e);
+                            }
                         }
                         return {
                             id: row.id,
@@ -5342,11 +5351,14 @@ apiRouter.get('/updates/stream', async (req, res) => {
         }
     };
 
+    let debounceTimer = null;
     const onUpdate = (data) => {
         if (closed) return;
-        // If candidateId is provided, we could optimize to only fetch that candidate,
-        // but for now, we'll just refresh the whole snapshot to keep it simple and consistent.
-        streamSnapshot();
+        if (debounceTimer) return;
+        debounceTimer = setTimeout(() => {
+            debounceTimer = null;
+            if (!closed) streamSnapshot();
+        }, 500); // 500ms debounce
     };
 
     const onNotification = (data) => {
@@ -5459,7 +5471,9 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
                         else if (row.type === 'document') documentUrl = resolvedMediaUrl;
                         else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
                         else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
-                    } catch(e){}
+                    } catch(e){
+                        console.error('Error in message mapping loop:', e);
+                    }
                 }
                 return { 
                     id: row.id,
@@ -6027,14 +6041,12 @@ const handleCronProcessQueueLegacy = async (req, res) => {
                     }
                 };
 
-                // PARALLEL EXECUTION (Batch of 5 concurrently)
-                const BATCH_SIZE = 5;
+                // SEQUENTIAL EXECUTION (To avoid concurrent queries on the same client)
                 perf.markStart('jobs_dispatch');
-                for (let i = 0; i < jobs.rows.length; i += BATCH_SIZE) {
-                    const chunk = jobs.rows.slice(i, i + BATCH_SIZE);
-                    await Promise.all(chunk.map(job => processJob(job)));
+                for (const job of jobs.rows) {
+                    await processJob(job);
                 }
-                perf.markEnd('jobs_dispatch', { processed, errors, batchSize: BATCH_SIZE });
+                perf.markEnd('jobs_dispatch', { processed, errors });
             });
         });
         res.json({ status: 'ok', processed, errors, queueSize: processed + errors });
@@ -6235,7 +6247,7 @@ async function processLeadAutoDistribution() {
             if (!settings.auto_enabled) return;
 
             // Get unassigned leads
-            const unassignedLeads = await client.query("SELECT id FROM candidates WHERE assigned_to IS NULL AND lead_status = 'new' LIMIT 10");
+            const unassignedLeads = await client.query("SELECT id FROM candidates WHERE assigned_to IS NULL AND lead_status = 'new' LIMIT 10 FOR UPDATE SKIP LOCKED");
             if (unassignedLeads.rows.length === 0) return;
 
             // Get active staff members for auto-dist, ordered by last_assigned_at (round-robin)
@@ -6275,6 +6287,17 @@ apiRouter.get('/system/ping', (req, res) => {
     res.json({ status: 'ok', timestamp: Date.now(), environment: process.env.NODE_ENV || 'development' });
 });
 
+apiRouter.post('/webhooks/deferred-bot', async (req, res) => {
+    const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
+    try {
+        await leadIngestionFacade.handleDeferredBot({ body: req.body, req, res, context: { requestId: req.requestId || null, tenantId } });
+        res.sendStatus(200);
+    } catch (e) {
+        console.error('Deferred bot processing error:', e);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 // --- START SERVER ---
 const startServer = async ({ port = 3000 } = {}) => {
     await setupFrontend(app);
@@ -6284,9 +6307,28 @@ const startServer = async ({ port = 3000 } = {}) => {
         startLeadAutoDistributor();
     }
 
-    return app.listen(port, () => {
+    return app.listen(port, async () => {
         console.log(`Server running on ${port}`);
         logLeadIngestionRuntimePosture();
+
+        // Reset active bot executions count on startup
+        if (redis) {
+            try {
+                // Use a short timeout for the startup reset to avoid blocking
+                await Promise.race([
+                    redis.set('active_bot_executions', '0'),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('Redis reset timeout')), 2000))
+                ]);
+                console.log("[Redis] active_bot_executions reset to 0.");
+            } catch (e) {
+                // Only log if it's not a common placeholder/network failure to reduce noise
+                if (!e.message?.includes('fetch failed') && !e.message?.includes('timeout')) {
+                    console.error("[Redis] Failed to reset active_bot_executions:", e.message);
+                } else {
+                    console.warn("[Redis] Startup reset skipped (connection issue or placeholder credentials).");
+                }
+            }
+        }
 
         // Self-ping to keep instance warm in Cloud Run/Vercel
         if (process.env.NODE_ENV === 'production' && !process.env.VERCEL) {
