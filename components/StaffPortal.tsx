@@ -29,8 +29,7 @@ import {
   Video,
   FileText,
   User,
-  Bot,
-  Bell
+  Bot
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 import { Driver, Message } from '../types.ts';
@@ -99,58 +98,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [selectedMedia, setSelectedMedia] = useState<{ type: 'image' | 'video' | 'document' | 'audio'; file: File; preview: string } | null>(null);
   const [isHumanModeLoading, setIsHumanModeLoading] = useState(false);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
-  const [reminders, setReminders] = useState<any[]>([]);
-  const [showReminders, setShowReminders] = useState(false);
-  const [nextFollowupAt, setNextFollowupAt] = useState('');
 
-  const handleSnooze = async (id: string) => {
-    try {
-      await liveApiService.snoozeReminder(id, 30); // Snooze for 30 mins
-      setReminders(prev => prev.filter(r => r.id !== id));
-    } catch (err) {
-      alert("Failed to snooze reminder");
-    }
-  };
-
-  const handleDone = async (id: string) => {
-    try {
-      await liveApiService.markReminderDone(id);
-      setReminders(prev => prev.filter(r => r.id !== id));
-    } catch (err) {
-      alert("Failed to mark reminder as done");
-    }
-  };
-
-  const handleReassign = async (leadId: string) => {
-    const staffId = window.prompt("Enter Staff ID to reassign to:");
-    if (!staffId) return;
-    const reason = window.prompt("Reason for reassignment:");
-    try {
-      await liveApiService.reassignLead(leadId, staffId, reason || "Manual reassignment");
-      alert("Lead reassigned successfully");
-      const updatedLeads = await liveApiService.getLeads();
-      setAllLeads(updatedLeads);
-      setSelectedLead(null);
-      setView('my-leads');
-    } catch (err: any) {
-      alert(err.message || "Failed to reassign lead");
-    }
-  };
-
-  const handleTakeover = async (leadId: string) => {
-    if (!window.confirm("Are you sure you want to take over this lead?")) return;
-    const reason = window.prompt("Reason for takeover:");
-    try {
-      await liveApiService.takeoverLead(leadId, reason || "Manager takeover");
-      alert("Lead taken over successfully");
-      const updatedLeads = await liveApiService.getLeads();
-      setAllLeads(updatedLeads);
-      // Refresh selected lead
-      setSelectedLead(updatedLeads.find((l: any) => l.id === leadId) || null);
-    } catch (err: any) {
-      alert(err.message || "Failed to takeover lead");
-    }
-  };
   const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
   const handleToggleHumanMode = async () => {
@@ -285,7 +233,6 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       {
         driverId: selectedLead?.id,
         onMessages: (msgs) => setLeadMessages(msgs),
-        onReminders: (newReminders) => setReminders(newReminders),
         onConnectionStateChange: (state) => setConnectionState(state)
       }
     );
@@ -325,13 +272,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     try {
       setLoading(true);
       await liveApiService.logLeadAction(selectedLead.id, {
-        action: actionStatus || action,
+        action,
         notes: actionNote,
-        next_followup_at: nextFollowupAt || undefined
+        status: actionStatus || undefined
       });
       setActionNote('');
       setActionStatus('');
-      setNextFollowupAt('');
       // Refresh activity
       const history = await liveApiService.getLeadActivity(selectedLead.id);
       setActivities(history);
@@ -560,24 +506,6 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             <h2 className="text-lg font-bold">Lead Details</h2>
           </div>
           <div className="flex items-center gap-2">
-            {selectedLead && (user.role === 'admin' || user.role === 'manager') && (
-              <div className="flex gap-1 mr-2">
-                <button
-                  onClick={() => handleReassign(selectedLead.id)}
-                  className="px-2 py-1 bg-gray-100 text-gray-600 rounded-lg text-[9px] font-bold uppercase tracking-wider hover:bg-gray-200 transition-all"
-                >
-                  Reassign
-                </button>
-                {selectedLead.assigned_to !== user.id && (
-                  <button
-                    onClick={() => handleTakeover(selectedLead.id)}
-                    className="px-2 py-1 bg-indigo-100 text-indigo-600 rounded-lg text-[9px] font-bold uppercase tracking-wider hover:bg-indigo-200 transition-all"
-                  >
-                    Takeover
-                  </button>
-                )}
-              </div>
-            )}
             <button 
               onClick={handleToggleHumanMode}
               disabled={isHumanModeLoading}
@@ -855,27 +783,18 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                   </h4>
                   
                   <div className="space-y-3">
-                    <div className="grid grid-cols-2 gap-2">
-                      <select 
-                        className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none text-sm focus:ring-2 focus:ring-blue-500 transition-all"
-                        value={actionStatus}
-                        onChange={e => setActionStatus(e.target.value)}
-                      >
-                        <option value="">Update Status...</option>
-                        <option value="followed_up">Followed Up</option>
-                        <option value="interested">Interested</option>
-                        <option value="not_interested">Not Interested</option>
-                        <option value="booked">Booked / Closed</option>
-                        <option value="no_answer">No Answer</option>
-                      </select>
-                      <input 
-                        type="datetime-local"
-                        className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none text-sm focus:ring-2 focus:ring-blue-500 transition-all"
-                        value={nextFollowupAt}
-                        onChange={e => setNextFollowupAt(e.target.value)}
-                        title="Next Follow-up"
-                      />
-                    </div>
+                    <select 
+                      className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none text-sm focus:ring-2 focus:ring-blue-500 transition-all"
+                      value={actionStatus}
+                      onChange={e => setActionStatus(e.target.value)}
+                    >
+                      <option value="">Update Status...</option>
+                      <option value="followed_up">Followed Up</option>
+                      <option value="interested">Interested</option>
+                      <option value="not_interested">Not Interested</option>
+                      <option value="booked">Booked / Closed</option>
+                      <option value="no_answer">No Answer</option>
+                    </select>
 
                     <textarea 
                       placeholder="Add a note about this interaction..."
@@ -933,16 +852,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       {/* Top Bar */}
       {view !== 'detail' && (
         <header className="bg-white px-6 py-4 border-b border-gray-100 flex items-center justify-between sticky top-0 z-20">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowReminders(!showReminders)}
-              className="relative p-2 text-gray-500 hover:bg-gray-100 rounded-xl transition-all"
-            >
-              <Bell size={20} />
-              {reminders.length > 0 && (
-                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full border-2 border-white"></span>
-              )}
-            </button>
+          <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-black text-white flex items-center justify-center font-bold">
               E
             </div>
@@ -996,60 +906,6 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       )}
 
       {/* Error Toast */}
-      {/* Reminders Overlay */}
-      {showReminders && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-200">
-            <div className="p-4 border-b flex items-center justify-between bg-gray-50">
-              <div className="flex items-center gap-2">
-                <Bell className="text-blue-600" size={20} />
-                <h3 className="font-bold text-gray-900">Follow-up Reminders</h3>
-              </div>
-              <button onClick={() => setShowReminders(false)} className="p-1 hover:bg-gray-200 rounded-full transition-colors">
-                <X size={20} />
-              </button>
-            </div>
-            <div className="max-h-[60vh] overflow-y-auto p-4 space-y-3">
-              {reminders.length === 0 ? (
-                <div className="text-center py-8 text-gray-500">
-                  <CheckCircle size={40} className="mx-auto mb-2 opacity-20" />
-                  <p>All caught up!</p>
-                </div>
-              ) : (
-                reminders.map(r => (
-                  <div key={r.id} className="p-4 rounded-xl border border-blue-100 bg-blue-50/50 space-y-3">
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <p className="font-bold text-gray-900">{r.lead_name}</p>
-                        <p className="text-xs text-gray-500">{new Date(r.scheduled_for).toLocaleString()}</p>
-                      </div>
-                      <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-[10px] font-bold uppercase tracking-wider">
-                        Follow-up
-                      </span>
-                    </div>
-                    {r.notes && <p className="text-sm text-gray-600 italic">"{r.notes}"</p>}
-                    <div className="flex gap-2 pt-1">
-                      <button 
-                        onClick={() => handleDone(r.id)}
-                        className="flex-1 bg-blue-600 text-white py-2 rounded-lg text-sm font-bold hover:bg-blue-700 transition-colors shadow-sm"
-                      >
-                        Done
-                      </button>
-                      <button 
-                        onClick={() => handleSnooze(r.id)}
-                        className="flex-1 bg-white border border-gray-200 text-gray-700 py-2 rounded-lg text-sm font-bold hover:bg-gray-50 transition-colors shadow-sm"
-                      >
-                        Snooze
-                      </button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
       {error && (
         <div className="fixed bottom-24 left-4 right-4 bg-red-600 text-white p-4 rounded-2xl shadow-2xl flex items-center gap-3 animate-in slide-in-from-bottom-10 z-50">
           <AlertCircle size={20} />

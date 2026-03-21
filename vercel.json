@@ -3,11 +3,11 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "/api/index.ts"
+      "destination": "/api/index.js"
     },
     {
       "source": "/webhook",
-      "destination": "/api/index.ts"
+      "destination": "/api/index.js"
     },
     {
       "source": "/(.*)",
@@ -15,38 +15,8 @@
     }
   ],
   "functions": {
-    "api/index.ts": {
+    "api/index.js": {
       "maxDuration": 60
     }
-  },
-  "crons": [
-    {
-      "path": "/api/health",
-      "schedule": "* * * * *"
-    },
-    {
-      "path": "/api/cron/process-queue",
-      "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/cron/reminders",
-      "schedule": "0 * * * *"
-    },
-    {
-      "path": "/api/cron/escalations",
-      "schedule": "0 0 * * *"
-    },
-    {
-      "path": "/api/cron/lead-ingestion",
-      "schedule": "*/15 * * * *"
-    },
-    {
-      "path": "/api/cron/auto-distribute",
-      "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/cron/sync-reporting",
-      "schedule": "0 */4 * * *"
-    }
-  ]
+  }
 }

@@ -2,8 +2,7 @@
 module.exports = {
   apps : [{
     name   : "uber-fleet-recruiter",
-    script : "./server.ts",
-    interpreter: "tsx",
+    script : "./server.js",
     env: {
       NODE_ENV: "production",
     },

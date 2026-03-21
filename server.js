@@ -2654,8 +2654,6 @@ const initDatabase = async (client) => {
         name VARCHAR(255), 
         role VARCHAR(50) DEFAULT 'staff', 
         is_active_for_auto_dist BOOLEAN DEFAULT FALSE,
-        manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
-        is_on_leave BOOLEAN DEFAULT FALSE,
         last_assigned_at TIMESTAMP,
         created_at TIMESTAMP DEFAULT NOW()
     );`);
@@ -2663,8 +2661,6 @@ const initDatabase = async (client) => {
     // Migration for existing table
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS is_active_for_auto_dist BOOLEAN DEFAULT FALSE;`);
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_assigned_at TIMESTAMP;`);
-    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
-    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS is_on_leave BOOLEAN DEFAULT FALSE;`);
     
     await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, lead_status VARCHAR(50) DEFAULT 'new', last_action_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW());`);
     
@@ -2677,47 +2673,7 @@ const initDatabase = async (client) => {
     await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`CREATE TABLE IF NOT EXISTS lead_activity_log (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
-        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, 
-        staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL, 
-        action VARCHAR(100) NOT NULL, 
-        notes TEXT, 
-        next_followup_at TIMESTAMP WITH TIME ZONE,
-        metadata JSONB DEFAULT '{}'::jsonb,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-    );`);
-
-    // Migration for lead_activity_log
-    await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS next_followup_at TIMESTAMP WITH TIME ZONE;`);
-    await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;`);
-
-    // Audit Logs Table
-    await client.query(`CREATE TABLE IF NOT EXISTS audit_logs (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        actor_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
-        entity_type VARCHAR(50) NOT NULL,
-        entity_id UUID NOT NULL,
-        action VARCHAR(100) NOT NULL,
-        previous_state JSONB,
-        new_state JSONB,
-        reason TEXT,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-    );`);
-
-    // Reminders Table
-    await client.query(`CREATE TABLE IF NOT EXISTS lead_reminders (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
-        staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
-        activity_id UUID REFERENCES lead_activity_log(id) ON DELETE CASCADE,
-        scheduled_at TIMESTAMP WITH TIME ZONE NOT NULL,
-        status VARCHAR(20) DEFAULT 'pending',
-        snooze_count INTEGER DEFAULT 0,
-        last_snoozed_at TIMESTAMP WITH TIME ZONE,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-    );`);
+    await client.query(`CREATE TABLE IF NOT EXISTS lead_activity_log (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL, action VARCHAR(100) NOT NULL, notes TEXT, created_at TIMESTAMP DEFAULT NOW());`);
     
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
     await client.query("INSERT INTO system_settings (key, value) VALUES ('lead_distribution', '{\"auto_enabled\": false}') ON CONFLICT DO NOTHING");
@@ -2780,25 +2736,6 @@ const ensurePerformanceIndexes = async (client) => {
     await client.query(`
         CREATE INDEX IF NOT EXISTS idx_candidates_lead_status
         ON candidates(lead_status)
-    `);
-
-    // New Hierarchy & Reminders Indexes
-    await client.query(`
-        CREATE INDEX IF NOT EXISTS idx_lead_reminders_staff_status 
-        ON lead_reminders(staff_id, status)
-    `);
-    await client.query(`
-        CREATE INDEX IF NOT EXISTS idx_lead_reminders_scheduled_at 
-        ON lead_reminders(scheduled_at)
-    `);
-    await client.query(`
-        CREATE INDEX IF NOT EXISTS idx_staff_members_manager_id 
-        ON staff_members(manager_id)
-    `);
-    await client.query(`
-        CREATE INDEX IF NOT EXISTS idx_lead_activity_log_next_followup 
-        ON lead_activity_log(next_followup_at) 
-        WHERE next_followup_at IS NOT NULL
     `);
 };
 
@@ -3788,44 +3725,30 @@ const handleOperationalStatusLegacy = async (req, res) => {
 
 const authMiddleware = async (req, res, next) => {
     try {
-        let token = (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) 
-            ? req.headers.authorization.split(' ')[1] 
-            : req.query.token;
-
-        if (!token) {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
             return res.status(401).json({ error: 'Unauthorized' });
         }
+        const token = authHeader.split(' ')[1];
         const ticket = await googleClient.verifyIdToken({ idToken: token, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
         const payload = ticket.getPayload();
         const email = payload.email;
 
         await withDb(async (client) => {
-            const staffRes = await client.query('SELECT id, role, manager_id, is_on_leave FROM staff_members WHERE email = $1', [email]);
+            const staffRes = await client.query('SELECT id, role FROM staff_members WHERE email = $1', [email]);
             if (staffRes.rows.length === 0) {
                 // Check if it's the super admin
                 if (email === 'ajithsabzz@gmail.com') {
                     const insertRes = await client.query(
-                        'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id, role, manager_id, is_on_leave',
+                        'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id, role',
                         [email, payload.name, 'admin']
                     );
-                    req.user = { 
-                        ...payload, 
-                        staffId: insertRes.rows[0].id, 
-                        role: insertRes.rows[0].role,
-                        managerId: insertRes.rows[0].manager_id,
-                        isOnLeave: insertRes.rows[0].is_on_leave
-                    };
+                    req.user = { ...payload, staffId: insertRes.rows[0].id, role: insertRes.rows[0].role };
                 } else {
                     throw new Error('Access denied. Not a staff member.');
                 }
             } else {
-                req.user = { 
-                    ...payload, 
-                    staffId: staffRes.rows[0].id, 
-                    role: staffRes.rows[0].role,
-                    managerId: staffRes.rows[0].manager_id,
-                    isOnLeave: staffRes.rows[0].is_on_leave
-                };
+                req.user = { ...payload, staffId: staffRes.rows[0].id, role: staffRes.rows[0].role };
             }
         });
         next();
@@ -3843,26 +3766,16 @@ apiRouter.get('/auth/me', authMiddleware, (req, res) => {
             email: req.user.email,
             name: req.user.name,
             role: req.user.role,
-            staffId: req.user.staffId,
-            managerId: req.user.managerId,
-            isOnLeave: req.user.isOnLeave
+            staffId: req.user.staffId
         }
     });
 });
 
 apiRouter.get('/staff', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
     try {
         await withDb(async (client) => {
-            let query = 'SELECT * FROM staff_members';
-            let params = [];
-            if (req.user.role === 'manager') {
-                query += ' WHERE manager_id = $1 OR id = $1';
-                params = [req.user.staffId];
-            } else if (req.user.role !== 'admin') {
-                return res.status(403).json({ error: 'Unauthorized' });
-            }
-            query += ' ORDER BY created_at DESC';
-            const r = await client.query(query, params);
+            const r = await client.query('SELECT * FROM staff_members ORDER BY created_at DESC');
             res.json(r.rows);
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3870,37 +3783,10 @@ apiRouter.get('/staff', authMiddleware, async (req, res) => {
 
 apiRouter.post('/staff', authMiddleware, async (req, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-    const { email, name, role, manager_id } = req.body;
+    const { email, name, role } = req.body;
     try {
         await withDb(async (client) => {
-            await client.query('INSERT INTO staff_members (email, name, role, manager_id) VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO UPDATE SET name = $2, role = $3, manager_id = $4', [email, name, role || 'staff', manager_id || null]);
-            res.json({ success: true });
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.patch('/staff/:id/status', authMiddleware, async (req, res) => {
-    const { is_on_leave, reason } = req.body;
-    try {
-        await withDb(async (client) => {
-            const targetStaff = await client.query('SELECT manager_id, is_on_leave FROM staff_members WHERE id = $1', [req.params.id]);
-            if (targetStaff.rows.length === 0) return res.status(404).json({ error: 'Staff not found' });
-            
-            const isManagerOfStaff = targetStaff.rows[0].manager_id === req.user.staffId;
-            if (req.user.role !== 'admin' && !isManagerOfStaff) {
-                return res.status(403).json({ error: 'Unauthorized' });
-            }
-
-            await client.query('UPDATE staff_members SET is_on_leave = $1 WHERE id = $2', [is_on_leave, req.params.id]);
-            
-            // Audit Log
-            await client.query('INSERT INTO audit_logs (actor_id, entity_type, entity_id, action, previous_state, new_state, reason) VALUES ($1, $2, $3, $4, $5, $6, $7)', [
-                req.user.staffId, 'staff', req.params.id, 'status_change', 
-                JSON.stringify({ is_on_leave: targetStaff.rows[0].is_on_leave }),
-                JSON.stringify({ is_on_leave }),
-                reason
-            ]);
-
+            await client.query('INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) ON CONFLICT (email) DO UPDATE SET name = $2, role = $3', [email, name, role || 'staff']);
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3982,33 +3868,13 @@ apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
 });
 
 apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
-    const { action, notes, status, next_followup_at, metadata } = req.body;
+    const { action, notes, status } = req.body;
     try {
         await withDb(async (client) => {
-            const check = await client.query('SELECT assigned_to, lead_status FROM candidates WHERE id = $1', [req.params.id]);
-            if (check.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
-            
-            const isAssignedToMe = check.rows[0].assigned_to === req.user.staffId;
-            const isAdmin = req.user.role === 'admin';
-            
-            // Manager check: can action if assigned to their staff
-            let isManagerOfAssigned = false;
-            if (req.user.role === 'manager' && check.rows[0].assigned_to) {
-                const staffCheck = await client.query('SELECT manager_id FROM staff_members WHERE id = $1', [check.rows[0].assigned_to]);
-                isManagerOfAssigned = staffCheck.rows[0]?.manager_id === req.user.staffId;
+            const check = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+            if (check.rows[0]?.assigned_to !== req.user.staffId && req.user.role !== 'admin') {
+                return res.status(403).json({ error: 'Not assigned to you' });
             }
-
-            if (!isAssignedToMe && !isAdmin && !isManagerOfAssigned) {
-                return res.status(403).json({ error: 'Not authorized for this lead' });
-            }
-
-            // Required next_followup_at for open leads
-            const isClosingStatus = ['booked', 'not_interested', 'closed'].includes(status || check.rows[0].lead_status);
-            if (!isClosingStatus && !next_followup_at && action !== 'claim') {
-                // We'll allow it for now but log a warning or return error if strictly required
-                // return res.status(400).json({ error: 'Next follow-up date is required for open leads' });
-            }
-
             const updates = [];
             const values = [];
             if (status) {
@@ -4018,103 +3884,7 @@ apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
             updates.push(`last_action_at = NOW()`);
             
             await client.query(`UPDATE candidates SET ${updates.join(', ')} WHERE id = $${values.length + 1}`, [...values, req.params.id]);
-            
-            const logRes = await client.query(
-                'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes, next_followup_at, metadata) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id', 
-                [req.params.id, req.user.staffId, action, notes, next_followup_at || null, metadata || {}]
-            );
-            const activityId = logRes.rows[0].id;
-
-            if (next_followup_at) {
-                // Deactivate old pending reminders for this lead
-                await client.query('UPDATE lead_reminders SET status = $1 WHERE candidate_id = $2 AND status = $3', ['done', req.params.id, 'pending']);
-                // Create new reminder
-                await client.query(
-                    'INSERT INTO lead_reminders (candidate_id, staff_id, activity_id, scheduled_at) VALUES ($1, $2, $3, $4)', 
-                    [req.params.id, check.rows[0].assigned_to || req.user.staffId, activityId, next_followup_at]
-                );
-            }
-
-            res.json({ success: true, activityId });
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/leads/:id/reassign', authMiddleware, async (req, res) => {
-    const { to_staff_id, reason } = req.body;
-    try {
-        await withDb(async (client) => {
-            const leadCheck = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
-            if (leadCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
-            
-            const fromStaffId = leadCheck.rows[0].assigned_to;
-            
-            // Auth check
-            if (req.user.role !== 'admin') {
-                if (req.user.role !== 'manager') return res.status(403).json({ error: 'Unauthorized' });
-                
-                // Manager can only reassign if to_staff is in their team
-                const toStaffCheck = await client.query('SELECT manager_id FROM staff_members WHERE id = $1', [to_staff_id]);
-                if (toStaffCheck.rows[0]?.manager_id !== req.user.staffId) {
-                    return res.status(403).json({ error: 'Can only reassign to your own team members' });
-                }
-            }
-
-            await client.query('UPDATE candidates SET assigned_to = $1 WHERE id = $2', [to_staff_id, req.params.id]);
-            
-            // Audit Log
-            await client.query('INSERT INTO audit_logs (actor_id, entity_type, entity_id, action, previous_state, new_state, reason) VALUES ($1, $2, $3, $4, $5, $6, $7)', [
-                req.user.staffId, 'lead', req.params.id, 'reassign',
-                JSON.stringify({ assigned_to: fromStaffId }),
-                JSON.stringify({ assigned_to: to_staff_id }),
-                reason
-            ]);
-
-            // Log activity
-            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [
-                req.params.id, req.user.staffId, 'reassign', `Lead reassigned. Reason: ${reason}`
-            ]);
-
-            res.json({ success: true });
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/leads/:id/takeover', authMiddleware, async (req, res) => {
-    const { reason } = req.body;
-    try {
-        await withDb(async (client) => {
-            if (req.user.role !== 'manager' && req.user.role !== 'admin') {
-                return res.status(403).json({ error: 'Only Managers or Admins can take over leads' });
-            }
-
-            const leadCheck = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
-            if (leadCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
-            
-            const previousOwnerId = leadCheck.rows[0].assigned_to;
-
-            if (req.user.role === 'manager' && previousOwnerId) {
-                const staffCheck = await client.query('SELECT manager_id FROM staff_members WHERE id = $1', [previousOwnerId]);
-                if (staffCheck.rows[0]?.manager_id !== req.user.staffId) {
-                    return res.status(403).json({ error: 'Can only take over leads from your own team members' });
-                }
-            }
-
-            await client.query('UPDATE candidates SET assigned_to = $1 WHERE id = $2', [req.user.staffId, req.params.id]);
-            
-            // Audit Log
-            await client.query('INSERT INTO audit_logs (actor_id, entity_type, entity_id, action, previous_state, new_state, reason) VALUES ($1, $2, $3, $4, $5, $6, $7)', [
-                req.user.staffId, 'lead', req.params.id, 'takeover',
-                JSON.stringify({ assigned_to: previousOwnerId }),
-                JSON.stringify({ assigned_to: req.user.staffId }),
-                reason
-            ]);
-
-            // Log activity
-            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [
-                req.params.id, req.user.staffId, 'takeover', `Lead taken over by manager. Reason: ${reason}`
-            ]);
-
+            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, action, notes]);
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4125,47 +3895,6 @@ apiRouter.get('/leads/:id/activity', authMiddleware, async (req, res) => {
         await withDb(async (client) => {
             const r = await client.query('SELECT l.*, s.name as staff_name FROM lead_activity_log l LEFT JOIN staff_members s ON l.staff_id = s.id WHERE l.candidate_id = $1 ORDER BY l.created_at DESC', [req.params.id]);
             res.json(r.rows);
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.get('/reminders', authMiddleware, async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            const remindersRes = await client.query(`
-                SELECT r.*, c.name as lead_name, c.phone_number as lead_phone, l.notes as last_note
-                FROM lead_reminders r
-                JOIN candidates c ON r.candidate_id = c.id
-                JOIN lead_activity_log l ON r.activity_id = l.id
-                WHERE r.staff_id = $1 AND r.status = 'pending' AND r.scheduled_at <= NOW()
-                ORDER BY r.scheduled_at ASC
-            `, [req.user.staffId]);
-            res.json(remindersRes.rows);
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/reminders/:id/snooze', authMiddleware, async (req, res) => {
-    const { minutes } = req.body;
-    try {
-        await withDb(async (client) => {
-            await client.query(
-                "UPDATE lead_reminders SET scheduled_at = NOW() + ($1 || ' minutes')::interval WHERE id = $2 AND staff_id = $3", 
-                [minutes || 15, req.params.id, req.user.staffId]
-            );
-            res.json({ success: true });
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/reminders/:id/done', authMiddleware, async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            await client.query(
-                "UPDATE lead_reminders SET status = 'done' WHERE id = $1 AND staff_id = $2", 
-                [req.params.id, req.user.staffId]
-            );
-            res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -4956,7 +4685,7 @@ registerAuthConfigRoutes({
     },
 });
 
-apiRouter.get('/updates/stream', authMiddleware, async (req, res) => {
+apiRouter.get('/updates/stream', async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
@@ -5034,18 +4763,7 @@ apiRouter.get('/updates/stream', authMiddleware, async (req, res) => {
 
             const payload = { drivers };
 
-            // Fetch pending reminders for the current user
-            const remindersRes = await client.query(`
-                SELECT r.*, c.name as lead_name, c.phone_number as lead_phone, l.notes as last_note
-                FROM lead_reminders r
-                JOIN candidates c ON r.candidate_id = c.id
-                JOIN lead_activity_log l ON r.activity_id = l.id
-                WHERE r.staff_id = $1 AND r.status = 'pending' AND r.scheduled_at <= NOW()
-                ORDER BY r.scheduled_at ASC
-            `, [req.user.staffId]);
-            payload.reminders = remindersRes.rows;
-
-            const messagesByDriver = {};
+                const messagesByDriver = {};
                 if (driverId) {
                     const [messagesRes, scheduledRes] = await Promise.all([
                         client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [driverId]),

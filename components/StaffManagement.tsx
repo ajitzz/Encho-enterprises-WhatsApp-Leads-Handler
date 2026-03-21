@@ -7,8 +7,7 @@ interface StaffMember {
   id: string;
   email: string;
   name: string;
-  role: 'admin' | 'manager' | 'staff';
-  manager_id: string | null;
+  role: 'admin' | 'staff';
   is_active_for_auto_dist: boolean;
   last_assigned_at: string | null;
   created_at: string;
@@ -19,7 +18,7 @@ export const StaffManagement: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isAdding, setIsAdding] = useState(false);
-  const [newStaff, setNewStaff] = useState<{ email: string; name: string; role: 'admin' | 'manager' | 'staff'; manager_id: string }>({ email: '', name: '', role: 'staff', manager_id: '' });
+  const [newStaff, setNewStaff] = useState({ email: '', name: '', role: 'staff' as 'admin' | 'staff' });
   const [searchQuery, setSearchQuery] = useState('');
   const [autoDistSettings, setAutoDistSettings] = useState({ auto_enabled: false });
 
@@ -73,11 +72,8 @@ export const StaffManagement: React.FC = () => {
     e.preventDefault();
     try {
       setLoading(true);
-      await liveApiService.addStaff({
-        ...newStaff,
-        manager_id: newStaff.manager_id || null
-      });
-      setNewStaff({ email: '', name: '', role: 'staff', manager_id: '' });
+      await liveApiService.addStaff(newStaff);
+      setNewStaff({ email: '', name: '', role: 'staff' });
       setIsAdding(false);
       await fetchStaff();
     } catch (err: any) {
@@ -190,39 +186,23 @@ export const StaffManagement: React.FC = () => {
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Role</label>
-              <select
-                className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all bg-white"
-                value={newStaff.role}
-                onChange={e => setNewStaff({ ...newStaff, role: e.target.value as 'admin' | 'manager' | 'staff' })}
-              >
-                <option value="staff">Staff (Lead Manager)</option>
-                <option value="manager">Manager (Team Supervisor)</option>
-                <option value="admin">Admin (Full Access)</option>
-              </select>
-            </div>
-            {newStaff.role === 'staff' && (
-              <div className="space-y-1.5">
-                <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Assign Manager</label>
+              <div className="flex gap-2">
                 <select
-                  className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all bg-white"
-                  value={newStaff.manager_id}
-                  onChange={e => setNewStaff({ ...newStaff, manager_id: e.target.value })}
+                  className="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all bg-white"
+                  value={newStaff.role}
+                  onChange={e => setNewStaff({ ...newStaff, role: e.target.value as 'admin' | 'staff' })}
                 >
-                  <option value="">No Manager (Direct to Admin)</option>
-                  {staff.filter(s => s.role === 'manager').map(m => (
-                    <option key={m.id} value={m.id}>{m.name}</option>
-                  ))}
+                  <option value="staff">Staff (Lead Manager)</option>
+                  <option value="admin">Admin (Full Access)</option>
                 </select>
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="bg-blue-600 text-white px-6 py-2.5 rounded-xl hover:bg-blue-700 transition-all font-bold disabled:opacity-50 flex items-center gap-2"
+                >
+                  {loading ? <Loader2 size={18} className="animate-spin" /> : 'Save'}
+                </button>
               </div>
-            )}
-            <div className="md:col-span-3 flex justify-end">
-              <button
-                type="submit"
-                disabled={loading}
-                className="bg-blue-600 text-white px-8 py-2.5 rounded-xl hover:bg-blue-700 transition-all font-bold disabled:opacity-50 flex items-center gap-2"
-              >
-                {loading ? <Loader2 size={18} className="animate-spin" /> : 'Save Staff Member'}
-              </button>
             </div>
           </form>
         </div>
@@ -246,7 +226,6 @@ export const StaffManagement: React.FC = () => {
               <tr className="bg-gray-50/50">
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Staff Member</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Role</th>
-                <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Reports To</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider text-center">Auto-Dist</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Last Assigned</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider text-right">Actions</th>
@@ -287,31 +266,11 @@ export const StaffManagement: React.FC = () => {
                     </td>
                     <td className="px-6 py-4">
                       <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                        s.role === 'admin' ? 'bg-purple-100 text-purple-700' : 
-                        s.role === 'manager' ? 'bg-indigo-100 text-indigo-700' : 
-                        'bg-blue-100 text-blue-700'
+                        s.role === 'admin' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
                       }`}>
                         <Shield size={10} />
                         {s.role}
                       </span>
-                    </td>
-                    <td className="px-6 py-4">
-                      {s.role === 'staff' ? (
-                        s.manager_id ? (
-                          <div className="flex items-center gap-2">
-                            <div className="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-[10px] font-bold">
-                              {staff.find(m => m.id === s.manager_id)?.name.charAt(0).toUpperCase() || '?'}
-                            </div>
-                            <span className="text-xs font-medium text-gray-700">
-                              {staff.find(m => m.id === s.manager_id)?.name || 'Unknown Manager'}
-                            </span>
-                          </div>
-                        ) : (
-                          <span className="text-xs text-gray-400 italic">Admin</span>
-                        )
-                      ) : (
-                        <span className="text-xs text-gray-400">-</span>
-                      )}
                     </td>
                     <td className="px-6 py-4 text-center">
                       <button
