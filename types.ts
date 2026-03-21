@@ -193,6 +193,7 @@ export interface Candidate {
   documents: Record<string, { url: string; type: string; timestamp: number }>;
   tags: string[];
   lastMessageAt: number;
+  assigned_to?: string;
   assignedAgent?: string;
   messages?: Message[];
   currentBotStepId?: string; 

@@ -20,6 +20,7 @@ interface SubscribeToUpdatesOptions {
     pollIntervalMs?: number;
     onMessages?: (messages: Message[]) => void;
     onScheduledMessages?: (items: ScheduledMessage[]) => void;
+    onReminders?: (reminders: any[]) => void;
     onConnectionStateChange?: (state: UpdateConnectionState) => void;
     onSyncFailure?: (details: { channel: 'push' | 'polling'; endpoint: string; streak: number; error: unknown }) => void;
     onSyncRecovery?: (details: { channel: 'push' | 'polling'; endpoint: string; previousStreak: number }) => void;
@@ -96,6 +97,9 @@ export const liveApiService = {
   getDrivers: async (): Promise<Driver[]> => {
       return apiRequest<Driver[]>('/api/drivers');
   },
+  getLeads: async (): Promise<Driver[]> => {
+      return apiRequest<Driver[]>('/api/drivers');
+  },
 
   verifyLogin: async (credential: string): Promise<{success: boolean, user?: any}> => {
       return apiRequest('/api/auth/google', {
@@ -114,6 +118,7 @@ export const liveApiService = {
           pollIntervalMs = 10000,
           onMessages,
           onScheduledMessages,
+          onReminders,
           onConnectionStateChange,
           onSyncFailure,
           onSyncRecovery
@@ -129,15 +134,17 @@ export const liveApiService = {
       const setConnectionState = (state: UpdateConnectionState) => onConnectionStateChange?.(state);
 
       const fetchFallbackSnapshot = async () => {
-          const [drivers, messages, scheduled] = await Promise.all([
+          const [drivers, messages, scheduled, reminders] = await Promise.all([
               liveApiService.getDrivers(),
               driverId ? liveApiService.getDriverMessages(driverId, 50) : Promise.resolve(null),
-              driverId ? liveApiService.getScheduledMessages(driverId) : Promise.resolve(null)
+              driverId ? liveApiService.getScheduledMessages(driverId) : Promise.resolve(null),
+              onReminders ? liveApiService.getReminders() : Promise.resolve(null)
           ]);
 
           callback(drivers);
           if (messages && onMessages) onMessages(messages);
           if (scheduled && onScheduledMessages) onScheduledMessages(scheduled);
+          if (reminders && onReminders) onReminders(reminders);
       };
 
       const stopPolling = () => {
@@ -210,6 +217,9 @@ export const liveApiService = {
                       }
                       if (driverId && payload?.scheduledByDriver?.[driverId] && onScheduledMessages) {
                           onScheduledMessages(payload.scheduledByDriver[driverId]);
+                      }
+                      if (payload?.reminders && onReminders) {
+                          onReminders(payload.reminders);
                       }
                   } catch {
                       // Ignore malformed update events and continue streaming.
@@ -504,7 +514,7 @@ export const liveApiService = {
     return apiRequest<any[]>('/api/staff');
   },
 
-  addStaff: async (staff: { email: string; name: string; role: 'admin' | 'staff' }) => {
+  addStaff: async (staff: { email: string; name: string; role: 'admin' | 'manager' | 'staff'; manager_id?: string | null }) => {
     return apiRequest('/api/staff', {
       method: 'POST',
       body: JSON.stringify(staff)
@@ -546,7 +556,7 @@ export const liveApiService = {
     return apiRequest(`/api/leads/${id}/claim`, { method: 'POST' });
   },
 
-  logLeadAction: async (id: string, data: { action: string; notes: string; status?: string }) => {
+  logLeadAction: async (id: string, data: { action: string; notes: string; status?: string; next_followup_at?: string }) => {
     return apiRequest(`/api/leads/${id}/action`, {
       method: 'POST',
       body: JSON.stringify(data)
@@ -555,5 +565,39 @@ export const liveApiService = {
 
   getLeadActivity: async (id: string): Promise<any[]> => {
     return apiRequest<any[]>(`/api/leads/${id}/activity`);
+  },
+
+  // Reminders
+  getReminders: async (): Promise<any[]> => {
+    return apiRequest<any[]>('/api/reminders');
+  },
+  snoozeReminder: async (id: string, minutes: number = 15) => {
+    return apiRequest(`/api/reminders/${id}/snooze`, {
+      method: 'POST',
+      body: JSON.stringify({ minutes })
+    });
+  },
+  markReminderDone: async (id: string) => {
+    return apiRequest(`/api/reminders/${id}/done`, { method: 'POST' });
+  },
+  
+  // Manager Actions
+  reassignLead: async (id: string, toStaffId: string, reason: string) => {
+    return apiRequest(`/api/leads/${id}/reassign`, {
+      method: 'POST',
+      body: JSON.stringify({ to_staff_id: toStaffId, reason })
+    });
+  },
+  takeoverLead: async (id: string, reason: string) => {
+    return apiRequest(`/api/leads/${id}/takeover`, {
+      method: 'POST',
+      body: JSON.stringify({ reason })
+    });
+  },
+  updateStaffStatus: async (id: string, isOnLeave: boolean, reason: string) => {
+    return apiRequest(`/api/staff/${id}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify({ is_on_leave: isOnLeave, reason })
+    });
   }
 };
