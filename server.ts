@@ -2594,6 +2594,7 @@ const ensureLeadOpsSchema = async (client) => {
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_date TIMESTAMP WITH TIME ZONE;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_note TEXT;`);
     await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS next_followup_at TIMESTAMP WITH TIME ZONE;`);
+    await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;`);
 
     await client.query(`
         CREATE TABLE IF NOT EXISTS lead_reminders (
@@ -3997,6 +3998,13 @@ apiRouter.post('/leads/:id/reassign', authMiddleware, async (req, res) => {
 apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
     const { action, notes, status, media_url, next_followup_at } = req.body;
     if (!action) return res.status(400).json({ error: 'Action required' });
+    const cleanNotes = typeof notes === 'string' ? notes.trim() : '';
+    if (action === 'interaction' && !status) {
+        return res.status(400).json({ error: 'Status is required for interaction logs' });
+    }
+    if (action === 'interaction' && !cleanNotes) {
+        return res.status(400).json({ error: 'Notes are required for interaction logs' });
+    }
 
     try {
         await withDb(async (client) => {
@@ -4019,6 +4027,13 @@ apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
                     return res.status(403).json({ error: 'Not authorized to act on this lead' });
                 }
                 
+                const currentLeadState = await client.query(
+                    'SELECT lead_status, follow_up_date FROM candidates WHERE id = $1',
+                    [req.params.id]
+                );
+                const previousStatus = currentLeadState.rows[0]?.lead_status || null;
+                const previousFollowupAt = currentLeadState.rows[0]?.follow_up_date || null;
+
                 const updates = [];
                 const values = [];
                 if (status) {
@@ -4029,17 +4044,28 @@ apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
                     updates.push(`follow_up_date = $${values.length + 1}`);
                     values.push(next_followup_at);
                 }
-                if (notes) {
+                if (cleanNotes) {
                     updates.push(`follow_up_note = $${values.length + 1}`);
-                    values.push(notes);
+                    values.push(cleanNotes);
                 }
                 updates.push(`last_action_at = NOW()`);
                 
                 await client.query(`UPDATE candidates SET ${updates.join(', ')} WHERE id = $${values.length + 1}`, [...values, req.params.id]);
                 
+                const metadata = {
+                    previous_status: previousStatus,
+                    new_status: status || previousStatus,
+                    previous_followup_at: previousFollowupAt,
+                    new_followup_at: next_followup_at || previousFollowupAt,
+                    status_changed: Boolean(status && status !== previousStatus),
+                    followup_changed: Boolean(next_followup_at && new Date(next_followup_at).toISOString() !== (previousFollowupAt ? new Date(previousFollowupAt).toISOString() : null))
+                };
+
                 // 2. Log Activity
-                await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes, media_url, next_followup_at) VALUES ($1, $2, $3, $4, $5, $6)', 
-                    [req.params.id, req.user.staffId, action, notes, media_url, next_followup_at || null]);
+                await client.query(
+                    'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes, media_url, next_followup_at, metadata) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+                    [req.params.id, req.user.staffId, action, cleanNotes || null, media_url, next_followup_at || null, metadata]
+                );
                 
                 // 3. Create Reminder if needed
                 if (next_followup_at) {

@@ -87,6 +87,15 @@ interface LeadActivity {
   notes: string;
   created_at: string;
   staff_name: string;
+  next_followup_at?: string | null;
+  metadata?: {
+    previous_status?: string | null;
+    new_status?: string | null;
+    previous_followup_at?: string | null;
+    new_followup_at?: string | null;
+    status_changed?: boolean;
+    followup_changed?: boolean;
+  };
 }
 
 export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ user, onLogout }) => {
@@ -115,6 +124,48 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [closingScreenshot, setClosingScreenshot] = useState<{ file: File; preview: string } | null>(null);
   const [dueAlertQueue, setDueAlertQueue] = useState<DueAlertItem[]>([]);
   const [activeDueAlert, setActiveDueAlert] = useState<DueAlertItem | null>(null);
+
+  const formatDateTime = (value?: string | null) => {
+    if (!value) return '—';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return '—';
+    return parsed.toLocaleString();
+  };
+
+  const formatTimelineTime = (value?: string | null) => {
+    if (!value) return '—';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return '—';
+    return parsed.toLocaleString(undefined, {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
+  const toLabel = (value?: string | null) => {
+    if (!value) return '—';
+    return value.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+  };
+
+  const getActivityDetails = (activity: LeadActivity) => {
+    return [
+      {
+        label: 'Status',
+        value: toLabel(activity.metadata?.new_status) === '—' ? 'Not updated' : toLabel(activity.metadata?.new_status),
+        tone: 'blue' as const
+      },
+      {
+        label: 'Scheduled Date',
+        value: formatDateTime(activity.metadata?.new_followup_at || activity.next_followup_at) === '—'
+          ? 'Not scheduled'
+          : formatDateTime(activity.metadata?.new_followup_at || activity.next_followup_at),
+        tone: 'violet' as const
+      }
+    ];
+  };
 
   const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
@@ -393,6 +444,16 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
   const handleLogAction = async (action: string) => {
     if (!selectedLead) return;
+    if (action === 'interaction') {
+      if (!actionStatus) {
+        setError('Please select a status before saving the interaction.');
+        return;
+      }
+      if (!actionNote.trim()) {
+        setError('Please add an interaction note before saving.');
+        return;
+      }
+    }
     try {
       setLoading(true);
       
@@ -404,7 +465,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
       await liveApiService.logLeadAction(selectedLead.id, {
         action,
-        notes: actionNote,
+        notes: actionNote.trim(),
         status: actionStatus || (action === 'submitted_for_closing' ? 'booked' : undefined),
         media_url,
         next_followup_at: nextFollowup || undefined
@@ -1050,7 +1111,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       value={actionStatus}
                       onChange={e => setActionStatus(e.target.value)}
                     >
-                      <option value="">Update Status...</option>
+                      <option value="">Select Status (Required)</option>
                       <option value="followed_up">Followed Up</option>
                       <option value="interested">Interested</option>
                       <option value="not_interested">Not Interested</option>
@@ -1059,7 +1120,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                     </select>
 
                     <textarea 
-                      placeholder="Add a note about this interaction..."
+                      placeholder="Add a note about this interaction... (Required)"
                       className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none text-sm focus:ring-2 focus:ring-blue-500 transition-all min-h-[100px] resize-none"
                       value={actionNote}
                       onChange={e => setActionNote(e.target.value)}
@@ -1110,10 +1171,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       </div>
                     )}
 
+                    <p className="text-[10px] text-gray-400 px-1">Status and note are required. Scheduled date is optional.</p>
+
                     <div className="grid grid-cols-1 gap-2">
                       <button 
                         onClick={() => handleLogAction('interaction')}
-                        disabled={loading || !actionNote}
+                        disabled={loading || !actionNote.trim() || !actionStatus}
                         className="w-full bg-black text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 transition-all"
                       >
                         {loading ? <Loader2 className="animate-spin" size={20} /> : <><CheckCircle size={20} /> Save Interaction</>}
@@ -1136,7 +1199,10 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
               <div className="p-4 pb-10">
                 <h4 className="text-sm font-bold text-gray-900 mb-4 px-1">Activity History</h4>
                 <div className="space-y-4 relative before:absolute before:left-[19px] before:top-2 before:bottom-2 before:w-0.5 before:bg-gray-200">
-                  {activities.map((activity, idx) => (
+                  {activities.map((activity) => {
+                    const activityDetails = getActivityDetails(activity);
+
+                    return (
                     <div key={activity.id} className="relative pl-10">
                       <div className="absolute left-0 top-1 w-10 h-10 rounded-full bg-white border-2 border-gray-200 flex items-center justify-center z-10">
                         <div className="w-2 h-2 rounded-full bg-blue-600" />
@@ -1144,9 +1210,26 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
                         <div className="flex justify-between items-start mb-1">
                           <p className="text-xs font-bold text-gray-900 uppercase tracking-wider">{activity.action.replace(/_/g, ' ')}</p>
-                          <p className="text-[10px] text-gray-400">{new Date(activity.created_at).toLocaleString()}</p>
+                          <p className="text-[10px] text-gray-400">{formatTimelineTime(activity.created_at)}</p>
                         </div>
-                        <p className="text-sm text-gray-600 leading-relaxed">{activity.notes}</p>
+                        <p className="text-sm text-gray-600 leading-relaxed">{activity.notes || 'No notes added.'}</p>
+                        <div className="mt-3 space-y-2">
+                          {activityDetails.map((detail) => (
+                            <div
+                              key={`${activity.id}-${detail.label}`}
+                              className={`rounded-xl px-3 py-2 ${
+                                detail.tone === 'blue'
+                                  ? 'border border-blue-100 bg-blue-50/60'
+                                  : 'border border-violet-100 bg-violet-50/60'
+                              }`}
+                            >
+                              <p className={`text-[10px] font-bold uppercase tracking-wider ${detail.tone === 'blue' ? 'text-blue-700' : 'text-violet-700'}`}>
+                                {detail.label}
+                              </p>
+                              <p className={`text-xs mt-1 ${detail.tone === 'blue' ? 'text-blue-900' : 'text-violet-900'}`}>{detail.value}</p>
+                            </div>
+                          ))}
+                        </div>
                         {(activity as any).media_url && (
                           <div className="mt-3 rounded-xl overflow-hidden border border-gray-100">
                             <img src={(activity as any).media_url} alt="Activity Media" className="max-w-full h-auto" referrerPolicy="no-referrer" />
@@ -1155,7 +1238,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                         <p className="text-[10px] text-gray-400 mt-2 font-medium italic">Logged by {activity.staff_name}</p>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                   {activities.length === 0 && (
                     <div className="text-center py-10 bg-white rounded-3xl border border-gray-100">
                       <p className="text-xs text-gray-400">No activity logged yet.</p>
