@@ -1,38 +1,38 @@
-const test = require('node:test');
-const assert = require('node:assert/strict');
+import test from 'node:test';
+import assert from 'node:assert/strict';
 
-const { resolveModuleMode } = require('../backend/shared/infra/flags');
-const { buildLatencyTracker, parsePositiveInt } = require('../backend/shared/infra/perf');
-const { LeadIngestionService } = require('../backend/modules/lead-ingestion/service');
-const { ReminderServiceFacade } = require('../backend/modules/reminders-escalations/service');
-const { AuthConfigServiceFacade } = require('../backend/modules/auth-config/service');
-const { SystemHealthServiceFacade } = require('../backend/modules/system-health/service');
-const {
+import { resolveModuleMode } from '../backend/shared/infra/flags.js';
+import { buildLatencyTracker, parsePositiveInt } from '../backend/shared/infra/perf.js';
+import { LeadIngestionService } from '../backend/modules/lead-ingestion/service.js';
+import { ReminderServiceFacade } from '../backend/modules/reminders-escalations/service.js';
+import { AuthConfigServiceFacade } from '../backend/modules/auth-config/service.js';
+import { SystemHealthServiceFacade } from '../backend/modules/system-health/service.js';
+import {
   validateLeadIngestedPayload,
   toLegacyLeadIngestedPayload,
   buildDeterministicDedupeKey,
-} = require('../backend/modules/lead-ingestion/contracts');
-const {
+} from '../backend/modules/lead-ingestion/contracts.js';
+import {
   normalizeReminderTaskDispatchedPayload,
   toLegacyReminderTaskDispatchedPayload,
   buildReminderAttemptIdempotencyKey,
-} = require('../backend/modules/reminders-escalations/contracts');
-const { buildStageTransitionFingerprint } = require('../backend/shared/contracts/idempotency');
+} from '../backend/modules/reminders-escalations/contracts.js';
+import { buildStageTransitionFingerprint } from '../backend/shared/contracts/idempotency.js';
 
-const { validateStageTransitionInput } = require('../backend/modules/lead-lifecycle/contracts');
-const { validateReportingExportInput } = require('../backend/modules/reporting-export/contracts');
-const { validateMediaOperationInput } = require('../backend/modules/media/contracts');
-const { validateConversationAdvanceInput } = require('../backend/modules/bot-conversation/contracts');
-const { validateWorkspaceLeadDetailInput } = require('../backend/modules/agent-workspace/contracts');
-const { validateCampaignJobUpdatedPayload } = require('../backend/modules/campaign-broadcast/contracts');
-const { validateSystemHealthSnapshot } = require('../backend/modules/system-health/contracts');
-const { validateAuthConfigUpdateInput } = require('../backend/modules/auth-config/contracts');
-const {
+import { validateStageTransitionInput } from '../backend/modules/lead-lifecycle/contracts.js';
+import { validateReportingExportInput } from '../backend/modules/reporting-export/contracts.js';
+import { validateMediaOperationInput } from '../backend/modules/media/contracts.js';
+import { validateConversationAdvanceInput } from '../backend/modules/bot-conversation/contracts.js';
+import { validateWorkspaceLeadDetailInput } from '../backend/modules/agent-workspace/contracts.js';
+import { validateCampaignJobUpdatedPayload } from '../backend/modules/campaign-broadcast/contracts.js';
+import { validateSystemHealthSnapshot } from '../backend/modules/system-health/contracts.js';
+import { validateAuthConfigUpdateInput } from '../backend/modules/auth-config/contracts.js';
+import {
   EVENT_TYPES,
   SCHEMA_VERSION,
   buildEventEnvelope,
   assertEventEnvelope,
-} = require('../backend/shared/contracts/internalEvents');
+} from '../backend/shared/contracts/internalEvents.js';
 
 const loadLeadIngestionServiceWithEnv = (env = {}) => {
   const servicePath = require.resolve('../backend/modules/lead-ingestion/service');

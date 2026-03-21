@@ -1,14 +1,14 @@
-const { log } = require('./logger');
+import { log } from './logger.js';
 
-const nowMs = () => Number(process.hrtime.bigint() / 1000000n);
+export const nowMs = () => Number(process.hrtime.bigint() / 1000000n);
 
-const parsePositiveInt = (value, fallback) => {
+export const parsePositiveInt = (value, fallback) => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   if (Number.isNaN(parsed) || parsed <= 0) return fallback;
   return parsed;
 };
 
-const buildLatencyTracker = ({ module, requestId = null, operation, warnThresholdMs = 1500, extraMeta = {} } = {}) => {
+export const buildLatencyTracker = ({ module, requestId = null, operation, warnThresholdMs = 1500, extraMeta = {} } = {}) => {
   const startedAt = nowMs();
 
   return {
@@ -38,7 +38,7 @@ const buildLatencyTracker = ({ module, requestId = null, operation, warnThreshol
   };
 };
 
-const buildStageTimer = ({ module, requestId = null, operation, warnThresholdMs = 300, extraMeta = {} } = {}) => {
+export const buildStageTimer = ({ module, requestId = null, operation, warnThresholdMs = 300, extraMeta = {} } = {}) => {
   const startedAt = nowMs();
 
   return {
@@ -68,7 +68,7 @@ const buildStageTimer = ({ module, requestId = null, operation, warnThresholdMs 
   };
 };
 
-const runWithTimeout = async ({
+export const runWithTimeout = async ({
   promise,
   timeoutMs,
   onTimeout,
@@ -96,7 +96,7 @@ const runWithTimeout = async ({
   }
 };
 
-module.exports = {
+export default {
   buildLatencyTracker,
   buildStageTimer,
   parsePositiveInt,

@@ -1,6 +1,6 @@
-const AGENT_WORKSPACE_SCHEMA_VERSION = '1.0.0';
+export const AGENT_WORKSPACE_SCHEMA_VERSION = '1.0.0';
 
-function validateWorkspaceLeadDetailInput(input = {}) {
+export function validateWorkspaceLeadDetailInput(input = {}) {
   const {
     leadId,
     includeMessages = true,
@@ -20,7 +20,7 @@ function validateWorkspaceLeadDetailInput(input = {}) {
   };
 }
 
-module.exports = {
+export default {
   AGENT_WORKSPACE_SCHEMA_VERSION,
   validateWorkspaceLeadDetailInput,
 };

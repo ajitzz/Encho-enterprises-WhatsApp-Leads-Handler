@@ -1,5 +1,5 @@
-const register = () => {
+export const register = () => {
   // Placeholder for module route registration.
 };
 
-module.exports = { register };
+export default { register };

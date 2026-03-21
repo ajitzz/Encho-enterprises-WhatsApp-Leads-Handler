@@ -1,6 +1,10 @@
 #!/usr/bin/env node
-const fs = require('node:fs');
-const path = require('node:path');
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const root = path.resolve(__dirname, '..');
 const requiredModules = [
@@ -18,7 +22,7 @@ for (const relPath of requiredModules) {
     continue;
   }
   const body = fs.readFileSync(fullPath, 'utf8');
-  if (!/register|router|route|module\.exports/i.test(body)) {
+  if (!/register|router|route|export/i.test(body)) {
     failures.push(`No route registration signal found in ${relPath}`);
   }
 }

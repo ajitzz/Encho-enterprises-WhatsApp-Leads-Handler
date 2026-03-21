@@ -1,14 +1,14 @@
-const { SCHEMA_VERSION, EVENT_TYPES } = require('../../shared/contracts/internalEvents');
+import { SCHEMA_VERSION, EVENT_TYPES } from '../../shared/contracts/internalEvents.js';
 
-const CAMPAIGN_JOB_UPDATED_CONTRACT = {
+export const CAMPAIGN_JOB_UPDATED_CONTRACT = {
   eventType: EVENT_TYPES.CAMPAIGN_JOB_UPDATED_V1,
   schemaVersion: SCHEMA_VERSION,
   requiredFields: ['jobId', 'previousStatus', 'currentStatus', 'counters'],
 };
 
-const ALLOWED_CAMPAIGN_STATUSES = new Set(['queued', 'processing', 'paused', 'completed', 'failed', 'cancelled']);
+export const ALLOWED_CAMPAIGN_STATUSES = new Set(['queued', 'processing', 'paused', 'completed', 'failed', 'cancelled']);
 
-function validateCampaignJobUpdatedPayload(input = {}) {
+export function validateCampaignJobUpdatedPayload(input = {}) {
   const normalized = {
     jobId: input.jobId,
     previousStatus: input.previousStatus,
@@ -38,7 +38,7 @@ function validateCampaignJobUpdatedPayload(input = {}) {
   return normalized;
 }
 
-module.exports = {
+export default {
   CAMPAIGN_JOB_UPDATED_CONTRACT,
   ALLOWED_CAMPAIGN_STATUSES,
   validateCampaignJobUpdatedPayload,

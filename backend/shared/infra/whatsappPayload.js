@@ -1,8 +1,8 @@
-const MAX_TEXT_MESSAGE_LENGTH = Number.parseInt(process.env.MAX_TEXT_MESSAGE_LENGTH || '4096', 10);
+export const MAX_TEXT_MESSAGE_LENGTH = Number.parseInt(process.env.MAX_TEXT_MESSAGE_LENGTH || '4096', 10);
 
-const normalizeTextBody = (value) => (typeof value === 'string' ? value : String(value || ''));
+export const normalizeTextBody = (value) => (typeof value === 'string' ? value : String(value || ''));
 
-const summarizePayloadForStorage = (payload) => {
+export const summarizePayloadForStorage = (payload) => {
   if (!payload || typeof payload !== 'object') return '[Unknown payload]';
   if (payload.type === 'text') return normalizeTextBody(payload.text?.body);
   if (payload.type === 'interactive') return normalizeTextBody(payload.interactive?.body?.text || '[Interactive]');
@@ -52,7 +52,7 @@ const validateInteractiveList = (interactive) => {
   return { valid: true };
 };
 
-const validateOutboundPayload = (payload) => {
+export const validateOutboundPayload = (payload) => {
   if (!payload || typeof payload !== 'object') return { valid: false, reason: 'payload_missing' };
 
   if (payload.type === 'text') {
@@ -76,7 +76,7 @@ const validateOutboundPayload = (payload) => {
   return { valid: true };
 };
 
-module.exports = {
+export default {
   MAX_TEXT_MESSAGE_LENGTH,
   normalizeTextBody,
   summarizePayloadForStorage,

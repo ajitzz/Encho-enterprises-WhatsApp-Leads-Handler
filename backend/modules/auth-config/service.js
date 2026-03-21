@@ -1,9 +1,9 @@
-const { log } = require('../../shared/infra/logger');
-const { buildLatencyTracker, parsePositiveInt } = require('../../shared/infra/perf');
+import { log } from '../../shared/infra/logger.js';
+import { buildLatencyTracker, parsePositiveInt } from '../../shared/infra/perf.js';
 
 const AUTH_CONFIG_WARN_MS = parsePositiveInt(process.env.AUTH_CONFIG_WARN_MS, 800);
 
-class AuthConfigServiceFacade {
+export class AuthConfigServiceFacade {
   constructor({
     legacyVerifyGoogleHandler,
     legacyGetBotSettingsHandler,
@@ -94,4 +94,4 @@ class AuthConfigServiceFacade {
   }
 }
 
-module.exports = { AuthConfigServiceFacade };
+export default { AuthConfigServiceFacade };

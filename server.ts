@@ -10,22 +10,22 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { OAuth2Client, JWT } from 'google-auth-library';
 import { EventEmitter } from 'events';
 import dotenv from 'dotenv';
-import { withDb, query, getPool } from './server/db';
-import { broadcastUpdate, onUpdate, sendNotification } from './server/services/notificationService';
+import { withDb, query, getPool } from './server/db.js';
+import { broadcastUpdate, onUpdate, sendNotification } from './server/services/notificationService.js';
 
 dotenv.config();
 
-const { parseBooleanFlag, parsePercent, resolveModuleMode } = require('./backend/shared/infra/flags');
-const {
+import { parseBooleanFlag, parsePercent, resolveModuleMode } from './backend/shared/infra/flags.js';
+import {
     MAX_TEXT_MESSAGE_LENGTH,
     normalizeTextBody,
     summarizePayloadForStorage,
     validateOutboundPayload,
-} = require('./backend/shared/infra/whatsappPayload');
-const { buildLeadIngestionFacade } = require('./backend/modules/lead-ingestion/api');
-const { buildRemindersRouter } = require('./backend/modules/reminders-escalations/api');
-const { buildAuthConfigRouter, registerAuthConfigRoutes } = require('./backend/modules/auth-config/api');
-const { buildSystemHealthRouter, registerSystemHealthRoutes } = require('./backend/modules/system-health/api');
+} from './backend/shared/infra/whatsappPayload.js';
+import { buildLeadIngestionFacade } from './backend/modules/lead-ingestion/api.js';
+import { buildRemindersRouter } from './backend/modules/reminders-escalations/api.js';
+import { buildAuthConfigRouter, registerAuthConfigRoutes } from './backend/modules/auth-config/api.js';
+import { buildSystemHealthRouter, registerSystemHealthRoutes } from './backend/modules/system-health/api.js';
 
 const notifyUpdates = (candidateId = null) => {
     broadcastUpdate(candidateId);
@@ -4479,7 +4479,7 @@ const leadIngestionFacade = buildLeadIngestionFacade({
 });
 
 apiRouter.post('/webhook', async (req, res) => {
-    const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
+    const tenantId = (req.headers['x-tenant-id'] || req.headers['x-tenant'] || null) as any;
     const mode = resolveModuleMode({
         flagValue: LEAD_INGESTION_FLAG,
         tenantId,
@@ -4612,7 +4612,7 @@ const authConfigRouter = buildAuthConfigRouter({
 });
 
 const resolveAuthConfigMode = (req) => {
-    const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
+    const tenantId = (req.headers['x-tenant-id'] || req.headers['x-tenant'] || null) as any;
     return resolveModuleMode({
         flagValue: AUTH_CONFIG_MODULE_FLAG,
         tenantId,
@@ -4631,7 +4631,7 @@ const systemHealthRouter = buildSystemHealthRouter({
 });
 
 const resolveSystemHealthMode = (req) => {
-    const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
+    const tenantId = (req.headers['x-tenant-id'] || req.headers['x-tenant'] || null) as any;
     return resolveModuleMode({
         flagValue: SYSTEM_HEALTH_MODULE_FLAG,
         tenantId,
@@ -5335,7 +5335,7 @@ const handleScheduledMessagesLegacy = async (req, res) => {
 };
 
 apiRouter.post('/scheduled-messages', async (req, res) => {
-    const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
+    const tenantId = (req.headers['x-tenant-id'] || req.headers['x-tenant'] || null) as any;
     const mode = resolveModuleMode({
         flagValue: REMINDERS_MODULE_FLAG,
         tenantId,
@@ -5504,7 +5504,7 @@ const remindersRouter = buildRemindersRouter({
 });
 
 apiRouter.get('/cron/process-queue', async (req, res) => {
-    const tenantId = req.headers['x-tenant-id'] || req.headers['x-tenant'] || null;
+    const tenantId = (req.headers['x-tenant-id'] || req.headers['x-tenant'] || null) as any;
     const mode = resolveModuleMode({
         flagValue: REMINDERS_MODULE_FLAG,
         tenantId,

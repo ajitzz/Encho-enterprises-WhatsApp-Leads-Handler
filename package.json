@@ -1,6 +1,7 @@
 {
   "name": "uber-fleet-recruiter",
   "version": "1.0.0",
+  "type": "module",
   "description": "WhatsApp Recruitment Automation for Uber Fleet",
   "main": "server.ts",
   "scripts": {

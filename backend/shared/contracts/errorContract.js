@@ -1,6 +1,6 @@
-const ERROR_CATEGORIES = ['validation', 'dependency', 'timeout', 'conflict', 'not_found', 'internal'];
+export const ERROR_CATEGORIES = ['validation', 'dependency', 'timeout', 'conflict', 'not_found', 'internal'];
 
-const buildBoundaryError = ({
+export const buildBoundaryError = ({
   code,
   message,
   retriable = false,
@@ -24,7 +24,7 @@ const buildBoundaryError = ({
   };
 };
 
-module.exports = {
+export default {
   ERROR_CATEGORIES,
   buildBoundaryError,
 };

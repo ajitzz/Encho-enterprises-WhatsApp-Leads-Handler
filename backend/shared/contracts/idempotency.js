@@ -1,4 +1,4 @@
-const buildStageTransitionFingerprint = ({ leadId, fromStage, toStage, changedAt } = {}) => {
+export const buildStageTransitionFingerprint = ({ leadId, fromStage, toStage, changedAt } = {}) => {
   if (!leadId) throw new Error('leadId is required');
   if (!fromStage) throw new Error('fromStage is required');
   if (!toStage) throw new Error('toStage is required');
@@ -8,6 +8,6 @@ const buildStageTransitionFingerprint = ({ leadId, fromStage, toStage, changedAt
   return `${leadId}:${fromStage}->${toStage}:${changedAtBucket}`;
 };
 
-module.exports = {
+export default {
   buildStageTransitionFingerprint,
 };

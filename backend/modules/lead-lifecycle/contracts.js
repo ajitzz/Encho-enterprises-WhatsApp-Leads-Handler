@@ -1,6 +1,6 @@
-const STAGE_TRANSITION_SCHEMA_VERSION = '1.0.0';
+export const STAGE_TRANSITION_SCHEMA_VERSION = '1.0.0';
 
-const ALLOWED_STAGE_NAMES = new Set([
+export const ALLOWED_STAGE_NAMES = new Set([
   'New',
   'Contacted',
   'Qualified',
@@ -11,9 +11,10 @@ const ALLOWED_STAGE_NAMES = new Set([
   'Lost',
 ]);
 
-function validateStageTransitionInput(input = {}) {
+export function validateStageTransitionInput(input = {}) {
   const {
     leadId,
+    currentStepId,
     fromStage,
     toStage,
     actor,
@@ -43,7 +44,7 @@ function validateStageTransitionInput(input = {}) {
   };
 }
 
-module.exports = {
+export default {
   STAGE_TRANSITION_SCHEMA_VERSION,
   ALLOWED_STAGE_NAMES,
   validateStageTransitionInput,

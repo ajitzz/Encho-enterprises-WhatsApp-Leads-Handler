@@ -1,6 +1,6 @@
-const { AuthConfigServiceFacade } = require('./service');
+import { AuthConfigServiceFacade } from './service.js';
 
-const buildAuthConfigRouter = ({
+export const buildAuthConfigRouter = ({
   legacyVerifyGoogleHandler,
   legacyGetBotSettingsHandler,
   legacySaveBotSettingsHandler,
@@ -27,7 +27,7 @@ const buildAuthConfigRouter = ({
   };
 };
 
-const registerAuthConfigRoutes = ({
+export const registerAuthConfigRoutes = ({
   apiRouter,
   moduleRouter,
   resolveMode,
@@ -81,4 +81,4 @@ const registerAuthConfigRoutes = ({
   }
 };
 
-module.exports = { buildAuthConfigRouter, registerAuthConfigRoutes };
+export default { buildAuthConfigRouter, registerAuthConfigRoutes };

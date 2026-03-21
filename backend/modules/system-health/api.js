@@ -1,6 +1,6 @@
-const { SystemHealthServiceFacade } = require('./service');
+import { SystemHealthServiceFacade } from './service.js';
 
-const buildSystemHealthRouter = ({
+export const buildSystemHealthRouter = ({
   legacyHealthHandler,
   legacyReadyHandler,
   legacyOperationalStatusHandler,
@@ -24,7 +24,7 @@ const buildSystemHealthRouter = ({
   };
 };
 
-const registerSystemHealthRoutes = ({
+export const registerSystemHealthRoutes = ({
   apiRouter,
   moduleRouter,
   resolveMode,
@@ -72,4 +72,4 @@ const registerSystemHealthRoutes = ({
   }
 };
 
-module.exports = { buildSystemHealthRouter, registerSystemHealthRoutes };
+export default { buildSystemHealthRouter, registerSystemHealthRoutes };

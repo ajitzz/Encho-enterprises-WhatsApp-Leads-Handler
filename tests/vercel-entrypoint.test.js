@@ -1,7 +1,7 @@
-const test = require('node:test');
-const assert = require('node:assert/strict');
+import test from 'node:test';
+import assert from 'node:assert/strict';
 
-const handler = require('../api/index');
+import handler from '../api/index.js';
 
 test('vercel api entrypoint exports a request handler function', () => {
   assert.equal(typeof handler, 'function');

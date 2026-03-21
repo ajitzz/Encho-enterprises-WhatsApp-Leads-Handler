@@ -1,12 +1,12 @@
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 
-const { buildBoundaryError } = require('../backend/shared/contracts/errorContract');
-const { resolveModuleMode } = require('../backend/shared/infra/flags');
+import { buildBoundaryError } from '../backend/shared/contracts/errorContract.js';
+import { resolveModuleMode } from '../backend/shared/infra/flags.js';
 
-const { registerAuthConfigRoutes } = require('../backend/modules/auth-config/api');
-const { registerSystemHealthRoutes } = require('../backend/modules/system-health/api');
+import { registerAuthConfigRoutes } from '../backend/modules/auth-config/api.js';
+import { registerSystemHealthRoutes } from '../backend/modules/system-health/api.js';
 
 const createRouterMock = () => {
   const routes = {};

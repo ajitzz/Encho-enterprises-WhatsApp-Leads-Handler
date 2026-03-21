@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-const assert = require('node:assert/strict');
-const { resolveModuleMode } = require('../backend/shared/infra/flags');
+import assert from 'node:assert/strict';
+import { resolveModuleMode } from '../backend/shared/infra/flags.js';
 
 const offMode = resolveModuleMode({
   flagValue: 'off',

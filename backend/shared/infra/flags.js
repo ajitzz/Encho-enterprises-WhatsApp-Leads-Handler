@@ -1,6 +1,6 @@
 const normalize = (value, fallback = '') => String(value ?? fallback).trim().toLowerCase();
 
-const parseBooleanFlag = (value, defaultValue = false) => {
+export const parseBooleanFlag = (value, defaultValue = false) => {
   if (value === undefined || value === null || value === '') return defaultValue;
   const normalized = normalize(value);
   if (['1', 'true', 'on', 'yes'].includes(normalized)) return true;
@@ -8,7 +8,7 @@ const parseBooleanFlag = (value, defaultValue = false) => {
   return defaultValue;
 };
 
-const parsePercent = (value, fallback = 0) => {
+export const parsePercent = (value, fallback = 0) => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   if (Number.isNaN(parsed)) return fallback;
   return Math.max(0, Math.min(100, parsed));
@@ -25,7 +25,16 @@ const isCanaryPercentHit = (seed, percent) => {
   return hash < percent;
 };
 
-const resolveModuleMode = ({ flagValue = 'off', tenantId, requestId, canaryPercent = 0, tenantAllowList = [] } = {}) => {
+/**
+ * @param {Object} [params]
+ * @param {string} [params.flagValue]
+ * @param {string | null} [params.tenantId]
+ * @param {string | null} [params.requestId]
+ * @param {number} [params.canaryPercent]
+ * @param {any[]} [params.tenantAllowList]
+ * @returns {'off' | 'on' | 'shadow' | 'canary'}
+ */
+export const resolveModuleMode = ({ flagValue = 'off', tenantId, requestId, canaryPercent = 0, tenantAllowList = [] } = {}) => {
   const mode = normalize(flagValue, 'off');
   if (mode === 'off') return 'off';
   if (mode === 'on' || mode === 'full') return 'on';
@@ -38,7 +47,7 @@ const resolveModuleMode = ({ flagValue = 'off', tenantId, requestId, canaryPerce
   return 'off';
 };
 
-module.exports = {
+export default {
   parseBooleanFlag,
   parsePercent,
   resolveModuleMode,

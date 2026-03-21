@@ -1,8 +1,8 @@
-const MEDIA_SCHEMA_VERSION = '1.0.0';
+export const MEDIA_SCHEMA_VERSION = '1.0.0';
 
-const ALLOWED_MEDIA_ACTIONS = new Set(['list', 'upload', 'copy', 'delete', 'tokenize-showcase']);
+export const ALLOWED_MEDIA_ACTIONS = new Set(['list', 'upload', 'copy', 'delete', 'tokenize-showcase']);
 
-function validateMediaOperationInput(input = {}) {
+export function validateMediaOperationInput(input = {}) {
   const {
     action,
     folder = null,
@@ -30,7 +30,7 @@ function validateMediaOperationInput(input = {}) {
   };
 }
 
-module.exports = {
+export default {
   MEDIA_SCHEMA_VERSION,
   ALLOWED_MEDIA_ACTIONS,
   validateMediaOperationInput,

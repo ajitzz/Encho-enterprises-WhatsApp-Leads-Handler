@@ -1,4 +1,4 @@
-const log = ({ level = 'info', module = 'app', message = '', requestId = null, meta = {} } = {}) => {
+export const log = ({ level = 'info', module = 'app', message = '', requestId = null, meta = {} } = {}) => {
   const payload = {
     timestamp: new Date().toISOString(),
     level,
@@ -15,4 +15,4 @@ const log = ({ level = 'info', module = 'app', message = '', requestId = null, m
   console.log(line);
 };
 
-module.exports = { log };
+export default { log };

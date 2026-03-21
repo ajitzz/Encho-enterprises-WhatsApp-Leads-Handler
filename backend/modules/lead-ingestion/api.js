@@ -1,14 +1,12 @@
-const { LeadIngestionService } = require('./service');
-const { LeadAssignmentService } = require('./assignment');
-const { redis } = require('../../shared/infra/redis');
+import { LeadIngestionService } from './service.js';
+import { LeadAssignmentService } from './assignment.js';
 
-const buildLeadIngestionFacade = ({
+export const buildLeadIngestionFacade = ({
   legacyProcessor,
   withDb,
   executeWithRetry,
   runBotEngine,
   triggerReportingSyncDeferred,
-  fetchAndStoreIncomingMedia,
 }) => {
   const assignmentService = new LeadAssignmentService({
     withDb,
@@ -22,19 +20,11 @@ const buildLeadIngestionFacade = ({
     runBotEngine,
     triggerReportingSyncDeferred,
     assignmentService,
-    fetchAndStoreIncomingMedia,
-    redis,
   });
 
-  const handleIncomingMessage = async ({ body, req, res, context }) => {
+  return async ({ body, req, res, context }) => {
     return service.handleIncomingMessage({ body, req, res, context });
   };
-
-  const handleDeferredBot = async ({ body, req, res, context }) => {
-    return service.handleDeferredBot({ body, requestId: context?.requestId || req?.requestId, tenantId: context?.tenantId });
-  };
-
-  return { handleIncomingMessage, handleDeferredBot };
 };
 
-module.exports = { buildLeadIngestionFacade };
+export default { buildLeadIngestionFacade };

@@ -1,8 +1,8 @@
-const REPORTING_EXPORT_SCHEMA_VERSION = '1.0.0';
+export const REPORTING_EXPORT_SCHEMA_VERSION = '1.0.0';
 
-const ALLOWED_EXPORT_TYPES = new Set(['driver-excel', 'driver-excel-incremental', 'driver-excel-full']);
+export const ALLOWED_EXPORT_TYPES = new Set(['driver-excel', 'driver-excel-incremental', 'driver-excel-full']);
 
-function validateReportingExportInput(input = {}) {
+export function validateReportingExportInput(input = {}) {
   const {
     exportType,
     triggeredBy,
@@ -26,7 +26,7 @@ function validateReportingExportInput(input = {}) {
   };
 }
 
-module.exports = {
+export default {
   REPORTING_EXPORT_SCHEMA_VERSION,
   ALLOWED_EXPORT_TYPES,
   validateReportingExportInput,

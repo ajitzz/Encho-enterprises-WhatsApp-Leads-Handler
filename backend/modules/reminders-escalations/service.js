@@ -1,10 +1,10 @@
-const { log } = require('../../shared/infra/logger');
-const { buildLatencyTracker, parsePositiveInt } = require('../../shared/infra/perf');
+import { log } from '../../shared/infra/logger.js';
+import { buildLatencyTracker, parsePositiveInt } from '../../shared/infra/perf.js';
 
 const REMINDER_SCHEDULE_WARN_MS = parsePositiveInt(process.env.REMINDER_SCHEDULE_WARN_MS, 800);
 const REMINDER_QUEUE_WARN_MS = parsePositiveInt(process.env.REMINDER_QUEUE_WARN_MS, 2500);
 
-class ReminderServiceFacade {
+export class ReminderServiceFacade {
   constructor({
     legacyScheduleHandler,
     legacyQueueHandler,
@@ -90,4 +90,4 @@ class ReminderServiceFacade {
   }
 }
 
-module.exports = { ReminderServiceFacade };
+export default { ReminderServiceFacade };

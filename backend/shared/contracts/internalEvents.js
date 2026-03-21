@@ -1,6 +1,6 @@
-const SCHEMA_VERSION = '1.0.0';
+export const SCHEMA_VERSION = '1.0.0';
 
-const EVENT_TYPES = {
+export const EVENT_TYPES = {
   LEAD_INGESTED_V1: 'lead.ingested.v1',
   CONVERSATION_ADVANCED_V1: 'conversation.advanced.v1',
   LEAD_STAGE_CHANGED_V1: 'lead.stage.changed.v1',
@@ -9,7 +9,7 @@ const EVENT_TYPES = {
   CAMPAIGN_JOB_UPDATED_V1: 'campaign.job.updated.v1',
 };
 
-const buildEventEnvelope = ({
+export const buildEventEnvelope = ({
   eventType,
   payload,
   sourceModule,
@@ -36,7 +36,7 @@ const buildEventEnvelope = ({
   };
 };
 
-const assertEventEnvelope = (event) => {
+export const assertEventEnvelope = (event) => {
   const required = ['eventId', 'eventType', 'occurredAt', 'schemaVersion', 'sourceModule', 'correlationId', 'payload'];
   for (const field of required) {
     if (event?.[field] === undefined || event?.[field] === null || event?.[field] === '') {
@@ -46,7 +46,7 @@ const assertEventEnvelope = (event) => {
   return true;
 };
 
-module.exports = {
+export default {
   SCHEMA_VERSION,
   EVENT_TYPES,
   buildEventEnvelope,

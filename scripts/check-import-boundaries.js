@@ -1,6 +1,10 @@
 #!/usr/bin/env node
-const fs = require('node:fs');
-const path = require('node:path');
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const repoRoot = path.resolve(__dirname, '..');
 const backendRoot = path.join(repoRoot, 'backend');
@@ -10,6 +14,7 @@ const sharedRoot = path.join(backendRoot, 'shared');
 const SOURCE_EXTENSIONS = new Set(['.js', '.ts', '.tsx', '.mjs', '.cjs']);
 
 function walk(dir) {
+  if (!fs.existsSync(dir)) return [];
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   const files = [];
   for (const entry of entries) {
@@ -31,6 +36,7 @@ function extractImports(source) {
     /require\((['"])([^'"]+)\1\)/g,
     /import\s+(?:[^'";]+\s+from\s+)?(['"])([^'"]+)\1/g,
     /import\((['"])([^'"]+)\1\)/g,
+    /from\s+(['"])([^'"]+)\1/g,
   ];
 
   for (const regex of regexes) {
@@ -75,6 +81,7 @@ const filesToCheck = [
 ];
 
 for (const filePath of filesToCheck) {
+  if (!fs.existsSync(filePath)) continue;
   const relFile = toPosix(path.relative(repoRoot, filePath));
   const source = fs.readFileSync(filePath, 'utf8');
   const imports = extractImports(source);
@@ -111,7 +118,7 @@ for (const filePath of filesToCheck) {
 
     // Rule 4: modules/shared cannot depend on server entrypoint
     const isModuleOrSharedFile = relFile.startsWith('backend/modules/') || relFile.startsWith('backend/shared/');
-    if (isModuleOrSharedFile && (relImport === 'server.ts' || importPath === '../../server' || importPath === '../server')) {
+    if (isModuleOrSharedFile && (relImport === 'server.ts' || importPath === '../../server' || importPath === '../server' || importPath === '../../server.js' || importPath === '../server.js')) {
       violations.push(`${relFile} depends on server entrypoint via ${importPath}`);
     }
   }

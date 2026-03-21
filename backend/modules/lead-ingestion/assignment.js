@@ -1,6 +1,6 @@
-const { log } = require('../../shared/infra/logger');
+import { log } from '../../shared/infra/logger.js';
 
-class LeadAssignmentService {
+export class LeadAssignmentService {
   constructor({ withDb, executeWithRetry }) {
     this.withDb = withDb;
     this.executeWithRetry = executeWithRetry;
@@ -63,4 +63,4 @@ class LeadAssignmentService {
   }
 }
 
-module.exports = { LeadAssignmentService };
+export default { LeadAssignmentService };

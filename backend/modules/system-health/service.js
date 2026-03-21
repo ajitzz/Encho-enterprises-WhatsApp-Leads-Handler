@@ -1,11 +1,11 @@
-const { log } = require('../../shared/infra/logger');
-const { buildLatencyTracker, parsePositiveInt } = require('../../shared/infra/perf');
+import { log } from '../../shared/infra/logger.js';
+import { buildLatencyTracker, parsePositiveInt } from '../../shared/infra/perf.js';
 
 const HEALTH_WARN_MS = parsePositiveInt(process.env.SYSTEM_HEALTH_WARN_MS, 400);
 const PING_WARN_MS = parsePositiveInt(process.env.SYSTEM_PING_WARN_MS, 600);
 const DEBUG_WARN_MS = parsePositiveInt(process.env.SYSTEM_DEBUG_WARN_MS, 1200);
 
-class SystemHealthServiceFacade {
+export class SystemHealthServiceFacade {
   constructor({
     legacyHealthHandler,
     legacyReadyHandler,
@@ -90,4 +90,4 @@ class SystemHealthServiceFacade {
   }
 }
 
-module.exports = { SystemHealthServiceFacade };
+export default { SystemHealthServiceFacade };

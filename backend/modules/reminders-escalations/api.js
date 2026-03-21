@@ -1,6 +1,6 @@
-const { ReminderServiceFacade } = require('./service');
+import { ReminderServiceFacade } from './service.js';
 
-const buildRemindersRouter = ({
+export const buildRemindersRouter = ({
   legacyScheduleHandler,
   legacyQueueHandler,
   legacyListDriverScheduledHandler,
@@ -24,4 +24,4 @@ const buildRemindersRouter = ({
   };
 };
 
-module.exports = { buildRemindersRouter };
+export default { buildRemindersRouter };

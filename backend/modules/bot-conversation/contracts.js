@@ -1,8 +1,8 @@
-const BOT_CONVERSATION_SCHEMA_VERSION = '1.0.0';
+export const BOT_CONVERSATION_SCHEMA_VERSION = '1.0.0';
 
-const ALLOWED_INBOUND_TYPES = new Set(['text', 'interactive', 'location', 'media', 'unknown']);
+export const ALLOWED_INBOUND_TYPES = new Set(['text', 'interactive', 'location', 'media', 'unknown']);
 
-function validateConversationAdvanceInput(input = {}) {
+export function validateConversationAdvanceInput(input = {}) {
   const {
     leadId,
     currentStepId,
@@ -43,7 +43,7 @@ function validateConversationAdvanceInput(input = {}) {
   };
 }
 
-module.exports = {
+export default {
   BOT_CONVERSATION_SCHEMA_VERSION,
   ALLOWED_INBOUND_TYPES,
   validateConversationAdvanceInput,
