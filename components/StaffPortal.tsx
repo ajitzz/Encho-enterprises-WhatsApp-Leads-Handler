@@ -35,6 +35,7 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
+import { getLeadScreenshotUploadPath } from '../services/mediaPaths';
 import { Driver, Message } from '../types.ts';
 import { VoiceRecorder } from './VoiceRecorder.tsx';
 import { ActionCenter } from './ActionCenter.tsx';
@@ -451,7 +452,10 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       
       let media_url = undefined;
       if (action === 'submitted_for_closing' && closingScreenshot) {
-        const upload = await liveApiService.uploadMedia(closingScreenshot.file, `closing/${selectedLead.id}`);
+        const upload = await liveApiService.uploadMedia(
+          closingScreenshot.file,
+          getLeadScreenshotUploadPath(selectedLead)
+        );
         media_url = upload.url;
       }
 
