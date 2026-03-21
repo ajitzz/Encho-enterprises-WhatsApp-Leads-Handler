@@ -81,7 +81,7 @@ interface LeadActivity {
 }
 
 export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ user, onLogout }) => {
-  const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail'>('dashboard');
+  const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail' | 'team'>('dashboard');
   const [allLeads, setAllLeads] = useState<Driver[]>([]);
   const [teamStaff, setTeamStaff] = useState<any[]>([]);
   const [selectedLead, setSelectedLead] = useState<Driver | null>(null);
@@ -1037,7 +1037,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         {view === 'pool' && renderLeadList(true)}
         {view === 'my-leads' && renderLeadList(false)}
         {view === 'detail' && renderDetail()}
-        {(view as any) === 'team' && renderTeam()}
+        {view === 'team' && renderTeam()}
       </main>
 
       {/* Bottom Navigation */}
@@ -1064,6 +1064,15 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             <Users size={20} />
             <span className="text-[10px] font-bold uppercase tracking-widest">Leads</span>
           </button>
+          {(user.role === 'manager' || user.role === 'admin') && (
+            <button 
+              onClick={() => setView('team')}
+              className={`flex flex-col items-center gap-1 transition-all ${view === 'team' ? 'text-blue-600' : 'text-gray-400'}`}
+            >
+              <Users size={20} className="stroke-[2.5px]" />
+              <span className="text-[10px] font-bold uppercase tracking-widest">Team</span>
+            </button>
+          )}
         </nav>
       )}
 

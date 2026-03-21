@@ -1,36 +1,36 @@
+import { Pool, PoolClient } from 'pg';
 
-import pg from 'pg';
-import dotenv from 'dotenv';
+let pgPool: Pool | null = null;
 
-dotenv.config();
+export const buildPoolConfig = () => {
+    const isProduction = process.env.NODE_ENV === 'production';
+    return {
+        connectionString: process.env.POSTGRES_URL,
+        ssl: isProduction ? { rejectUnauthorized: false } : false,
+        max: 20,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 2000,
+    };
+};
 
-const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
+export const getPool = (): Pool => {
+    if (!pgPool) {
+        pgPool = new Pool(buildPoolConfig());
+        pgPool.on('error', (err) => console.error('[DB POOL ERROR]', err));
+    }
+    return pgPool;
+};
 
-export const withDb = async <T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> => {
+export const withDb = async <T>(callback: (client: PoolClient) => Promise<T>): Promise<T> => {
+    const pool = getPool();
     const client = await pool.connect();
     try {
-        return await fn(client);
+        return await callback(client);
     } finally {
         client.release();
     }
 };
 
-export const executeWithRetry = async <T>(client: pg.PoolClient, fn: () => Promise<T>, retries = 3): Promise<T> => {
-    let lastError: any;
-    for (let i = 0; i < retries; i++) {
-        try {
-            return await fn();
-        } catch (err) {
-            lastError = err;
-            if (i < retries - 1) {
-                await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-            }
-        }
-    }
-    throw lastError;
+export const query = async (text: string, params?: any[]) => {
+    return getPool().query(text, params);
 };
-
-export default pool;

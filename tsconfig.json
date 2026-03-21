@@ -24,6 +24,17 @@
       ]
     },
     "allowImportingTsExtensions": true,
-    "noEmit": true
-  }
+    "noEmit": true,
+    "typeRoots": [
+      "./node_modules/@types",
+      "./types"
+    ]
+  },
+  "include": [
+    "src",
+    "server.ts",
+    "api",
+    "server",
+    "types"
+  ]
 }
