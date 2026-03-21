@@ -3998,6 +3998,13 @@ apiRouter.post('/leads/:id/reassign', authMiddleware, async (req, res) => {
 apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
     const { action, notes, status, media_url, next_followup_at } = req.body;
     if (!action) return res.status(400).json({ error: 'Action required' });
+    const cleanNotes = typeof notes === 'string' ? notes.trim() : '';
+    if (action === 'interaction' && !status) {
+        return res.status(400).json({ error: 'Status is required for interaction logs' });
+    }
+    if (action === 'interaction' && !cleanNotes) {
+        return res.status(400).json({ error: 'Notes are required for interaction logs' });
+    }
 
     try {
         await withDb(async (client) => {
@@ -4037,9 +4044,9 @@ apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
                     updates.push(`follow_up_date = $${values.length + 1}`);
                     values.push(next_followup_at);
                 }
-                if (notes) {
+                if (cleanNotes) {
                     updates.push(`follow_up_note = $${values.length + 1}`);
-                    values.push(notes);
+                    values.push(cleanNotes);
                 }
                 updates.push(`last_action_at = NOW()`);
                 
@@ -4057,7 +4064,7 @@ apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
                 // 2. Log Activity
                 await client.query(
                     'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes, media_url, next_followup_at, metadata) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-                    [req.params.id, req.user.staffId, action, notes, media_url, next_followup_at || null, metadata]
+                    [req.params.id, req.user.staffId, action, cleanNotes || null, media_url, next_followup_at || null, metadata]
                 );
                 
                 // 3. Create Reminder if needed
