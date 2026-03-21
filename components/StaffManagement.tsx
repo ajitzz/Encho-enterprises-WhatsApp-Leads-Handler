@@ -7,11 +7,9 @@ interface StaffMember {
   id: string;
   email: string;
   name: string;
-  role: 'admin' | 'manager' | 'staff';
-  manager_id: string | null;
+  role: 'admin' | 'staff';
   is_active_for_auto_dist: boolean;
   last_assigned_at: string | null;
-  last_activity_at: string | null;
   created_at: string;
 }
 
@@ -20,13 +18,7 @@ export const StaffManagement: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isAdding, setIsAdding] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [newStaff, setNewStaff] = useState({ 
-    email: '', 
-    name: '', 
-    role: 'staff' as 'admin' | 'manager' | 'staff',
-    manager_id: null as string | null
-  });
+  const [newStaff, setNewStaff] = useState({ email: '', name: '', role: 'staff' as 'admin' | 'staff' });
   const [searchQuery, setSearchQuery] = useState('');
   const [autoDistSettings, setAutoDistSettings] = useState({ auto_enabled: false });
 
@@ -81,24 +73,11 @@ export const StaffManagement: React.FC = () => {
     try {
       setLoading(true);
       await liveApiService.addStaff(newStaff);
-      setNewStaff({ email: '', name: '', role: 'staff', manager_id: null });
+      setNewStaff({ email: '', name: '', role: 'staff' });
       setIsAdding(false);
       await fetchStaff();
     } catch (err: any) {
       setError(err.message || 'Failed to add staff');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleUpdateStaff = async (id: string, updates: any) => {
-    try {
-      setLoading(true);
-      await liveApiService.updateStaff(id, updates);
-      setEditingId(null);
-      await fetchStaff();
-    } catch (err: any) {
-      setError(err.message || 'Failed to update staff');
     } finally {
       setLoading(false);
     }
@@ -207,28 +186,14 @@ export const StaffManagement: React.FC = () => {
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Role</label>
-              <select
-                className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all bg-white"
-                value={newStaff.role}
-                onChange={e => setNewStaff({ ...newStaff, role: e.target.value as any })}
-              >
-                <option value="staff">Staff (Lead Manager)</option>
-                <option value="manager">Manager (Team Leader)</option>
-                <option value="admin">Admin (Full Access)</option>
-              </select>
-            </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">Assign Manager</label>
               <div className="flex gap-2">
                 <select
                   className="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all bg-white"
-                  value={newStaff.manager_id || ''}
-                  onChange={e => setNewStaff({ ...newStaff, manager_id: e.target.value || null })}
+                  value={newStaff.role}
+                  onChange={e => setNewStaff({ ...newStaff, role: e.target.value as 'admin' | 'staff' })}
                 >
-                  <option value="">No Manager</option>
-                  {staff.filter(s => s.role === 'manager' || s.role === 'admin').map(m => (
-                    <option key={m.id} value={m.id}>{m.name} ({m.role})</option>
-                  ))}
+                  <option value="staff">Staff (Lead Manager)</option>
+                  <option value="admin">Admin (Full Access)</option>
                 </select>
                 <button
                   type="submit"
@@ -260,9 +225,9 @@ export const StaffManagement: React.FC = () => {
             <thead>
               <tr className="bg-gray-50/50">
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Staff Member</th>
-                <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Role / Manager</th>
+                <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Role</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider text-center">Auto-Dist</th>
-                <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Activity</th>
+                <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider">Last Assigned</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider text-right">Actions</th>
               </tr>
             </thead>
@@ -300,34 +265,12 @@ export const StaffManagement: React.FC = () => {
                       </div>
                     </td>
                     <td className="px-6 py-4">
-                      <div className="flex flex-col gap-1">
-                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider w-fit ${
-                          s.role === 'admin' ? 'bg-purple-100 text-purple-700' : 
-                          s.role === 'manager' ? 'bg-indigo-100 text-indigo-700' :
-                          'bg-blue-100 text-blue-700'
-                        }`}>
-                          <Shield size={10} />
-                          {s.role}
-                        </span>
-                        {editingId === s.id ? (
-                          <select
-                            className="text-xs border rounded p-1 mt-1"
-                            value={s.manager_id || ''}
-                            onChange={(e) => handleUpdateStaff(s.id, { manager_id: e.target.value || null })}
-                          >
-                            <option value="">No Manager</option>
-                            {staff.filter(m => (m.role === 'manager' || m.role === 'admin') && m.id !== s.id).map(m => (
-                              <option key={m.id} value={m.id}>{m.name}</option>
-                            ))}
-                          </select>
-                        ) : (
-                          s.manager_id && (
-                            <p className="text-[10px] text-gray-400 italic">
-                              Reports to: {staff.find(m => m.id === s.manager_id)?.name || 'Unknown'}
-                            </p>
-                          )
-                        )}
-                      </div>
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                        s.role === 'admin' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+                      }`}>
+                        <Shield size={10} />
+                        {s.role}
+                      </span>
                     </td>
                     <td className="px-6 py-4 text-center">
                       <button
@@ -344,40 +287,25 @@ export const StaffManagement: React.FC = () => {
                       </button>
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-500">
-                      <div className="flex flex-col">
-                        <span className="flex items-center gap-1">
-                          <div className={`w-2 h-2 rounded-full ${
-                            s.last_activity_at && (Date.now() - new Date(s.last_activity_at).getTime() < 300000) 
-                              ? 'bg-green-500' : 'bg-gray-300'
-                          }`} />
-                          {s.last_activity_at ? (
-                            <span>{new Date(s.last_activity_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                          ) : 'No activity'}
+                      {s.last_assigned_at ? (
+                        <span className="flex flex-col">
+                          <span>{new Date(s.last_assigned_at).toLocaleDateString()}</span>
+                          <span className="text-[10px] opacity-70">{new Date(s.last_assigned_at).toLocaleTimeString()}</span>
                         </span>
-                        {s.last_assigned_at && (
-                          <span className="text-[10px] opacity-70">Last Lead: {new Date(s.last_assigned_at).toLocaleDateString()}</span>
-                        )}
-                      </div>
+                      ) : (
+                        <span className="text-gray-300 italic">Never</span>
+                      )}
                     </td>
                     <td className="px-6 py-4 text-right">
-                      <div className="flex items-center justify-end gap-2">
+                      {s.email !== 'ajithsabzz@gmail.com' && (
                         <button
-                          onClick={() => setEditingId(editingId === s.id ? null : s.id)}
-                          className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                          title="Edit Staff"
+                          onClick={() => handleDeleteStaff(s.id)}
+                          className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                          title="Remove Staff"
                         >
-                          <Users size={18} />
+                          <Trash2 size={18} />
                         </button>
-                        {s.email !== 'ajithsabzz@gmail.com' && (
-                          <button
-                            onClick={() => handleDeleteStaff(s.id)}
-                            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                            title="Remove Staff"
-                          >
-                            <Trash2 size={18} />
-                          </button>
-                        )}
-                      </div>
+                      )}
                     </td>
                   </tr>
                 ))

@@ -84,7 +84,7 @@ if (sectionReadiness) {
   }
 }
 
-const serverTs = read('server.ts');
+const serverJs = read('server.js');
 for (const signal of [
   'buildLeadIngestionFacade',
   "apiRouter.post('/webhook'",
@@ -94,8 +94,8 @@ for (const signal of [
   'registerAuthConfigRoutes({',
   'registerSystemHealthRoutes({',
 ]) {
-  if (serverTs && !serverTs.includes(signal)) {
-    problems.push(`server.ts missing Section 1-3 extraction signal: ${signal}`);
+  if (serverJs && !serverJs.includes(signal)) {
+    problems.push(`server.js missing Section 1-3 extraction signal: ${signal}`);
   }
 }
 

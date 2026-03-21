@@ -27,14 +27,57 @@ const WEBHOOK_DEFER_QUEUE_MAX = parsePositiveInt(process.env.WEBHOOK_DEFER_QUEUE
 const WEBHOOK_DEDUPE_MEMORY_TTL_MS = parsePositiveInt(process.env.WEBHOOK_DEDUPE_MEMORY_TTL_MS, 120000);
 const WEBHOOK_DEDUPE_MEMORY_MAX_SIZE = parsePositiveInt(process.env.WEBHOOK_DEDUPE_MEMORY_MAX_SIZE, 5000);
 
+let activeBotExecutions = 0;
+let drainingDeferredBotQueue = false;
+const deferredBotQueue = [];
+const recentMessageCache = new Map();
+const inFlightMessageIds = new Set();
+
+const pruneRecentMessageCache = () => {
+  const now = Date.now();
+  for (const [messageId, expiresAt] of recentMessageCache.entries()) {
+    if (expiresAt <= now) recentMessageCache.delete(messageId);
+  }
+};
+
+const hasRecentMessage = (messageId) => {
+  pruneRecentMessageCache();
+  const expiresAt = recentMessageCache.get(messageId);
+  if (!expiresAt) return false;
+  if (expiresAt <= Date.now()) {
+    recentMessageCache.delete(messageId);
+    return false;
+  }
+  return true;
+};
+
+const rememberMessageId = (messageId) => {
+  if (!messageId) return;
+  if (recentMessageCache.size >= WEBHOOK_DEDUPE_MEMORY_MAX_SIZE) {
+    const oldestMessageId = recentMessageCache.keys().next()?.value;
+    if (oldestMessageId) recentMessageCache.delete(oldestMessageId);
+  }
+  recentMessageCache.set(messageId, Date.now() + WEBHOOK_DEDUPE_MEMORY_TTL_MS);
+};
+
+
 const safeSendStatus = (res, code) => {
   if (!res || typeof res.sendStatus !== 'function') return;
   if (res.statusCode) return;
   res.sendStatus(code);
 };
 
+const withBotExecutionSlot = async (handler) => {
+  activeBotExecutions += 1;
+  try {
+    return await handler();
+  } finally {
+    activeBotExecutions = Math.max(0, activeBotExecutions - 1);
+  }
+};
+
 class LeadIngestionService {
-  constructor({ legacyProcessor, withDb, executeWithRetry, runBotEngine, triggerReportingSyncDeferred, assignmentService, fetchAndStoreIncomingMedia, redis }) {
+  constructor({ legacyProcessor, withDb, executeWithRetry, runBotEngine, triggerReportingSyncDeferred, assignmentService, fetchAndStoreIncomingMedia }) {
     this.legacyProcessor = legacyProcessor;
     this.withDb = withDb;
     this.executeWithRetry = executeWithRetry;
@@ -42,37 +85,6 @@ class LeadIngestionService {
     this.triggerReportingSyncDeferred = triggerReportingSyncDeferred;
     this.assignmentService = assignmentService;
     this.fetchAndStoreIncomingMedia = fetchAndStoreIncomingMedia;
-    this.redis = redis;
-  }
-
-  async hasRecentMessage(messageId) {
-    if (!this.redis || !messageId) return false;
-    const key = `webhook_dedupe:${messageId}`;
-    const exists = await this.redis.get(key);
-    return !!exists;
-  }
-
-  async rememberMessageId(messageId) {
-    if (!this.redis || !messageId) return;
-    const key = `webhook_dedupe:${messageId}`;
-    await this.redis.set(key, '1', { px: WEBHOOK_DEDUPE_MEMORY_TTL_MS });
-  }
-
-  async getActiveBotExecutions() {
-    if (!this.redis) return 0;
-    const count = await this.redis.get('active_bot_executions');
-    return parseInt(count || '0', 10);
-  }
-
-  async withBotExecutionSlot(handler) {
-    if (!this.redis) return await handler();
-    
-    await this.redis.incr('active_bot_executions');
-    try {
-      return await handler();
-    } finally {
-      await this.redis.decr('active_bot_executions');
-    }
   }
 
   async handleIncomingMessage({ body, req, res, context }) {
@@ -98,9 +110,15 @@ class LeadIngestionService {
 
     const hasMessageId = Boolean(msg.id);
 
-    if (hasMessageId && await this.hasRecentMessage(msg.id)) {
+    if (hasMessageId && hasRecentMessage(msg.id)) {
       safeSendStatus(res, 200);
-      latency.end({ path: 'module-service', duplicate: true, dedupe: 'redis' });
+      latency.end({ path: 'module-service', duplicate: true, dedupe: 'memory-cache' });
+      return { accepted: true, path: 'module-service' };
+    }
+
+    if (hasMessageId && inFlightMessageIds.has(msg.id)) {
+      safeSendStatus(res, 200);
+      latency.end({ path: 'module-service', duplicate: true, dedupe: 'in-flight' });
       return { accepted: true, path: 'module-service' };
     }
 
@@ -115,6 +133,8 @@ class LeadIngestionService {
 
     const parsed = this.parseInboundMessage({ body, msg });
 
+    if (hasMessageId) inFlightMessageIds.add(msg.id);
+
     let shouldRememberMessageId = false;
     const processPromise = this.processWebhookCore({
       parsed,
@@ -124,9 +144,10 @@ class LeadIngestionService {
       webhookStartedMs,
     }).then((result) => {
       shouldRememberMessageId = result !== false;
-    }).finally(async () => {
+    }).finally(() => {
+      if (hasMessageId) inFlightMessageIds.delete(msg.id);
       if (hasMessageId && shouldRememberMessageId) {
-        await this.rememberMessageId(msg.id);
+        rememberMessageId(msg.id);
       }
     });
 
@@ -260,7 +281,6 @@ class LeadIngestionService {
 
       if (!candidate.is_human_mode) {
         const elapsed = Date.now() - webhookStartedMs;
-        const activeBotExecutions = await this.getActiveBotExecutions();
         const shouldDeferForBudget = WEBHOOK_ADAPTIVE_BOT_DEFER && elapsed >= WEBHOOK_SYNC_BUDGET_MS;
         const shouldDeferForBackpressure = WEBHOOK_BACKPRESSURE_DEFER && activeBotExecutions >= BOT_ENGINE_MAX_CONCURRENCY;
         const shouldDeferBot = WEBHOOK_DEFER_BOT_ENGINE || shouldDeferForBudget || shouldDeferForBackpressure;
@@ -271,7 +291,7 @@ class LeadIngestionService {
             : 'flag';
 
         if (shouldDeferBot) {
-          await this.runBotDeferred({
+          this.runBotDeferred({
             candidate,
             parsed,
             requestId,
@@ -296,7 +316,23 @@ class LeadIngestionService {
     });
   }
 
-  async runBotDeferred({ candidate, parsed, requestId, tenantId, elapsed, reason = 'flag', activeExecutions }) {
+  runBotDeferred({ candidate, parsed, requestId, tenantId, elapsed, reason = 'flag', activeExecutions = activeBotExecutions }) {
+    if (deferredBotQueue.length >= WEBHOOK_DEFER_QUEUE_MAX) {
+      const dropped = deferredBotQueue.shift();
+      log({
+        level: 'error',
+        module: 'lead-ingestion',
+        message: 'ingestion.bot_engine.defer_queue_capacity_reached',
+        requestId,
+        meta: {
+          candidateId: candidate.id,
+          queueDepth: deferredBotQueue.length,
+          queueMax: WEBHOOK_DEFER_QUEUE_MAX,
+          droppedCandidateId: dropped?.candidate?.id || null,
+        },
+      });
+    }
+
     log({
       module: 'lead-ingestion',
       message: 'ingestion.bot_engine.deferred_pre_ack',
@@ -308,28 +344,57 @@ class LeadIngestionService {
         reason,
         activeExecutions,
         maxConcurrency: BOT_ENGINE_MAX_CONCURRENCY,
+        queueDepth: deferredBotQueue.length,
       },
     });
 
-    // In Vercel, we use QStash for deferred processing
-    if (process.env.QSTASH_TOKEN) {
-      try {
-        const { Client } = require('@upstash/qstash');
-        const qstash = new Client({ token: process.env.QSTASH_TOKEN });
-        
-        await qstash.publishJSON({
-          url: `${process.env.PUBLIC_BASE_URL}/api/webhooks/deferred-bot`,
-          body: { candidateId: candidate.id, parsed, requestId, tenantId },
-          delay: 0,
-        });
-        
-        log({ module: 'lead-ingestion', message: 'ingestion.bot_engine.qstash_enqueued', requestId, meta: { candidateId: candidate.id } });
-      } catch (error) {
-        log({ level: 'error', module: 'lead-ingestion', message: 'ingestion.bot_engine.qstash_failed', requestId, meta: { candidateId: candidate.id, error: error.message } });
+    deferredBotQueue.push({ candidate, parsed, requestId, tenantId, enqueuedAt: Date.now() });
+    this.drainBotDeferredQueue();
+  }
+
+  drainBotDeferredQueue() {
+    if (drainingDeferredBotQueue) return;
+    drainingDeferredBotQueue = true;
+
+    const drainLoop = () => {
+      if (!deferredBotQueue.length) {
+        drainingDeferredBotQueue = false;
+        return;
       }
-    } else {
-      log({ level: 'warn', module: 'lead-ingestion', message: 'ingestion.bot_engine.defer_skipped_no_qstash', requestId, meta: { candidateId: candidate.id } });
-    }
+
+      if (activeBotExecutions >= BOT_ENGINE_MAX_CONCURRENCY) {
+        setTimeout(drainLoop, 1);
+        return;
+      }
+
+      const job = deferredBotQueue.shift();
+      this.withDb(async (client) => {
+        await this.runBotWithinBudget({
+          client,
+          candidate: job.candidate,
+          parsed: job.parsed,
+          requestId: job.requestId,
+          tenantId: job.tenantId,
+          deferred: true,
+        });
+      }).catch((error) => {
+        log({
+          level: 'error',
+          module: 'lead-ingestion',
+          message: 'ingestion.bot_engine.deferred.failed',
+          requestId: job.requestId,
+          meta: {
+            candidateId: job.candidate.id,
+            queueWaitMs: Date.now() - job.enqueuedAt,
+            error: error?.message || String(error),
+          },
+        });
+      }).finally(() => {
+        setImmediate(drainLoop);
+      });
+    };
+
+    setImmediate(drainLoop);
   }
 
   async runBotWithinBudget({ client, candidate, parsed, requestId, tenantId, deferred = false }) {
@@ -341,7 +406,7 @@ class LeadIngestionService {
       extraMeta: { tenantId, candidateId: candidate.id, deferred },
     });
 
-    const botResult = await this.withBotExecutionSlot(async () => runWithTimeout({
+    const botResult = await withBotExecutionSlot(async () => runWithTimeout({
       promise: this.runBotEngine(client, candidate, parsed.text, parsed.payloadId),
       timeoutMs: BOT_ENGINE_HARD_TIMEOUT_MS,
       onTimeout: async () => {
@@ -369,24 +434,6 @@ class LeadIngestionService {
     }
 
     botStage.end({ timedOut: Boolean(botResult && botResult.timedOut) });
-  }
-
-  async handleDeferredBot({ body, requestId, tenantId }) {
-    const { candidateId, parsed } = body;
-    if (!candidateId || !parsed) {
-      log({ level: 'error', module: 'lead-ingestion', message: 'deferred_bot.invalid_payload', requestId });
-      return;
-    }
-
-    await this.withDb(async (client) => {
-      const candidateRes = await client.query('SELECT * FROM candidates WHERE id = $1', [candidateId]);
-      if (candidateRes.rows.length === 0) {
-        log({ level: 'error', module: 'lead-ingestion', message: 'deferred_bot.candidate_not_found', requestId, meta: { candidateId } });
-        return;
-      }
-      const candidate = candidateRes.rows[0];
-      await this.runBotWithinBudget({ client, candidate, parsed, requestId, tenantId, deferred: true });
-    });
   }
 
   async distributeLeadAutomatically({ client, candidate, requestId, tenantId }) {
