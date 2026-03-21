@@ -21,8 +21,9 @@ import { SettingsModal } from './components/SettingsModal.tsx';
 import { Login } from './components/Login.tsx'; 
 import { StaffPortal } from './components/StaffPortal.tsx';
 import { StaffManagement } from './components/StaffManagement.tsx';
+import { ScheduledAlertPopup } from './components/ScheduledAlertPopup.tsx';
 import { mockBackend } from './services/mockBackend.ts';
-import { liveApiService, setAuthToken, UpdateConnectionState } from './services/liveApiService.ts';
+import { liveApiService, setAuthToken, UpdateConnectionState, DueAlertItem } from './services/liveApiService.ts';
 import { reportUiFailure, reportUiRecovery } from './services/uiFailureMonitor.ts';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types.ts';
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle, Wifi, WifiOff, Loader2 } from 'lucide-react';
@@ -79,6 +80,8 @@ export default function App() {
   const [isRepeatToggling, setIsRepeatToggling] = useState(false);
   const [updateConnectionState, setUpdateConnectionState] = useState<UpdateConnectionState>('disconnected');
   const [syncFailureMetrics, setSyncFailureMetrics] = useState({ polling: 0, push: 0, lastEndpoint: 'n/a' });
+  const [dueAlertQueue, setDueAlertQueue] = useState<DueAlertItem[]>([]);
+  const [activeDueAlert, setActiveDueAlert] = useState<DueAlertItem | null>(null);
   
   const [dataSource, setDataSource] = useState<'mock' | 'live'>(() => {
       const saved = localStorage.getItem('uber_fleet_data_source');
@@ -215,6 +218,57 @@ export default function App() {
       setUserProfile(user);
       setIsAuthenticated(true);
       if ("Notification" in window) Notification.requestPermission();
+  };
+
+  useEffect(() => {
+      if (!isAuthenticated || dataSource !== 'live' || !userProfile) return;
+      if (userProfile.role !== 'manager' && userProfile.role !== 'admin') return;
+
+      const seenKey = `due_alerts_seen:${userProfile.staffId || userProfile.email || userProfile.role}`;
+      const seenIds = new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
+
+      const syncDueAlerts = async () => {
+          try {
+              const alerts = await liveApiService.getDueAlerts();
+              const fresh = alerts.filter((item) => !seenIds.has(item.event_id));
+              if (fresh.length > 0) {
+                  setDueAlertQueue(prev => {
+                      const existing = new Set(prev.map(entry => entry.event_id));
+                      return [...prev, ...fresh.filter(entry => !existing.has(entry.event_id))];
+                  });
+              }
+          } catch (e) {
+              console.error('Failed to fetch due alerts', e);
+          }
+      };
+
+      syncDueAlerts();
+      const timer = setInterval(syncDueAlerts, 30000);
+      return () => clearInterval(timer);
+  }, [isAuthenticated, dataSource, userProfile]);
+
+  useEffect(() => {
+      if (activeDueAlert || dueAlertQueue.length === 0) return;
+      const next = dueAlertQueue[0];
+      setActiveDueAlert(next);
+      setDueAlertQueue(prev => prev.slice(1));
+      if ('Notification' in window && Notification.permission === 'granted') {
+          new Notification(`Lead Alert: ${next.lead_name}`, {
+              body: `Scheduled time reached at ${new Date(next.scheduled_at).toLocaleString()}`
+          });
+      }
+  }, [dueAlertQueue, activeDueAlert]);
+
+  const dismissDueAlert = (eventId?: string) => {
+      if (!eventId || !userProfile) {
+          setActiveDueAlert(null);
+          return;
+      }
+      const seenKey = `due_alerts_seen:${userProfile.staffId || userProfile.email || userProfile.role}`;
+      const seenIds = new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
+      seenIds.add(eventId);
+      localStorage.setItem(seenKey, JSON.stringify(Array.from(seenIds)));
+      setActiveDueAlert(null);
   };
 
   if (activePublicPage === 'privacy') return <PrivacyPolicy />;
@@ -539,6 +593,15 @@ export default function App() {
         {dataSource === 'live' && <AssistantChat />}
         {dataSource === 'live' && <SystemMonitor />}
         <NotificationToast notifications={notifications} onDismiss={removeNotification} />
+        <ScheduledAlertPopup
+          alert={activeDueAlert}
+          onDismiss={() => dismissDueAlert(activeDueAlert?.event_id)}
+          onOpenLead={(leadId) => {
+            setActiveTab('leads');
+            const lead = drivers.find(d => d.id === leadId);
+            if (lead) setSelectedDriver(lead);
+          }}
+        />
       </Layout>
       {dataSource === 'mock' && <Simulator onNotify={addNotification} />}
     </>
