@@ -451,7 +451,10 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       
       let media_url = undefined;
       if (action === 'submitted_for_closing' && closingScreenshot) {
-        const upload = await liveApiService.uploadMedia(closingScreenshot.file, `closing/${selectedLead.id}`);
+        const upload = await liveApiService.uploadMedia(
+          closingScreenshot.file,
+          `leads/${selectedLead.id}/screenshots/closing`
+        );
         media_url = upload.url;
       }
 

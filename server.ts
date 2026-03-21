@@ -3791,7 +3791,7 @@ const authMiddleware = async (req, res, next) => {
 };
 
 // --- STAFF MANAGEMENT ---
-apiRouter.use('/reviews', leadReviewRouter);
+apiRouter.use('/reviews', authMiddleware, leadReviewRouter);
 apiRouter.use('/analytics', analyticsRouter);
 
 apiRouter.get('/auth/me', authMiddleware, (req, res) => {
