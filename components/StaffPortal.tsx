@@ -87,6 +87,15 @@ interface LeadActivity {
   notes: string;
   created_at: string;
   staff_name: string;
+  next_followup_at?: string | null;
+  metadata?: {
+    previous_status?: string | null;
+    new_status?: string | null;
+    previous_followup_at?: string | null;
+    new_followup_at?: string | null;
+    status_changed?: boolean;
+    followup_changed?: boolean;
+  };
 }
 
 export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ user, onLogout }) => {
@@ -115,6 +124,18 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [closingScreenshot, setClosingScreenshot] = useState<{ file: File; preview: string } | null>(null);
   const [dueAlertQueue, setDueAlertQueue] = useState<DueAlertItem[]>([]);
   const [activeDueAlert, setActiveDueAlert] = useState<DueAlertItem | null>(null);
+
+  const formatDateTime = (value?: string | null) => {
+    if (!value) return '—';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return '—';
+    return parsed.toLocaleString();
+  };
+
+  const toLabel = (value?: string | null) => {
+    if (!value) return '—';
+    return value.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+  };
 
   const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
@@ -1146,7 +1167,25 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                           <p className="text-xs font-bold text-gray-900 uppercase tracking-wider">{activity.action.replace(/_/g, ' ')}</p>
                           <p className="text-[10px] text-gray-400">{new Date(activity.created_at).toLocaleString()}</p>
                         </div>
-                        <p className="text-sm text-gray-600 leading-relaxed">{activity.notes}</p>
+                        <p className="text-sm text-gray-600 leading-relaxed">{activity.notes || 'No notes added.'}</p>
+                        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+                          <div className="rounded-xl border border-blue-100 bg-blue-50/60 px-3 py-2">
+                            <p className="text-[10px] font-bold text-blue-700 uppercase tracking-wider">Status</p>
+                            <p className="text-xs text-blue-900 mt-1">
+                              {activity.metadata?.status_changed
+                                ? `${toLabel(activity.metadata.previous_status)} → ${toLabel(activity.metadata.new_status)}`
+                                : toLabel(activity.metadata?.new_status)}
+                            </p>
+                          </div>
+                          <div className="rounded-xl border border-violet-100 bg-violet-50/60 px-3 py-2">
+                            <p className="text-[10px] font-bold text-violet-700 uppercase tracking-wider">Follow-up Schedule</p>
+                            <p className="text-xs text-violet-900 mt-1">
+                              {activity.metadata?.followup_changed
+                                ? `${formatDateTime(activity.metadata.previous_followup_at)} → ${formatDateTime(activity.metadata.new_followup_at)}`
+                                : formatDateTime(activity.metadata?.new_followup_at || activity.next_followup_at)}
+                            </p>
+                          </div>
+                        </div>
                         {(activity as any).media_url && (
                           <div className="mt-3 rounded-xl overflow-hidden border border-gray-100">
                             <img src={(activity as any).media_url} alt="Activity Media" className="max-w-full h-auto" referrerPolicy="no-referrer" />
