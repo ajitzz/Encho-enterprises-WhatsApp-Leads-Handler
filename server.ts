@@ -2593,6 +2593,7 @@ const isSchemaDriftError = (err: any) => err?.code === '42P01' || err?.code === 
 const ensureLeadOpsSchema = async (client) => {
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_date TIMESTAMP WITH TIME ZONE;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_note TEXT;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'none';`);
     await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS next_followup_at TIMESTAMP WITH TIME ZONE;`);
     await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;`);
 
@@ -2630,6 +2631,32 @@ const ensureLeadOpsSchema = async (client) => {
             new_state JSONB,
             created_at TIMESTAMP DEFAULT NOW()
         );
+    `);
+
+    await client.query(`
+        CREATE TABLE IF NOT EXISTS lead_reviews (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+            staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
+            manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+            closing_date DATE NOT NULL,
+            notes TEXT,
+            screenshot_url TEXT,
+            status VARCHAR(20) DEFAULT 'pending',
+            manager_feedback TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+    `);
+
+    await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_lead_reviews_status
+        ON lead_reviews(status);
+    `);
+
+    await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_lead_reviews_manager
+        ON lead_reviews(manager_id);
     `);
 };
 
