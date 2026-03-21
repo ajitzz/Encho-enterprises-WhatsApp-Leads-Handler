@@ -198,15 +198,12 @@ export const liveApiService = {
                   consecutiveFailures = 0;
                   stopPolling();
                   setConnectionState('connected');
-                  console.info('[liveApiService] EventSource connected successfully');
               };
 
               eventSource.onmessage = (event) => {
-                  if (!event.data) return;
-                  if (event.data === 'heartbeat') return; // Legacy heartbeat
+                  if (!event.data || event.data === 'heartbeat') return;
                   try {
                       const payload = JSON.parse(event.data);
-                      if (payload?.type === 'heartbeat') return; // New heartbeat format
                       if (Array.isArray(payload?.drivers)) callback(payload.drivers);
                       if (driverId && payload?.messagesByDriver?.[driverId] && onMessages) {
                           onMessages(payload.messagesByDriver[driverId]);
@@ -220,29 +217,8 @@ export const liveApiService = {
               };
 
               eventSource.onerror = () => {
-                  // In serverless environments (like Cloud Run or Vercel), disconnections are normal and expected.
-                  // We only report a "failure" if we've failed to connect multiple times in a row without a successful open.
-                  const wasConnected = eventSource?.readyState === EventSource.OPEN || reconnectAttempts === 0;
-                  
-                  if (!wasConnected) {
-                      consecutiveFailures += 1;
-                  } else {
-                      // If it was previously connected, this is likely a normal timeout/refresh.
-                      // We don't increment consecutiveFailures yet to avoid noise.
-                      console.debug('[liveApiService] EventSource closed normally, will reconnect');
-                  }
-
-                  if (consecutiveFailures >= 10) {
-                      onSyncFailure?.({ 
-                          channel: 'push', 
-                          endpoint: '/api/updates/stream', 
-                          streak: consecutiveFailures, 
-                          error: new Error('Live sync connection lost repeatedly. Please check your internet connection.') 
-                      });
-                  } else {
-                      console.info('[liveApiService] EventSource disconnected, attempting reconnect...', { streak: consecutiveFailures });
-                  }
-                  
+                  consecutiveFailures += 1;
+                  onSyncFailure?.({ channel: 'push', endpoint: '/api/updates/stream', streak: consecutiveFailures, error: new Error('EventSource disconnected') });
                   eventSource?.close();
                   eventSource = null;
                   scheduleReconnect();

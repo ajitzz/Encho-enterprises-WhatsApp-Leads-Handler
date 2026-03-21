@@ -1,6 +1,5 @@
 
 const express = require('express');
-const path = require('path');
 const cors = require('cors');
 const crypto = require('crypto');
 const { Pool } = require('pg');
@@ -163,7 +162,7 @@ const SYSTEM_CONFIG = {
     GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || '',
     CACHE_TTL: 60 * 1000, // 60 Seconds Cache for Bot Settings
     RUNTIME_CONFIG_CACHE_TTL: Number.parseInt(process.env.RUNTIME_CONFIG_CACHE_TTL_MS || '2000', 10),
-    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
+    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
 };
 
 const applyRuntimeGoogleSheetsConfig = (rawConfig = {}) => {
@@ -305,7 +304,7 @@ const buildPoolConfig = () => {
     const baseConfig = {
         connectionTimeoutMillis: SYSTEM_CONFIG.DB_CONNECTION_TIMEOUT,
         idleTimeoutMillis: 30000,
-        max: 50,
+        max: 20,
         keepAlive: true
     };
 
@@ -2741,31 +2740,15 @@ const ensurePerformanceIndexes = async (client) => {
 };
 
 const executeWithRetry = async (client, operation) => {
-    let attempts = 0;
-    const maxAttempts = 3;
-    while (attempts < maxAttempts) {
-        try {
-            return await operation();
-        } catch (err) {
-            attempts++;
-            const isRetryable = ['57P01', '57P03', '53300', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND', '08006'].includes(err.code) || 
-                               (err.message && err.message.includes('database not initialized'));
-            
-            if (err.code === '42P01') {
-                console.warn("[Auto-Heal] Tables missing. Re-initializing database...");
-                await initDatabase(client);
-                // After re-init, try the operation again immediately
-                continue;
-            }
-
-            if (isRetryable && attempts < maxAttempts) {
-                const delay = Math.pow(2, attempts) * 100;
-                console.warn(`[DB RETRY] Attempt ${attempts}/${maxAttempts} failed. Retrying in ${delay}ms...`, err.message);
-                await new Promise(r => setTimeout(r, delay));
-                continue;
-            }
-            throw err;
+    try {
+        return await operation();
+    } catch (err) {
+        if (err.code === '42P01') {
+            console.warn("[Auto-Heal] Tables missing. Re-initializing database...");
+            await initDatabase(client);
+            return await operation(); 
         }
+        throw err;
     }
 };
 
@@ -4403,10 +4386,6 @@ const processWebhookLegacy = async ({ body, req, res }) => {
         const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
         if (!msg) { res.sendStatus(200); return; }
 
-        if (WEBHOOK_DEFER_POST_RESPONSE) {
-            res.sendStatus(200);
-        }
-
         const processPromise = withDb(async (client) => {
             // WRAPPER: Retry logic for cold starts / missing tables
             await executeWithRetry(client, async () => {
@@ -4491,6 +4470,8 @@ const processWebhookLegacy = async ({ body, req, res }) => {
             });
         });
 
+        res.sendStatus(200);
+
         if (WEBHOOK_DEFER_POST_RESPONSE) {
             trackBackgroundTask({
                 taskName: 'webhook.post_response_processing',
@@ -4500,7 +4481,6 @@ const processWebhookLegacy = async ({ body, req, res }) => {
             return;
         }
 
-        res.sendStatus(200);
         await processPromise;
     } catch (e) {
         console.error('Webhook processing error:', e);
@@ -4513,7 +4493,6 @@ const leadIngestionFacade = buildLeadIngestionFacade({
     executeWithRetry,
     runBotEngine,
     triggerReportingSyncDeferred,
-    fetchAndStoreIncomingMedia,
 });
 
 apiRouter.post('/webhook', async (req, res) => {
@@ -4714,8 +4693,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
     let closed = false;
 
-    // Vercel/Cloud Run timeout guard: close connection before platform limit
-    // Cloud Run default is 5m, so we close at 4m 50s to allow graceful reconnect
+    // Vercel timeout guard: close connection before 60s limit
     const vercelTimeout = setTimeout(() => {
         if (!closed) {
             closed = true;
@@ -4724,7 +4702,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
             clearInterval(heartbeat);
             res.end();
         }
-    }, 290000); // 4 Minutes 50 Seconds 
+    }, 55000); 
     const driverId = typeof req.query.driverId === 'string' ? req.query.driverId : null;
 
     const sendEvent = (data) => {
@@ -4857,17 +4835,9 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
     const snapshotInterval = setInterval(streamSnapshot, 10000); // Polling as fallback, less frequent
     const heartbeat = setInterval(() => {
-        if (!closed) {
-            // Standard SSE heartbeat/keep-alive comment
-            res.write(': heartbeat\n\n');
-            // Also send a data heartbeat for client-side tracking if needed
-            res.write('data: {"type":"heartbeat"}\n\n');
-            if (res.flush) res.flush();
-        }
-    }, 15000); // 15 Seconds heartbeat
+        if (!closed) res.write('data: heartbeat\n\n');
+    }, 20000);
 
-    // Tell client to reconnect after 3 seconds if disconnected
-    res.write('retry: 3000\n\n');
     streamSnapshot();
 
     req.on('close', () => {
@@ -5639,31 +5609,6 @@ apiRouter.get('/system/meta-send-metrics', async (_req, res) => {
 
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
-
-// --- VITE MIDDLEWARE / STATIC ASSETS ---
-const setupFrontend = async (app) => {
-    if (process.env.NODE_ENV !== 'production') {
-        try {
-            const { createServer: createViteServer } = require('vite');
-            const vite = await createViteServer({
-                server: { middlewareMode: true },
-                appType: 'spa'
-            });
-            app.use(vite.middlewares);
-            console.log("[VITE] Middleware mounted.");
-        } catch (e) {
-            console.error("[VITE] Failed to mount middleware:", e.message);
-        }
-    } else {
-        const distPath = path.join(process.cwd(), 'dist');
-        app.use(express.static(distPath));
-        app.get('*', (req, res) => {
-            res.sendFile(path.join(distPath, 'index.html'));
-        });
-        console.log("[PROD] Static assets mounted from", distPath);
-    }
-};
-
 app.use((err, req, res, next) => {
     structuredLog({
         level: 'error',
@@ -5678,6 +5623,7 @@ app.use((err, req, res, next) => {
     });
     res.status(500).json({ error: 'Internal server error' });
 });
+app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
 // --- LEAD AUTO-DISTRIBUTION ---
 async function startLeadAutoDistributor() {
@@ -5716,30 +5662,11 @@ async function startLeadAutoDistributor() {
     }, 30000); // Run every 30 seconds
 }
 
-apiRouter.get('/system/ping', (req, res) => {
-    res.json({ status: 'ok', timestamp: Date.now(), environment: process.env.NODE_ENV || 'development' });
-});
-
-const startServer = async ({ port = 3000 } = {}) => {
-    await setupFrontend(app);
+const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
     startLeadAutoDistributor();
     return app.listen(port, () => {
         console.log(`Server running on ${port}`);
         logLeadIngestionRuntimePosture();
-
-        // Self-ping to keep instance warm in Cloud Run/Vercel
-        if (process.env.NODE_ENV === 'production') {
-            const healthUrl = `http://localhost:${port}/api/health`;
-            console.log(`[Self-Ping] Starting keep-alive to ${healthUrl}`);
-            setInterval(async () => {
-                try {
-                    await axios.get(healthUrl, { timeout: 5000 });
-                } catch (e) {
-                    // Silent fail for self-ping
-                }
-            }, 240000); // Every 4 minutes
-        }
-
         // Auto-Init Check on Start (For Local/VPS, NOT Vercel)
         (async () => {
             try {
@@ -5768,10 +5695,7 @@ const startServer = async ({ port = 3000 } = {}) => {
 };
 
 if (require.main === module) {
-    startServer().catch(err => {
-        console.error("Failed to start server:", err);
-        process.exit(1);
-    });
+    startServer();
 }
 
 module.exports = { app, startServer };
