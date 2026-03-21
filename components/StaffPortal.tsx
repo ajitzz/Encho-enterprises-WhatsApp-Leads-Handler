@@ -133,6 +133,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     return parsed.toLocaleString();
   };
 
+  const formatTimelineTime = formatDateTime;
+
   const toLabel = (value?: string | null) => {
     if (!value) return '—';
     return value.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
