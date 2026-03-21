@@ -331,7 +331,7 @@ try {
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-const MEDIA_ROOT_PREFIX = (process.env.MEDIA_ROOT_PREFIX || 'media-library/').replace(/^\/+/, '');
+const MEDIA_ROOT_PREFIX = (process.env.MEDIA_ROOT_PREFIX || 'enchowhatsappapis3buckets/').replace(/^\/+/, '');
 
 const normalizeMediaPath = (rawPath = '/') => {
     const cleaned = String(rawPath || '/').replace(/\\/g, '/').trim();
@@ -4262,7 +4262,12 @@ apiRouter.get('/media', async (req, res) => {
                 };
             });
 
-        res.json({ folders, files });
+        const mediaRootFolderName = MEDIA_ROOT_PREFIX.replace(/\/+$/, '');
+        res.json({
+            folders,
+            files,
+            mediaRootFolderName
+        });
     } catch (e) {
         console.error('[MEDIA LIST ERROR]', e.message);
         res.status(500).json({ error: 'Failed to load media library from S3', details: e.message });
