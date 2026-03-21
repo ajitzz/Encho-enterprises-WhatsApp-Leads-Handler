@@ -4056,7 +4056,8 @@ apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
                     previous_status: previousStatus,
                     new_status: status || previousStatus,
                     previous_followup_at: previousFollowupAt,
-                    new_followup_at: next_followup_at || previousFollowupAt,
+                    new_followup_at: next_followup_at || null,
+                    interaction_followup_at: next_followup_at || null,
                     status_changed: Boolean(status && status !== previousStatus),
                     followup_changed: Boolean(next_followup_at && new Date(next_followup_at).toISOString() !== (previousFollowupAt ? new Date(previousFollowupAt).toISOString() : null))
                 };
