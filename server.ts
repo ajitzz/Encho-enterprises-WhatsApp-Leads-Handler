@@ -164,7 +164,7 @@ const SYSTEM_CONFIG: any = {
     GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || '',
     CACHE_TTL: 60 * 1000, // 60 Seconds Cache for Bot Settings
     RUNTIME_CONFIG_CACHE_TTL: Number.parseInt(process.env.RUNTIME_CONFIG_CACHE_TTL_MS || '2000', 10),
-    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '')
+    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
 };
 
 const applyRuntimeGoogleSheetsConfig = (rawConfig: any = {}) => {
@@ -860,7 +860,7 @@ const buildShowcaseToken = (payload = {}) => toBase64Url(JSON.stringify(payload)
 const getPublicShowcaseUrl = async (payload = {}) => {
     const token = encodeURIComponent(await getOrCreateShowcaseShortToken(payload));
     const normalizedBase = String(SYSTEM_CONFIG.PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
-    const safeBase = normalizedBase || '';
+    const safeBase = normalizedBase || 'https://encho-whatsapp-lead-handler.vercel.app';
     return `${safeBase}/showcase/${token}`;
 };
 
@@ -4791,14 +4791,8 @@ apiRouter.post('/webhook', async (req, res) => {
 });
 
 const handleAuthGoogleLegacy = async (req, res) => {
-    console.log('[server.ts] handleAuthGoogleLegacy hit');
     try {
         const { credential } = req.body;
-        if (!credential) {
-            console.log('[server.ts] No credential in body');
-            return res.status(400).json({ success: false, error: 'Missing credential' });
-        }
-        console.log('[server.ts] Verifying Google token...');
         const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
         const payload = ticket.getPayload();
         const email = payload.email;
@@ -4946,10 +4940,6 @@ registerAuthConfigRoutes({
     },
 });
 
-// Explicit fail-safe for Google Auth route to prevent 404s
-app.post('/api/auth/google', handleAuthGoogleLegacy);
-app.post('/auth/google', handleAuthGoogleLegacy);
-
 apiRouter.get('/updates/stream', async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -5090,22 +5080,16 @@ apiRouter.get('/updates/stream', async (req, res) => {
         }
     };
 
-    let snapshotTimeout: NodeJS.Timeout | null = null;
-    const streamSnapshotDebounced = () => {
-        if (snapshotTimeout) clearTimeout(snapshotTimeout);
-        snapshotTimeout = setTimeout(streamSnapshot, 5000); // Wait 5 seconds before refreshing
-    };
-
     const handleUpdate = (data) => {
         if (closed) return;
         // If candidateId is provided, we could optimize to only fetch that candidate,
         // but for now, we'll just refresh the whole snapshot to keep it simple and consistent.
-        streamSnapshotDebounced();
+        streamSnapshot();
     };
 
     unsubscribe = onUpdate(handleUpdate);
 
-    const snapshotInterval = setInterval(streamSnapshot, 120000); // Polling as fallback, increased to 120s to save quota
+    const snapshotInterval = setInterval(streamSnapshot, 10000); // Polling as fallback, less frequent
     const heartbeat = setInterval(() => {
         if (!closed) res.write('data: heartbeat\n\n');
     }, 20000);
@@ -5115,7 +5099,6 @@ apiRouter.get('/updates/stream', async (req, res) => {
     req.on('close', () => {
         closed = true;
         clearTimeout(vercelTimeout);
-        if (snapshotTimeout) clearTimeout(snapshotTimeout);
         if (unsubscribe) unsubscribe();
         clearInterval(snapshotInterval);
         clearInterval(heartbeat);
@@ -5683,9 +5666,6 @@ const handlePatchScheduledMessageLegacy = async (req, res) => {
 
 // --- ADVANCED PARALLEL CRON PROCESSOR ---
 const handleCronProcessQueueLegacy = async (req, res) => {
-    if (Date.now() < globalQuotaBackoffUntil) {
-        return res.status(429).json({ error: 'Quota backoff in effect' });
-    }
     let processed = 0, errors = 0;
     try {
         const perf = createPerfTracker({ requestId: req?.requestId || null, module: 'reminders-escalations', event: 'reminders.queue.stage' });
@@ -5773,10 +5753,6 @@ const handleCronProcessQueueLegacy = async (req, res) => {
         });
         res.json({ status: 'ok', processed, errors, queueSize: processed + errors });
     } catch (e) {
-        const errorMsg = e.message?.toLowerCase() || '';
-        if (errorMsg.includes('quota') || errorMsg.includes('limit exceeded') || errorMsg.includes('too many requests')) {
-            globalQuotaBackoffUntil = Date.now() + (1000 * 60 * 30);
-        }
         if (isRecoverableInfraError(e)) {
             structuredLog({
                 level: 'error',
@@ -5906,25 +5882,9 @@ app.use((err, req, res, next) => {
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
 // --- LEAD AUTO-DISTRIBUTION ---
-let isDistributing = false;
-let globalQuotaBackoffUntil = 0;
-
 async function startLeadAutoDistributor() {
     console.log("Starting Lead Auto-Distributor...");
-    
-    // Increased interval to 15 minutes to save quota
-    const DIST_INTERVAL = 1000 * 60 * 15; 
-    
     setInterval(async () => {
-        if (isDistributing) return;
-        
-        const now = Date.now();
-        if (now < globalQuotaBackoffUntil) {
-            console.log(`[Lead Auto-Distributor] Skipping run due to quota backoff (until ${new Date(globalQuotaBackoffUntil).toISOString()})`);
-            return;
-        }
-
-        isDistributing = true;
         try {
             await withDb(async (client) => {
                 // Check if auto-distribution is enabled
@@ -5932,7 +5892,7 @@ async function startLeadAutoDistributor() {
                 const settings = settingsRes.rows[0]?.value || { auto_enabled: false };
                 if (!settings.auto_enabled) return;
 
-                // Get unassigned leads - keep limit small to avoid massive transfer
+                // Get unassigned leads
                 const unassignedLeads = await client.query("SELECT id FROM candidates WHERE assigned_to IS NULL AND lead_status = 'new' LIMIT 10");
                 if (unassignedLeads.rows.length === 0) return;
 
@@ -5940,41 +5900,22 @@ async function startLeadAutoDistributor() {
                 const activeStaff = await client.query("SELECT id FROM staff_members WHERE is_active_for_auto_dist = TRUE ORDER BY last_assigned_at ASC NULLS FIRST");
                 if (activeStaff.rows.length === 0) return;
 
-                // Use a transaction for the batch of updates
-                await client.query('BEGIN');
-                try {
-                    let staffIndex = 0;
-                    for (const lead of unassignedLeads.rows) {
-                        const staff = activeStaff.rows[staffIndex];
-                        
-                        // Combined updates to reduce round-trips if possible, but standard PG doesn't support multi-table update easily here
-                        await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [staff.id, lead.id]);
-                        await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [staff.id]);
-                        await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead auto-assigned via distributor')", [lead.id, staff.id]);
-                        
-                        console.log(`Auto-assigned lead ${lead.id} to staff ${staff.id}`);
-                        
-                        staffIndex = (staffIndex + 1) % activeStaff.rows.length;
-                    }
-                    await client.query('COMMIT');
-                } catch (err) {
-                    await client.query('ROLLBACK');
-                    throw err;
+                let staffIndex = 0;
+                for (const lead of unassignedLeads.rows) {
+                    const staff = activeStaff.rows[staffIndex];
+                    await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [staff.id, lead.id]);
+                    await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [staff.id]);
+                    await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead auto-assigned via distributor')", [lead.id, staff.id]);
+                    
+                    console.log(`Auto-assigned lead ${lead.id} to staff ${staff.id}`);
+                    
+                    staffIndex = (staffIndex + 1) % activeStaff.rows.length;
                 }
             });
         } catch (e) {
-            const errorMsg = e.message?.toLowerCase() || '';
-            if (errorMsg.includes('quota') || errorMsg.includes('limit exceeded') || errorMsg.includes('too many requests')) {
-                console.error("Lead Auto-Distributor Quota Error: Your database provider has exceeded its data transfer quota. Please upgrade your plan or wait for the quota to reset.");
-                // Backoff for 30 minutes on quota error
-                globalQuotaBackoffUntil = Date.now() + (1000 * 60 * 30);
-            } else {
-                console.error("Lead Auto-Distributor Error:", e);
-            }
-        } finally {
-            isDistributing = false;
+            console.error("Lead Auto-Distributor Error:", e);
         }
-    }, DIST_INTERVAL);
+    }, 30000); // Run every 30 seconds
 }
 
 const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
@@ -5982,15 +5923,8 @@ const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
     
     // Start background jobs
     setInterval(() => {
-        if (Date.now() < globalQuotaBackoffUntil) return;
-        runNurtureTriggers().catch(err => {
-            const errorMsg = err.message?.toLowerCase() || '';
-            if (errorMsg.includes('quota') || errorMsg.includes('limit exceeded') || errorMsg.includes('too many requests')) {
-                globalQuotaBackoffUntil = Date.now() + (1000 * 60 * 30);
-            }
-            console.error('[NURTURE JOB ERROR]', err);
-        });
-    }, 1000 * 60 * 60 * 4); // Run every 4 hours
+        runNurtureTriggers().catch(err => console.error('[NURTURE JOB ERROR]', err));
+    }, 1000 * 60 * 60); // Run every hour
 
     return app.listen(port, () => {
         console.log(`Server running on ${port}`);

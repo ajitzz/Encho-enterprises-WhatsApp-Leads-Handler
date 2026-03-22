@@ -20,7 +20,6 @@ import { IsolatedFeatureBoundary } from './components/IsolatedFeatureBoundary.ts
 import { SettingsModal } from './components/SettingsModal.tsx'; 
 import { Login } from './components/Login.tsx'; 
 import { StaffPortal } from './components/StaffPortal.tsx';
-import { ManagerPortal } from './components/ManagerPortal.tsx';
 import { StaffManagement } from './components/StaffManagement.tsx';
 import { mockBackend } from './services/mockBackend.ts';
 import { liveApiService, setAuthToken, UpdateConnectionState } from './services/liveApiService.ts';
@@ -119,7 +118,7 @@ export default function App() {
           }
       };
 
-      const interval = setInterval(triggerCron, 300000); // Increased to 5 minutes to save quota
+      const interval = setInterval(triggerCron, 10000);
       triggerCron();
       return () => clearInterval(interval);
   }, [dataSource, isAuthenticated, isEmergencyMode]);
@@ -235,20 +234,6 @@ export default function App() {
   if (userProfile?.role === 'staff') {
       return (
           <StaffPortal 
-              user={userProfile} 
-              onLogout={() => {
-                  localStorage.removeItem('uber_fleet_auth_token');
-                  setIsAuthenticated(false);
-                  setUserProfile(null);
-              }} 
-          />
-      );
-  }
-
-  // --- MANAGER PORTAL VIEW ---
-  if (userProfile?.role === 'manager') {
-      return (
-          <ManagerPortal 
               user={userProfile} 
               onLogout={() => {
                   localStorage.removeItem('uber_fleet_auth_token');

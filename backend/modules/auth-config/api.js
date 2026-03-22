@@ -72,18 +72,10 @@ export const registerAuthConfigRoutes = ({
     },
   ];
 
-  console.log('[AUTH CONFIG] Registering routes...');
   for (const route of routes) {
-    console.log(`[AUTH CONFIG] Registering ${route.method.toUpperCase()} ${route.path}`);
     apiRouter[route.method](route.path, async (req, res) => {
-      console.log(`[AUTH CONFIG] Hit ${route.method.toUpperCase()} ${route.path}`);
       const mode = resolveMode(req);
-      console.log(`[AUTH CONFIG] Mode resolved to: ${mode}`);
-      if (mode !== 'off') {
-        console.log('[AUTH CONFIG] Using module handler');
-        return route.moduleHandler(req, res);
-      }
-      console.log('[AUTH CONFIG] Using legacy handler');
+      if (mode !== 'off') return route.moduleHandler(req, res);
       return route.legacyHandler(req, res);
     });
   }

@@ -111,7 +111,7 @@ export const liveApiService = {
   subscribeToUpdates: (callback: (drivers: Driver[]) => void, options: SubscribeToUpdatesOptions = {}) => {
       const {
           driverId,
-          pollIntervalMs = 30000,
+          pollIntervalMs = 10000,
           onMessages,
           onScheduledMessages,
           onConnectionStateChange,

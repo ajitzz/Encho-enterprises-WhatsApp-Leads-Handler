@@ -1,6 +1,6 @@
-export const SYSTEM_HEALTH_SCHEMA_VERSION = '1.0.0';
+const SYSTEM_HEALTH_SCHEMA_VERSION = '1.0.0';
 
-export function validateSystemHealthSnapshot(input = {}) {
+function validateSystemHealthSnapshot(input = {}) {
   const {
     status,
     timestamp,
@@ -34,3 +34,8 @@ export function validateSystemHealthSnapshot(input = {}) {
     degradedReasons,
   };
 }
+
+module.exports = {
+  SYSTEM_HEALTH_SCHEMA_VERSION,
+  validateSystemHealthSnapshot,
+};
