@@ -31,9 +31,6 @@ CREATE TABLE staff_members (
     role VARCHAR(50) DEFAULT 'staff',
     manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
     is_active_for_auto_dist BOOLEAN DEFAULT FALSE,
-    is_on_leave BOOLEAN DEFAULT FALSE,
-    max_capacity INTEGER DEFAULT 10,
-    avg_response_time_seconds INTEGER DEFAULT 0,
     last_assigned_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -58,7 +55,6 @@ CREATE TABLE candidates (
     closing_notes TEXT,
     closing_screenshot_url TEXT,
     lead_status VARCHAR(50) DEFAULT 'new',
-    review_status VARCHAR(50) DEFAULT 'none',
     last_action_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -136,21 +132,6 @@ CREATE TABLE lead_reminders (
     staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
     scheduled_at TIMESTAMP WITH TIME ZONE NOT NULL,
     status VARCHAR(20) DEFAULT 'pending',
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
--- 11. Lead Reviews
-CREATE TABLE lead_reviews (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
-    staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
-    manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
-    closing_date DATE,
-    notes TEXT,
-    screenshot_url TEXT,
-    status VARCHAR(20) DEFAULT 'pending', -- pending, approved, rejected
-    manager_feedback TEXT,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
