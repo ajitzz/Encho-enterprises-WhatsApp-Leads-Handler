@@ -2593,7 +2593,11 @@ const initDatabase = async (client) => {
     await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
     await client.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";');
 
-    await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB);`);
+    await client.query(`CREATE TABLE IF NOT EXISTS system_settings (
+        key VARCHAR(50) PRIMARY KEY, 
+        value JSONB
+    );`);
+
     await client.query(`CREATE TABLE IF NOT EXISTS staff_members (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
         email VARCHAR(255) UNIQUE NOT NULL, 
@@ -2601,28 +2605,143 @@ const initDatabase = async (client) => {
         role VARCHAR(50) DEFAULT 'staff', 
         manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
         is_active_for_auto_dist BOOLEAN DEFAULT FALSE,
-        last_assigned_at TIMESTAMP,
-        created_at TIMESTAMP DEFAULT NOW()
+        is_on_leave BOOLEAN DEFAULT FALSE,
+        max_capacity INTEGER DEFAULT 10,
+        avg_response_time_seconds INTEGER DEFAULT 0,
+        last_assigned_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );`);
     
     // Migration for existing table
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS is_active_for_auto_dist BOOLEAN DEFAULT FALSE;`);
-    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_assigned_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS is_on_leave BOOLEAN DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS max_capacity INTEGER DEFAULT 10;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS avg_response_time_seconds INTEGER DEFAULT 0;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_assigned_at TIMESTAMP WITH TIME ZONE;`);
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
     
-    await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, lead_status VARCHAR(50) DEFAULT 'new', last_action_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS candidates (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        phone_number VARCHAR(50) UNIQUE NOT NULL, 
+        name VARCHAR(255), 
+        stage VARCHAR(50) DEFAULT 'New', 
+        last_message TEXT, 
+        last_message_at BIGINT, 
+        source VARCHAR(50) DEFAULT 'Organic', 
+        is_human_mode BOOLEAN DEFAULT FALSE, 
+        current_bot_step_id VARCHAR(100), 
+        variables JSONB DEFAULT '{}'::jsonb, 
+        assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, 
+        assigned_manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+        follow_up_date TIMESTAMP WITH TIME ZONE,
+        follow_up_note TEXT,
+        is_pushed_to_closing BOOLEAN DEFAULT FALSE,
+        closing_notes TEXT,
+        closing_screenshot_url TEXT,
+        lead_status VARCHAR(50) DEFAULT 'new', 
+        review_status VARCHAR(50) DEFAULT 'none',
+        last_action_at TIMESTAMP WITH TIME ZONE, 
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
     
     // Ensure candidates has the new columns if it already existed
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_date TIMESTAMP WITH TIME ZONE;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_note TEXT;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS is_pushed_to_closing BOOLEAN DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closing_notes TEXT;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closing_screenshot_url TEXT;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_status VARCHAR(50) DEFAULT 'new';`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMP;`);
-    await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`ALTER TABLE candidate_messages ADD COLUMN IF NOT EXISTS sender_type VARCHAR(20);`);
-    await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`CREATE TABLE IF NOT EXISTS lead_activity_log (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL, action VARCHAR(100) NOT NULL, notes TEXT, media_url TEXT, created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'none';`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMP WITH TIME ZONE;`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, 
+        direction VARCHAR(10) CHECK (direction IN ('in', 'out')), 
+        text TEXT, 
+        type VARCHAR(50) DEFAULT 'text', 
+        status VARCHAR(50) DEFAULT 'sent', 
+        whatsapp_message_id VARCHAR(255), 
+        sender_type VARCHAR(50),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
+    await client.query(`ALTER TABLE candidate_messages ADD COLUMN IF NOT EXISTS sender_type VARCHAR(50);`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, 
+        payload JSONB NOT NULL, 
+        scheduled_time BIGINT NOT NULL, 
+        status VARCHAR(50) DEFAULT 'pending', 
+        error_log TEXT, 
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        status VARCHAR(20) DEFAULT 'draft', 
+        settings JSONB, 
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, 
+        type VARCHAR(50), 
+        url TEXT, 
+        status VARCHAR(50) DEFAULT 'pending', 
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS lead_activity_log (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, 
+        staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL, 
+        action VARCHAR(100) NOT NULL, 
+        notes TEXT, 
+        media_url TEXT, 
+        next_followup_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
     await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS media_url TEXT;`);
+    await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS next_followup_at TIMESTAMP WITH TIME ZONE;`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS audit_logs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        actor_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+        action VARCHAR(100) NOT NULL,
+        entity_type VARCHAR(50) NOT NULL,
+        entity_id UUID,
+        previous_state JSONB,
+        new_state JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS lead_reminders (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+        staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
+        scheduled_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        status VARCHAR(20) DEFAULT 'pending',
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS lead_reviews (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+        staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
+        manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+        closing_date DATE,
+        notes TEXT,
+        screenshot_url TEXT,
+        status VARCHAR(20) DEFAULT 'pending',
+        manager_feedback TEXT,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
     
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
     await client.query("INSERT INTO system_settings (key, value) VALUES ('lead_distribution', '{\"auto_enabled\": false}') ON CONFLICT DO NOTHING");
