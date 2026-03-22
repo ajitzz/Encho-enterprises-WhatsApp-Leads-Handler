@@ -61,7 +61,6 @@ export const MediaLibrary = () => {
     
     // Global Status
     const [globalStatus, setGlobalStatus] = useState<ShowcaseStatus | null>(null);
-    const [mediaRootFolderName, setMediaRootFolderName] = useState('enchowhatsappapis3buckets');
 
     useEffect(() => {
         loadMedia(currentPath);
@@ -91,9 +90,6 @@ export const MediaLibrary = () => {
             if (data) {
                 setFiles(data.files || []);
                 setFolders(data.folders || []);
-                if (typeof data.mediaRootFolderName === 'string' && data.mediaRootFolderName.trim()) {
-                    setMediaRootFolderName(data.mediaRootFolderName.trim());
-                }
             } else {
                 throw new Error("Invalid response");
             }
@@ -376,9 +372,6 @@ export const MediaLibrary = () => {
                             <Cloud className="text-blue-600" /> AWS S3 Media Library
                         </h1>
                         <p className="text-gray-500 text-sm mt-1">Organize and upload approved assets. Sync to WhatsApp or Public Showcase.</p>
-                        <p className="text-[11px] mt-2 text-blue-700 bg-blue-50 border border-blue-100 inline-flex px-2 py-1 rounded-md font-semibold">
-                            S3 Root Folder: {mediaRootFolderName}
-                        </p>
                     </div>
                     
                     <div className="flex gap-3 items-center">

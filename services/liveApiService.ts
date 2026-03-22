@@ -14,16 +14,6 @@ const resolveProxyUploadMaxBytes = () => {
 let authToken: string | null = localStorage.getItem('uber_fleet_auth_token');
 
 export type UpdateConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'polling' | 'disconnected';
-export interface DueAlertItem {
-  event_id: string;
-  event_type: 'followup_due' | 'review_due';
-  lead_id: string;
-  lead_name: string;
-  scheduled_at: string;
-  owner_staff_id: string | null;
-  owner_staff_name: string | null;
-  review_status?: string | null;
-}
 
 interface SubscribeToUpdatesOptions {
     driverId?: string;
@@ -331,6 +321,8 @@ export const liveApiService = {
   },
 
   uploadMedia: async (file: File, path: string) => {
+      const isLocalDev = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+
       try {
           const init = await apiRequest<any>('/api/media/upload/init', {
               method: 'POST',
@@ -356,7 +348,13 @@ export const liveApiService = {
       } catch (directUploadError) {
           const directUploadMessage = String((directUploadError as Error)?.message || directUploadError || 'Upload failed');
 
-          // Fallback through backend proxy when pre-signed direct upload is blocked by bucket CORS.
+          // Vercel serverless functions have request payload limits, so never fallback to proxy upload
+          // in non-local environments (it triggers FUNCTION_PAYLOAD_TOO_LARGE for larger files).
+          if (!isLocalDev) {
+              throw new Error(`Direct S3 upload failed. ${directUploadMessage}. Check S3 CORS for PUT and allowed headers.`);
+          }
+
+          // Local/dev fallback where pre-signed upload may be blocked by local networking/CORS.
           const formData = new FormData();
           formData.append('file', file);
           formData.append('path', path);
@@ -374,8 +372,7 @@ export const liveApiService = {
 
           if (!response.ok) {
               const errorBody = await response.text();
-              const combinedError = `${directUploadMessage}${errorBody ? ` | Proxy upload failed: ${errorBody}` : ''}`;
-              throw new Error(combinedError || 'Upload failed');
+              throw new Error(errorBody || directUploadMessage || 'Upload failed');
           }
 
           return response.json();
@@ -582,10 +579,6 @@ export const liveApiService = {
     return apiRequest(`/api/leads/reminders/${id}/done`, { method: 'POST' });
   },
 
-  getDueAlerts: async (): Promise<DueAlertItem[]> => {
-    return apiRequest<DueAlertItem[]>('/api/notifications/due');
-  },
-
   // Action Center & Analytics
   getActionCenter: async (staffId: string) => {
     return apiRequest<any>(`/api/analytics/action-center/${staffId}`);
@@ -599,11 +592,7 @@ export const liveApiService = {
   submitLeadReview: async (id: string, data: { closing_date: string; notes: string; screenshot_url?: string }) => {
     return apiRequest(`/api/reviews/${id}/submit`, {
       method: 'POST',
-      body: JSON.stringify({
-        closingDate: data.closing_date,
-        notes: data.notes,
-        screenshotUrl: data.screenshot_url
-      })
+      body: JSON.stringify(data)
     });
   },
 
@@ -614,10 +603,7 @@ export const liveApiService = {
   reviewDecision: async (reviewId: string, data: { decision: 'approved' | 'rejected'; feedback?: string }) => {
     return apiRequest(`/api/reviews/${reviewId}/decision`, {
       method: 'POST',
-      body: JSON.stringify({
-        status: data.decision,
-        feedback: data.feedback || ''
-      })
+      body: JSON.stringify(data)
     });
   }
 };

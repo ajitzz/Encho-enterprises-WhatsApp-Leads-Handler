@@ -331,7 +331,7 @@ try {
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-const MEDIA_ROOT_PREFIX = (process.env.MEDIA_ROOT_PREFIX || 'enchowhatsappapis3buckets/').replace(/^\/+/, '');
+const MEDIA_ROOT_PREFIX = (process.env.MEDIA_ROOT_PREFIX || 'media-library/').replace(/^\/+/, '');
 
 const normalizeMediaPath = (rawPath = '/') => {
     const cleaned = String(rawPath || '/').replace(/\\/g, '/').trim();
@@ -2588,95 +2588,16 @@ const getDefaultBotConfig = () => ({
     ]
 });
 
-const isSchemaDriftError = (err: any) => err?.code === '42P01' || err?.code === '42703';
-
-const ensureLeadOpsSchema = async (client) => {
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_date TIMESTAMP WITH TIME ZONE;`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_note TEXT;`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'none';`);
-    await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS next_followup_at TIMESTAMP WITH TIME ZONE;`);
-    await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;`);
-
-    await client.query(`
-        CREATE TABLE IF NOT EXISTS lead_reminders (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
-            staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
-            activity_id UUID REFERENCES lead_activity_log(id) ON DELETE CASCADE,
-            scheduled_at TIMESTAMP WITH TIME ZONE NOT NULL,
-            status VARCHAR(20) DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW()
-        );
-    `);
-
-    await client.query(`
-        CREATE INDEX IF NOT EXISTS idx_lead_reminders_staff_status
-        ON lead_reminders(staff_id, status);
-    `);
-
-    await client.query(`
-        CREATE INDEX IF NOT EXISTS idx_lead_reminders_scheduled_at
-        ON lead_reminders(scheduled_at);
-    `);
-
-    await client.query(`
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            actor_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
-            action VARCHAR(100) NOT NULL,
-            entity_type VARCHAR(50) NOT NULL,
-            entity_id UUID,
-            previous_state JSONB,
-            new_state JSONB,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-    `);
-
-    await client.query(`
-        CREATE TABLE IF NOT EXISTS lead_reviews (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
-            staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
-            manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
-            closing_date DATE NOT NULL,
-            notes TEXT,
-            screenshot_url TEXT,
-            status VARCHAR(20) DEFAULT 'pending',
-            manager_feedback TEXT,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        );
-    `);
-
-    await client.query(`
-        CREATE INDEX IF NOT EXISTS idx_lead_reviews_status
-        ON lead_reviews(status);
-    `);
-
-    await client.query(`
-        CREATE INDEX IF NOT EXISTS idx_lead_reviews_manager
-        ON lead_reviews(manager_id);
-    `);
-};
-
-const withSchemaRetry = async (client, operation) => {
-    try {
-        return await operation();
-    } catch (err: any) {
-        if (!isSchemaDriftError(err)) throw err;
-        console.warn(`[Auto-Heal] Schema drift detected (${err.code}). Applying lead ops schema guards and retrying...`);
-        await ensureLeadOpsSchema(client);
-        return await operation();
-    }
-};
-
 // --- DB RECOVERY & INIT ---
 const initDatabase = async (client) => {
     await client.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";');
     await client.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";');
 
-    await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB);`);
+    await client.query(`CREATE TABLE IF NOT EXISTS system_settings (
+        key VARCHAR(50) PRIMARY KEY, 
+        value JSONB
+    );`);
+
     await client.query(`CREATE TABLE IF NOT EXISTS staff_members (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
         email VARCHAR(255) UNIQUE NOT NULL, 
@@ -2684,29 +2605,143 @@ const initDatabase = async (client) => {
         role VARCHAR(50) DEFAULT 'staff', 
         manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
         is_active_for_auto_dist BOOLEAN DEFAULT FALSE,
-        last_assigned_at TIMESTAMP,
-        created_at TIMESTAMP DEFAULT NOW()
+        is_on_leave BOOLEAN DEFAULT FALSE,
+        max_capacity INTEGER DEFAULT 10,
+        avg_response_time_seconds INTEGER DEFAULT 0,
+        last_assigned_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );`);
     
     // Migration for existing table
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS is_active_for_auto_dist BOOLEAN DEFAULT FALSE;`);
-    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_assigned_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS is_on_leave BOOLEAN DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS max_capacity INTEGER DEFAULT 10;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS avg_response_time_seconds INTEGER DEFAULT 0;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_assigned_at TIMESTAMP WITH TIME ZONE;`);
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
     
-    await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, lead_status VARCHAR(50) DEFAULT 'new', last_action_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS candidates (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        phone_number VARCHAR(50) UNIQUE NOT NULL, 
+        name VARCHAR(255), 
+        stage VARCHAR(50) DEFAULT 'New', 
+        last_message TEXT, 
+        last_message_at BIGINT, 
+        source VARCHAR(50) DEFAULT 'Organic', 
+        is_human_mode BOOLEAN DEFAULT FALSE, 
+        current_bot_step_id VARCHAR(100), 
+        variables JSONB DEFAULT '{}'::jsonb, 
+        assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, 
+        assigned_manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+        follow_up_date TIMESTAMP WITH TIME ZONE,
+        follow_up_note TEXT,
+        is_pushed_to_closing BOOLEAN DEFAULT FALSE,
+        closing_notes TEXT,
+        closing_screenshot_url TEXT,
+        lead_status VARCHAR(50) DEFAULT 'new', 
+        review_status VARCHAR(50) DEFAULT 'none',
+        last_action_at TIMESTAMP WITH TIME ZONE, 
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
     
     // Ensure candidates has the new columns if it already existed
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_date TIMESTAMP WITH TIME ZONE;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_note TEXT;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS is_pushed_to_closing BOOLEAN DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closing_notes TEXT;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closing_screenshot_url TEXT;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_status VARCHAR(50) DEFAULT 'new';`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMP;`);
-    await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`ALTER TABLE candidate_messages ADD COLUMN IF NOT EXISTS sender_type VARCHAR(20);`);
-    await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), status VARCHAR(20), settings JSONB, created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, type VARCHAR(50), url TEXT, status VARCHAR(50), created_at TIMESTAMP DEFAULT NOW());`);
-    await client.query(`CREATE TABLE IF NOT EXISTS lead_activity_log (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL, action VARCHAR(100) NOT NULL, notes TEXT, media_url TEXT, created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'none';`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMP WITH TIME ZONE;`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, 
+        direction VARCHAR(10) CHECK (direction IN ('in', 'out')), 
+        text TEXT, 
+        type VARCHAR(50) DEFAULT 'text', 
+        status VARCHAR(50) DEFAULT 'sent', 
+        whatsapp_message_id VARCHAR(255), 
+        sender_type VARCHAR(50),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
+    await client.query(`ALTER TABLE candidate_messages ADD COLUMN IF NOT EXISTS sender_type VARCHAR(50);`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, 
+        payload JSONB NOT NULL, 
+        scheduled_time BIGINT NOT NULL, 
+        status VARCHAR(50) DEFAULT 'pending', 
+        error_log TEXT, 
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS bot_versions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        status VARCHAR(20) DEFAULT 'draft', 
+        settings JSONB, 
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS driver_documents (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, 
+        type VARCHAR(50), 
+        url TEXT, 
+        status VARCHAR(50) DEFAULT 'pending', 
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS lead_activity_log (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
+        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, 
+        staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL, 
+        action VARCHAR(100) NOT NULL, 
+        notes TEXT, 
+        media_url TEXT, 
+        next_followup_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
     await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS media_url TEXT;`);
-    await ensureLeadOpsSchema(client);
+    await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS next_followup_at TIMESTAMP WITH TIME ZONE;`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS audit_logs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        actor_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+        action VARCHAR(100) NOT NULL,
+        entity_type VARCHAR(50) NOT NULL,
+        entity_id UUID,
+        previous_state JSONB,
+        new_state JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS lead_reminders (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+        staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
+        scheduled_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        status VARCHAR(20) DEFAULT 'pending',
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS lead_reviews (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+        staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
+        manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+        closing_date DATE,
+        notes TEXT,
+        screenshot_url TEXT,
+        status VARCHAR(20) DEFAULT 'pending',
+        manager_feedback TEXT,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`);
     
     await client.query("INSERT INTO system_settings (key, value) VALUES ('config', '{\"automation_enabled\": true}') ON CONFLICT DO NOTHING");
     await client.query("INSERT INTO system_settings (key, value) VALUES ('lead_distribution', '{\"auto_enabled\": false}') ON CONFLICT DO NOTHING");
@@ -2776,7 +2811,7 @@ const executeWithRetry = async (client, operation) => {
     try {
         return await operation();
     } catch (err) {
-        if (isSchemaDriftError(err)) {
+        if (err.code === '42P01') {
             console.warn("[Auto-Heal] Tables missing. Re-initializing database...");
             await initDatabase(client);
             return await operation(); 
@@ -3792,7 +3827,7 @@ const authMiddleware = async (req, res, next) => {
 
 // --- STAFF MANAGEMENT ---
 apiRouter.use('/reviews', authMiddleware, leadReviewRouter);
-apiRouter.use('/analytics', analyticsRouter);
+apiRouter.use('/analytics', authMiddleware, analyticsRouter);
 
 apiRouter.get('/auth/me', authMiddleware, (req, res) => {
     res.json({
@@ -3928,20 +3963,19 @@ apiRouter.get('/leads/my', authMiddleware, async (req, res) => {
 apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
     try {
         await withDb(async (client) => {
-            await withSchemaRetry(client, async () => {
-                const check = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
-                if (check.rows[0]?.assigned_to) {
-                    return res.status(400).json({ error: 'Lead already claimed' });
-                }
-                await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW() WHERE id = $3', [req.user.staffId, 'claimed', req.params.id]);
-                await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, 'claimed', 'Lead claimed from pool']);
-                
-                // Audit log
-                await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, new_state) VALUES ($1, $2, $3, $4, $5)', 
-                    [req.user.staffId, 'lead_claim', 'candidate', req.params.id, JSON.stringify({ staff_id: req.user.staffId })]);
-                
-                res.json({ success: true });
-            });
+            const check = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+            if (check.rows[0]?.assigned_to) {
+                return res.status(400).json({ error: 'Lead already claimed' });
+            }
+            await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW() WHERE id = $3', [req.user.staffId, 'claimed', req.params.id]);
+            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, 'claimed', 'Lead claimed from pool']);
+            
+            // Audit log
+            await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, new_state) VALUES ($1, $2, $3, $4, $5)', 
+                [req.user.staffId, 'lead_claim', 'candidate', req.params.id, JSON.stringify({ staff_id: req.user.staffId })]);
+            
+            notifyUpdates(req.params.id);
+            res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -4017,6 +4051,7 @@ apiRouter.post('/leads/:id/reassign', authMiddleware, async (req, res) => {
             await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, previous_state, new_state) VALUES ($1, $2, $3, $4, $5, $6)', 
                 [req.user.staffId, 'lead_reassign', 'candidate', req.params.id, JSON.stringify({ assigned_to: oldStaffId }), JSON.stringify({ assigned_to: staff_id })]);
             
+            notifyUpdates(req.params.id);
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4025,89 +4060,62 @@ apiRouter.post('/leads/:id/reassign', authMiddleware, async (req, res) => {
 apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
     const { action, notes, status, media_url, next_followup_at } = req.body;
     if (!action) return res.status(400).json({ error: 'Action required' });
-    const cleanNotes = typeof notes === 'string' ? notes.trim() : '';
-    if (action === 'interaction' && !status) {
-        return res.status(400).json({ error: 'Status is required for interaction logs' });
-    }
-    if (action === 'interaction' && !cleanNotes) {
-        return res.status(400).json({ error: 'Notes are required for interaction logs' });
-    }
 
     try {
         await withDb(async (client) => {
-            await withSchemaRetry(client, async () => {
-                const check = await client.query(`
-                    SELECT c.assigned_to, s.manager_id 
-                    FROM candidates c 
-                    LEFT JOIN staff_members s ON c.assigned_to = s.id 
-                    WHERE c.id = $1
-                `, [req.params.id]);
-                
-                const lead = check.rows[0];
-                if (!lead) return res.status(404).json({ error: 'Lead not found' });
+            const check = await client.query(`
+                SELECT c.assigned_to, s.manager_id 
+                FROM candidates c 
+                LEFT JOIN staff_members s ON c.assigned_to = s.id 
+                WHERE c.id = $1
+            `, [req.params.id]);
+            
+            const lead = check.rows[0];
+            if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
-                const isAssignedToMe = lead?.assigned_to === req.user.staffId;
-                const isManagerOfStaff = lead?.manager_id === req.user.staffId;
-                const isAdmin = req.user.role === 'admin';
+            const isAssignedToMe = lead?.assigned_to === req.user.staffId;
+            const isManagerOfStaff = lead?.manager_id === req.user.staffId;
+            const isAdmin = req.user.role === 'admin';
 
-                if (!isAssignedToMe && !isManagerOfStaff && !isAdmin) {
-                    return res.status(403).json({ error: 'Not authorized to act on this lead' });
-                }
+            if (!isAssignedToMe && !isManagerOfStaff && !isAdmin) {
+                return res.status(403).json({ error: 'Not authorized to act on this lead' });
+            }
+            
+            const updates = [];
+            const values = [];
+            if (status) {
+                updates.push(`lead_status = $${values.length + 1}`);
+                values.push(status);
+            }
+            if (next_followup_at) {
+                updates.push(`follow_up_date = $${values.length + 1}`);
+                values.push(next_followup_at);
+            }
+            if (notes) {
+                updates.push(`follow_up_note = $${values.length + 1}`);
+                values.push(notes);
+            }
+            updates.push(`last_action_at = NOW()`);
+            
+            await client.query(`UPDATE candidates SET ${updates.join(', ')} WHERE id = $${values.length + 1}`, [...values, req.params.id]);
+            
+            // 2. Log Activity
+            await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes, media_url, next_followup_at) VALUES ($1, $2, $3, $4, $5, $6)', 
+                [req.params.id, req.user.staffId, action, notes, media_url, next_followup_at || null]);
+            
+            // 3. Create Reminder if needed
+            if (next_followup_at) {
+                // Clear existing pending reminders for this lead/staff to avoid duplicates
+                await client.query("UPDATE lead_reminders SET status = 'cancelled' WHERE candidate_id = $1 AND staff_id = $2 AND status = 'pending'", [req.params.id, req.user.staffId]);
                 
-                const currentLeadState = await client.query(
-                    'SELECT lead_status, follow_up_date FROM candidates WHERE id = $1',
-                    [req.params.id]
-                );
-                const previousStatus = currentLeadState.rows[0]?.lead_status || null;
-                const previousFollowupAt = currentLeadState.rows[0]?.follow_up_date || null;
+                await client.query(`
+                    INSERT INTO lead_reminders (candidate_id, staff_id, scheduled_at)
+                    VALUES ($1, $2, $3)
+                `, [req.params.id, req.user.staffId, next_followup_at]);
+            }
 
-                const updates = [];
-                const values = [];
-                if (status) {
-                    updates.push(`lead_status = $${values.length + 1}`);
-                    values.push(status);
-                }
-                if (next_followup_at) {
-                    updates.push(`follow_up_date = $${values.length + 1}`);
-                    values.push(next_followup_at);
-                }
-                if (cleanNotes) {
-                    updates.push(`follow_up_note = $${values.length + 1}`);
-                    values.push(cleanNotes);
-                }
-                updates.push(`last_action_at = NOW()`);
-                
-                await client.query(`UPDATE candidates SET ${updates.join(', ')} WHERE id = $${values.length + 1}`, [...values, req.params.id]);
-                
-                const metadata = {
-                    previous_status: previousStatus,
-                    new_status: status || previousStatus,
-                    previous_followup_at: previousFollowupAt,
-                    new_followup_at: next_followup_at || null,
-                    interaction_followup_at: next_followup_at || null,
-                    status_changed: Boolean(status && status !== previousStatus),
-                    followup_changed: Boolean(next_followup_at && new Date(next_followup_at).toISOString() !== (previousFollowupAt ? new Date(previousFollowupAt).toISOString() : null))
-                };
-
-                // 2. Log Activity
-                await client.query(
-                    'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes, media_url, next_followup_at, metadata) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-                    [req.params.id, req.user.staffId, action, cleanNotes || null, media_url, next_followup_at || null, metadata]
-                );
-                
-                // 3. Create Reminder if needed
-                if (next_followup_at) {
-                    // Clear existing pending reminders for this lead/staff to avoid duplicates
-                    await client.query("UPDATE lead_reminders SET status = 'cancelled' WHERE candidate_id = $1 AND staff_id = $2 AND status = 'pending'", [req.params.id, req.user.staffId]);
-                    
-                    await client.query(`
-                        INSERT INTO lead_reminders (candidate_id, staff_id, scheduled_at)
-                        VALUES ($1, $2, $3)
-                    `, [req.params.id, req.user.staffId, next_followup_at]);
-                }
-
-                res.json({ success: true });
-            });
+            notifyUpdates(req.params.id);
+            res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -4115,16 +4123,14 @@ apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
 apiRouter.get('/leads/reminders', authMiddleware, async (req, res) => {
     try {
         await withDb(async (client) => {
-            await withSchemaRetry(client, async () => {
-                const r = await client.query(`
-                    SELECT r.*, c.name as lead_name 
-                    FROM lead_reminders r 
-                    JOIN candidates c ON r.candidate_id = c.id 
-                    WHERE r.staff_id = $1 AND r.status = 'pending' AND r.scheduled_at > NOW() - INTERVAL '1 day'
-                    ORDER BY r.scheduled_at ASC
-                `, [req.user.staffId]);
-                res.json(r.rows);
-            });
+            const r = await client.query(`
+                SELECT r.*, c.name as lead_name 
+                FROM lead_reminders r 
+                JOIN candidates c ON r.candidate_id = c.id 
+                WHERE r.staff_id = $1 AND r.status = 'pending' AND r.scheduled_at > NOW() - INTERVAL '1 day'
+                ORDER BY r.scheduled_at ASC
+            `, [req.user.staffId]);
+            res.json(r.rows);
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -4132,80 +4138,8 @@ apiRouter.get('/leads/reminders', authMiddleware, async (req, res) => {
 apiRouter.post('/leads/reminders/:id/done', authMiddleware, async (req, res) => {
     try {
         await withDb(async (client) => {
-            await withSchemaRetry(client, async () => {
-                await client.query("UPDATE lead_reminders SET status = 'done', updated_at = NOW() WHERE id = $1 AND staff_id = $2", [req.params.id, req.user.staffId]);
-                res.json({ success: true });
-            });
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.get('/notifications/due', authMiddleware, async (req, res) => {
-    try {
-        await withDb(async (client) => {
-            await withSchemaRetry(client, async () => {
-                const role = req.user.role;
-                const staffId = req.user.staffId;
-                const params: any[] = [];
-                let followupScope = '';
-                let reviewScope = '';
-
-                if (role === 'staff') {
-                    params.push(staffId);
-                    followupScope = `AND r.staff_id = $${params.length}`;
-                    reviewScope = `AND lr.staff_id = $${params.length}`;
-                } else if (role === 'manager') {
-                    params.push(staffId);
-                    followupScope = `AND sm.manager_id = $${params.length}`;
-                    reviewScope = `AND lr.manager_id = $${params.length}`;
-                } else if (role !== 'admin') {
-                    return res.status(403).json({ error: 'Forbidden' });
-                }
-
-                const dueAlerts = await client.query(`
-                    WITH due_followups AS (
-                        SELECT
-                            'followup:' || r.id::text AS event_id,
-                            'followup_due' AS event_type,
-                            c.id AS lead_id,
-                            c.name AS lead_name,
-                            r.scheduled_at,
-                            r.staff_id AS owner_staff_id,
-                            sm.name AS owner_staff_name,
-                            NULL::text AS review_status
-                        FROM lead_reminders r
-                        JOIN candidates c ON c.id = r.candidate_id
-                        LEFT JOIN staff_members sm ON sm.id = r.staff_id
-                        WHERE r.status = 'pending'
-                          AND r.scheduled_at <= NOW()
-                          ${followupScope}
-                    ),
-                    due_reviews AS (
-                        SELECT
-                            'review:' || lr.id::text AS event_id,
-                            'review_due' AS event_type,
-                            c.id AS lead_id,
-                            c.name AS lead_name,
-                            lr.closing_date AS scheduled_at,
-                            lr.staff_id AS owner_staff_id,
-                            sm.name AS owner_staff_name,
-                            lr.status::text AS review_status
-                        FROM lead_reviews lr
-                        JOIN candidates c ON c.id = lr.candidate_id
-                        LEFT JOIN staff_members sm ON sm.id = lr.staff_id
-                        WHERE lr.status = 'pending'
-                          AND lr.closing_date <= NOW()
-                          ${reviewScope}
-                    )
-                    SELECT * FROM due_followups
-                    UNION ALL
-                    SELECT * FROM due_reviews
-                    ORDER BY scheduled_at ASC
-                    LIMIT 100
-                `, params);
-
-                res.json(dueAlerts.rows);
-            });
+            await client.query("UPDATE lead_reminders SET status = 'done', updated_at = NOW() WHERE id = $1 AND staff_id = $2", [req.params.id, req.user.staffId]);
+            res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -4262,12 +4196,7 @@ apiRouter.get('/media', async (req, res) => {
                 };
             });
 
-        const mediaRootFolderName = MEDIA_ROOT_PREFIX.replace(/\/+$/, '');
-        res.json({
-            folders,
-            files,
-            mediaRootFolderName
-        });
+        res.json({ folders, files });
     } catch (e) {
         console.error('[MEDIA LIST ERROR]', e.message);
         res.status(500).json({ error: 'Failed to load media library from S3', details: e.message });
