@@ -1,6 +1,6 @@
-const AUTH_CONFIG_SCHEMA_VERSION = '1.0.0';
+export const AUTH_CONFIG_SCHEMA_VERSION = '1.0.0';
 
-function validateAuthConfigUpdateInput(input = {}) {
+export function validateAuthConfigUpdateInput(input = {}) {
   const {
     actor,
     googleClientId,
@@ -27,8 +27,3 @@ function validateAuthConfigUpdateInput(input = {}) {
     publicAppUrl: publicAppUrl.trim(),
   };
 }
-
-module.exports = {
-  AUTH_CONFIG_SCHEMA_VERSION,
-  validateAuthConfigUpdateInput,
-};

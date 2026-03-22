@@ -34,16 +34,16 @@ import {
   assertEventEnvelope,
 } from '../backend/shared/contracts/internalEvents.js';
 
-const loadLeadIngestionServiceWithEnv = (env = {}) => {
-  const servicePath = require.resolve('../backend/modules/lead-ingestion/service');
+const loadLeadIngestionServiceWithEnv = async (env = {}) => {
   const previousEnv = {};
   for (const key of Object.keys(env)) {
     previousEnv[key] = process.env[key];
   }
 
   Object.assign(process.env, env);
-  delete require.cache[servicePath];
-  const { LeadIngestionService: ReloadedLeadIngestionService } = require('../backend/modules/lead-ingestion/service');
+  
+  // Cache busting for ESM
+  const { LeadIngestionService: ReloadedLeadIngestionService } = await import(`../backend/modules/lead-ingestion/service.js?update=${Date.now()}`);
 
   for (const key of Object.keys(env)) {
     if (previousEnv[key] === undefined) delete process.env[key];
@@ -145,7 +145,7 @@ test('lead ingestion service falls back to facade path when dependencies are mis
 });
 
 test('lead ingestion service supports deferred webhook ack mode', async () => {
-  const DeferredLeadIngestionService = loadLeadIngestionServiceWithEnv({ FF_WEBHOOK_DEFER_POST_RESPONSE: 'true' });
+  const DeferredLeadIngestionService = await loadLeadIngestionServiceWithEnv({ FF_WEBHOOK_DEFER_POST_RESPONSE: 'true' });
   let resolveProcessing;
   let processed = false;
 
@@ -190,7 +190,7 @@ test('lead ingestion service supports deferred webhook ack mode', async () => {
 });
 
 test('lead ingestion service defers bot on backpressure to keep webhook fast', async () => {
-  const BackpressureLeadIngestionService = loadLeadIngestionServiceWithEnv({
+  const BackpressureLeadIngestionService = await loadLeadIngestionServiceWithEnv({
     BOT_ENGINE_MAX_CONCURRENCY: '1',
     FF_WEBHOOK_BACKPRESSURE_DEFER: 'true',
     FF_WEBHOOK_ADAPTIVE_BOT_DEFER: 'false',
@@ -267,7 +267,7 @@ test('lead ingestion service defers bot on backpressure to keep webhook fast', a
 });
 
 test('lead ingestion service logs timeout and continues when bot exceeds hard timeout', async () => {
-  const TimeoutLeadIngestionService = loadLeadIngestionServiceWithEnv({ BOT_ENGINE_HARD_TIMEOUT_MS: '10' });
+  const TimeoutLeadIngestionService = await loadLeadIngestionServiceWithEnv({ BOT_ENGINE_HARD_TIMEOUT_MS: '10' });
   let reportingTriggered = false;
 
   const service = new TimeoutLeadIngestionService({
@@ -306,7 +306,7 @@ test('lead ingestion service logs timeout and continues when bot exceeds hard ti
 });
 
 test('lead ingestion service acks quickly when ack-timeout guard is exceeded', async () => {
-  const GuardedLeadIngestionService = loadLeadIngestionServiceWithEnv({
+  const GuardedLeadIngestionService = await loadLeadIngestionServiceWithEnv({
     WEBHOOK_ACK_TIMEOUT_MS: '10',
     FF_WEBHOOK_ACK_TIMEOUT_GUARD: 'true',
     FF_WEBHOOK_DEFER_POST_RESPONSE: 'false',
@@ -395,7 +395,7 @@ test('lead ingestion service short-circuits immediate duplicate message ids from
 });
 
 test('lead ingestion service evicts oldest dedupe id when cache reaches max size', async () => {
-  const BoundedCacheLeadIngestionService = loadLeadIngestionServiceWithEnv({
+  const BoundedCacheLeadIngestionService = await loadLeadIngestionServiceWithEnv({
     WEBHOOK_DEDUPE_MEMORY_MAX_SIZE: '1',
     WEBHOOK_DEDUPE_MEMORY_TTL_MS: '60000',
   });
@@ -729,7 +729,7 @@ test('auth-config contract validates runtime config update payload', () => {
 });
 
 test('lead ingestion service defers bot when sync budget is exceeded', async () => {
-  const AdaptiveLeadIngestionService = loadLeadIngestionServiceWithEnv({
+  const AdaptiveLeadIngestionService = await loadLeadIngestionServiceWithEnv({
     WEBHOOK_SYNC_BUDGET_MS: '1',
     FF_WEBHOOK_ADAPTIVE_BOT_DEFER: 'true',
     FF_WEBHOOK_DEFER_BOT_ENGINE: 'false',
