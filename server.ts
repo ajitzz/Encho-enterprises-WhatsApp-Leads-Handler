@@ -5882,9 +5882,12 @@ app.use((err, req, res, next) => {
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
 // --- LEAD AUTO-DISTRIBUTION ---
+let isDistributing = false;
 async function startLeadAutoDistributor() {
     console.log("Starting Lead Auto-Distributor...");
     setInterval(async () => {
+        if (isDistributing) return;
+        isDistributing = true;
         try {
             await withDb(async (client) => {
                 // Check if auto-distribution is enabled
@@ -5913,9 +5916,15 @@ async function startLeadAutoDistributor() {
                 }
             });
         } catch (e) {
-            console.error("Lead Auto-Distributor Error:", e);
+            if (e.message?.toLowerCase().includes('quota')) {
+                console.error("Lead Auto-Distributor Quota Error: Your database provider has exceeded its data transfer quota. Please upgrade your plan or wait for the quota to reset.");
+            } else {
+                console.error("Lead Auto-Distributor Error:", e);
+            }
+        } finally {
+            isDistributing = false;
         }
-    }, 30000); // Run every 30 seconds
+    }, 60000); // Run every 60 seconds (increased from 30s to save quota)
 }
 
 const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
