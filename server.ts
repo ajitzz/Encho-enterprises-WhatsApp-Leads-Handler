@@ -164,7 +164,7 @@ const SYSTEM_CONFIG: any = {
     GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || '',
     CACHE_TTL: 60 * 1000, // 60 Seconds Cache for Bot Settings
     RUNTIME_CONFIG_CACHE_TTL: Number.parseInt(process.env.RUNTIME_CONFIG_CACHE_TTL_MS || '2000', 10),
-    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
+    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '')
 };
 
 const applyRuntimeGoogleSheetsConfig = (rawConfig: any = {}) => {
@@ -860,7 +860,7 @@ const buildShowcaseToken = (payload = {}) => toBase64Url(JSON.stringify(payload)
 const getPublicShowcaseUrl = async (payload = {}) => {
     const token = encodeURIComponent(await getOrCreateShowcaseShortToken(payload));
     const normalizedBase = String(SYSTEM_CONFIG.PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
-    const safeBase = normalizedBase || 'https://encho-whatsapp-lead-handler.vercel.app';
+    const safeBase = normalizedBase || '';
     return `${safeBase}/showcase/${token}`;
 };
 
@@ -4791,8 +4791,14 @@ apiRouter.post('/webhook', async (req, res) => {
 });
 
 const handleAuthGoogleLegacy = async (req, res) => {
+    console.log('[server.ts] handleAuthGoogleLegacy hit');
     try {
         const { credential } = req.body;
+        if (!credential) {
+            console.log('[server.ts] No credential in body');
+            return res.status(400).json({ success: false, error: 'Missing credential' });
+        }
+        console.log('[server.ts] Verifying Google token...');
         const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
         const payload = ticket.getPayload();
         const email = payload.email;
@@ -4939,6 +4945,10 @@ registerAuthConfigRoutes({
         patchSystemSettings: handleSystemSettingsPatchLegacy,
     },
 });
+
+// Explicit fail-safe for Google Auth route to prevent 404s
+app.post('/api/auth/google', handleAuthGoogleLegacy);
+app.post('/auth/google', handleAuthGoogleLegacy);
 
 apiRouter.get('/updates/stream', async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
