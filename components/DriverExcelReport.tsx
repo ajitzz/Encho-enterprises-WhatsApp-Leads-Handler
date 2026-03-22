@@ -158,7 +158,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
 
   useEffect(() => {
     if (!isLiveMode) return;
-    const interval = setInterval(loadSyncStatus, 2000);
+    const interval = setInterval(loadSyncStatus, 30000);
     return () => clearInterval(interval);
   }, [isLiveMode]);
 

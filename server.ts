@@ -5080,16 +5080,22 @@ apiRouter.get('/updates/stream', async (req, res) => {
         }
     };
 
+    let snapshotTimeout: NodeJS.Timeout | null = null;
+    const streamSnapshotDebounced = () => {
+        if (snapshotTimeout) clearTimeout(snapshotTimeout);
+        snapshotTimeout = setTimeout(streamSnapshot, 5000); // Wait 5 seconds before refreshing
+    };
+
     const handleUpdate = (data) => {
         if (closed) return;
         // If candidateId is provided, we could optimize to only fetch that candidate,
         // but for now, we'll just refresh the whole snapshot to keep it simple and consistent.
-        streamSnapshot();
+        streamSnapshotDebounced();
     };
 
     unsubscribe = onUpdate(handleUpdate);
 
-    const snapshotInterval = setInterval(streamSnapshot, 10000); // Polling as fallback, less frequent
+    const snapshotInterval = setInterval(streamSnapshot, 120000); // Polling as fallback, increased to 120s to save quota
     const heartbeat = setInterval(() => {
         if (!closed) res.write('data: heartbeat\n\n');
     }, 20000);
@@ -5099,6 +5105,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
     req.on('close', () => {
         closed = true;
         clearTimeout(vercelTimeout);
+        if (snapshotTimeout) clearTimeout(snapshotTimeout);
         if (unsubscribe) unsubscribe();
         clearInterval(snapshotInterval);
         clearInterval(heartbeat);
@@ -5666,6 +5673,9 @@ const handlePatchScheduledMessageLegacy = async (req, res) => {
 
 // --- ADVANCED PARALLEL CRON PROCESSOR ---
 const handleCronProcessQueueLegacy = async (req, res) => {
+    if (Date.now() < globalQuotaBackoffUntil) {
+        return res.status(429).json({ error: 'Quota backoff in effect' });
+    }
     let processed = 0, errors = 0;
     try {
         const perf = createPerfTracker({ requestId: req?.requestId || null, module: 'reminders-escalations', event: 'reminders.queue.stage' });
@@ -5753,6 +5763,10 @@ const handleCronProcessQueueLegacy = async (req, res) => {
         });
         res.json({ status: 'ok', processed, errors, queueSize: processed + errors });
     } catch (e) {
+        const errorMsg = e.message?.toLowerCase() || '';
+        if (errorMsg.includes('quota') || errorMsg.includes('limit exceeded') || errorMsg.includes('too many requests')) {
+            globalQuotaBackoffUntil = Date.now() + (1000 * 60 * 30);
+        }
         if (isRecoverableInfraError(e)) {
             structuredLog({
                 level: 'error',
@@ -5883,10 +5897,23 @@ app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
 // --- LEAD AUTO-DISTRIBUTION ---
 let isDistributing = false;
+let globalQuotaBackoffUntil = 0;
+
 async function startLeadAutoDistributor() {
     console.log("Starting Lead Auto-Distributor...");
+    
+    // Increased interval to 15 minutes to save quota
+    const DIST_INTERVAL = 1000 * 60 * 15; 
+    
     setInterval(async () => {
         if (isDistributing) return;
+        
+        const now = Date.now();
+        if (now < globalQuotaBackoffUntil) {
+            console.log(`[Lead Auto-Distributor] Skipping run due to quota backoff (until ${new Date(globalQuotaBackoffUntil).toISOString()})`);
+            return;
+        }
+
         isDistributing = true;
         try {
             await withDb(async (client) => {
@@ -5895,7 +5922,7 @@ async function startLeadAutoDistributor() {
                 const settings = settingsRes.rows[0]?.value || { auto_enabled: false };
                 if (!settings.auto_enabled) return;
 
-                // Get unassigned leads
+                // Get unassigned leads - keep limit small to avoid massive transfer
                 const unassignedLeads = await client.query("SELECT id FROM candidates WHERE assigned_to IS NULL AND lead_status = 'new' LIMIT 10");
                 if (unassignedLeads.rows.length === 0) return;
 
@@ -5903,28 +5930,41 @@ async function startLeadAutoDistributor() {
                 const activeStaff = await client.query("SELECT id FROM staff_members WHERE is_active_for_auto_dist = TRUE ORDER BY last_assigned_at ASC NULLS FIRST");
                 if (activeStaff.rows.length === 0) return;
 
-                let staffIndex = 0;
-                for (const lead of unassignedLeads.rows) {
-                    const staff = activeStaff.rows[staffIndex];
-                    await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [staff.id, lead.id]);
-                    await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [staff.id]);
-                    await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead auto-assigned via distributor')", [lead.id, staff.id]);
-                    
-                    console.log(`Auto-assigned lead ${lead.id} to staff ${staff.id}`);
-                    
-                    staffIndex = (staffIndex + 1) % activeStaff.rows.length;
+                // Use a transaction for the batch of updates
+                await client.query('BEGIN');
+                try {
+                    let staffIndex = 0;
+                    for (const lead of unassignedLeads.rows) {
+                        const staff = activeStaff.rows[staffIndex];
+                        
+                        // Combined updates to reduce round-trips if possible, but standard PG doesn't support multi-table update easily here
+                        await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [staff.id, lead.id]);
+                        await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [staff.id]);
+                        await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead auto-assigned via distributor')", [lead.id, staff.id]);
+                        
+                        console.log(`Auto-assigned lead ${lead.id} to staff ${staff.id}`);
+                        
+                        staffIndex = (staffIndex + 1) % activeStaff.rows.length;
+                    }
+                    await client.query('COMMIT');
+                } catch (err) {
+                    await client.query('ROLLBACK');
+                    throw err;
                 }
             });
         } catch (e) {
-            if (e.message?.toLowerCase().includes('quota')) {
+            const errorMsg = e.message?.toLowerCase() || '';
+            if (errorMsg.includes('quota') || errorMsg.includes('limit exceeded') || errorMsg.includes('too many requests')) {
                 console.error("Lead Auto-Distributor Quota Error: Your database provider has exceeded its data transfer quota. Please upgrade your plan or wait for the quota to reset.");
+                // Backoff for 30 minutes on quota error
+                globalQuotaBackoffUntil = Date.now() + (1000 * 60 * 30);
             } else {
                 console.error("Lead Auto-Distributor Error:", e);
             }
         } finally {
             isDistributing = false;
         }
-    }, 60000); // Run every 60 seconds (increased from 30s to save quota)
+    }, DIST_INTERVAL);
 }
 
 const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
@@ -5932,8 +5972,15 @@ const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
     
     // Start background jobs
     setInterval(() => {
-        runNurtureTriggers().catch(err => console.error('[NURTURE JOB ERROR]', err));
-    }, 1000 * 60 * 60); // Run every hour
+        if (Date.now() < globalQuotaBackoffUntil) return;
+        runNurtureTriggers().catch(err => {
+            const errorMsg = err.message?.toLowerCase() || '';
+            if (errorMsg.includes('quota') || errorMsg.includes('limit exceeded') || errorMsg.includes('too many requests')) {
+                globalQuotaBackoffUntil = Date.now() + (1000 * 60 * 30);
+            }
+            console.error('[NURTURE JOB ERROR]', err);
+        });
+    }, 1000 * 60 * 60 * 4); // Run every 4 hours
 
     return app.listen(port, () => {
         console.log(`Server running on ${port}`);

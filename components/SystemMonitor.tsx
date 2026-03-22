@@ -50,7 +50,7 @@ export const SystemMonitor = () => {
                     notifyAdmin: (message) => console.warn('[admin.notify]', message)
                 });
             }
-            timerRef.current = setTimeout(poll, 5000); 
+            timerRef.current = setTimeout(poll, 30000); 
         };
         poll();
     };

@@ -119,7 +119,7 @@ export default function App() {
           }
       };
 
-      const interval = setInterval(triggerCron, 10000);
+      const interval = setInterval(triggerCron, 300000); // Increased to 5 minutes to save quota
       triggerCron();
       return () => clearInterval(interval);
   }, [dataSource, isAuthenticated, isEmergencyMode]);

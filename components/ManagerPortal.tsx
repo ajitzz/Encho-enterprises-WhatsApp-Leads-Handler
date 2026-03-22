@@ -79,7 +79,7 @@ export const ManagerPortal: React.FC<ManagerPortalProps> = ({ user, onLogout }) 
     };
 
     fetchData();
-    const interval = setInterval(fetchData, 30000); // Refresh stats every 30s
+    const interval = setInterval(fetchData, 120000); // Refresh stats every 2 minutes to save quota
 
     return () => {
       unsubscribe();
