@@ -163,7 +163,8 @@ const SYSTEM_CONFIG: any = {
     GOOGLE_SERVICE_ACCOUNT_EMAIL: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || '',
     GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY || '',
     CACHE_TTL: 60 * 1000, // 60 Seconds Cache for Bot Settings
-    RUNTIME_CONFIG_CACHE_TTL: Number.parseInt(process.env.RUNTIME_CONFIG_CACHE_TTL_MS || '2000', 10),
+    RUNTIME_CONFIG_CACHE_TTL: Number.parseInt(process.env.RUNTIME_CONFIG_CACHE_TTL_MS || '30000', 10),
+    WEBHOOK_MESSAGE_ID_CACHE_TTL_MS: Number.parseInt(process.env.WEBHOOK_MESSAGE_ID_CACHE_TTL_MS || String(6 * 60 * 60 * 1000), 10),
     PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
 };
 
@@ -192,6 +193,32 @@ const memoryCache = {
     runtimeConfigLastUpdated: 0,
     runtimeConfigInFlight: null,
     botSettingsInFlight: null,
+    recentWebhookMessageIds: new Map<string, number>(),
+};
+
+const markRecentWebhookMessageId = (messageId: string | null) => {
+    if (!messageId) return;
+    const now = Date.now();
+    const ttl = Math.max(10_000, SYSTEM_CONFIG.WEBHOOK_MESSAGE_ID_CACHE_TTL_MS || 0);
+
+    memoryCache.recentWebhookMessageIds.set(messageId, now + ttl);
+
+    if (memoryCache.recentWebhookMessageIds.size <= 3000) return;
+    for (const [id, expiresAt] of memoryCache.recentWebhookMessageIds.entries()) {
+        if (expiresAt <= now) memoryCache.recentWebhookMessageIds.delete(id);
+        if (memoryCache.recentWebhookMessageIds.size <= 3000) break;
+    }
+};
+
+const hasRecentWebhookMessageId = (messageId: string | null) => {
+    if (!messageId) return false;
+    const expiresAt = memoryCache.recentWebhookMessageIds.get(messageId);
+    if (!expiresAt) return false;
+    if (expiresAt <= Date.now()) {
+        memoryCache.recentWebhookMessageIds.delete(messageId);
+        return false;
+    }
+    return true;
 };
 
 const getRuntimeConfigCached = async (client) => {
@@ -4711,6 +4738,10 @@ const processWebhookLegacy = async ({ body, req, res }) => {
         const perf = createPerfTracker({ requestId: req?.requestId || null, module: 'lead-ingestion', event: 'webhook.processing.stage' });
         const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
         if (!msg) { res.sendStatus(200); return; }
+        if (hasRecentWebhookMessageId(msg.id)) {
+            res.sendStatus(200);
+            return;
+        }
 
         const processPromise = withDb(async (client) => {
             // WRAPPER: Retry logic for cold starts / missing tables
@@ -4718,7 +4749,10 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                 perf.markStart('dedupe_lookup');
                 const existing = await client.query("SELECT id FROM candidate_messages WHERE whatsapp_message_id = $1", [msg.id]);
                 perf.markEnd('dedupe_lookup', { found: existing.rows.length > 0 });
-                if (existing.rows.length > 0) return;
+                if (existing.rows.length > 0) {
+                    markRecentWebhookMessageId(msg.id);
+                    return;
+                }
 
                 const from = msg.from;
                 const name = body.entry[0].changes[0].value.contacts?.[0]?.profile?.name || 'Unknown';
@@ -4778,6 +4812,7 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                      VALUES ($1, $2, 'in', $3, $4, 'received', $5, 'driver', NOW())`,
                     [crypto.randomUUID(), candidate.id, text, messageType, msg.id]
                 );
+                markRecentWebhookMessageId(msg.id);
                 notifyUpdates(candidate.id);
                 perf.markEnd('inbound_message_insert', { candidateId: candidate.id, messageType });
 
