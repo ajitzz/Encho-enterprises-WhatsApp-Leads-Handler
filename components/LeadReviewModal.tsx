@@ -11,6 +11,7 @@ import {
   Zap
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
+import { getLeadScreenshotUploadPath } from '../services/mediaPaths';
 
 interface LeadReviewModalProps {
   lead: any;
@@ -34,7 +35,7 @@ export const LeadReviewModal: React.FC<LeadReviewModalProps> = ({ lead, onClose,
       let screenshot_url = undefined;
       
       if (screenshot) {
-        const upload = await liveApiService.uploadMedia(screenshot.file, `reviews/${lead.id}`);
+        const upload = await liveApiService.uploadMedia(screenshot.file, getLeadScreenshotUploadPath(lead));
         screenshot_url = upload.url;
       }
 
