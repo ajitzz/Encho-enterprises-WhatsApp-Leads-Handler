@@ -346,15 +346,20 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
   useEffect(() => {
     const seenKey = `due_alerts_seen:${user.staffId || user.email || 'staff'}`;
-    const seenIds = new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
+    const readSeenIds = () =>
+      new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
 
     const syncDueAlerts = async () => {
       try {
         const alerts = await liveApiService.getDueAlerts();
+        const seenIds = readSeenIds();
         const fresh = alerts.filter(alert => !seenIds.has(alert.event_id));
         if (fresh.length > 0) {
           setDueAlertQueue(prev => {
             const existing = new Set(prev.map(item => item.event_id));
+            if (activeDueAlert?.event_id) {
+              existing.add(activeDueAlert.event_id);
+            }
             return [...prev, ...fresh.filter(item => !existing.has(item.event_id))];
           });
         }
@@ -366,11 +371,17 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     syncDueAlerts();
     const timer = setInterval(syncDueAlerts, 30000);
     return () => clearInterval(timer);
-  }, [user.staffId, user.email]);
+  }, [user.staffId, user.email, activeDueAlert?.event_id]);
 
   useEffect(() => {
     if (activeDueAlert || dueAlertQueue.length === 0) return;
     const next = dueAlertQueue[0];
+    const seenKey = `due_alerts_seen:${user.staffId || user.email || 'staff'}`;
+    const seenIds = new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
+    if (seenIds.has(next.event_id)) {
+      setDueAlertQueue(prev => prev.slice(1));
+      return;
+    }
     setActiveDueAlert(next);
     setDueAlertQueue(prev => prev.slice(1));
     if ('Notification' in window && Notification.permission === 'granted') {
@@ -378,7 +389,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         body: `Scheduled time reached at ${new Date(next.scheduled_at).toLocaleString()}`
       });
     }
-  }, [dueAlertQueue, activeDueAlert]);
+  }, [dueAlertQueue, activeDueAlert, user.staffId, user.email]);
 
   const dismissDueAlert = (eventId?: string) => {
     if (!eventId) {
