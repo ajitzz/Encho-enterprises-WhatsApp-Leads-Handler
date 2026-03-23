@@ -5947,6 +5947,93 @@ apiRouter.post('/system/seed-db', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+const envNumber = (name: string, fallback: number): number => {
+    const parsed = Number.parseFloat(`${process.env[name] ?? fallback}`);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const computeTransferBudgetProjection = () => {
+    const leadsPerWeek = envNumber('LEADS_PER_WEEK', 300);
+    const weeksPerMonth = envNumber('WEEKS_PER_MONTH', 4.345);
+    const messagesPerLead = envNumber('MSGS_PER_LEAD', 18);
+    const docRate = envNumber('DOC_RATE', 0.2);
+    const kbPerMessageNoCache = envNumber('KB_PER_MESSAGE', 3.2);
+    const cacheHitRatio = envNumber('CACHE_HIT_RATIO', 0.7);
+    const writeBatchSize = Math.max(1, envNumber('WRITE_BATCH_SIZE', 4));
+    const retryMultiplier = Math.max(1, envNumber('RETRY_MULTIPLIER', 1.05));
+    const kbPerDocument = envNumber('KB_PER_DOCUMENT', 1.5);
+    const healthChecksPerMinute = envNumber('HEALTH_CHECKS_PER_MINUTE', 1);
+    const kbPerHealthCheck = envNumber('KB_PER_HEALTH_CHECK', 0.5);
+    const webhookVerifyCallsPerDay = envNumber('WEBHOOK_VERIFY_CALLS_PER_DAY', 2);
+    const kbPerWebhookVerify = envNumber('KB_PER_WEBHOOK_VERIFY', 0.3);
+    const budgetGb = envNumber('MONTHLY_BUDGET_GB', 5);
+
+    const monthlyLeads = leadsPerWeek * weeksPerMonth;
+    const monthlyMessages = monthlyLeads * messagesPerLead;
+    const monthlyDocuments = monthlyLeads * docRate;
+    const dbTouchRatio = Math.max(0, 1 - cacheHitRatio);
+    const effectiveKbPerMessage = (kbPerMessageNoCache * dbTouchRatio * retryMultiplier) / writeBatchSize;
+
+    const messageTransferKb = monthlyMessages * effectiveKbPerMessage;
+    const documentTransferKb = monthlyDocuments * kbPerDocument * retryMultiplier;
+    const minutesPerMonth = 60 * 24 * 30.4375;
+    const daysPerMonth = 30.4375;
+    const healthTransferKb = healthChecksPerMinute * minutesPerMonth * kbPerHealthCheck;
+    const webhookVerifyTransferKb = webhookVerifyCallsPerDay * daysPerMonth * kbPerWebhookVerify;
+    const totalKb = messageTransferKb + documentTransferKb + healthTransferKb + webhookVerifyTransferKb;
+    const totalGb = totalKb / (1024 * 1024);
+    const headroomGb = budgetGb - totalGb;
+    const utilizationPct = budgetGb > 0 ? (totalGb / budgetGb) * 100 : 100;
+
+    const grade = (() => {
+        if (utilizationPct <= 55) return '9.9/10 (Peak-safe)';
+        if (utilizationPct <= 70) return '9.3/10 (Strong)';
+        if (utilizationPct <= 85) return '8.5/10 (Manageable)';
+        if (utilizationPct <= 100) return '7.0/10 (Risky)';
+        return '5.0/10 (Over budget)';
+    })();
+
+    return {
+        assumptions: {
+            leadsPerWeek,
+            messagesPerLead,
+            docRate,
+            cacheHitRatio,
+            writeBatchSize,
+            retryMultiplier,
+            budgetGb,
+        },
+        projections: {
+            monthlyLeads,
+            monthlyMessages,
+            totalGb,
+            headroomGb,
+            utilizationPct,
+            grade,
+            breakdownGb: {
+                message: messageTransferKb / (1024 * 1024),
+                mediaMetadata: documentTransferKb / (1024 * 1024),
+                healthChecks: healthTransferKb / (1024 * 1024),
+                webhookVerify: webhookVerifyTransferKb / (1024 * 1024),
+            }
+        },
+        thresholds: {
+            warningPct: 70,
+            elevatedPct: 85,
+            incidentPct: 100,
+        }
+    };
+};
+
+apiRouter.get('/system/transfer-budget', async (_req, res) => {
+    try {
+        const snapshot = computeTransferBudgetProjection();
+        return res.json({ success: true, generatedAt: new Date().toISOString(), ...snapshot });
+    } catch (e) {
+        return res.status(500).json({ error: e.message });
+    }
+});
+
 apiRouter.get('/system/meta-send-metrics', async (_req, res) => {
     try {
         return res.json({
