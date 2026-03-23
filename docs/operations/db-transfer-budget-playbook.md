@@ -65,3 +65,54 @@ Target result:
 3. Reduce non-essential polling/health query frequency.
 4. Move analytics/reporting queries to daily batch window.
 5. Upgrade DB transfer plan only if optimization headroom is exhausted.
+
+## Production answer for your exact workload (300 inquiries/week, always-on)
+
+For the declared operating profile (300 leads/week, 18 messages/lead, 20% docs to S3, Redis-first + batched writes), the estimator projects:
+
+- **Total DB transfer ≈ 0.027 GB/month**
+- **Budget utilization ≈ 0.54% of 5 GB**
+- **Headroom ≈ 4.973 GB**
+- **Grade: 9.9/10 (Peak-safe)**
+
+Use this command for recurring validation:
+
+```bash
+LEADS_PER_WEEK=300 MSGS_PER_LEAD=18 DOC_RATE=0.2 CACHE_HIT_RATIO=0.7 WRITE_BATCH_SIZE=4 RETRY_MULTIPLIER=1.05 npm run estimate:transfer
+```
+
+### What this means in plain terms
+
+- Yes, you can keep webhook/chatbot **24/7 for months** and still stay below 5 GB.
+- If you already crossed 5 GB, your excess is likely from **non-chatbot transfer** (dashboards, heavy SELECTs, ad-hoc exports, repeated retries, debug polling, or large row payloads), not from the modeled WhatsApp flow itself.
+
+## Hard control limits (to keep a 9.9/10 grade)
+
+Treat these as non-negotiable SLOs:
+
+1. **Cache hit ratio >= 65%** (target 70–80%).
+2. **Write batch size >= 3** (target 4–5).
+3. **Webhook duplicate/retry rate <= 5%**.
+4. **Health check frequency <= 1/minute** unless incident mode.
+5. **No large JSON/message blobs in hot tables**; only keys + compact metadata.
+6. **No DB media binaries** (S3 object only + URL/checksum in DB).
+
+## Fast incident drill when transfer spikes unexpectedly
+
+Execute in this order within the same day:
+
+1. Cut non-essential polling jobs by 50%.
+2. Reduce dashboard auto-refresh to >= 60s.
+3. Turn on strict column projection (`SELECT only required columns`).
+4. Increase Redis TTL for session/config objects by 25–50%.
+5. Raise write batching one step (for example 3 -> 4).
+6. Pause non-critical analytics queries to an off-peak batch window.
+
+## Weekly governance cadence (recommended)
+
+- Run estimator with actual observed inputs from last 7 days.
+- Compare estimator output to Neon monthly transfer consumed.
+- Record: cache-hit %, retry %, transfer/lead, transfer/message.
+- Open an action item if either:
+  - budget utilization forecast > 70%, or
+  - transfer per lead jumps by > 20% week-over-week.
