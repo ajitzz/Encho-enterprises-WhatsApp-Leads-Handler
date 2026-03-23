@@ -116,3 +116,161 @@ Execute in this order within the same day:
 - Open an action item if either:
   - budget utilization forecast > 70%, or
   - transfer per lead jumps by > 20% week-over-week.
+
+## Scenario analysis: 300 to 1000 inquiries/week (your stated range)
+
+Using the built-in estimator with your current architecture assumptions (S3 media objects + DB URL only, Redis-first reads, batched writes):
+
+- `LEADS_PER_WEEK=300` -> **~0.027 GB/month** (~0.54% of 5 GB).
+- `LEADS_PER_WEEK=1000` -> **~0.041 GB/month** (~0.82% of 5 GB).
+
+This means the WhatsApp chatbot workload itself is not the transfer bottleneck under healthy architecture controls. If the account crossed 5 GB, the likely source is usually one or more of:
+
+- repeated dashboard polling / short refresh intervals,
+- broad `SELECT *` queries against high-volume tables,
+- repeated failed/retried webhook deliveries without dedupe,
+- heavy export/reporting jobs executed too frequently,
+- oversized payload columns fetched repeatedly.
+
+## Admin panel upgrade: live DB transfer budget control
+
+To operate at a sustained **9.9/10 grade**, expose transfer and efficiency KPIs in the admin panel with these widgets:
+
+1. **Monthly transfer gauge**
+   - `used_gb`, `budget_gb=5`, `% utilized`, `% remaining`.
+   - Color states: green < 70%, amber 70-85%, red > 85%.
+
+2. **Transfer intensity metrics**
+   - `KB per lead` (daily + weekly trend).
+   - `KB per message` (inbound+outbound).
+   - `GB/day burn rate` and projected month-end usage.
+
+3. **Optimization health metrics**
+   - Redis cache hit ratio.
+   - Write batch size (effective average).
+   - Webhook duplicate/retry rate.
+   - Health-check query frequency.
+
+4. **Anomaly feed**
+   - Top 10 queries/endpoints by transferred bytes.
+   - Spike detector when transfer/lead jumps > 20% day-over-day.
+
+5. **Action center**
+   - One-click incident toggles: lower polling frequency, pause non-critical exports, increase cache TTL profile.
+
+## Composite management rating (target: 9.9/10)
+
+Use a weighted score to continuously track transfer optimization quality:
+
+- **Budget utilization (35%)**: highest score when <= 55% of budget.
+- **Transfer efficiency per lead (25%)**: stable or improving week-over-week.
+- **Cache + batching discipline (20%)**: cache hit >= 65%, batch size >= 3.
+- **Retry/idempotency control (10%)**: duplicate+retry <= 5%.
+- **Operational observability (10%)**: alerts + trend dashboards + runbook drills active.
+
+A practical interpretation:
+
+- **9.9/10** -> utilization < 55%, all control limits healthy, no unresolved spikes.
+- **9.3/10** -> utilization 55-70%, minor drift, corrective actions in progress.
+- **8.5/10** -> utilization 70-85%, elevated risk, mandatory weekly optimization actions.
+- **<= 7.0/10** -> utilization > 85%, incident mode until stabilized.
+
+## Exact commands for weekly forecasting
+
+```bash
+LEADS_PER_WEEK=300 MSGS_PER_LEAD=18 DOC_RATE=0.2 CACHE_HIT_RATIO=0.7 WRITE_BATCH_SIZE=4 RETRY_MULTIPLIER=1.05 npm run estimate:transfer
+LEADS_PER_WEEK=1000 MSGS_PER_LEAD=18 DOC_RATE=0.2 CACHE_HIT_RATIO=0.7 WRITE_BATCH_SIZE=4 RETRY_MULTIPLIER=1.05 npm run estimate:transfer
+```
+
+## Implementation focus to stay below 5 GB while running 24/7
+
+1. Keep webhook handler always-on in a server/worker runtime with auto-restart (PM2/systemd or managed equivalent).
+2. Keep response path minimal: parse -> dedupe -> enqueue -> immediate WhatsApp ACK.
+3. Move non-urgent DB writes to worker queue and batch flushes.
+4. Keep media in S3 only; DB stores URL + checksum metadata only.
+5. Add hard alerts at 70/80/90% and a weekly transfer budget review ritual.
+
+With these controls, your declared 300-1000 inquiries/week pattern remains comfortably below a 5 GB DB transfer limit while preserving 24/7 chatbot availability.
+
+## Better suggestions (v2): keep transfer < 5 GB at sustained 9.9/10
+
+### 1) Enforce a hard monthly transfer envelope by source
+Set explicit per-source budgets so overages cannot hide until month-end:
+
+- Webhook ingest + bot replies: **40% max**
+- Admin panel reads: **15% max**
+- Reporting/exports: **20% max**
+- Background jobs + health checks: **10% max**
+- Safety buffer (retries/spikes): **15% reserved**
+
+If any bucket exceeds 85% of its allocation, trigger an automatic throttle profile.
+
+### 2) Move from request/response polling to event-driven UI updates
+Polling is a common silent transfer leak.
+
+- Replace frequent admin polling with SSE/WebSocket updates from a compact in-memory snapshot.
+- Keep dashboard auto-refresh at >= 60 seconds in normal mode.
+- Disable heavy widgets by default; lazy-load only when a user opens the panel.
+
+### 3) Add a transfer-aware repository layer
+Every read path should be byte-budgeted.
+
+- Ban `SELECT *` on hot tables.
+- Define strict projection DTOs for each endpoint.
+- Enforce pagination with small page sizes (for example 25/50 rows).
+- Add query lint checks in CI for unbounded/oversized result sets.
+
+### 4) Use Redis as the primary operational read model
+For WhatsApp conversation responsiveness and low DB transfer:
+
+- Keep active conversation state + latest lead summary in Redis.
+- Write to Postgres on state transitions / milestones, not every message turn.
+- Store short-lived analytics counters in Redis and flush aggregated deltas periodically.
+
+### 5) Introduce adaptive write-behind batching
+Use dynamic batch size based on queue depth and retry pressure:
+
+- Low traffic: batch size 3-4 for low latency.
+- High traffic: batch size 5-8 to reduce transfer per message.
+- On incident mode: batch size increase + non-critical write deferral.
+
+### 6) Guardrails for media/document flow
+You already keep binaries in S3, which is correct. Add two more controls:
+
+- Persist only immutable metadata keys (URL/checksum/type/timestamps), not verbose OCR/extraction payloads in hot rows.
+- Route document enrichment (OCR/classification) to async workers and store outputs in cold/archive tables.
+
+### 7) Cost-safe retry + idempotency discipline
+Retries can silently double transfer.
+
+- Keep idempotency keys on inbound webhook events and outbound send attempts.
+- Use exponential backoff with jitter and hard max retry count.
+- Track duplicate ratio in the admin panel as a first-class KPI.
+
+### 8) Weekly optimization governance with acceptance gates
+To preserve 9.9/10 quality, enforce weekly gates:
+
+- Cache hit ratio >= 70%
+- Effective batch size >= 4
+- Retry/duplicate ratio <= 3%
+- Transfer/lead week-over-week delta <= +10%
+- Month-end forecast <= 55% budget utilization (for 9.9 band)
+
+If any gate fails for 2 consecutive days, enter optimization incident mode.
+
+### 9) Suggested 9.9 score equation
+Use a deterministic score so the team sees exactly why grade changed:
+
+`score = 10 - (u + e + r + o)`
+
+Where:
+- `u` (utilization penalty, max 4.0): grows rapidly after 55% forecast utilization.
+- `e` (efficiency penalty, max 2.5): based on KB/lead regression vs 4-week baseline.
+- `r` (reliability penalty, max 2.0): retry + duplicate + dead-letter rate.
+- `o` (observability penalty, max 1.5): missing alerts, missing dashboards, stale runbook drill.
+
+Target operating envelope for **9.9/10**:
+- utilization forecast <= 55%
+- KB/lead stable within +/-10% of baseline
+- retries+duplicates <= 3%
+- all alerts and weekly drill checks green

@@ -1,6 +1,6 @@
 
 import React, { useEffect, useState, useRef } from 'react';
-import { Database, Server, Shield, X, AlertTriangle, Zap, RefreshCw, AlertCircle, DatabaseZap, Workflow, Trash2, Hammer } from 'lucide-react';
+import { Database, Shield, X, AlertTriangle, RefreshCw, DatabaseZap, Trash2, Hammer, Gauge } from 'lucide-react';
 import { SystemStats } from '../types';
 import { reportUiFailure, reportUiRecovery } from '../services/uiFailureMonitor';
 
@@ -12,8 +12,36 @@ interface DiagnosticStats extends SystemStats {
     env?: { hasPostgres: boolean; publicUrl: string };
 }
 
+interface TransferBudgetStats {
+    projections: {
+        totalGb: number;
+        headroomGb: number;
+        utilizationPct: number;
+        grade: string;
+        breakdownGb: {
+            message: number;
+            mediaMetadata: number;
+            healthChecks: number;
+            webhookVerify: number;
+        };
+    };
+    assumptions: {
+        leadsPerWeek: number;
+        messagesPerLead: number;
+        cacheHitRatio: number;
+        writeBatchSize: number;
+        budgetGb: number;
+    };
+    thresholds: {
+        warningPct: number;
+        elevatedPct: number;
+        incidentPct: number;
+    };
+}
+
 export const SystemMonitor = () => {
     const [stats, setStats] = useState<DiagnosticStats | null>(null);
+    const [transferStats, setTransferStats] = useState<TransferBudgetStats | null>(null);
     const [isOpen, setIsOpen] = useState(false);
     const [showControls, setShowControls] = useState(false);
     const [dbActionStatus, setDbActionStatus] = useState('');
@@ -42,6 +70,18 @@ export const SystemMonitor = () => {
                         env: debugStats.env
                     });
                 }
+
+                const transferResponse = await fetch('/api/system/transfer-budget', {
+                    headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }
+                });
+                if (transferResponse.ok) {
+                    const transferPayload = await transferResponse.json();
+                    setTransferStats({
+                        projections: transferPayload.projections,
+                        assumptions: transferPayload.assumptions,
+                        thresholds: transferPayload.thresholds,
+                    });
+                }
             } catch(e) {
                 reportUiFailure({
                     channel: 'polling',
@@ -50,7 +90,7 @@ export const SystemMonitor = () => {
                     notifyAdmin: (message) => console.warn('[admin.notify]', message)
                 });
             }
-            timerRef.current = setTimeout(poll, 5000); 
+            timerRef.current = setTimeout(poll, 60000);
         };
         poll();
     };
@@ -126,6 +166,15 @@ export const SystemMonitor = () => {
                 )}
 
                 <div className="flex items-center gap-2">
+                     {transferStats && (
+                        <div className="flex items-center gap-1.5">
+                            <Gauge size={12} className={`${transferStats.projections.utilizationPct > transferStats.thresholds.warningPct ? 'text-amber-400' : 'text-green-400'}`} />
+                            <span className="text-gray-400">XFER:</span>
+                            <span className={`font-bold ${transferStats.projections.utilizationPct > transferStats.thresholds.warningPct ? 'text-amber-400' : 'text-green-400'}`}>
+                                {transferStats.projections.utilizationPct.toFixed(1)}%
+                            </span>
+                        </div>
+                     )}
                      <button onClick={() => setShowControls(true)} className="hover:text-white text-gray-400 flex items-center gap-1"><Shield size={12} /> Diagnose</button>
                 </div>
             </div>
@@ -181,6 +230,26 @@ export const SystemMonitor = () => {
                              <div className="bg-gray-800 p-2 rounded border border-gray-700">PG: {stats.env?.hasPostgres ? 'OK' : 'MISSING'}</div>
                              <div className="bg-gray-800 p-2 rounded border border-gray-700 truncate" title={stats.env?.publicUrl}>Public URL: {stats.env?.publicUrl}</div>
                         </div>
+
+                        {transferStats && (
+                            <div className="bg-emerald-900/20 border border-emerald-800 p-4 rounded-lg text-xs">
+                                <div className="flex items-center justify-between mb-2">
+                                    <div className="flex items-center gap-2 text-emerald-400 font-bold"><Gauge size={16} /> DB Transfer Budget</div>
+                                    <span className="text-emerald-300">{transferStats.projections.grade}</span>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 text-gray-300 font-mono">
+                                    <div className="bg-gray-800 p-2 rounded border border-gray-700">Used: {transferStats.projections.totalGb.toFixed(3)} GB</div>
+                                    <div className="bg-gray-800 p-2 rounded border border-gray-700">Headroom: {transferStats.projections.headroomGb.toFixed(3)} GB</div>
+                                    <div className="bg-gray-800 p-2 rounded border border-gray-700">Utilization: {transferStats.projections.utilizationPct.toFixed(2)}%</div>
+                                    <div className="bg-gray-800 p-2 rounded border border-gray-700">Budget: {transferStats.assumptions.budgetGb.toFixed(1)} GB</div>
+                                </div>
+                                <div className="mt-3 text-gray-400 space-y-1">
+                                    <div>Message: {transferStats.projections.breakdownGb.message.toFixed(3)} GB • Media Metadata: {transferStats.projections.breakdownGb.mediaMetadata.toFixed(3)} GB</div>
+                                    <div>Health: {transferStats.projections.breakdownGb.healthChecks.toFixed(3)} GB • Webhook Verify: {transferStats.projections.breakdownGb.webhookVerify.toFixed(3)} GB</div>
+                                    <div>Inputs: {transferStats.assumptions.leadsPerWeek}/wk, {transferStats.assumptions.messagesPerLead} msg/lead, cache {(transferStats.assumptions.cacheHitRatio * 100).toFixed(0)}%, batch {transferStats.assumptions.writeBatchSize.toFixed(0)}</div>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             </div>
