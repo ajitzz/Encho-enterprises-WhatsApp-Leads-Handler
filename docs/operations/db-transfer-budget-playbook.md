@@ -238,7 +238,34 @@ Use dynamic batch size based on queue depth and retry pressure:
 You already keep binaries in S3, which is correct. Add two more controls:
 
 - Persist only immutable metadata keys (URL/checksum/type/timestamps), not verbose OCR/extraction payloads in hot rows.
-- Route document enrichment (OCR/classification) to async workers and store outputs in cold/archive tables.
+
+## Overage recovery plan for the 5.5 GB incident (immediate)
+
+If monthly transfer already reached **5.5 GB** against a **5 GB cap**, treat it as a control-plane leak investigation, not a WhatsApp volume issue:
+
+1. Run estimator with your observed numbers and compare source share:
+
+   ```bash
+   LEADS_PER_WEEK=300 MSGS_PER_LEAD=18 DOC_RATE=0.2 CACHE_HIT_RATIO=0.7 WRITE_BATCH_SIZE=4 RETRY_MULTIPLIER=1.05 npm run estimate:transfer
+   ```
+
+2. If the estimator output remains low but Neon usage is high, focus on:
+   - admin polling frequency,
+   - broad dashboard queries (`SELECT *`),
+   - exports/reporting pulls,
+   - webhook retry storms without strict idempotency.
+
+3. Apply emergency budget profile for remainder of month:
+   - Dashboard refresh >= 60s.
+   - Pause non-critical exports.
+   - Cache bot/session reads in Redis with longer TTL.
+   - Increase write batching by +1 step.
+
+4. Keep monthly safety target at **<= 4.0 GB** (80% of cap) so retry spikes do not create another paid overage.
+
+## 24/7 viability verdict for your declared workload
+
+For **300 inquiries/week**, S3 media offload, and URL-only DB metadata, this architecture is viable for always-on operation and should remain far below 5 GB when guardrails are enforced. The practical 10/10 outcome depends on enforcing the controls continuously (cache hit ratio, idempotency, query projection, and polling discipline), not only during peak weeks. Route document enrichment (OCR/classification) to async workers and store outputs in cold/archive tables.
 
 ### 7) Cost-safe retry + idempotency discipline
 Retries can silently double transfer.

@@ -65,6 +65,15 @@ const totalKb = messageTransferKb + documentTransferKb + healthTransferKb + webh
 const totalGb = totalKb / (1024 * 1024);
 const headroomGb = budgetGb - totalGb;
 const utilizationPct = (totalGb / budgetGb) * 100;
+const fixedAlwaysOnKb = healthTransferKb + webhookVerifyTransferKb;
+const trafficKb = messageTransferKb + documentTransferKb;
+const variableKbPerLead =
+  messagesPerLead * effectiveKbPerMessage + docRate * kbPerDocument * retryMultiplier;
+const maxLeadsPerMonthWithinBudget =
+  variableKbPerLead > 0 ? Math.max(0, (budgetGb * 1024 * 1024 - fixedAlwaysOnKb) / variableKbPerLead) : Infinity;
+const maxLeadsPerWeekWithinBudget = maxLeadsPerMonthWithinBudget / weeksPerMonth;
+const budgetRemainingKb = Math.max(0, budgetGb * 1024 * 1024 - fixedAlwaysOnKb);
+const requiredKbPerLeadForBudget = monthlyLeads > 0 ? budgetRemainingKb / monthlyLeads : 0;
 
 const print = (label, value) => {
   console.log(`${label.padEnd(40)} ${value}`);
@@ -92,10 +101,14 @@ print('Monthly message transfer (GB):', (messageTransferKb / (1024 * 1024)).toFi
 print('Monthly media metadata transfer (GB):', (documentTransferKb / (1024 * 1024)).toFixed(3));
 print('Monthly health-check transfer (GB):', (healthTransferKb / (1024 * 1024)).toFixed(3));
 print('Monthly webhook verify transfer (GB):', (webhookVerifyTransferKb / (1024 * 1024)).toFixed(3));
+print('Always-on baseline share:', `${((fixedAlwaysOnKb / totalKb) * 100 || 0).toFixed(2)}%`);
+print('Business traffic share:', `${((trafficKb / totalKb) * 100 || 0).toFixed(2)}%`);
 print('Total monthly transfer (GB):', totalGb.toFixed(3));
 print('Monthly budget (GB):', budgetGb.toFixed(3));
 print('Headroom (GB):', headroomGb.toFixed(3));
 print('Budget utilization:', `${utilizationPct.toFixed(2)}%`);
+print('Max leads/week within budget:', Number.isFinite(maxLeadsPerWeekWithinBudget) ? maxLeadsPerWeekWithinBudget.toFixed(0) : 'Unlimited');
+print('Required KB/lead for budget:', requiredKbPerLeadForBudget.toFixed(2));
 print('Operational grade:', grade());
 
 if (totalGb <= budgetGb) {

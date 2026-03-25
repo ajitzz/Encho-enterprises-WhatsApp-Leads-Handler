@@ -5952,6 +5952,13 @@ const envNumber = (name: string, fallback: number): number => {
     return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const getTransferSeverity = (utilizationPct: number, warningPct = 70, elevatedPct = 85, incidentPct = 100): 'normal' | 'warning' | 'elevated' | 'incident' => {
+    if (utilizationPct >= incidentPct) return 'incident';
+    if (utilizationPct >= elevatedPct) return 'elevated';
+    if (utilizationPct >= warningPct) return 'warning';
+    return 'normal';
+};
+
 const computeTransferBudgetProjection = () => {
     const leadsPerWeek = envNumber('LEADS_PER_WEEK', 300);
     const weeksPerMonth = envNumber('WEEKS_PER_MONTH', 4.345);
@@ -5967,6 +5974,9 @@ const computeTransferBudgetProjection = () => {
     const webhookVerifyCallsPerDay = envNumber('WEBHOOK_VERIFY_CALLS_PER_DAY', 2);
     const kbPerWebhookVerify = envNumber('KB_PER_WEBHOOK_VERIFY', 0.3);
     const budgetGb = envNumber('MONTHLY_BUDGET_GB', 5);
+    const warningPct = 70;
+    const elevatedPct = 85;
+    const incidentPct = 100;
 
     const monthlyLeads = leadsPerWeek * weeksPerMonth;
     const monthlyMessages = monthlyLeads * messagesPerLead;
@@ -5993,6 +6003,10 @@ const computeTransferBudgetProjection = () => {
         return '5.0/10 (Over budget)';
     })();
 
+    const monitoredUsedGb = envNumber('DB_TRANSFER_USED_GB', -1);
+    const monitoredUsageEnabled = monitoredUsedGb >= 0;
+    const monitoredUtilizationPct = monitoredUsageEnabled && budgetGb > 0 ? (monitoredUsedGb / budgetGb) * 100 : utilizationPct;
+
     return {
         assumptions: {
             leadsPerWeek,
@@ -6017,10 +6031,20 @@ const computeTransferBudgetProjection = () => {
                 webhookVerify: webhookVerifyTransferKb / (1024 * 1024),
             }
         },
+        monitored: {
+            source: monitoredUsageEnabled ? 'manual_env' : 'projection_fallback',
+            usedGb: monitoredUsageEnabled ? monitoredUsedGb : totalGb,
+            remainingGb: Math.max(0, budgetGb - (monitoredUsageEnabled ? monitoredUsedGb : totalGb)),
+            utilizationPct: monitoredUtilizationPct,
+            severity: getTransferSeverity(monitoredUtilizationPct, warningPct, elevatedPct, incidentPct),
+            notes: monitoredUsageEnabled
+                ? 'Using DB_TRANSFER_USED_GB from env for real usage tracking.'
+                : 'Set DB_TRANSFER_USED_GB to display real provider usage in dashboard.',
+        },
         thresholds: {
-            warningPct: 70,
-            elevatedPct: 85,
-            incidentPct: 100,
+            warningPct,
+            elevatedPct,
+            incidentPct,
         }
     };
 };
