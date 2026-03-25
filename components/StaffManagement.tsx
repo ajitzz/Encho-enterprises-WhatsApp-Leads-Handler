@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Users, UserPlus, Trash2, Shield, Mail, Search, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
+import { Users, UserPlus, Trash2, Shield, Mail, Search, Loader2, AlertCircle, GitBranch, Briefcase, Activity } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 import { StaffMember, UserRole } from '../types';
 
@@ -12,10 +12,13 @@ export const StaffManagement: React.FC = () => {
   const [newStaff, setNewStaff] = useState({ email: '', name: '', role: 'staff' as UserRole, manager_id: null as string | null });
   const [searchQuery, setSearchQuery] = useState('');
   const [autoDistSettings, setAutoDistSettings] = useState({ auto_enabled: false });
+  const [hierarchy, setHierarchy] = useState<{ scope: string; managers: any[]; staffLoad: any[] } | null>(null);
+  const [hierarchyLoading, setHierarchyLoading] = useState(true);
 
   useEffect(() => {
     fetchStaff();
     fetchSettings();
+    fetchHierarchy();
   }, []);
 
   const fetchSettings = async () => {
@@ -37,6 +40,18 @@ export const StaffManagement: React.FC = () => {
       setError(err.message || 'Failed to fetch staff');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchHierarchy = async () => {
+    try {
+      setHierarchyLoading(true);
+      const overview = await liveApiService.getHierarchyOverview();
+      setHierarchy(overview);
+    } catch (err) {
+      console.error('Failed to fetch hierarchy overview', err);
+    } finally {
+      setHierarchyLoading(false);
     }
   };
 
@@ -94,6 +109,94 @@ export const StaffManagement: React.FC = () => {
 
   return (
     <div className="p-6 max-w-6xl mx-auto font-sans">
+      <div className="mb-8 bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="p-5 border-b border-gray-100 flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+              <GitBranch className="text-indigo-600" size={18} />
+              Hierarchy Command Center
+            </h2>
+            <p className="text-xs text-gray-500 mt-1">
+              Supervise manager to staff ownership, load balancing, and conversion health.
+            </p>
+          </div>
+          <button
+            onClick={fetchHierarchy}
+            className="text-xs px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 font-semibold"
+          >
+            Refresh
+          </button>
+        </div>
+
+        {hierarchyLoading ? (
+          <div className="p-8 text-center">
+            <Loader2 size={24} className="animate-spin text-indigo-600 mx-auto mb-2" />
+            <p className="text-xs text-gray-500 font-medium">Loading hierarchy insights...</p>
+          </div>
+        ) : hierarchy ? (
+          <div className="p-5 space-y-5">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="bg-indigo-50 rounded-xl p-4 border border-indigo-100">
+                <p className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest">Managers</p>
+                <p className="text-2xl font-bold text-indigo-900">{hierarchy.managers.length}</p>
+              </div>
+              <div className="bg-blue-50 rounded-xl p-4 border border-blue-100">
+                <p className="text-[10px] font-bold text-blue-500 uppercase tracking-widest">Staff under supervision</p>
+                <p className="text-2xl font-bold text-blue-900">{hierarchy.staffLoad.length}</p>
+              </div>
+              <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-100">
+                <p className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest">Closed leads</p>
+                <p className="text-2xl font-bold text-emerald-900">
+                  {hierarchy.managers.reduce((sum, manager) => sum + Number(manager.closed_leads || 0), 0)}
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div className="bg-gray-50 rounded-xl border border-gray-100 overflow-hidden">
+                <div className="p-3 border-b border-gray-100 flex items-center gap-2 text-xs font-bold text-gray-600 uppercase tracking-widest">
+                  <Briefcase size={14} /> Manager Supervision
+                </div>
+                <div className="max-h-64 overflow-auto divide-y divide-gray-100">
+                  {hierarchy.managers.map((manager) => (
+                    <div key={manager.manager_id} className="p-3 text-sm">
+                      <div className="font-semibold text-gray-900">{manager.manager_name || manager.manager_email}</div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        Staff: {manager.staff_count} · Total Leads: {manager.total_leads} · Review Pending: {manager.review_pending_leads}
+                      </div>
+                    </div>
+                  ))}
+                  {hierarchy.managers.length === 0 && (
+                    <div className="p-4 text-xs text-gray-400">No manager data in scope.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="bg-gray-50 rounded-xl border border-gray-100 overflow-hidden">
+                <div className="p-3 border-b border-gray-100 flex items-center gap-2 text-xs font-bold text-gray-600 uppercase tracking-widest">
+                  <Activity size={14} /> Staff Workload
+                </div>
+                <div className="max-h-64 overflow-auto divide-y divide-gray-100">
+                  {hierarchy.staffLoad.map((member) => (
+                    <div key={member.staff_id} className="p-3 text-sm">
+                      <div className="font-semibold text-gray-900">{member.staff_name}</div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        Manager: {member.manager_name || 'Unassigned'} · Active: {member.active_leads} · Closed: {member.closed_leads}
+                      </div>
+                    </div>
+                  ))}
+                  {hierarchy.staffLoad.length === 0 && (
+                    <div className="p-4 text-xs text-gray-400">No staff workload data in scope.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="p-5 text-xs text-gray-500">Hierarchy insights are currently unavailable.</div>
+        )}
+      </div>
+
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
