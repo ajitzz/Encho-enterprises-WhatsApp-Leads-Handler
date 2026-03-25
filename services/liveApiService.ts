@@ -587,12 +587,18 @@ export const liveApiService = {
   },
 
   // Action Center & Analytics
-  getActionCenter: async (staffId: string) => {
-    return apiRequest<any>(`/api/analytics/action-center/${staffId}`);
+  getActionCenter: async (staffId?: string) => {
+    const query = staffId ? `?staffId=${encodeURIComponent(staffId)}` : '';
+    return apiRequest<any>(`/api/analytics/action-center${query}`);
   },
 
-  getCommandCenter: async (managerId: string) => {
-    return apiRequest<any>(`/api/analytics/command-center/${managerId}`);
+  getCommandCenter: async (managerId?: string) => {
+    const query = managerId ? `?managerId=${encodeURIComponent(managerId)}` : '';
+    return apiRequest<any>(`/api/analytics/command-center${query}`);
+  },
+
+  getHierarchyOverview: async () => {
+    return apiRequest<any>('/api/analytics/hierarchy-overview');
   },
 
   // Lead Reviews
