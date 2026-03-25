@@ -32,6 +32,14 @@ interface TransferBudgetStats {
         writeBatchSize: number;
         budgetGb: number;
     };
+    monitored: {
+        source: 'manual_env' | 'projection_fallback';
+        usedGb: number;
+        remainingGb: number;
+        utilizationPct: number;
+        severity: 'normal' | 'warning' | 'elevated' | 'incident';
+        notes: string;
+    };
     thresholds: {
         warningPct: number;
         elevatedPct: number;
@@ -79,6 +87,7 @@ export const SystemMonitor = () => {
                     setTransferStats({
                         projections: transferPayload.projections,
                         assumptions: transferPayload.assumptions,
+                        monitored: transferPayload.monitored,
                         thresholds: transferPayload.thresholds,
                     });
                 }
@@ -170,8 +179,8 @@ export const SystemMonitor = () => {
                         <div className="flex items-center gap-1.5">
                             <Gauge size={12} className={`${transferStats.projections.utilizationPct > transferStats.thresholds.warningPct ? 'text-amber-400' : 'text-green-400'}`} />
                             <span className="text-gray-400">XFER:</span>
-                            <span className={`font-bold ${transferStats.projections.utilizationPct > transferStats.thresholds.warningPct ? 'text-amber-400' : 'text-green-400'}`}>
-                                {transferStats.projections.utilizationPct.toFixed(1)}%
+                            <span className={`font-bold ${transferStats.monitored.utilizationPct > transferStats.thresholds.warningPct ? 'text-amber-400' : 'text-green-400'}`}>
+                                {transferStats.monitored.utilizationPct.toFixed(1)}%
                             </span>
                         </div>
                      )}
@@ -238,12 +247,14 @@ export const SystemMonitor = () => {
                                     <span className="text-emerald-300">{transferStats.projections.grade}</span>
                                 </div>
                                 <div className="grid grid-cols-2 gap-2 text-gray-300 font-mono">
-                                    <div className="bg-gray-800 p-2 rounded border border-gray-700">Used: {transferStats.projections.totalGb.toFixed(3)} GB</div>
-                                    <div className="bg-gray-800 p-2 rounded border border-gray-700">Headroom: {transferStats.projections.headroomGb.toFixed(3)} GB</div>
-                                    <div className="bg-gray-800 p-2 rounded border border-gray-700">Utilization: {transferStats.projections.utilizationPct.toFixed(2)}%</div>
+                                    <div className="bg-gray-800 p-2 rounded border border-gray-700">Used: {transferStats.monitored.usedGb.toFixed(3)} GB</div>
+                                    <div className="bg-gray-800 p-2 rounded border border-gray-700">Headroom: {transferStats.monitored.remainingGb.toFixed(3)} GB</div>
+                                    <div className="bg-gray-800 p-2 rounded border border-gray-700">Utilization: {transferStats.monitored.utilizationPct.toFixed(2)}%</div>
                                     <div className="bg-gray-800 p-2 rounded border border-gray-700">Budget: {transferStats.assumptions.budgetGb.toFixed(1)} GB</div>
                                 </div>
                                 <div className="mt-3 text-gray-400 space-y-1">
+                                    <div>Source: {transferStats.monitored.source === 'manual_env' ? 'Provider usage (env)' : 'Estimator projection'} • State: {transferStats.monitored.severity.toUpperCase()}</div>
+                                    <div>{transferStats.monitored.notes}</div>
                                     <div>Message: {transferStats.projections.breakdownGb.message.toFixed(3)} GB • Media Metadata: {transferStats.projections.breakdownGb.mediaMetadata.toFixed(3)} GB</div>
                                     <div>Health: {transferStats.projections.breakdownGb.healthChecks.toFixed(3)} GB • Webhook Verify: {transferStats.projections.breakdownGb.webhookVerify.toFixed(3)} GB</div>
                                     <div>Inputs: {transferStats.assumptions.leadsPerWeek}/wk, {transferStats.assumptions.messagesPerLead} msg/lead, cache {(transferStats.assumptions.cacheHitRatio * 100).toFixed(0)}%, batch {transferStats.assumptions.writeBatchSize.toFixed(0)}</div>
