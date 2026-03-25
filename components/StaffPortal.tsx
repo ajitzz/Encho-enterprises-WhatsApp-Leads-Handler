@@ -32,7 +32,11 @@ import {
   Bot,
   Inbox,
   BarChart3,
-  ShieldCheck
+  ShieldCheck,
+  UserCog,
+  ListFilter,
+  TrendingUp,
+  AlertTriangle
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 import { getLeadScreenshotUploadPath } from '../services/mediaPaths';
@@ -101,7 +105,17 @@ interface LeadActivity {
 }
 
 export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ user, onLogout }) => {
-  const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail' | 'team' | 'action-center' | 'command-center' | 'pending-reviews'>('dashboard');
+  const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail' | 'team' | 'action-center' | 'command-center' | 'pending-reviews' | 'manager-workspace'>('dashboard');
+  const [managerTab, setManagerTab] = useState<'team-leads' | 'team-members' | 'assignments' | 'reports' | 'audit'>('team-leads');
+  const [managerStatusFilter, setManagerStatusFilter] = useState<'all' | 'overdue' | 'unassigned' | 'booked'>('all');
+  const [managerStaffFilter, setManagerStaffFilter] = useState<string>('all');
+  const [assignmentStrategy, setAssignmentStrategy] = useState<'manual' | 'least-loaded' | 'round-robin'>('manual');
+  const [roundRobinCursor, setRoundRobinCursor] = useState(0);
+  const [reportRange, setReportRange] = useState<'7d' | '30d' | '90d'>('30d');
+  const [managerAuditFeed, setManagerAuditFeed] = useState<LeadActivity[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditActionFilter, setAuditActionFilter] = useState<string>('all');
+  const [auditStaffFilter, setAuditStaffFilter] = useState<string>('all');
   const [allLeads, setAllLeads] = useState<Driver[]>([]);
   const [teamStaff, setTeamStaff] = useState<any[]>([]);
   const [selectedLead, setSelectedLead] = useState<Driver | null>(null);
@@ -275,6 +289,50 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     [allLeads]
   );
 
+  const isManagerRole = user.role === 'manager' || user.role === 'admin';
+  const teamMemberIds = React.useMemo(() => new Set(teamStaff.map((staff) => staff.id)), [teamStaff]);
+  const reportStartDate = React.useMemo(() => {
+    const days = reportRange === '7d' ? 7 : reportRange === '30d' ? 30 : 90;
+    const start = new Date();
+    start.setDate(start.getDate() - days);
+    return start;
+  }, [reportRange]);
+  const teamLeads = React.useMemo(
+    () => allLeads.filter((lead) => {
+      const assignedTo = (lead as any).assigned_to;
+      return assignedTo ? (teamMemberIds.has(assignedTo) || assignedTo === user.staffId) : true;
+    }),
+    [allLeads, teamMemberIds, user.staffId]
+  );
+  const scopedReportLeads = React.useMemo(
+    () =>
+      teamLeads.filter((lead) => {
+        const createdAt = new Date((lead as any).created_at || Date.now());
+        return !Number.isNaN(createdAt.getTime()) && createdAt >= reportStartDate;
+      }),
+    [teamLeads, reportStartDate]
+  );
+  const filteredManagerLeads = React.useMemo(() => {
+    return teamLeads.filter((lead) => {
+      const assignedTo = (lead as any).assigned_to || 'unassigned';
+      if (managerStaffFilter !== 'all' && assignedTo !== managerStaffFilter) return false;
+      if (managerStatusFilter === 'overdue') {
+        const nextFollowup = (lead as any).next_followup_at;
+        return !!nextFollowup && new Date(nextFollowup).getTime() < Date.now();
+      }
+      if (managerStatusFilter === 'unassigned') return !assignedTo || assignedTo === 'unassigned';
+      if (managerStatusFilter === 'booked') return (lead as any).lead_status === 'booked';
+      return true;
+    });
+  }, [teamLeads, managerStaffFilter, managerStatusFilter]);
+  const filteredAuditFeed = React.useMemo(() => {
+    return managerAuditFeed.filter((entry) => {
+      if (auditActionFilter !== 'all' && entry.action !== auditActionFilter) return false;
+      if (auditStaffFilter !== 'all' && entry.staff_name !== auditStaffFilter) return false;
+      return true;
+    });
+  }, [managerAuditFeed, auditActionFilter, auditStaffFilter]);
+
   const filteredLeads = React.useMemo(() => {
     const activeLeads = view === 'pool' ? poolLeads : (view === 'my-leads' || view === 'dashboard' ? myLeads : []);
     if (!searchQuery) return activeLeads;
@@ -427,6 +485,28 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     }
   };
 
+  const getStrategyStaffId = () => {
+    if (teamStaff.length === 0) return null;
+    if (assignmentStrategy === 'manual') return teamStaff[0]?.id || null;
+    if (assignmentStrategy === 'least-loaded') {
+      const leadLoadByStaff = teamStaff.map((staff) => ({
+        staffId: staff.id,
+        load: allLeads.filter((lead) => (lead as any).assigned_to === staff.id).length
+      }));
+      leadLoadByStaff.sort((a, b) => a.load - b.load);
+      return leadLoadByStaff[0]?.staffId || null;
+    }
+    const nextStaff = teamStaff[roundRobinCursor % teamStaff.length];
+    setRoundRobinCursor((prev) => prev + 1);
+    return nextStaff?.id || null;
+  };
+
+  const handleStrategyAssign = async (leadId: string) => {
+    const staffId = getStrategyStaffId();
+    if (!staffId) return;
+    await handleAssignLead(leadId, staffId);
+  };
+
   const handleReassignLead = async (leadId: string, staffId: string) => {
     try {
       setLoading(true);
@@ -445,6 +525,28 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    const loadManagerAudit = async () => {
+      if (!isManagerRole || managerTab !== 'audit') return;
+      setAuditLoading(true);
+      try {
+        const scopedLeadIds = teamLeads.slice(0, 12).map((lead) => lead.id);
+        const batches = await Promise.all(
+          scopedLeadIds.map((leadId) => liveApiService.getLeadActivity(leadId).catch(() => []))
+        );
+        const combined = batches.flat().slice(0, 200) as LeadActivity[];
+        combined.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        setManagerAuditFeed(combined);
+      } catch (err) {
+        console.error('Failed to fetch manager audit feed', err);
+      } finally {
+        setAuditLoading(false);
+      }
+    };
+
+    loadManagerAudit();
+  }, [isManagerRole, managerTab, teamLeads]);
 
   const handleLogAction = async (action: string) => {
     if (!selectedLead) return;
@@ -576,6 +678,24 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         </button>
 
         {(user.role === 'manager' || user.role === 'admin') && (
+          <button 
+            onClick={() => setView('manager-workspace')}
+            className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white p-5 rounded-3xl border border-blue-500 shadow-sm flex items-center justify-between group active:scale-95 transition-all"
+          >
+            <div className="flex items-center gap-4">
+              <div className="bg-white/20 text-white p-3 rounded-2xl">
+                <UserCog size={24} />
+              </div>
+              <div className="text-left">
+                <h3 className="font-bold">Supervised Workspace</h3>
+                <p className="text-xs text-blue-100">Team leads, assignments, reports & audit</p>
+              </div>
+            </div>
+            <ChevronRight className="text-blue-100 group-hover:text-white transition-colors" />
+          </button>
+        )}
+
+        {(user.role === 'manager' || user.role === 'admin') && (
           <div className="grid grid-cols-2 gap-3">
             <button 
               onClick={() => setView('command-center')}
@@ -596,24 +716,6 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
               <h3 className="font-bold text-gray-900 text-xs">Pending Reviews</h3>
             </button>
           </div>
-        )}
-
-        {(user.role === 'manager' || user.role === 'admin') && (
-          <button 
-            onClick={() => setView('team' as any)}
-            className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center justify-between group active:scale-95 transition-all"
-          >
-            <div className="flex items-center gap-4">
-              <div className="bg-purple-100 text-purple-600 p-3 rounded-2xl">
-                <Users size={24} />
-              </div>
-              <div className="text-left">
-                <h3 className="font-bold text-gray-900">Team Management</h3>
-                <p className="text-xs text-gray-500">Supervise and monitor your staff</p>
-              </div>
-            </div>
-            <ChevronRight className="text-gray-300 group-hover:text-gray-900 transition-colors" />
-          </button>
         )}
 
         <button 
@@ -1330,17 +1432,370 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     </div>
   );
 
+  const renderManagerWorkspace = () => {
+    const managerTabs = [
+      { key: 'team-leads', label: 'Team Leads', icon: ClipboardList },
+      { key: 'team-members', label: 'Team Members', icon: UserCog },
+      { key: 'assignments', label: 'Assignments', icon: ListFilter },
+      { key: 'reports', label: 'Reports', icon: TrendingUp },
+      { key: 'audit', label: 'Audit', icon: ShieldCheck }
+    ] as const;
+
+    const staffLoad = teamStaff.map((staff) => {
+      const leads = allLeads.filter((lead) => (lead as any).assigned_to === staff.id);
+      const overdue = leads.filter((lead) => {
+        const followup = (lead as any).next_followup_at;
+        return followup && new Date(followup).getTime() < Date.now();
+      }).length;
+      const booked = leads.filter((lead) => (lead as any).lead_status === 'booked').length;
+      return { staff, leads: leads.length, overdue, booked };
+    });
+    const reportStaffLoad = teamStaff.map((staff) => {
+      const leads = scopedReportLeads.filter((lead) => (lead as any).assigned_to === staff.id);
+      const overdue = leads.filter((lead) => {
+        const followup = (lead as any).next_followup_at;
+        return followup && new Date(followup).getTime() < Date.now();
+      }).length;
+      const booked = leads.filter((lead) => (lead as any).lead_status === 'booked').length;
+      return { staff, leads: leads.length, overdue, booked };
+    });
+
+    const totalTeamLeads = scopedReportLeads.length;
+    const unassignedLeads = scopedReportLeads.filter((lead) => !(lead as any).assigned_to).length;
+    const overdueTeamLeads = scopedReportLeads.filter((lead) => {
+      const followup = (lead as any).next_followup_at;
+      return followup && new Date(followup).getTime() < Date.now();
+    }).length;
+    const bookedLeads = scopedReportLeads.filter((lead) => (lead as any).lead_status === 'booked').length;
+    const auditActions = Array.from(new Set(managerAuditFeed.map((entry) => entry.action))).sort();
+    const auditStaffMembers = Array.from(new Set(managerAuditFeed.map((entry) => entry.staff_name).filter(Boolean))).sort();
+
+    return (
+      <div className="h-full flex flex-col lg:flex-row animate-in fade-in duration-300">
+        <aside className="hidden lg:flex lg:w-72 xl:w-80 bg-white border-r border-gray-200 p-5 flex-col gap-4">
+          <div>
+            <p className="text-[10px] font-bold text-blue-600 uppercase tracking-widest">Manager Workspace</p>
+            <h2 className="text-xl font-bold text-gray-900 mt-1">Supervised Portal</h2>
+            <p className="text-xs text-gray-500 mt-1">Monitor team health, rebalance workload, and close faster.</p>
+          </div>
+          <div className="space-y-2">
+            {managerTabs.map(({ key, label, icon: Icon }) => (
+              <button
+                key={key}
+                onClick={() => setManagerTab(key)}
+                className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl text-sm font-semibold transition-all ${
+                  managerTab === key ? 'bg-black text-white shadow-lg' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <Icon size={16} />
+                  {label}
+                </span>
+                <ChevronRight size={14} />
+              </button>
+            ))}
+          </div>
+        </aside>
+
+        <div className="flex-1 min-h-0 flex flex-col">
+          <div className="p-4 md:p-6 bg-white border-b border-gray-100 sticky top-0 z-10 space-y-4">
+            <div className="flex items-center gap-3">
+              <button onClick={() => setView('dashboard')} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
+                <ArrowLeft size={20} />
+              </button>
+              <div>
+                <h2 className="text-lg md:text-2xl font-bold text-gray-900">Manager Workspace</h2>
+                <p className="text-xs text-gray-500">Desktop-grade supervision with mobile-optimized actions.</p>
+              </div>
+            </div>
+
+            <div className="lg:hidden flex gap-2 overflow-x-auto pb-1">
+              {managerTabs.map(({ key, label, icon: Icon }) => (
+                <button
+                  key={key}
+                  onClick={() => setManagerTab(key)}
+                  className={`flex items-center gap-1.5 whitespace-nowrap px-3 py-2 rounded-xl text-xs font-bold ${
+                    managerTab === key ? 'bg-black text-white' : 'bg-gray-100 text-gray-600'
+                  }`}
+                >
+                  <Icon size={14} />
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 md:gap-3">
+              <div className="bg-blue-50 border border-blue-100 rounded-2xl p-3">
+                <p className="text-[10px] uppercase font-bold tracking-wider text-blue-700">Team Leads</p>
+                <p className="text-xl font-bold text-blue-900">{totalTeamLeads}</p>
+              </div>
+              <div className="bg-amber-50 border border-amber-100 rounded-2xl p-3">
+                <p className="text-[10px] uppercase font-bold tracking-wider text-amber-700">Overdue</p>
+                <p className="text-xl font-bold text-amber-900">{overdueTeamLeads}</p>
+              </div>
+              <div className="bg-violet-50 border border-violet-100 rounded-2xl p-3">
+                <p className="text-[10px] uppercase font-bold tracking-wider text-violet-700">Unassigned</p>
+                <p className="text-xl font-bold text-violet-900">{unassignedLeads}</p>
+              </div>
+              <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-3">
+                <p className="text-[10px] uppercase font-bold tracking-wider text-emerald-700">Booked</p>
+                <p className="text-xl font-bold text-emerald-900">{bookedLeads}</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-gray-500">Reporting Window</p>
+              {(['7d', '30d', '90d'] as const).map((range) => (
+                <button
+                  key={range}
+                  onClick={() => setReportRange(range)}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${
+                    reportRange === range ? 'bg-black text-white' : 'bg-gray-100 text-gray-600'
+                  }`}
+                >
+                  {range}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4">
+            {managerTab === 'team-leads' && (
+              <>
+                <div className="bg-white rounded-2xl border border-gray-100 p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <select
+                    className="px-3 py-2 rounded-xl bg-gray-50 text-sm border border-transparent focus:border-blue-300"
+                    value={managerStaffFilter}
+                    onChange={(e) => setManagerStaffFilter(e.target.value)}
+                  >
+                    <option value="all">All Staff</option>
+                    {teamStaff.map((staff) => (
+                      <option key={staff.id} value={staff.id}>{staff.name}</option>
+                    ))}
+                  </select>
+                  <select
+                    className="px-3 py-2 rounded-xl bg-gray-50 text-sm border border-transparent focus:border-blue-300"
+                    value={managerStatusFilter}
+                    onChange={(e) => setManagerStatusFilter(e.target.value as any)}
+                  >
+                    <option value="all">All Lead States</option>
+                    <option value="overdue">Overdue Follow-ups</option>
+                    <option value="unassigned">Unassigned</option>
+                    <option value="booked">Booked</option>
+                  </select>
+                </div>
+
+                <div className="hidden lg:block bg-white rounded-2xl border border-gray-100 overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50 text-xs uppercase tracking-wider text-gray-500">
+                      <tr>
+                        <th className="text-left p-3">Lead</th>
+                        <th className="text-left p-3">Owner</th>
+                        <th className="text-left p-3">Status</th>
+                        <th className="text-left p-3">Follow-up</th>
+                        <th className="text-right p-3">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredManagerLeads.slice(0, 60).map((lead) => {
+                        const owner = teamStaff.find((staff) => staff.id === (lead as any).assigned_to)?.name || 'Unassigned';
+                        const followup = (lead as any).next_followup_at;
+                        const isOverdue = followup && new Date(followup).getTime() < Date.now();
+                        return (
+                          <tr key={lead.id} className="border-t border-gray-100">
+                            <td className="p-3 font-semibold text-gray-900">{lead.name}</td>
+                            <td className="p-3 text-gray-600">{owner}</td>
+                            <td className="p-3 text-gray-600">{toLabel((lead as any).lead_status) || 'New'}</td>
+                            <td className={`p-3 ${isOverdue ? 'text-red-600 font-semibold' : 'text-gray-600'}`}>{formatDateTime(followup)}</td>
+                            <td className="p-3">
+                              <div className="flex justify-end gap-2">
+                                <button onClick={() => handleOpenDetail(lead)} className="px-3 py-1.5 rounded-lg bg-black text-white text-xs font-bold">Open</button>
+                                {!(lead as any).assigned_to && teamStaff[0] && (
+                                  <button onClick={() => handleStrategyAssign(lead.id)} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-bold">Smart Assign</button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="lg:hidden space-y-3">
+                  {filteredManagerLeads.slice(0, 30).map((lead) => (
+                    <div key={lead.id} className="bg-white rounded-2xl border border-gray-100 p-4">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="font-bold text-gray-900 truncate">{lead.name}</p>
+                        <span className="text-[10px] uppercase tracking-wider font-bold text-gray-500">{toLabel((lead as any).lead_status)}</span>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-1">Owner: {teamStaff.find((staff) => staff.id === (lead as any).assigned_to)?.name || 'Unassigned'}</p>
+                      <p className="text-xs text-gray-500">Follow-up: {formatDateTime((lead as any).next_followup_at)}</p>
+                      <button onClick={() => handleOpenDetail(lead)} className="mt-3 w-full py-2 rounded-xl bg-black text-white text-xs font-bold">Open Lead</button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {managerTab === 'team-members' && (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                {staffLoad.map(({ staff, leads, overdue, booked }) => (
+                  <div key={staff.id} className="bg-white border border-gray-100 rounded-2xl p-4">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-bold text-gray-900">{staff.name}</h3>
+                      <span className={`text-[10px] px-2 py-1 rounded-full font-bold ${staff.is_active_for_auto_dist ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}>
+                        {staff.is_active_for_auto_dist ? 'Online' : 'Offline'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 mt-3 text-center">
+                      <div className="bg-gray-50 rounded-xl py-2">
+                        <p className="text-[10px] text-gray-500 uppercase">Leads</p>
+                        <p className="font-bold">{leads}</p>
+                      </div>
+                      <div className="bg-amber-50 rounded-xl py-2">
+                        <p className="text-[10px] text-amber-600 uppercase">Overdue</p>
+                        <p className="font-bold text-amber-700">{overdue}</p>
+                      </div>
+                      <div className="bg-emerald-50 rounded-xl py-2">
+                        <p className="text-[10px] text-emerald-600 uppercase">Booked</p>
+                        <p className="font-bold text-emerald-700">{booked}</p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {managerTab === 'assignments' && (
+              <div className="bg-white rounded-2xl border border-gray-100 p-4 space-y-3">
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                  <p className="text-sm font-bold text-gray-900">Quick Assignment Queue</p>
+                  <select
+                    className="px-3 py-2 rounded-xl bg-gray-50 text-xs font-semibold border border-transparent focus:border-blue-300"
+                    value={assignmentStrategy}
+                    onChange={(e) => setAssignmentStrategy(e.target.value as any)}
+                  >
+                    <option value="manual">Manual assignment</option>
+                    <option value="least-loaded">Auto: Least loaded</option>
+                    <option value="round-robin">Auto: Round robin</option>
+                  </select>
+                </div>
+                {teamLeads.filter((lead) => !(lead as any).assigned_to).slice(0, 20).map((lead) => (
+                  <div key={lead.id} className="p-3 rounded-xl bg-gray-50 flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+                    <div>
+                      <p className="font-semibold text-sm text-gray-900">{lead.name}</p>
+                      <p className="text-xs text-gray-500">{(lead as any).phone_number || 'No phone'}</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {assignmentStrategy !== 'manual' && (
+                        <button onClick={() => handleStrategyAssign(lead.id)} className="px-3 py-1.5 rounded-lg bg-black text-white text-xs font-bold">
+                          Auto Assign
+                        </button>
+                      )}
+                      {teamStaff.slice(0, 4).map((staff) => (
+                        <button key={staff.id} onClick={() => handleAssignLead(lead.id, staff.id)} className="px-3 py-1.5 rounded-lg bg-white border border-gray-200 text-xs font-bold hover:bg-blue-50 hover:border-blue-200">
+                          Assign {staff.name.split(' ')[0]}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {managerTab === 'reports' && (
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                {reportStaffLoad.map(({ staff, leads, overdue, booked }) => {
+                  const conversion = leads > 0 ? Math.round((booked / leads) * 100) : 0;
+                  return (
+                    <div key={staff.id} className="bg-white border border-gray-100 rounded-2xl p-4">
+                      <div className="flex items-center justify-between">
+                        <p className="font-bold text-gray-900">{staff.name}</p>
+                        <span className="text-[10px] px-2 py-1 rounded-full bg-blue-50 text-blue-700 font-bold uppercase">{reportRange}</span>
+                      </div>
+                      <div className="mt-3 space-y-2">
+                        <div className="flex justify-between text-xs"><span>Total Leads</span><span className="font-bold">{leads}</span></div>
+                        <div className="flex justify-between text-xs"><span>Booked</span><span className="font-bold text-emerald-700">{booked}</span></div>
+                        <div className="flex justify-between text-xs"><span>Overdue</span><span className="font-bold text-amber-700">{overdue}</span></div>
+                        <div className="flex justify-between text-xs"><span>Conversion</span><span className="font-bold text-blue-700">{conversion}%</span></div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {managerTab === 'audit' && (
+              <div className="bg-white rounded-2xl border border-gray-100 p-4">
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-3">
+                  <p className="text-sm font-bold text-gray-900">Latest Team Activity</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    <select
+                      className="px-3 py-2 rounded-xl bg-gray-50 text-xs border border-transparent focus:border-blue-300"
+                      value={auditActionFilter}
+                      onChange={(e) => setAuditActionFilter(e.target.value)}
+                    >
+                      <option value="all">All actions</option>
+                      {auditActions.map((action) => (
+                        <option key={action} value={action}>{toLabel(action)}</option>
+                      ))}
+                    </select>
+                    <select
+                      className="px-3 py-2 rounded-xl bg-gray-50 text-xs border border-transparent focus:border-blue-300"
+                      value={auditStaffFilter}
+                      onChange={(e) => setAuditStaffFilter(e.target.value)}
+                    >
+                      <option value="all">All staff</option>
+                      {auditStaffMembers.map((staffName) => (
+                        <option key={staffName} value={staffName}>{staffName}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  {auditLoading && (
+                    <div className="py-6 flex items-center justify-center text-gray-500 text-sm">
+                      <Loader2 className="animate-spin mr-2" size={16} />
+                      Loading audit feed...
+                    </div>
+                  )}
+                  {!auditLoading && filteredAuditFeed.slice(0, 20).map((activity) => (
+                    <div key={activity.id} className="p-3 rounded-xl bg-gray-50">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs font-bold uppercase tracking-wide text-gray-700">{activity.action.replace(/_/g, ' ')}</p>
+                        <p className="text-[10px] text-gray-500">{formatDateTime(activity.created_at)}</p>
+                      </div>
+                      <p className="text-xs text-gray-600 mt-1 line-clamp-2">{activity.notes || 'No note provided.'}</p>
+                      <p className="text-[10px] text-gray-400 mt-1">by {activity.staff_name || 'System'}</p>
+                    </div>
+                  ))}
+                  {!auditLoading && filteredAuditFeed.length === 0 && (
+                    <div className="py-10 text-center text-gray-500 text-sm flex flex-col items-center gap-2">
+                      <AlertTriangle size={18} />
+                      No audit activity matches the selected filters.
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col font-sans max-w-md mx-auto border-x border-gray-200 shadow-2xl">
+    <div className={`min-h-screen bg-gray-50 flex flex-col font-sans mx-auto border-gray-200 ${isManagerRole ? 'max-w-[1400px] lg:border-x lg:shadow-xl' : 'max-w-md border-x shadow-2xl'}`}>
       {/* Top Bar */}
       {view !== 'detail' && (
-        <header className="bg-white px-6 py-4 border-b border-gray-100 flex items-center justify-between sticky top-0 z-20">
+        <header className="bg-white px-4 md:px-6 py-4 border-b border-gray-100 flex items-center justify-between sticky top-0 z-20">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-black text-white flex items-center justify-center font-bold">
               E
             </div>
             <div>
-              <h1 className="text-sm font-bold text-gray-900">Encho Staff</h1>
+              <h1 className="text-sm font-bold text-gray-900">{isManagerRole ? 'Encho Workspace' : 'Encho Staff'}</h1>
               <p className="text-[10px] text-emerald-600 font-bold uppercase tracking-widest flex items-center gap-1">
                 <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                 Online
@@ -1387,6 +1842,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         {view === 'pending-reviews' && (
           <PendingReviews managerId={user.staffId} onBack={() => setView('dashboard')} />
         )}
+        {view === 'manager-workspace' && isManagerRole && renderManagerWorkspace()}
       </main>
 
       {/* Modals */}
@@ -1405,7 +1861,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
       {/* Bottom Navigation */}
       {view !== 'detail' && (
-        <nav className="bg-white border-t border-gray-100 px-6 py-3 flex items-center justify-around sticky bottom-0 z-20 pb-8">
+        <nav className="bg-white border-t border-gray-100 px-4 md:px-6 py-3 flex items-center justify-around sticky bottom-0 z-20 pb-8">
           <button 
             onClick={() => setView('dashboard')}
             className={`flex flex-col items-center gap-1 transition-all ${view === 'dashboard' ? 'text-blue-600' : 'text-gray-400'}`}
@@ -1429,11 +1885,11 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           </button>
           {(user.role === 'manager' || user.role === 'admin') && (
             <button 
-              onClick={() => setView('team')}
-              className={`flex flex-col items-center gap-1 transition-all ${view === 'team' ? 'text-blue-600' : 'text-gray-400'}`}
+              onClick={() => setView('manager-workspace')}
+              className={`flex flex-col items-center gap-1 transition-all ${view === 'manager-workspace' ? 'text-blue-600' : 'text-gray-400'}`}
             >
-              <Users size={20} className="stroke-[2.5px]" />
-              <span className="text-[10px] font-bold uppercase tracking-widest">Team</span>
+              <UserCog size={20} className="stroke-[2.5px]" />
+              <span className="text-[10px] font-bold uppercase tracking-widest">Manage</span>
             </button>
           )}
         </nav>

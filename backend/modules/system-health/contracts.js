@@ -1,6 +1,6 @@
-const SYSTEM_HEALTH_SCHEMA_VERSION = '1.0.0';
+export const SYSTEM_HEALTH_SCHEMA_VERSION = '1.0.0';
 
-function validateSystemHealthSnapshot(input = {}) {
+export function validateSystemHealthSnapshot(input = {}) {
   const {
     status,
     timestamp,
@@ -35,7 +35,7 @@ function validateSystemHealthSnapshot(input = {}) {
   };
 }
 
-module.exports = {
+export default {
   SYSTEM_HEALTH_SCHEMA_VERSION,
   validateSystemHealthSnapshot,
 };

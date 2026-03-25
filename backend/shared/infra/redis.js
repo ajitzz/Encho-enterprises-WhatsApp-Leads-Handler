@@ -1,4 +1,4 @@
-const { Redis } = require('@upstash/redis');
+import { Redis } from '@upstash/redis';
 
 let redis = null;
 
@@ -14,4 +14,5 @@ if (url && token && !isPlaceholder(url) && !isPlaceholder(token)) {
   });
 }
 
-module.exports = { redis };
+export { redis };
+export default { redis };
