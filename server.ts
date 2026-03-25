@@ -3819,7 +3819,7 @@ const authMiddleware = async (req, res, next) => {
 
 // --- STAFF MANAGEMENT ---
 apiRouter.use('/reviews', authMiddleware, leadReviewRouter);
-apiRouter.use('/analytics', analyticsRouter);
+apiRouter.use('/analytics', authMiddleware, analyticsRouter);
 
 apiRouter.get('/auth/me', authMiddleware, (req, res) => {
     res.json({
