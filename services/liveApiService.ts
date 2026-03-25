@@ -607,16 +607,17 @@ export const liveApiService = {
     });
   },
 
-  getPendingReviews: async (managerId: string) => {
-    return apiRequest<any[]>(`/api/reviews/pending/${managerId}`);
+  getPendingReviews: async (managerId: string, status: 'pending' | 'approved' | 'rejected' | 'returned_for_call_again' | 'all' = 'pending') => {
+    return apiRequest<any[]>(`/api/reviews/inbox/${managerId}?status=${encodeURIComponent(status)}`);
   },
 
-  reviewDecision: async (reviewId: string, data: { decision: 'approved' | 'rejected'; feedback?: string }) => {
+  reviewDecision: async (reviewId: string, data: { decision: 'approved' | 'rejected' | 'returned_for_call_again'; feedback?: string; reasonCode?: string }) => {
     return apiRequest(`/api/reviews/${reviewId}/decision`, {
       method: 'POST',
       body: JSON.stringify({
         status: data.decision,
-        feedback: data.feedback || ''
+        feedback: data.feedback || '',
+        reasonCode: data.reasonCode || ''
       })
     });
   }
