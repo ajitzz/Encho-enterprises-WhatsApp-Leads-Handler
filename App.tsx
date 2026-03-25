@@ -222,7 +222,7 @@ export default function App() {
 
   useEffect(() => {
       if (!isAuthenticated || dataSource !== 'live' || !userProfile) return;
-      if (userProfile.role !== 'manager' && userProfile.role !== 'admin') return;
+      if (userProfile.role !== 'admin') return;
 
       const seenKey = `due_alerts_seen:${userProfile.staffId || userProfile.email || userProfile.role}`;
       const seenIds = new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
@@ -284,8 +284,8 @@ export default function App() {
       );
   }
 
-  // --- STAFF PORTAL VIEW ---
-  if (userProfile?.role === 'staff') {
+  // --- STAFF / MANAGER PORTAL VIEW ---
+  if (userProfile?.role === 'staff' || userProfile?.role === 'manager') {
       return (
           <StaffPortal 
               user={userProfile} 
