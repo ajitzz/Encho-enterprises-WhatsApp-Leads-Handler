@@ -4,6 +4,7 @@ import { withDb } from '../../../server/db.js';
 import { log } from '../../shared/infra/logger.js';
 
 const router = Router();
+const DECISION_STATUSES = ['approved', 'rejected', 'returned_for_call_again'] as const;
 
 // Submit a lead for review
 router.post('/:id/submit', async (req, res) => {
@@ -69,12 +70,13 @@ router.post('/:id/submit', async (req, res) => {
     }
 });
 
-// Get pending reviews for a manager
-router.get('/pending/:managerId', async (req, res) => {
+const getInboxReviews = async (req: any, res: any, forcedStatus?: string) => {
     const { managerId } = req.params;
     const actor = (req as any).user || {};
     const actorRole = String(actor.role || '').toLowerCase();
     const actorStaffId = String(actor.staffId || '').trim();
+    const status = String(forcedStatus || req.query?.status || 'pending').trim().toLowerCase();
+    const normalizedStatus = status === 'returned' ? 'returned_for_call_again' : status;
 
     if (!actorStaffId) return res.status(401).json({ error: 'Unauthorized' });
     if (actorRole === 'manager' && managerId !== actorStaffId) {
@@ -86,20 +88,32 @@ router.get('/pending/:managerId', async (req, res) => {
 
     try {
         const reviews = await withDb(async (client) => {
+            const whereStatus = normalizedStatus === 'all' ? '' : 'AND r.status = $2';
+            const params = normalizedStatus === 'all' ? [managerId] : [managerId, normalizedStatus];
             const result = await client.query(`
-                SELECT r.*, c.name as candidate_name, s.name as staff_name
+                SELECT r.*, c.name as lead_name, s.name as staff_name
                 FROM lead_reviews r
                 JOIN candidates c ON r.candidate_id = c.id
                 JOIN staff_members s ON r.staff_id = s.id
-                WHERE r.manager_id = $1 AND r.status = 'pending'
-                ORDER BY r.created_at DESC
-            `, [managerId]);
+                WHERE r.manager_id = $1 ${whereStatus}
+                ORDER BY r.updated_at DESC, r.created_at DESC
+            `, params);
             return result.rows;
         });
         res.json(reviews);
     } catch (error: any) {
         res.status(500).json({ error: error.message });
     }
+};
+
+// Get reviews for review inbox sections (pending + history)
+router.get('/inbox/:managerId', async (req, res) => {
+    return getInboxReviews(req, res);
+});
+
+// Backward compatible route
+router.get('/pending/:managerId', async (req, res) => {
+    return getInboxReviews(req, res, 'pending');
 });
 
 // Approve or reject a review
@@ -108,12 +122,17 @@ router.post('/:reviewId/decision', async (req, res) => {
     const actor = (req as any).user || {};
     const actorRole = String(actor.role || '').toLowerCase();
     const actorStaffId = String(actor.staffId || req.body?.managerId || '').trim();
-    const status = String(req.body?.status || req.body?.decision || '').trim().toLowerCase(); // approved/rejected
+    const status = String(req.body?.status || req.body?.decision || '').trim().toLowerCase();
+    const normalizedStatus = status === 'returned' ? 'returned_for_call_again' : status;
     const feedback = String(req.body?.feedback || '').trim();
+    const reasonCode = String(req.body?.reasonCode || req.body?.reason_code || '').trim();
 
     if (!actorStaffId) return res.status(401).json({ error: 'Unauthorized' });
     if (!['manager', 'admin'].includes(actorRole)) return res.status(403).json({ error: 'Only managers/admins can decide reviews' });
-    if (!['approved', 'rejected'].includes(status)) return res.status(400).json({ error: 'Invalid decision status' });
+    if (!DECISION_STATUSES.includes(normalizedStatus as any)) return res.status(400).json({ error: 'Invalid decision status' });
+    if (['rejected', 'returned_for_call_again'].includes(normalizedStatus) && !reasonCode) {
+        return res.status(400).json({ error: 'Reason code is required for rejection/return decisions' });
+    }
 
     try {
         await withDb(async (client) => {
@@ -128,11 +147,15 @@ router.post('/:reviewId/decision', async (req, res) => {
                 UPDATE lead_reviews 
                 SET status = $1, manager_feedback = $2, updated_at = NOW()
                 WHERE id = $3
-            `, [status, feedback, reviewId]);
+            `, [normalizedStatus, feedback, reviewId]);
 
             // 2. Update lead status
-            const newLeadStatus = status === 'approved' ? 'closed' : 'assigned';
-            const newReviewStatus = status;
+            const newLeadStatus = normalizedStatus === 'approved'
+                ? 'closed'
+                : normalizedStatus === 'rejected'
+                    ? 'rejected'
+                    : 'assigned';
+            const newReviewStatus = normalizedStatus;
             await client.query(`
                 UPDATE candidates 
                 SET lead_status = $1, review_status = $2 
@@ -143,9 +166,14 @@ router.post('/:reviewId/decision', async (req, res) => {
             await client.query(`
                 INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes)
                 VALUES ($1, $2, $3, $4)
-            `, [candidateId, actorStaffId, `review_${status}`, `Review ${status} by manager. Feedback: ${feedback}`]);
+            `, [
+                candidateId,
+                actorStaffId,
+                `review_${normalizedStatus}`,
+                `Review ${normalizedStatus} by manager. Reason: ${reasonCode || 'n/a'}. Feedback: ${feedback || 'n/a'}`
+            ]);
 
-            log({ module: 'lead-review', message: `review.${status}`, meta: { reviewId, candidateId } });
+            log({ module: 'lead-review', message: `review.${normalizedStatus}`, meta: { reviewId, candidateId, reasonCode } });
             res.json({ success: true });
         });
     } catch (error: any) {
