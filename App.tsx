@@ -32,6 +32,7 @@ const FALLBACK_CLIENT_ID = "764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.g
 const ENV_CLIENT_ID = (import.meta as any)?.env?.VITE_GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_ID = (ENV_CLIENT_ID || FALLBACK_CLIENT_ID).replace(/^['"]|['"]$/g, '').trim();
 const DriverExcelReport = lazy(() => import('./components/DriverExcelReport.tsx').then((module) => ({ default: module.DriverExcelReport })));
+const getDueAlertInstanceId = (alert: DueAlertItem) => `${alert.event_id}:${new Date(alert.scheduled_at).toISOString()}`;
 
 export default function App() {
   const [isShowcaseMode, setIsShowcaseMode] = useState(false);
@@ -225,16 +226,23 @@ export default function App() {
       if (userProfile.role !== 'admin') return;
 
       const seenKey = `due_alerts_seen:${userProfile.staffId || userProfile.email || userProfile.role}`;
-      const seenIds = new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
+      const readSeenIds = () => new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
 
       const syncDueAlerts = async () => {
           try {
               const alerts = await liveApiService.getDueAlerts();
-              const fresh = alerts.filter((item) => !seenIds.has(item.event_id));
+              const seenIds = readSeenIds();
+              const fresh = alerts.filter((item) => {
+                  const instanceId = getDueAlertInstanceId(item);
+                  return !seenIds.has(instanceId);
+              });
               if (fresh.length > 0) {
                   setDueAlertQueue(prev => {
-                      const existing = new Set(prev.map(entry => entry.event_id));
-                      return [...prev, ...fresh.filter(entry => !existing.has(entry.event_id))];
+                      const existing = new Set(prev.map(entry => getDueAlertInstanceId(entry)));
+                      if (activeDueAlert?.event_id) {
+                          existing.add(getDueAlertInstanceId(activeDueAlert));
+                      }
+                      return [...prev, ...fresh.filter(entry => !existing.has(getDueAlertInstanceId(entry)))];
                   });
               }
           } catch (e) {
@@ -245,7 +253,7 @@ export default function App() {
       syncDueAlerts();
       const timer = setInterval(syncDueAlerts, 30000);
       return () => clearInterval(timer);
-  }, [isAuthenticated, dataSource, userProfile]);
+  }, [isAuthenticated, dataSource, userProfile, activeDueAlert?.event_id]);
 
   useEffect(() => {
       if (activeDueAlert || dueAlertQueue.length === 0) return;
@@ -266,8 +274,16 @@ export default function App() {
       }
       const seenKey = `due_alerts_seen:${userProfile.staffId || userProfile.email || userProfile.role}`;
       const seenIds = new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
-      seenIds.add(eventId);
+      if (activeDueAlert && activeDueAlert.event_id === eventId) {
+          seenIds.add(getDueAlertInstanceId(activeDueAlert));
+      }
       localStorage.setItem(seenKey, JSON.stringify(Array.from(seenIds)));
+      setDueAlertQueue(prev => prev.filter(alert => {
+          if (activeDueAlert && activeDueAlert.event_id === eventId) {
+              return getDueAlertInstanceId(alert) !== getDueAlertInstanceId(activeDueAlert);
+          }
+          return alert.event_id !== eventId;
+      }));
       setActiveDueAlert(null);
   };
 

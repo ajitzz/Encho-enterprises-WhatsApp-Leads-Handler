@@ -49,6 +49,8 @@ import { LeadReviewModal } from './LeadReviewModal.tsx';
 import { ScheduledAlertPopup } from './ScheduledAlertPopup.tsx';
 import { DueAlertItem } from '../services/liveApiService.ts';
 
+const getDueAlertInstanceId = (alert: DueAlertItem) => `${alert.event_id}:${new Date(alert.scheduled_at).toISOString()}`;
+
 const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTime }) => {
   const [timeLeft, setTimeLeft] = useState<number>(0);
   const WINDOW_DURATION = 24 * 60 * 60 * 1000; // 24 hours
@@ -411,14 +413,14 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       try {
         const alerts = await liveApiService.getDueAlerts();
         const seenIds = readSeenIds();
-        const fresh = alerts.filter(alert => !seenIds.has(alert.event_id));
+        const fresh = alerts.filter(alert => !seenIds.has(getDueAlertInstanceId(alert)));
         if (fresh.length > 0) {
           setDueAlertQueue(prev => {
-            const existing = new Set(prev.map(item => item.event_id));
+            const existing = new Set(prev.map(item => getDueAlertInstanceId(item)));
             if (activeDueAlert?.event_id) {
-              existing.add(activeDueAlert.event_id);
+              existing.add(getDueAlertInstanceId(activeDueAlert));
             }
-            return [...prev, ...fresh.filter(item => !existing.has(item.event_id))];
+            return [...prev, ...fresh.filter(item => !existing.has(getDueAlertInstanceId(item)))];
           });
         }
       } catch (err) {
@@ -436,7 +438,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     const next = dueAlertQueue[0];
     const seenKey = `due_alerts_seen:${user.staffId || user.email || 'staff'}`;
     const seenIds = new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
-    if (seenIds.has(next.event_id)) {
+    if (seenIds.has(getDueAlertInstanceId(next))) {
       setDueAlertQueue(prev => prev.slice(1));
       return;
     }
@@ -456,8 +458,16 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     }
     const seenKey = `due_alerts_seen:${user.staffId || user.email || 'staff'}`;
     const seenIds = new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
-    seenIds.add(eventId);
+    if (activeDueAlert && activeDueAlert.event_id === eventId) {
+      seenIds.add(getDueAlertInstanceId(activeDueAlert));
+    }
     localStorage.setItem(seenKey, JSON.stringify(Array.from(seenIds)));
+    setDueAlertQueue(prev => prev.filter(alert => {
+      if (activeDueAlert && activeDueAlert.event_id === eventId) {
+        return getDueAlertInstanceId(alert) !== getDueAlertInstanceId(activeDueAlert);
+      }
+      return alert.event_id !== eventId;
+    }));
     setActiveDueAlert(null);
   };
 
