@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { liveApiService } from '../services/liveApiService';
 import { DriverExcelColumn, DriverExcelRow } from '../types';
-import { ArrowDown, ArrowUp, CheckSquare, GripVertical, Pencil, Plus, RotateCcw, Save, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, CheckSquare, GripVertical, Info, Pencil, Plus, RotateCcw, Save, Trash2, X } from 'lucide-react';
 
 interface VariableOption {
   key: string;
@@ -233,6 +233,30 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     if (col.key === 'createdAt') return row.createdAt || '';
     if (col.key === 'lastMessageAt') return row.lastMessageAt || '';
     return String(row.variables?.[col.key] ?? '');
+  };
+
+  const isTerminationColumn = (key: string) => {
+    const normalized = String(key || '').trim().toLowerCase();
+    return normalized === 'termination' || normalized === 'terminated' || normalized === 'termination_date';
+  };
+
+  const getLastDailyEntryDate = (row: DriverExcelRow): string => {
+    const fromVariables =
+      row.variables?.last_daily_entries_done_date ||
+      row.variables?.daily_entries_done_date ||
+      row.variables?.last_daily_entry_date ||
+      row.variables?.daily_entry_date ||
+      row.variables?.last_daily_entry_done_date;
+    const raw = String(fromVariables || row.lastMessageAt || '').trim();
+    if (!raw) return '';
+    const parsed = Date.parse(raw);
+    if (Number.isNaN(parsed)) return raw;
+    return new Date(parsed).toLocaleDateString();
+  };
+
+  const isTerminationActive = (value: string) => {
+    const normalized = String(value || '').trim().toLowerCase();
+    return Boolean(normalized && !['false', '0', 'no', 'none', 'null', 'cancel', 'rejoin', 'active'].includes(normalized));
   };
 
   const isReadOnlyColumn = (key: string) => key === 'createdAt' || key === 'lastMessageAt' || key.endsWith('_status') || key.endsWith('_uploaded_at');
@@ -652,6 +676,12 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                       <GripVertical size={13} className="text-gray-400" />
                     </button>
                     <span>{col.label}</span>
+                    {isTerminationColumn(col.key) && (
+                      <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                        <Info size={11} />
+                        Use last daily entry date
+                      </span>
+                    )}
                     {!col.isCore && (
                       <>
                         <button onClick={() => moveColumn(col, 'up')} className="text-gray-500 hover:text-gray-900 disabled:opacity-50" title="Move column up" disabled={actionKey !== null}><ArrowUp size={13} /></button>
@@ -677,6 +707,8 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                   {columns.map((col) => {
                     const isEditing = editingCell?.rowId === row.id && editingCell?.colKey === col.key;
                     const value = getCellValue(row, col);
+                    const dailyEntryHint = getLastDailyEntryDate(row);
+                    const terminationActive = isTerminationColumn(col.key) && isTerminationActive(value);
                     const looksLikeLink = typeof value === 'string' && /^(https?:\/\/|\/showcase\/)/.test(value.trim());
                     return (
                       <td key={col.key} className="px-3 py-2 border-b align-top min-w-[160px]">
@@ -702,6 +734,36 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                           ) : (
                             <span className="text-gray-400">-</span>
                           )
+                        ) : (isTerminationColumn(col.key)) ? (
+                          <div className="space-y-2">
+                            <button onClick={() => beginEdit(row.id, col, value)} className="text-left w-full">
+                              <span className="whitespace-pre-wrap break-words">{value === '' ? '-' : value}</span>
+                            </button>
+                            {dailyEntryHint && (
+                              <p className="text-[11px] text-amber-700">Last daily entry: {dailyEntryHint}</p>
+                            )}
+                            {terminationActive && (
+                              <button
+                                onClick={async () => {
+                                  setActionKey(`cancel-termination-${row.id}`);
+                                  try {
+                                    await liveApiService.updateDriverExcelRow(row.id, { [col.key]: '' });
+                                    await loadReport();
+                                    await loadSyncStatus();
+                                    showMessage('Termination cancelled. Driver connections restored.');
+                                  } catch (e: any) {
+                                    showMessage(e.message || 'Failed to cancel termination.');
+                                  } finally {
+                                    setActionKey(null);
+                                  }
+                                }}
+                                className="text-[11px] px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                                disabled={actionKey !== null}
+                              >
+                                Cancel termination (rejoin)
+                              </button>
+                            )}
+                          </div>
                         ) : (
                           <button onClick={() => beginEdit(row.id, col, value)} className="text-left w-full">
                             <span className="whitespace-pre-wrap break-words">{value === '' ? '-' : value}</span>
