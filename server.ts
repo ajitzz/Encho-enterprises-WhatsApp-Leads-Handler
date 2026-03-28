@@ -5547,7 +5547,7 @@ apiRouter.patch('/reports/driver-excel/:id', async (req, res) => {
         const updates = req.body?.updates || {};
         const id = req.params.id;
         await withDb(async (client) => {
-            const existingRes = await client.query('SELECT stage, lead_status, assigned_to, is_human_mode, variables FROM candidates WHERE id = $1 LIMIT 1', [id]);
+            const existingRes = await client.query('SELECT variables FROM candidates WHERE id = $1 LIMIT 1', [id]);
             if (existingRes.rows.length === 0) return res.status(404).json({ error: 'Candidate not found' });
 
             const coreFieldMap = { phoneNumber: 'phone_number', name: 'name', status: 'stage', source: 'source' };
@@ -5557,95 +5557,10 @@ apiRouter.patch('/reports/driver-excel/:id', async (req, res) => {
                 }
             }
 
-            const existingRow = existingRes.rows[0];
-            const vars = normalizeVariables(existingRow.variables);
+            const vars = normalizeVariables(existingRes.rows[0].variables);
             const variableUpdates = Object.entries(updates).filter(([k]) => !['phoneNumber', 'name', 'status', 'source', 'createdAt', 'lastMessageAt'].includes(k));
             if (variableUpdates.length > 0) {
                 for (const [k, v] of variableUpdates) vars[k] = v;
-
-                const terminationKey = variableUpdates.find(([k]) => {
-                    const normalized = String(k || '').trim().toLowerCase();
-                    return normalized === 'termination' || normalized === 'terminated' || normalized === 'termination_date';
-                })?.[0];
-
-                if (terminationKey) {
-                    const terminationInput = vars[terminationKey];
-                    const normalizedInput = String(terminationInput ?? '').trim().toLowerCase();
-                    const cancelTermination = !normalizedInput || ['false', '0', 'no', 'none', 'null', 'cancel', 'rejoin', 'active'].includes(normalizedInput);
-
-                    if (cancelTermination) {
-                        const restoreSnapshot = vars.__termination_restore && typeof vars.__termination_restore === 'object'
-                            ? vars.__termination_restore
-                            : null;
-
-                        if (restoreSnapshot) {
-                            if (Object.prototype.hasOwnProperty.call(restoreSnapshot, 'stage')) {
-                                await client.query('UPDATE candidates SET stage = $1 WHERE id = $2', [restoreSnapshot.stage, id]);
-                            }
-                            if (Object.prototype.hasOwnProperty.call(restoreSnapshot, 'lead_status')) {
-                                await client.query('UPDATE candidates SET lead_status = $1 WHERE id = $2', [restoreSnapshot.lead_status, id]);
-                            }
-                            if (Object.prototype.hasOwnProperty.call(restoreSnapshot, 'assigned_to')) {
-                                await client.query('UPDATE candidates SET assigned_to = $1 WHERE id = $2', [restoreSnapshot.assigned_to, id]);
-                            }
-                            if (Object.prototype.hasOwnProperty.call(restoreSnapshot, 'is_human_mode')) {
-                                await client.query('UPDATE candidates SET is_human_mode = $1 WHERE id = $2', [Boolean(restoreSnapshot.is_human_mode), id]);
-                            }
-                            if (restoreSnapshot.variables && typeof restoreSnapshot.variables === 'object') {
-                                for (const [snapshotKey, snapshotValue] of Object.entries(restoreSnapshot.variables)) {
-                                    vars[snapshotKey] = snapshotValue;
-                                }
-                            }
-                        }
-
-                        delete vars.__termination_restore;
-                        vars.terminated_at = '';
-                        vars.termination_date = '';
-                    } else {
-                        if (!vars.__termination_restore || typeof vars.__termination_restore !== 'object') {
-                            vars.__termination_restore = {
-                                stage: existingRow.stage || '',
-                                lead_status: existingRow.lead_status || '',
-                                assigned_to: existingRow.assigned_to || null,
-                                is_human_mode: Boolean(existingRow.is_human_mode),
-                                variables: {}
-                            };
-                        }
-
-                        const restoreVariables = vars.__termination_restore.variables || {};
-                        for (const [existingKey, existingValue] of Object.entries(vars)) {
-                            if (existingKey === '__termination_restore') continue;
-                            if (/connection|portal/i.test(existingKey) && !Object.prototype.hasOwnProperty.call(restoreVariables, existingKey)) {
-                                restoreVariables[existingKey] = existingValue;
-                            }
-                        }
-                        vars.__termination_restore.variables = restoreVariables;
-
-                        const lastDailyEntriesDoneDate =
-                            vars.last_daily_entries_done_date ||
-                            vars.daily_entries_done_date ||
-                            vars.last_daily_entry_date ||
-                            vars.daily_entry_date ||
-                            vars.last_daily_entry_done_date ||
-                            '';
-                        const normalizedTerminationDate = String(lastDailyEntriesDoneDate || '').trim() || new Date().toISOString().slice(0, 10);
-
-                        vars.termination_date = normalizedTerminationDate;
-                        vars.terminated_at = new Date().toISOString();
-                        vars[terminationKey] = normalizedTerminationDate;
-
-                        for (const key of Object.keys(vars)) {
-                            if (/connection/i.test(key)) vars[key] = 'closed';
-                            if (/portal/i.test(key)) vars[key] = 'closed';
-                        }
-
-                        await client.query(
-                            'UPDATE candidates SET assigned_to = NULL, lead_status = $1, is_human_mode = $2, stage = $3 WHERE id = $4',
-                            ['terminated', true, 'Terminated', id]
-                        );
-                    }
-                }
-
                 await client.query('UPDATE candidates SET variables = $1::jsonb WHERE id = $2', [JSON.stringify(vars), id]);
             }
             scheduleDriverExcelSync();
