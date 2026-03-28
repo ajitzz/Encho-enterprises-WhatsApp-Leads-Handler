@@ -197,6 +197,64 @@ export const StaffManagement: React.FC = () => {
         )}
       </div>
 
+      {/* NEW: Global Live Telemetry Grid */}
+      <div className="mb-8 bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="p-5 border-b border-gray-100 flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+              <Activity className="text-emerald-600" size={18} />
+              Global Live Telemetry
+            </h2>
+            <p className="text-xs text-gray-500 mt-1">
+              Real-time presence and focus tracking for all staff members.
+            </p>
+          </div>
+        </div>
+        <div className="p-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {filteredStaff.map((s) => {
+              const isOnline = s.current_status === 'online';
+              const isIdle = s.current_status === 'idle';
+              const activeMins = Math.floor((s.active_seconds_today || 0) / 60);
+              const idleMins = Math.floor((s.idle_seconds_today || 0) / 60);
+
+              return (
+                <div key={s.id} className="bg-gray-50 border border-gray-100 rounded-2xl p-4 hover:shadow-md transition-all">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="relative">
+                      <div className="w-10 h-10 rounded-full bg-white border border-gray-200 flex items-center justify-center text-gray-700 font-bold text-lg">
+                        {s.name.charAt(0).toUpperCase()}
+                      </div>
+                      <div className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-white ${isOnline ? 'bg-emerald-500' : isIdle ? 'bg-amber-400' : 'bg-gray-300'}`}></div>
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-gray-900 text-sm truncate max-w-[120px]">{s.name}</h3>
+                      <p className="text-[10px] text-gray-500 capitalize font-semibold">{s.current_status || 'Offline'}</p>
+                    </div>
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-2 text-center">
+                    <div className="bg-white rounded-xl p-2 border border-gray-100">
+                      <p className="text-[9px] text-gray-400 uppercase font-bold mb-0.5">Active</p>
+                      <p className="font-bold text-gray-800 text-xs">{activeMins}m</p>
+                    </div>
+                    <div className="bg-white rounded-xl p-2 border border-gray-100">
+                      <p className="text-[9px] text-gray-400 uppercase font-bold mb-0.5">Idle</p>
+                      <p className="font-bold text-gray-800 text-xs">{idleMins}m</p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            {filteredStaff.length === 0 && (
+              <div className="col-span-full p-8 text-center text-sm text-gray-500">
+                No staff members found.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">

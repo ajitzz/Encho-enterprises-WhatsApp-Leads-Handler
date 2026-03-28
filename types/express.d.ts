@@ -8,6 +8,7 @@ declare global {
         staffId: string;
         role: string;
         name: string;
+        email: string;
       };
       requestId?: string;
     }

@@ -2344,7 +2344,7 @@ const isValidContent = (text) => {
         'sample text',
         'your message here'
     ];
-    if (clean.length < 50 && blockers.some(b => clean.includes(b))) return false;
+    if (blockers.some(b => clean.includes(b))) return false;
     return true;
 };
 
@@ -2704,6 +2704,19 @@ const initDatabase = async (client) => {
     await client.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";');
 
     await client.query(`CREATE TABLE IF NOT EXISTS system_settings (key VARCHAR(50) PRIMARY KEY, value JSONB);`);
+    await client.query(`CREATE TABLE IF NOT EXISTS staff_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
+        session_date DATE NOT NULL DEFAULT CURRENT_DATE,
+        login_time TIMESTAMP DEFAULT NOW(),
+        logout_time TIMESTAMP,
+        active_seconds INT DEFAULT 0,
+        idle_seconds INT DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(staff_id, session_date)
+    );`);
+    
     await client.query(`CREATE TABLE IF NOT EXISTS staff_members (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(), 
         email VARCHAR(255) UNIQUE NOT NULL, 
@@ -2712,6 +2725,10 @@ const initDatabase = async (client) => {
         manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
         is_active_for_auto_dist BOOLEAN DEFAULT FALSE,
         last_assigned_at TIMESTAMP,
+        current_status VARCHAR(50) DEFAULT 'offline',
+        last_ping_at TIMESTAMP,
+        active_seconds_today INT DEFAULT 0,
+        idle_seconds_today INT DEFAULT 0,
         created_at TIMESTAMP DEFAULT NOW()
     );`);
     
@@ -2719,13 +2736,19 @@ const initDatabase = async (client) => {
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS is_active_for_auto_dist BOOLEAN DEFAULT FALSE;`);
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_assigned_at TIMESTAMP;`);
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS current_status VARCHAR(50) DEFAULT 'offline';`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_ping_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS active_seconds_today INT DEFAULT 0;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS idle_seconds_today INT DEFAULT 0;`);
     
-    await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, lead_status VARCHAR(50) DEFAULT 'new', last_action_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW());`);
+    await client.query(`CREATE TABLE IF NOT EXISTS candidates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), phone_number VARCHAR(50) UNIQUE, name VARCHAR(255), stage VARCHAR(50), last_message TEXT, last_message_at BIGINT, source VARCHAR(50), is_human_mode BOOLEAN DEFAULT FALSE, current_bot_step_id VARCHAR(100), variables JSONB DEFAULT '{}', assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL, lead_status VARCHAR(50) DEFAULT 'new', last_action_at TIMESTAMP, first_response_time INT, claimed_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW());`);
     
     // Ensure candidates has the new columns if it already existed
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS assigned_to UUID REFERENCES staff_members(id) ON DELETE SET NULL;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS lead_status VARCHAR(50) DEFAULT 'new';`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS first_response_time INT;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP;`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`ALTER TABLE candidate_messages ADD COLUMN IF NOT EXISTS sender_type VARCHAR(20);`);
     await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
@@ -3229,7 +3252,9 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         const expectsMediaInput = currentNode.data.type === 'input' && currentNode.data.validationType === 'media';
 
                         if (expectsMediaInput && !incomingMediaPayload?.mediaKey) {
-                            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: currentNode.data.retryMessage || 'Please upload a valid licence file (image, PDF, or video) to continue.' } }, { sendType: 'bot', enableRetry: true });
+                            const rawRetry = processText(currentNode.data.retryMessage || '', candidate);
+                            const retryMsg = isValidContent(rawRetry) ? rawRetry : 'Please upload a valid licence file (image, PDF, or video) to continue.';
+                            await sendToMeta(candidate.phone_number, { type: 'text', text: { body: retryMsg } }, { sendType: 'bot', enableRetry: true });
                             return;
                         }
 
@@ -3343,11 +3368,17 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 let validBody = isValidContent(rawBody) ? rawBody : null;
                 let payload = null;
 
-                if (data.type === 'summary') {
+                if (!validBody && data.type !== 'summary' && data.type !== 'image') {
+                    autoAdvance = true;
+                } else if (data.type === 'summary') {
                     const headerText = formatSummaryToken(validBody || "📋 Summary", data.summaryHeaderStyle || 'bold');
                     let summaryText = headerText;
-                    if (data.summaryDescription) summaryText += `
-${formatSummaryToken(processText(data.summaryDescription, candidate), data.summaryDescriptionStyle || 'plain')}`;
+                    if (data.summaryDescription) {
+                        const rawDesc = processText(data.summaryDescription, candidate);
+                        if (isValidContent(rawDesc)) {
+                            summaryText += `\n${formatSummaryToken(rawDesc, data.summaryDescriptionStyle || 'plain')}`;
+                        }
+                    }
 
                     const ignoredKeys = ['current_bot_step_id', 'is_human_mode', 'undefined', 'null'];
                     const filteredEntries = Object.entries(candidate.variables || {}).filter(([k, v]) => {
@@ -3385,18 +3416,18 @@ ${formatSummaryToken(processText(data.summaryDescription, candidate), data.summa
                     }
 
                     if (configuredRows.length > 0) {
-                        summaryText += `
-
-${configuredRows.join('\n')}`;
+                        summaryText += `\n\n${configuredRows.join('\n')}`;
                     } else {
-                        summaryText += `
-
-${data.summaryEmptyText || '(No data collected yet)'}`;
+                        const emptyText = processText(data.summaryEmptyText || '', candidate);
+                        summaryText += `\n\n${isValidContent(emptyText) ? emptyText : '(No data collected yet)'}`;
                     }
 
-                    if (data.footerText) summaryText += `
-
-${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooterStyle || 'italic')}`;
+                    if (data.footerText) {
+                        const rawFooter = processText(data.footerText, candidate);
+                        if (isValidContent(rawFooter)) {
+                            summaryText += `\n\n${formatSummaryToken(rawFooter, data.summaryFooterStyle || 'italic')}`;
+                        }
+                    }
                     payload = { type: 'text', text: { body: summaryText } };
                 }
 
@@ -3404,7 +3435,12 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
                 else if (data.type === 'text') {
                     if (validBody) {
                         payload = { type: 'text', text: { body: validBody } };
-                        if (data.footerText) payload.text.body += `\n\n_${data.footerText}_`;
+                        if (data.footerText) {
+                            const rawFooter = processText(data.footerText, candidate);
+                            if (isValidContent(rawFooter)) {
+                                payload.text.body += `\n\n_${rawFooter}_`;
+                            }
+                        }
                     }
                 } 
                 else if (data.type === 'input') {
@@ -3455,7 +3491,12 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
                             }
                         }
                     };
-                    if (data.footerText) payload.interactive.footer = { text: data.footerText };
+                    if (data.footerText) {
+                        const rawFooter = processText(data.footerText, candidate);
+                        if (isValidContent(rawFooter)) {
+                            payload.interactive.footer = { text: rawFooter };
+                        }
+                    }
                     autoAdvance = false;
                 }
 
@@ -3515,13 +3556,20 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
                         const url = await refreshMediaUrl(data.mediaUrl);
                         header = { type: data.headerType, [data.headerType]: { link: url } };
                     }
+                    let footerObj = undefined;
+                    if (data.footerText) {
+                        const rawFooter = processText(data.footerText, candidate);
+                        if (isValidContent(rawFooter)) {
+                            footerObj = { text: rawFooter };
+                        }
+                    }
                     payload = {
                         type: "interactive",
                         interactive: {
                             type: "button",
                             header: header,
                             body: { text: validBody || "Please select an option:" },
-                            footer: data.footerText ? { text: data.footerText } : undefined,
+                            footer: footerObj,
                             action: {
                                 buttons: data.buttons.slice(0, 3).map(b => ({
                                     type: "reply",
@@ -3533,13 +3581,18 @@ ${formatSummaryToken(processText(data.footerText, candidate), data.summaryFooter
                     autoAdvance = false;
                 } 
                 else if (data.type === 'interactive_list' && data.sections?.length > 0) {
+                    let buttonText = "Menu";
+                    if (data.listButtonText) {
+                        const rawBtn = processText(data.listButtonText, candidate);
+                        if (isValidContent(rawBtn)) buttonText = rawBtn;
+                    }
                     payload = {
                         type: "interactive",
                         interactive: {
                             type: "list",
                             body: { text: validBody || "Please make a selection:" },
                             action: {
-                                button: data.listButtonText || "Menu",
+                                button: buttonText,
                                 sections: data.sections
                             }
                         }
@@ -3883,11 +3936,58 @@ apiRouter.delete('/staff/:id', authMiddleware, async (req, res) => {
 });
 
 apiRouter.patch('/staff/:id/auto-dist', authMiddleware, async (req, res) => {
-    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    if (req.user.role !== 'admin' && req.user.role !== 'manager') return res.status(403).json({ error: 'Admin/Manager only' });
     const { enabled } = req.body;
     try {
         await withDb(async (client) => {
             await client.query('UPDATE staff_members SET is_active_for_auto_dist = $1 WHERE id = $2', [enabled, req.params.id]);
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/staff/:id/force-logout', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin' && req.user.role !== 'manager') return res.status(403).json({ error: 'Admin/Manager only' });
+    try {
+        await withDb(async (client) => {
+            await client.query(`
+                UPDATE staff_members 
+                SET current_status = 'offline', 
+                    is_active_for_auto_dist = FALSE 
+                WHERE id = $1
+            `, [req.params.id]);
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.post('/staff/heartbeat', authMiddleware, async (req, res) => {
+    const { status, active_seconds, idle_seconds } = req.body;
+    try {
+        await withDb(async (client) => {
+            await client.query(`
+                UPDATE staff_members 
+                SET current_status = $1, 
+                    last_ping_at = NOW(),
+                    active_seconds_today = active_seconds_today + $2,
+                    idle_seconds_today = idle_seconds_today + $3
+                WHERE email = $4
+            `, [status || 'online', active_seconds || 0, idle_seconds || 0, req.user.email]);
+            
+            const staffRes = await client.query('SELECT id FROM staff_members WHERE email = $1', [req.user.email]);
+            if (staffRes.rows.length > 0) {
+                const staffId = staffRes.rows[0].id;
+                await client.query(`
+                    INSERT INTO staff_sessions (staff_id, session_date, active_seconds, idle_seconds)
+                    VALUES ($1, CURRENT_DATE, $2, $3)
+                    ON CONFLICT (staff_id, session_date) 
+                    DO UPDATE SET 
+                        active_seconds = staff_sessions.active_seconds + EXCLUDED.active_seconds,
+                        idle_seconds = staff_sessions.idle_seconds + EXCLUDED.idle_seconds,
+                        updated_at = NOW()
+                `, [staffId, active_seconds || 0, idle_seconds || 0]);
+            }
+            
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -6113,20 +6213,51 @@ async function startLeadAutoDistributor() {
                 const unassignedLeads = await client.query("SELECT id FROM candidates WHERE assigned_to IS NULL AND lead_status = 'new' LIMIT 10");
                 if (unassignedLeads.rows.length === 0) return;
 
-                // Get active staff members for auto-dist, ordered by last_assigned_at (round-robin)
-                const activeStaff = await client.query("SELECT id FROM staff_members WHERE is_active_for_auto_dist = TRUE ORDER BY last_assigned_at ASC NULLS FIRST");
-                if (activeStaff.rows.length === 0) return;
+                // God-Eye Engine: Smart Load-Balancing & Skill-Based Router
+                // 1. Only route to staff who are explicitly 'online' and have pinged recently.
+                // 2. Count their current active workload (leads not closed/lost).
+                // 3. Order by least loaded first, then least recently assigned.
+                const activeStaffRes = await client.query(`
+                    SELECT 
+                        s.id, 
+                        s.last_assigned_at,
+                        (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified')) as active_leads
+                    FROM staff_members s
+                    WHERE s.is_active_for_auto_dist = TRUE 
+                      AND s.current_status = 'online'
+                      AND s.last_ping_at > NOW() - INTERVAL '2 minutes'
+                `);
+                
+                if (activeStaffRes.rows.length === 0) {
+                    // No online staff available to take leads right now.
+                    return;
+                }
 
-                let staffIndex = 0;
+                // Keep track of workload in memory during this batch assignment
+                let staffList = activeStaffRes.rows.map(row => ({
+                    id: row.id,
+                    active_leads: parseInt(row.active_leads, 10),
+                    last_assigned_at: row.last_assigned_at ? new Date(row.last_assigned_at).getTime() : 0
+                }));
+
                 for (const lead of unassignedLeads.rows) {
-                    const staff = activeStaff.rows[staffIndex];
-                    await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [staff.id, lead.id]);
-                    await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [staff.id]);
-                    await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead auto-assigned via distributor')", [lead.id, staff.id]);
+                    // Re-sort to always pick the absolute best candidate for the next lead
+                    staffList.sort((a, b) => {
+                        if (a.active_leads !== b.active_leads) return a.active_leads - b.active_leads;
+                        return a.last_assigned_at - b.last_assigned_at;
+                    });
+
+                    const bestStaff = staffList[0];
+
+                    await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [bestStaff.id, lead.id]);
+                    await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [bestStaff.id]);
+                    await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead routed via smart load-balancer')", [lead.id, bestStaff.id]);
                     
-                    console.log(`Auto-assigned lead ${lead.id} to staff ${staff.id}`);
+                    console.log(`Smart-routed lead ${lead.id} to staff ${bestStaff.id} (Active Workload: ${bestStaff.active_leads})`);
                     
-                    staffIndex = (staffIndex + 1) % activeStaff.rows.length;
+                    // Update in-memory stats so they don't get all 10 leads at once if they were tied
+                    bestStaff.active_leads += 1;
+                    bestStaff.last_assigned_at = Date.now();
                 }
             });
         } catch (e) {
@@ -6143,7 +6274,7 @@ const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
         runNurtureTriggers().catch(err => console.error('[NURTURE JOB ERROR]', err));
     }, 1000 * 60 * 60); // Run every hour
 
-    return app.listen(port, () => {
+    return app.listen(Number(port), '0.0.0.0', () => {
         console.log(`Server running on ${port}`);
         logLeadIngestionRuntimePosture();
         // Auto-Init Check on Start (For Local/VPS, NOT Vercel)

@@ -26,6 +26,10 @@ export interface StaffMember {
   manager_id?: string | null;
   is_active_for_auto_dist: boolean;
   last_assigned_at: string | null;
+  current_status?: string;
+  last_ping_at?: string | null;
+  active_seconds_today?: number;
+  idle_seconds_today?: number;
   created_at: string;
 }
 

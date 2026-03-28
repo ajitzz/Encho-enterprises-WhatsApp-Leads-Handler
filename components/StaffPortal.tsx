@@ -36,7 +36,8 @@ import {
   UserCog,
   ListFilter,
   TrendingUp,
-  AlertTriangle
+  AlertTriangle,
+  Eye
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 import { getLeadScreenshotUploadPath } from '../services/mediaPaths';
@@ -109,6 +110,7 @@ interface LeadActivity {
 export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ user, onLogout }) => {
   const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail' | 'team' | 'action-center' | 'command-center' | 'pending-reviews' | 'manager-workspace'>('dashboard');
   const [managerTab, setManagerTab] = useState<'team-leads' | 'team-members' | 'assignments' | 'reports' | 'audit'>('team-leads');
+  const [monitoredStaffId, setMonitoredStaffId] = useState<string | null>(null);
   const [managerStatusFilter, setManagerStatusFilter] = useState<'all' | 'overdue' | 'unassigned' | 'booked'>('all');
   const [managerStaffFilter, setManagerStaffFilter] = useState<string>('all');
   const [assignmentStrategy, setAssignmentStrategy] = useState<'manual' | 'least-loaded' | 'round-robin'>('manual');
@@ -345,6 +347,46 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     );
   }, [view, poolLeads, myLeads, searchQuery]);
 
+  // Background Telemetry Pinger (God-Eye Engine)
+  useEffect(() => {
+    let lastActivity = Date.now();
+    let activeSeconds = 0;
+    let idleSeconds = 0;
+    
+    const updateActivity = () => { lastActivity = Date.now(); };
+    window.addEventListener('mousemove', updateActivity);
+    window.addEventListener('keydown', updateActivity);
+    window.addEventListener('click', updateActivity);
+    window.addEventListener('scroll', updateActivity);
+
+    const heartbeatInterval = setInterval(() => {
+      const now = Date.now();
+      const isIdle = (now - lastActivity) > 5 * 60 * 1000; // 5 minutes idle threshold
+      
+      if (isIdle) {
+        idleSeconds += 30;
+      } else {
+        activeSeconds += 30;
+      }
+
+      liveApiService.sendHeartbeat(isIdle ? 'idle' : 'online', activeSeconds, idleSeconds)
+        .then(() => {
+          // Reset counters after successful sync
+          activeSeconds = 0;
+          idleSeconds = 0;
+        })
+        .catch(err => console.error('Telemetry ping failed', err));
+    }, 30000); // Ping every 30 seconds
+
+    return () => {
+      window.removeEventListener('mousemove', updateActivity);
+      window.removeEventListener('keydown', updateActivity);
+      window.removeEventListener('click', updateActivity);
+      window.removeEventListener('scroll', updateActivity);
+      clearInterval(heartbeatInterval);
+    };
+  }, []);
+
   useEffect(() => {
     const unsubscribe = liveApiService.subscribeToUpdates(
       (drivers) => {
@@ -515,6 +557,20 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     const staffId = getStrategyStaffId();
     if (!staffId) return;
     await handleAssignLead(leadId, staffId);
+  };
+
+  const handleForceLogout = async (staffId: string) => {
+    try {
+      setLoading(true);
+      await liveApiService.forceLogoutStaff(staffId);
+      // Refresh staff list
+      const staffRes = await liveApiService.getStaff();
+      setTeamStaff(staffRes.filter((s: any) => s.manager_id === user?.staffId || s.id === user?.staffId));
+    } catch (error) {
+      console.error('Failed to force logout:', error);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleReassignLead = async (leadId: string, staffId: string) => {
@@ -1649,31 +1705,88 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             )}
 
             {managerTab === 'team-members' && (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                {staffLoad.map(({ staff, leads, overdue, booked }) => (
-                  <div key={staff.id} className="bg-white border border-gray-100 rounded-2xl p-4">
-                    <div className="flex items-center justify-between">
-                      <h3 className="font-bold text-gray-900">{staff.name}</h3>
-                      <span className={`text-[10px] px-2 py-1 rounded-full font-bold ${staff.is_active_for_auto_dist ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}>
-                        {staff.is_active_for_auto_dist ? 'Online' : 'Offline'}
-                      </span>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {staffLoad.map(({ staff, leads, overdue, booked }) => {
+                  const isOnline = staff.current_status === 'online';
+                  const isIdle = staff.current_status === 'idle';
+                  const activeMins = Math.floor((staff.active_seconds_today || 0) / 60);
+                  const idleMins = Math.floor((staff.idle_seconds_today || 0) / 60);
+                  
+                  return (
+                    <div key={staff.id} className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm hover:shadow-md transition-all">
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-3">
+                          <div className="relative">
+                            <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-blue-700 font-bold text-lg">
+                              {staff.name.charAt(0).toUpperCase()}
+                            </div>
+                            <div className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-white ${isOnline ? 'bg-emerald-500' : isIdle ? 'bg-amber-400' : 'bg-gray-300'}`}></div>
+                          </div>
+                          <div>
+                            <h3 className="font-bold text-gray-900">{staff.name}</h3>
+                            <p className="text-xs text-gray-500 capitalize">{staff.current_status || 'Offline'}</p>
+                          </div>
+                        </div>
+                        <span className={`text-[10px] px-2 py-1 rounded-full font-bold ${staff.is_active_for_auto_dist ? 'bg-blue-50 text-blue-600 border border-blue-100' : 'bg-gray-50 text-gray-500 border border-gray-100'}`}>
+                          {staff.is_active_for_auto_dist ? 'Auto-Dist ON' : 'Auto-Dist OFF'}
+                        </span>
+                      </div>
+                      
+                      <div className="grid grid-cols-2 gap-3 mb-4">
+                        <div className="bg-gray-50 rounded-xl p-3 flex flex-col justify-center">
+                          <p className="text-[10px] text-gray-500 uppercase font-semibold mb-1">Active Time</p>
+                          <p className="font-bold text-gray-800 text-sm">{activeMins}m</p>
+                        </div>
+                        <div className="bg-gray-50 rounded-xl p-3 flex flex-col justify-center">
+                          <p className="text-[10px] text-gray-500 uppercase font-semibold mb-1">Idle Time</p>
+                          <p className="font-bold text-gray-800 text-sm">{idleMins}m</p>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2 text-center border-t border-gray-100 pt-4 mb-4">
+                        <div>
+                          <p className="text-[10px] text-gray-500 uppercase font-semibold">Leads</p>
+                          <p className="font-bold text-gray-900">{leads}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-amber-600 uppercase font-semibold">Overdue</p>
+                          <p className="font-bold text-amber-700">{overdue}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-emerald-600 uppercase font-semibold">Booked</p>
+                          <p className="font-bold text-emerald-700">{booked}</p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 border-t border-gray-100 pt-4">
+                        <button 
+                          onClick={() => {
+                            setManagerStaffFilter(staff.id);
+                            setManagerTab('assignments');
+                          }}
+                          className="flex-1 py-2 bg-blue-50 text-blue-700 rounded-xl text-xs font-bold hover:bg-blue-100 transition-colors flex items-center justify-center gap-1"
+                        >
+                          <Eye size={14} /> Monitor
+                        </button>
+                        <button 
+                          onClick={() => {
+                            if (window.confirm(`Are you sure you want to force logout ${staff.name}?`)) {
+                              handleForceLogout(staff.id);
+                            }
+                          }}
+                          disabled={!isOnline && !isIdle}
+                          className={`flex-1 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1 transition-colors ${
+                            isOnline || isIdle 
+                              ? 'bg-red-50 text-red-700 hover:bg-red-100' 
+                              : 'bg-gray-50 text-gray-400 cursor-not-allowed'
+                          }`}
+                        >
+                          <LogOut size={14} /> Force Logout
+                        </button>
+                      </div>
                     </div>
-                    <div className="grid grid-cols-3 gap-2 mt-3 text-center">
-                      <div className="bg-gray-50 rounded-xl py-2">
-                        <p className="text-[10px] text-gray-500 uppercase">Leads</p>
-                        <p className="font-bold">{leads}</p>
-                      </div>
-                      <div className="bg-amber-50 rounded-xl py-2">
-                        <p className="text-[10px] text-amber-600 uppercase">Overdue</p>
-                        <p className="font-bold text-amber-700">{overdue}</p>
-                      </div>
-                      <div className="bg-emerald-50 rounded-xl py-2">
-                        <p className="text-[10px] text-emerald-600 uppercase">Booked</p>
-                        <p className="font-bold text-emerald-700">{booked}</p>
-                      </div>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
 

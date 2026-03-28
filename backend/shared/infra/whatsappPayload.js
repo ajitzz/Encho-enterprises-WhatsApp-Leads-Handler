@@ -15,9 +15,24 @@ export const summarizePayloadForStorage = (payload) => {
 
 const isNonEmptyString = (value) => typeof value === 'string' && value.trim().length > 0;
 
+const containsPlaceholder = (text) => {
+  if (!text || typeof text !== 'string') return false;
+  const clean = text.trim().toLowerCase();
+  const blockers = [
+    'replace this sample message',
+    'replace this text',
+    'type your message',
+    'enter your message',
+    'sample text',
+    'your message here'
+  ];
+  return blockers.some((b) => clean.includes(b));
+};
+
 const validateInteractiveButtons = (interactive) => {
   const bodyText = normalizeTextBody(interactive?.body?.text).trim();
   if (!bodyText) return { valid: false, reason: 'interactive_body_missing' };
+  if (containsPlaceholder(bodyText)) return { valid: false, reason: 'interactive_placeholder_body' };
 
   const buttons = interactive?.action?.buttons;
   if (!Array.isArray(buttons) || buttons.length === 0) return { valid: false, reason: 'interactive_buttons_missing' };
@@ -35,6 +50,7 @@ const validateInteractiveButtons = (interactive) => {
 const validateInteractiveList = (interactive) => {
   const bodyText = normalizeTextBody(interactive?.body?.text).trim();
   if (!bodyText) return { valid: false, reason: 'interactive_body_missing' };
+  if (containsPlaceholder(bodyText)) return { valid: false, reason: 'interactive_placeholder_body' };
 
   const actionButton = normalizeTextBody(interactive?.action?.button).trim();
   if (!actionButton) return { valid: false, reason: 'interactive_action_button_missing' };
@@ -59,6 +75,7 @@ export const validateOutboundPayload = (payload) => {
     const body = normalizeTextBody(payload.text?.body).trim();
     if (!body) return { valid: false, reason: 'empty_text_body' };
     if (body.length > MAX_TEXT_MESSAGE_LENGTH) return { valid: false, reason: 'text_too_long' };
+    if (containsPlaceholder(body)) return { valid: false, reason: 'placeholder_text_body' };
     return { valid: true };
   }
 
@@ -68,7 +85,9 @@ export const validateOutboundPayload = (payload) => {
     if (interactive.type === 'list') return validateInteractiveList(interactive);
     if (interactive.type === 'location_request_message') {
       const bodyText = normalizeTextBody(interactive?.body?.text).trim();
-      return bodyText ? { valid: true } : { valid: false, reason: 'interactive_body_missing' };
+      if (!bodyText) return { valid: false, reason: 'interactive_body_missing' };
+      if (containsPlaceholder(bodyText)) return { valid: false, reason: 'interactive_placeholder_body' };
+      return { valid: true };
     }
     return { valid: false, reason: 'interactive_type_unsupported' };
   }

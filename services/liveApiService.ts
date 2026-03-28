@@ -518,10 +518,23 @@ export const liveApiService = {
     return apiRequest(`/api/staff/${id}`, { method: 'DELETE' });
   },
 
+  sendHeartbeat: async (status: string, active_seconds: number, idle_seconds: number) => {
+    return apiRequest('/api/staff/heartbeat', {
+      method: 'POST',
+      body: JSON.stringify({ status, active_seconds, idle_seconds })
+    });
+  },
+
   updateStaffAutoDist: async (id: string, enabled: boolean) => {
     return apiRequest(`/api/staff/${id}/auto-dist`, {
       method: 'PATCH',
       body: JSON.stringify({ enabled })
+    });
+  },
+
+  forceLogoutStaff: async (id: string) => {
+    return apiRequest(`/api/staff/${id}/force-logout`, {
+      method: 'POST'
     });
   },
 
