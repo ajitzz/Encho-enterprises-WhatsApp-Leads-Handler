@@ -261,10 +261,13 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
 
   const isReadOnlyColumn = (key: string) => key === 'createdAt' || key === 'lastMessageAt' || key.endsWith('_status') || key.endsWith('_uploaded_at');
 
-  const beginEdit = (rowId: string, col: DriverExcelColumn, currentValue: string) => {
+  const beginEdit = (row: DriverExcelRow, col: DriverExcelColumn, currentValue: string) => {
     if (isReadOnlyColumn(col.key)) return;
-    setEditingCell({ rowId, colKey: col.key });
-    setDraftValue(currentValue);
+    const nextDraftValue = isTerminationColumn(col.key) && !String(currentValue || '').trim()
+      ? getLastDailyEntryDate(row)
+      : currentValue;
+    setEditingCell({ rowId: row.id, colKey: col.key });
+    setDraftValue(nextDraftValue);
   };
 
   const saveCell = async () => {
@@ -679,7 +682,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                     {isTerminationColumn(col.key) && (
                       <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
                         <Info size={11} />
-                        Use last daily entry date
+                        Use last daily entry date • rejoin restores portals
                       </span>
                     )}
                     {!col.isCore && (
@@ -736,11 +739,13 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                           )
                         ) : (isTerminationColumn(col.key)) ? (
                           <div className="space-y-2">
-                            <button onClick={() => beginEdit(row.id, col, value)} className="text-left w-full">
+                            <button onClick={() => beginEdit(row, col, value)} className="text-left w-full">
                               <span className="whitespace-pre-wrap break-words">{value === '' ? '-' : value}</span>
                             </button>
                             {dailyEntryHint && (
-                              <p className="text-[11px] text-amber-700">Last daily entry: {dailyEntryHint}</p>
+                              <p className="text-[11px] text-amber-700">
+                                Last daily entry: {dailyEntryHint}. Set this as termination date and all connections/portals will be closed.
+                              </p>
                             )}
                             {terminationActive && (
                               <button
@@ -765,7 +770,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
                             )}
                           </div>
                         ) : (
-                          <button onClick={() => beginEdit(row.id, col, value)} className="text-left w-full">
+                          <button onClick={() => beginEdit(row, col, value)} className="text-left w-full">
                             <span className="whitespace-pre-wrap break-words">{value === '' ? '-' : value}</span>
                           </button>
                         )}
