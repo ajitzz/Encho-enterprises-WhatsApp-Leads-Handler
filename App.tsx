@@ -83,12 +83,49 @@ export default function App() {
   const [syncFailureMetrics, setSyncFailureMetrics] = useState({ polling: 0, push: 0, lastEndpoint: 'n/a' });
   const [dueAlertQueue, setDueAlertQueue] = useState<DueAlertItem[]>([]);
   const [activeDueAlert, setActiveDueAlert] = useState<DueAlertItem | null>(null);
+  const [shadowUser, setShadowUser] = useState<any>(null);
   
   const [dataSource, setDataSource] = useState<'mock' | 'live'>(() => {
       const saved = localStorage.getItem('uber_fleet_data_source');
       if (saved === 'live' || saved === 'mock') return saved;
       return process.env.NODE_ENV === 'production' ? 'live' : 'mock';
   });
+
+  useEffect(() => {
+      if (!isAuthenticated || !userProfile) return;
+
+      let idleTimer: any;
+      let heartbeatInterval: any;
+      let isIdle = false;
+
+      const resetIdle = () => {
+          isIdle = false;
+          clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => { isIdle = true; }, 10 * 60 * 1000); // 10 mins idle
+      };
+
+      window.addEventListener('mousemove', resetIdle);
+      window.addEventListener('keydown', resetIdle);
+      window.addEventListener('scroll', resetIdle);
+      window.addEventListener('click', resetIdle);
+      resetIdle();
+
+      const sendBeat = () => {
+          liveApiService.sendHeartbeat(isIdle ? 'idle' : 'online').catch(() => {});
+      };
+
+      sendBeat(); // Initial beat
+      heartbeatInterval = setInterval(sendBeat, 60 * 1000); // Every 60s
+
+      return () => {
+          window.removeEventListener('mousemove', resetIdle);
+          window.removeEventListener('keydown', resetIdle);
+          window.removeEventListener('scroll', resetIdle);
+          window.removeEventListener('click', resetIdle);
+          clearTimeout(idleTimer);
+          clearInterval(heartbeatInterval);
+      };
+  }, [isAuthenticated, userProfile]);
 
   useEffect(() => {
       if (dataSource !== 'live' || !isAuthenticated || isEmergencyMode) return;
@@ -297,6 +334,32 @@ export default function App() {
           <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
               <Login onLoginSuccess={handleLoginSuccess} />
           </GoogleOAuthProvider>
+      );
+  }
+
+  // --- SHADOW MODE VIEW ---
+  if (shadowUser) {
+      return (
+          <div className="relative h-screen w-full flex flex-col">
+              <div className="bg-purple-600 text-white px-4 py-2 flex justify-between items-center shadow-md z-50">
+                  <div className="flex items-center gap-2 font-bold">
+                      <span className="animate-pulse">👁️</span>
+                      SHADOW MODE ACTIVE: You are viewing {shadowUser.name}'s workspace
+                  </div>
+                  <button 
+                      onClick={() => setShadowUser(null)}
+                      className="bg-white text-purple-700 px-4 py-1 rounded-md font-bold hover:bg-purple-100 transition-colors text-sm"
+                  >
+                      Exit Shadow Mode
+                  </button>
+              </div>
+              <div className="flex-1 overflow-hidden">
+                  <StaffPortal 
+                      user={shadowUser} 
+                      onLogout={() => setShadowUser(null)} 
+                  />
+              </div>
+          </div>
       );
   }
 
@@ -591,7 +654,7 @@ export default function App() {
         )}
         {activeTab === 'media-library' && <MediaLibrary />}
         {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
-        {activeTab === 'staff' && <StaffManagement />}
+        {activeTab === 'staff' && <StaffManagement onShadowUser={setShadowUser} />}
 
         {showWebhookModal && <WebhookConfigModal onClose={() => setShowWebhookModal(false)} onSuccess={() => { addNotification({ type: 'success', title: 'Webhook Configured', message: 'Meta App settings updated successfully.' }); }} />}
         {showSettingsModal && <SettingsModal onClose={() => setShowSettingsModal(false)} />}

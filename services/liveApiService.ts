@@ -614,6 +614,17 @@ export const liveApiService = {
     return apiRequest<any>('/api/analytics/hierarchy-overview');
   },
 
+  sendHeartbeat: async (status: 'online' | 'idle') => {
+    return apiRequest('/api/staff/heartbeat', {
+      method: 'POST',
+      body: JSON.stringify({ status })
+    });
+  },
+
+  getStaffPresence: async () => {
+    return apiRequest<any[]>('/api/staff/presence');
+  },
+
   // Lead Reviews
   submitLeadReview: async (id: string, data: { closing_date: string; notes: string; screenshot_url?: string }) => {
     return apiRequest(`/api/reviews/${id}/submit`, {

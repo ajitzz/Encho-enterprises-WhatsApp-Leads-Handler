@@ -49,7 +49,7 @@ router.post('/:id/submit', async (req, res) => {
             `, [id, reviewOwnerStaffId, managerId, closingDate, notes, screenshotUrl]);
 
             // 4. Update lead status
-            await client.query("UPDATE candidates SET review_status = 'pending', lead_status = 'review_pending' WHERE id = $1", [id]);
+            await client.query("UPDATE candidates SET review_status = 'pending', lead_status = 'review_pending', review_requested_at = NOW() WHERE id = $1", [id]);
 
             // 5. Log activity
             await client.query(`
@@ -158,7 +158,7 @@ router.post('/:reviewId/decision', async (req, res) => {
             const newReviewStatus = normalizedStatus;
             await client.query(`
                 UPDATE candidates 
-                SET lead_status = $1, review_status = $2 
+                SET lead_status = $1, review_status = $2, closed_at = CASE WHEN $1 = 'closed' THEN NOW() ELSE closed_at END
                 WHERE id = $3
             `, [newLeadStatus, newReviewStatus, candidateId]);
 

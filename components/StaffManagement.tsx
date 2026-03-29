@@ -4,7 +4,11 @@ import { Users, UserPlus, Trash2, Shield, Mail, Search, Loader2, AlertCircle, Gi
 import { liveApiService } from '../services/liveApiService.ts';
 import { StaffMember, UserRole } from '../types';
 
-export const StaffManagement: React.FC = () => {
+interface StaffManagementProps {
+  onShadowUser?: (user: any) => void;
+}
+
+export const StaffManagement: React.FC<StaffManagementProps> = ({ onShadowUser }) => {
   const [staff, setStaff] = useState<StaffMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -159,10 +163,19 @@ export const StaffManagement: React.FC = () => {
                 </div>
                 <div className="max-h-64 overflow-auto divide-y divide-gray-100">
                   {hierarchy.managers.map((manager) => (
-                    <div key={manager.manager_id} className="p-3 text-sm">
-                      <div className="font-semibold text-gray-900">{manager.manager_name || manager.manager_email}</div>
-                      <div className="text-xs text-gray-500 mt-1">
-                        Staff: {manager.staff_count} · Total Leads: {manager.total_leads} · Review Pending: {manager.review_pending_leads}
+                    <div key={manager.manager_id} className="p-3 text-sm flex justify-between items-center">
+                      <div>
+                        <div className="font-semibold text-gray-900 flex items-center gap-2">
+                          {manager.manager_name || manager.manager_email}
+                          <span className={`w-2 h-2 rounded-full ${manager.current_status === 'online' ? 'bg-emerald-500' : manager.current_status === 'idle' ? 'bg-amber-400' : 'bg-gray-300'}`}></span>
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          Staff: {manager.staff_count} · Total Leads: {manager.total_leads} · Review Pending: {manager.review_pending_leads}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-xs font-bold text-gray-700">Avg Approval Time</div>
+                        <div className="text-sm font-black text-purple-600">{manager.avg_manager_approval_time_mins || 0}m</div>
                       </div>
                     </div>
                   ))}
@@ -178,10 +191,19 @@ export const StaffManagement: React.FC = () => {
                 </div>
                 <div className="max-h-64 overflow-auto divide-y divide-gray-100">
                   {hierarchy.staffLoad.map((member) => (
-                    <div key={member.staff_id} className="p-3 text-sm">
-                      <div className="font-semibold text-gray-900">{member.staff_name}</div>
-                      <div className="text-xs text-gray-500 mt-1">
-                        Manager: {member.manager_name || 'Unassigned'} · Active: {member.active_leads} · Closed: {member.closed_leads}
+                    <div key={member.staff_id} className="p-3 text-sm flex justify-between items-center">
+                      <div>
+                        <div className="font-semibold text-gray-900 flex items-center gap-2">
+                          {member.staff_name}
+                          <span className={`w-2 h-2 rounded-full ${member.current_status === 'online' ? 'bg-emerald-500' : member.current_status === 'idle' ? 'bg-amber-400' : 'bg-gray-300'}`}></span>
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          Manager: {member.manager_name || 'Unassigned'} · Active: {member.active_leads} · Closed: {member.closed_leads}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-xs font-bold text-gray-700">Avg Time to Review</div>
+                        <div className="text-sm font-black text-blue-600">{member.avg_time_to_review_mins || 0}m</div>
                       </div>
                     </div>
                   ))}
@@ -233,7 +255,7 @@ export const StaffManagement: React.FC = () => {
                     </div>
                   </div>
                   
-                  <div className="grid grid-cols-2 gap-2 text-center">
+                  <div className="grid grid-cols-2 gap-2 text-center mb-3">
                     <div className="bg-white rounded-xl p-2 border border-gray-100">
                       <p className="text-[9px] text-gray-400 uppercase font-bold mb-0.5">Active</p>
                       <p className="font-bold text-gray-800 text-xs">{activeMins}m</p>
@@ -243,6 +265,14 @@ export const StaffManagement: React.FC = () => {
                       <p className="font-bold text-gray-800 text-xs">{idleMins}m</p>
                     </div>
                   </div>
+                  {onShadowUser && s.role !== 'admin' && (
+                    <button
+                      onClick={() => onShadowUser(s)}
+                      className="w-full py-1.5 bg-purple-100 text-purple-700 hover:bg-purple-200 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1"
+                    >
+                      <span className="animate-pulse">👁️</span> Shadow
+                    </button>
+                  )}
                 </div>
               );
             })}
@@ -468,7 +498,16 @@ export const StaffManagement: React.FC = () => {
                         <span className="text-gray-300 italic">Never</span>
                       )}
                     </td>
-                    <td className="px-6 py-4 text-right">
+                    <td className="px-6 py-4 text-right flex justify-end gap-2">
+                      {onShadowUser && s.role !== 'admin' && (
+                        <button
+                          onClick={() => onShadowUser(s)}
+                          className="p-2 text-purple-600 hover:text-purple-800 hover:bg-purple-100 rounded-lg transition-all opacity-0 group-hover:opacity-100 flex items-center gap-1 text-xs font-bold"
+                          title="Shadow Workspace"
+                        >
+                          <span className="animate-pulse">👁️</span> Shadow
+                        </button>
+                      )}
                       {s.email !== 'ajithsabzz@gmail.com' && (
                         <button
                           onClick={() => handleDeleteStaff(s.id)}

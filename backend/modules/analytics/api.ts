@@ -167,15 +167,18 @@ router.get('/hierarchy-overview', async (req: any, res) => {
                     m.id as manager_id,
                     m.name as manager_name,
                     m.email as manager_email,
+                    m.current_status,
+                    m.last_seen_at,
                     COUNT(DISTINCT s.id)::int as staff_count,
                     COUNT(DISTINCT c.id)::int as total_leads,
                     COUNT(DISTINCT CASE WHEN c.lead_status = 'closed' THEN c.id END)::int as closed_leads,
-                    COUNT(DISTINCT CASE WHEN c.lead_status = 'review_pending' THEN c.id END)::int as review_pending_leads
+                    COUNT(DISTINCT CASE WHEN c.lead_status = 'review_pending' THEN c.id END)::int as review_pending_leads,
+                    AVG(EXTRACT(EPOCH FROM (c.closed_at - c.review_requested_at))/60)::int as avg_manager_approval_time_mins
                 FROM staff_members m
                 LEFT JOIN staff_members s ON s.manager_id = m.id AND s.role = 'staff'
                 LEFT JOIN candidates c ON c.assigned_to = s.id
                 ${scopeFilter}
-                GROUP BY m.id, m.name, m.email
+                GROUP BY m.id, m.name, m.email, m.current_status, m.last_seen_at
                 ORDER BY total_leads DESC, m.name ASC
             `, scopeParams);
 
@@ -184,18 +187,21 @@ router.get('/hierarchy-overview', async (req: any, res) => {
                     s.id as staff_id,
                     s.name as staff_name,
                     s.email as staff_email,
+                    s.current_status,
+                    s.last_seen_at,
                     m.id as manager_id,
                     m.name as manager_name,
                     COUNT(c.id)::int as total_leads,
                     COUNT(CASE WHEN c.lead_status IN ('assigned', 'claimed', 'review_pending') THEN 1 END)::int as active_leads,
                     COUNT(CASE WHEN c.lead_status = 'closed' THEN 1 END)::int as closed_leads,
-                    MAX(c.last_action_at) as last_action_at
+                    MAX(c.last_action_at) as last_action_at,
+                    AVG(EXTRACT(EPOCH FROM (c.review_requested_at - c.claimed_at))/60)::int as avg_time_to_review_mins
                 FROM staff_members s
                 LEFT JOIN staff_members m ON s.manager_id = m.id
                 LEFT JOIN candidates c ON c.assigned_to = s.id
                 WHERE s.role = 'staff'
                   AND ($1::text = 'admin' OR s.manager_id = $2)
-                GROUP BY s.id, s.name, s.email, m.id, m.name
+                GROUP BY s.id, s.name, s.email, s.current_status, s.last_seen_at, m.id, m.name
                 ORDER BY active_leads DESC, total_leads DESC
             `, [actor.role, actor.staffId]);
 

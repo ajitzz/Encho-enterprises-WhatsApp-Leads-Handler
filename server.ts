@@ -2342,7 +2342,9 @@ const isValidContent = (text) => {
         'type your message',
         'enter your message',
         'sample text',
-        'your message here'
+        'your message here',
+        'placeholder',
+        'test message'
     ];
     if (blockers.some(b => clean.includes(b))) return false;
     return true;
@@ -3444,11 +3446,12 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     }
                 } 
                 else if (data.type === 'input') {
-                    const fallbackPrompt = data.validationType === 'media'
-                        ? 'Please upload your licence file (image, PDF, or video) below.'
-                        : 'Please enter your response below:';
-                    payload = { type: 'text', text: { body: validBody || fallbackPrompt } };
-                    autoAdvance = false; 
+                    if (validBody) {
+                        payload = { type: 'text', text: { body: validBody } };
+                        autoAdvance = false; 
+                    } else {
+                        autoAdvance = true;
+                    }
                 } 
                 
                 else if (data.type === 'datetime_picker') {
@@ -3501,103 +3504,118 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                 }
 
                 else if (data.type === 'pickup_location' || data.type === 'destination_location') {
-                     let isManualTrigger = false;
-                     if (data.presets) {
-                         const preset = data.presets.find(p => (incomingPayloadId && p.id === incomingPayloadId) || (cleanInput && p.title.toLowerCase().trim() === cleanInput));
-                         if (preset && isPresetManual(preset)) isManualTrigger = true;
-                     }
-                     const hasPresets = data.presets && data.presets.length > 0;
-                     
-                     if (hasPresets && !isManualTrigger) {
-                         const rows = data.presets.slice(0, 10).map(p => {
-                             const row: any = { id: p.id, title: p.title.substring(0, 24) };
-                             if (p.description) row.description = p.description.substring(0, 72);
-                             return row;
-                         });
-                         payload = {
-                            type: "interactive",
-                            interactive: {
-                                type: "list",
-                                body: { text: validBody || (data.type === 'pickup_location' ? "Select Pickup Location:" : "Select Destination:") },
-                                action: { button: "Locations", sections: [{ title: "Options", rows }] }
-                            }
-                        };
+                     if (!validBody) {
+                         autoAdvance = true;
                      } else {
-                         const label = data.type === 'pickup_location' ? "Pickup Location" : "Destination";
-                         payload = {
+                         let isManualTrigger = false;
+                         if (data.presets) {
+                             const preset = data.presets.find(p => (incomingPayloadId && p.id === incomingPayloadId) || (cleanInput && p.title.toLowerCase().trim() === cleanInput));
+                             if (preset && isPresetManual(preset)) isManualTrigger = true;
+                         }
+                         const hasPresets = data.presets && data.presets.length > 0;
+                         
+                         if (hasPresets && !isManualTrigger) {
+                             const rows = data.presets.slice(0, 10).map(p => {
+                                 const row: any = { id: p.id, title: p.title.substring(0, 24) };
+                                 if (p.description) row.description = p.description.substring(0, 72);
+                                 return row;
+                             });
+                             payload = {
+                                type: "interactive",
+                                interactive: {
+                                    type: "list",
+                                    body: { text: validBody },
+                                    action: { button: "Locations", sections: [{ title: "Options", rows }] }
+                                }
+                            };
+                         } else {
+                             payload = {
+                                type: "interactive",
+                                interactive: {
+                                    type: "location_request_message",
+                                    body: { text: validBody },
+                                    action: { name: "send_location" }
+                                }
+                            };
+                         }
+                         autoAdvance = false;
+                     }
+                }
+                else if (data.type === 'location_request') {
+                    if (validBody) {
+                        payload = {
                             type: "interactive",
                             interactive: {
                                 type: "location_request_message",
-                                body: { text: (validBody || `Please share your *${label}*:`) },
+                                body: { text: validBody },
                                 action: { name: "send_location" }
                             }
                         };
-                     }
-                     autoAdvance = false;
-                }
-                else if (data.type === 'location_request') {
-                     payload = {
-                        type: "interactive",
-                        interactive: {
-                            type: "location_request_message",
-                            body: { text: validBody || "Please share your current location:" },
-                            action: { name: "send_location" }
-                        }
-                    };
-                    autoAdvance = false;
+                        autoAdvance = false;
+                    } else {
+                        autoAdvance = true;
+                    }
                 }
                 else if (data.type === 'image' && data.mediaUrl) {
                     const url = await refreshMediaUrl(data.mediaUrl);
                     payload = { type: 'image', image: { link: url, caption: validBody || '' } };
                 } 
                 else if ((data.type === 'interactive_button' || data.type === 'rich_card') && data.buttons?.length > 0) {
-                    let header = undefined;
-                    if (data.mediaUrl && (data.headerType === 'image' || data.headerType === 'video')) {
-                        const url = await refreshMediaUrl(data.mediaUrl);
-                        header = { type: data.headerType, [data.headerType]: { link: url } };
-                    }
-                    let footerObj = undefined;
-                    if (data.footerText) {
-                        const rawFooter = processText(data.footerText, candidate);
-                        if (isValidContent(rawFooter)) {
-                            footerObj = { text: rawFooter };
+                    if (!validBody) {
+                        autoAdvance = true;
+                    } else {
+                        let header = undefined;
+                        if (data.mediaUrl && (data.headerType === 'image' || data.headerType === 'video')) {
+                            const url = await refreshMediaUrl(data.mediaUrl);
+                            header = { type: data.headerType, [data.headerType]: { link: url } };
                         }
-                    }
-                    payload = {
-                        type: "interactive",
-                        interactive: {
-                            type: "button",
-                            header: header,
-                            body: { text: validBody || "Please select an option:" },
-                            footer: footerObj,
-                            action: {
-                                buttons: data.buttons.slice(0, 3).map(b => ({
-                                    type: "reply",
-                                    reply: { id: b.id, title: b.title.substring(0, 20) } 
-                                }))
+                        let footerObj = undefined;
+                        if (data.footerText) {
+                            const rawFooter = processText(data.footerText, candidate);
+                            if (isValidContent(rawFooter)) {
+                                footerObj = { text: rawFooter };
                             }
                         }
-                    };
-                    autoAdvance = false;
+                        payload = {
+                            type: "interactive",
+                            interactive: {
+                                type: "button",
+                                header: header,
+                                body: { text: validBody },
+                                footer: footerObj,
+                                action: {
+                                    buttons: data.buttons.slice(0, 3).map(b => ({
+                                        type: "reply",
+                                        reply: { id: b.id, title: b.title.substring(0, 20) } 
+                                    }))
+                                }
+                            }
+                        };
+                        autoAdvance = false;
+                    }
                 } 
                 else if (data.type === 'interactive_list' && data.sections?.length > 0) {
-                    let buttonText = "Menu";
-                    if (data.listButtonText) {
-                        const rawBtn = processText(data.listButtonText, candidate);
-                        if (isValidContent(rawBtn)) buttonText = rawBtn;
-                    }
-                    payload = {
-                        type: "interactive",
-                        interactive: {
-                            type: "list",
-                            body: { text: validBody || "Please make a selection:" },
-                            action: {
-                                button: buttonText,
-                                sections: data.sections
-                            }
+                    if (!validBody) {
+                        autoAdvance = true;
+                    } else {
+                        let buttonText = "Menu";
+                        if (data.listButtonText) {
+                            const rawBtn = processText(data.listButtonText, candidate);
+                            if (isValidContent(rawBtn)) buttonText = rawBtn;
                         }
-                    };
-                    autoAdvance = false;
+                        payload = {
+                            type: "interactive",
+                            interactive: {
+                                type: "list",
+                                body: { text: validBody },
+                                action: {
+                                    button: buttonText,
+                                    sections: data.sections
+                                }
+                            }
+                        };
+                        autoAdvance = false;
+                    }
                 }
 
                 if (payload) {
@@ -3605,25 +3623,26 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                         let sendResult = await sendToMeta(candidate.phone_number, payload, { sendType: 'bot', enableRetry: true });
                         let loggedPayload = payload;
 
-                        if (!sendResult?.delivered && sendResult?.blocked && String(sendResult?.reason || '').startsWith('interactive_')) {
-                            const fallbackText = validBody || 'Please reply with your preferred option.';
-                            const fallbackPayload = { type: 'text', text: { body: fallbackText } };
-                            const fallbackResult = await sendToMeta(candidate.phone_number, fallbackPayload, { sendType: 'bot', enableRetry: true });
-                            if (fallbackResult?.delivered) {
-                                sendResult = fallbackResult;
-                                loggedPayload = fallbackPayload;
-                            }
+                        if (!sendResult?.delivered && sendResult?.blocked) {
+                            // If the message was blocked (e.g., due to placeholders or empty content),
+                            // we skip sending any fallback and auto-advance to the next node to prevent breaks.
+                            console.warn(`[Bot Engine] Node ${node.id} blocked (${sendResult.reason}). Skipping to prevent breaks.`);
+                            autoAdvance = true;
+                        } else {
+                            queueBotMessageSideEffects({
+                                candidateId: candidate.id,
+                                payload: loggedPayload,
+                                nodeType: data.type,
+                                sendResult,
+                            });
                         }
-
-                        queueBotMessageSideEffects({
-                            candidateId: candidate.id,
-                            payload: loggedPayload,
-                            nodeType: data.type,
-                            sendResult,
-                        });
                     } catch (apiError) {
                         console.error("Meta Send Error:", apiError);
                     }
+                } else if (!validBody && data.type !== 'datetime_picker' && data.type !== 'summary') {
+                    // If there's no valid body and no payload was generated, skip the node
+                    console.warn(`[Bot Engine] Node ${node.id} has no valid body. Skipping to prevent breaks.`);
+                    autoAdvance = true;
                 }
             }
             const nodeDurationMs = nowMs() - nodeExecStart;
@@ -3887,6 +3906,53 @@ apiRouter.get('/auth/me', authMiddleware, (req, res) => {
     });
 });
 
+apiRouter.post('/staff/heartbeat', authMiddleware, async (req, res) => {
+    try {
+        const { status } = req.body; // 'online' or 'idle'
+        const currentStatus = status === 'idle' ? 'idle' : 'online';
+        await withDb(async (client) => {
+            await client.query(
+                `UPDATE staff_members 
+                 SET last_seen_at = NOW(), current_status = $1 
+                 WHERE id = $2`,
+                [currentStatus, req.user.staffId]
+            );
+            
+            // Update daily performance metrics (online minutes)
+            // We'll increment total_online_minutes if status is online.
+            // This is a simple approximation: 1 heartbeat = 1 minute if called every 60s.
+            if (currentStatus === 'online') {
+                await client.query(`
+                    INSERT INTO daily_performance_metrics (staff_id, record_date, total_online_minutes)
+                    VALUES ($1, CURRENT_DATE, 1)
+                    ON CONFLICT (staff_id, record_date) 
+                    DO UPDATE SET total_online_minutes = daily_performance_metrics.total_online_minutes + 1
+                `, [req.user.staffId]);
+            }
+        });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/staff/presence', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            // Mark offline if not seen in 5 minutes
+            await client.query(`
+                UPDATE staff_members 
+                SET current_status = 'offline' 
+                WHERE last_seen_at < NOW() - INTERVAL '5 minutes' AND current_status != 'offline'
+            `);
+            
+            const result = await client.query(`
+                SELECT id, name, current_status, last_seen_at 
+                FROM staff_members
+            `);
+            res.json(result.rows);
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 apiRouter.get('/staff', authMiddleware, async (req, res) => {
     try {
         await withDb(async (client) => {
@@ -4060,7 +4126,7 @@ apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
                 if (check.rows[0]?.assigned_to) {
                     return res.status(400).json({ error: 'Lead already claimed' });
                 }
-                await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW() WHERE id = $3', [req.user.staffId, 'claimed', req.params.id]);
+                await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW(), claimed_at = NOW() WHERE id = $3', [req.user.staffId, 'claimed', req.params.id]);
                 await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, 'claimed', 'Lead claimed from pool']);
                 
                 // Audit log

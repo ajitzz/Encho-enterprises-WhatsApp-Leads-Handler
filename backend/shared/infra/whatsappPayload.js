@@ -24,7 +24,9 @@ const containsPlaceholder = (text) => {
     'type your message',
     'enter your message',
     'sample text',
-    'your message here'
+    'your message here',
+    'placeholder',
+    'test message'
   ];
   return blockers.some((b) => clean.includes(b));
 };
@@ -40,7 +42,7 @@ const validateInteractiveButtons = (interactive) => {
   const hasInvalidButton = buttons.some((button) => {
     const title = button?.reply?.title;
     const id = button?.reply?.id;
-    return !isNonEmptyString(title) || !isNonEmptyString(id);
+    return !isNonEmptyString(title) || !isNonEmptyString(id) || containsPlaceholder(title);
   });
 
   if (hasInvalidButton) return { valid: false, reason: 'interactive_button_invalid' };
@@ -61,7 +63,7 @@ const validateInteractiveList = (interactive) => {
   const hasInvalidSection = sections.some((section) => {
     const rows = section?.rows;
     if (!Array.isArray(rows) || rows.length === 0) return true;
-    return rows.some((row) => !isNonEmptyString(row?.id) || !isNonEmptyString(row?.title));
+    return rows.some((row) => !isNonEmptyString(row?.id) || !isNonEmptyString(row?.title) || containsPlaceholder(row?.title));
   });
 
   if (hasInvalidSection) return { valid: false, reason: 'interactive_section_row_invalid' };

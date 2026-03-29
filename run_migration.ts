@@ -7,7 +7,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 async function runMigration() {
-    const migrationPath = path.join(process.cwd(), 'migrations_v2.sql');
+    const migrationPath = path.join(process.cwd(), 'migrations_v3.sql');
     const sql = fs.readFileSync(migrationPath, 'utf8');
 
     console.log('Applying migration from:', migrationPath);
