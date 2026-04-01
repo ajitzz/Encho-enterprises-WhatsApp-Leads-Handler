@@ -49,7 +49,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
       const unsubscribe = liveApiService.subscribeToUpdates(() => {}, {
           driverId: driver.id,
-          pollIntervalMs: 12000,
+          pollIntervalMs: 3000,
           onMessages: (latestMsgs) => {
               setLocalMessages(prev => {
                   if (latestMsgs.length === 0) return prev;
