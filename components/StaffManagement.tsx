@@ -18,6 +18,7 @@ export const StaffManagement: React.FC<StaffManagementProps> = ({ onShadowUser }
   const [autoDistSettings, setAutoDistSettings] = useState({ auto_enabled: false });
   const [hierarchy, setHierarchy] = useState<{ scope: string; managers: any[]; staffLoad: any[] } | null>(null);
   const [hierarchyLoading, setHierarchyLoading] = useState(true);
+  const [hierarchyError, setHierarchyError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchStaff();
@@ -50,9 +51,13 @@ export const StaffManagement: React.FC<StaffManagementProps> = ({ onShadowUser }
   const fetchHierarchy = async () => {
     try {
       setHierarchyLoading(true);
+      setHierarchyError(null);
       const overview = await liveApiService.getHierarchyOverview();
       setHierarchy(overview);
-    } catch (err) {
+    } catch (err: any) {
+      const message = String(err?.message || 'Hierarchy insights are unavailable right now.');
+      setHierarchyError(message);
+      setHierarchy(null);
       console.error('Failed to fetch hierarchy overview', err);
     } finally {
       setHierarchyLoading(false);
@@ -215,7 +220,10 @@ export const StaffManagement: React.FC<StaffManagementProps> = ({ onShadowUser }
             </div>
           </div>
         ) : (
-          <div className="p-5 text-xs text-gray-500">Hierarchy insights are currently unavailable.</div>
+          <div className="p-5 text-xs text-gray-500">
+            Hierarchy insights are currently unavailable.
+            {hierarchyError && <div className="mt-2 text-red-500">{hierarchyError}</div>}
+          </div>
         )}
       </div>
 
