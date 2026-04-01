@@ -2624,8 +2624,6 @@ const ensureLeadOpsSchema = async (client) => {
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_note TEXT;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'none';`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP;`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS review_requested_at TIMESTAMP WITH TIME ZONE;`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP WITH TIME ZONE;`);
     await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS next_followup_at TIMESTAMP WITH TIME ZONE;`);
     await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;`);
 
