@@ -168,6 +168,17 @@ const SYSTEM_CONFIG: any = {
     PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
 };
 
+const DEFAULT_SUPER_ADMIN_EMAILS = ['ajithsabzz@gmail.com', 'enchoenterprises@gmail.com'];
+const SUPER_ADMIN_EMAILS = new Set(
+    (process.env.SUPER_ADMIN_EMAILS || process.env.ADMIN_EMAILS || DEFAULT_SUPER_ADMIN_EMAILS.join(','))
+        .split(',')
+        .map((email) => String(email || '').trim().toLowerCase())
+        .filter(Boolean)
+);
+
+const normalizeEmail = (value: any) => String(value || '').trim().toLowerCase();
+console.log(`[Auth] Super admin allowlist loaded (${SUPER_ADMIN_EMAILS.size} email(s)).`);
+
 const applyRuntimeGoogleSheetsConfig = (rawConfig: any = {}) => {
     if (!rawConfig || typeof rawConfig !== 'object') return;
 
@@ -3865,13 +3876,16 @@ const authMiddleware = async (req, res, next) => {
         const token = authHeader.split(' ')[1];
         const ticket = await googleClient.verifyIdToken({ idToken: token, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
         const payload = ticket.getPayload();
-        const email = payload.email;
+        const email = normalizeEmail(payload?.email);
+        if (!email) {
+            return res.status(401).json({ error: 'Unauthorized: email claim missing from token.' });
+        }
 
         await withDb(async (client) => {
             const staffRes = await client.query('SELECT id, role FROM staff_members WHERE email = $1', [email]);
             if (staffRes.rows.length === 0) {
                 // Check if it's the super admin
-                if (email === 'ajithsabzz@gmail.com') {
+                if (SUPER_ADMIN_EMAILS.has(email)) {
                     const insertRes = await client.query(
                         'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id, role',
                         [email, payload.name, 'admin']
@@ -5068,14 +5082,16 @@ const handleAuthGoogleLegacy = async (req, res) => {
         const { credential } = req.body;
         const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
         const payload = ticket.getPayload();
-        const email = payload.email;
+        const email = normalizeEmail(payload?.email);
+        if (!email) {
+            return res.status(401).json({ success: false, error: 'Unauthorized: email claim missing from token.' });
+        }
 
         // Super Admin check
-        const ADMIN_EMAILS = ['ajithsabzz@gmail.com', 'enchoenterprises@gmail.com'];
         let userRole = null;
         let staffId = null;
 
-        const isSuperAdmin = ADMIN_EMAILS.includes(email);
+        const isSuperAdmin = SUPER_ADMIN_EMAILS.has(email);
         if (isSuperAdmin) {
             userRole = 'admin';
         }
