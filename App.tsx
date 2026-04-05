@@ -655,6 +655,7 @@ export default function App() {
         {activeTab === 'media-library' && <MediaLibrary />}
         {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
         {activeTab === 'staff' && <StaffManagement onShadowUser={setShadowUser} />}
+        {activeTab === 'staff-portal' && <StaffPortal user={userProfile} onLogout={() => setActiveTab('dashboard')} />}
 
         {showWebhookModal && <WebhookConfigModal onClose={() => setShowWebhookModal(false)} onSuccess={() => { addNotification({ type: 'success', title: 'Webhook Configured', message: 'Meta App settings updated successfully.' }); }} />}
         {showSettingsModal && <SettingsModal onClose={() => setShowSettingsModal(false)} />}

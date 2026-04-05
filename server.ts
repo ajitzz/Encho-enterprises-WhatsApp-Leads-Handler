@@ -2623,7 +2623,6 @@ const ensureLeadOpsSchema = async (client) => {
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_date TIMESTAMP WITH TIME ZONE;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_note TEXT;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'none';`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP;`);
     await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS next_followup_at TIMESTAMP WITH TIME ZONE;`);
     await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;`);
 
@@ -2752,6 +2751,23 @@ const initDatabase = async (client) => {
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMP;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS first_response_time INT;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS review_requested_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP;`);
+    await client.query(`CREATE TABLE IF NOT EXISTS daily_performance_metrics (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
+        record_date DATE NOT NULL DEFAULT CURRENT_DATE,
+        leads_claimed INT DEFAULT 0,
+        notes_added INT DEFAULT 0,
+        reviews_submitted INT DEFAULT 0,
+        leads_closed INT DEFAULT 0,
+        leads_rejected INT DEFAULT 0,
+        total_time_to_review_mins INT DEFAULT 0, 
+        total_manager_approval_time_mins INT DEFAULT 0,
+        total_online_minutes INT DEFAULT 0,
+        UNIQUE(staff_id, record_date)
+    );`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`ALTER TABLE candidate_messages ADD COLUMN IF NOT EXISTS sender_type VARCHAR(20);`);
     await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
