@@ -440,8 +440,19 @@ export const liveApiService = {
       });
   },
 
-  getDriverExcelReport: async (search: string = ''): Promise<{ columns: DriverExcelColumn[]; rows: DriverExcelRow[] }> => {
-      return apiRequest(`/api/reports/driver-excel?search=${encodeURIComponent(search)}`);
+  getDriverExcelReport: async (search: string = '', includeHidden: boolean = false): Promise<{ columns: DriverExcelColumn[]; rows: DriverExcelRow[] }> => {
+      return apiRequest(`/api/reports/driver-excel?search=${encodeURIComponent(search)}&includeHidden=${includeHidden ? 'true' : 'false'}`);
+  },
+
+  getArchivedDrivers: async (): Promise<DriverExcelRow[]> => {
+      return apiRequest<DriverExcelRow[]>('/api/drivers/archived');
+  },
+
+  setDriverVisibility: async (id: string, isHidden: boolean) => {
+      return apiRequest(`/api/drivers/${id}/visibility`, {
+          method: 'PATCH',
+          body: JSON.stringify({ isHidden })
+      });
   },
 
   getDriverExcelSyncStatus: async (): Promise<{ state: string; lastTriggeredAt?: string; lastRunAt?: string; lastSuccessAt?: string; lastError?: string; inProgress?: boolean; hasQueuedSync?: boolean; lastDurationMs?: number }> => {
