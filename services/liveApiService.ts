@@ -1,37 +1,8 @@
 
 import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage, DriverExcelColumn, DriverExcelRow, UserRole } from '../types';
 
-// Use relative paths by default so Vercel rewrites route requests through `/api/index.ts`.
-// Cross-origin API targets (e.g. Render) are ignored unless explicitly allowed.
-const resolveApiBaseUrl = () => {
-    const env = (import.meta as any)?.env || {};
-    const rawBase = (env.VITE_API_BASE_URL || '').toString().trim().replace(/^['"]|['"]$/g, '');
-    if (!rawBase) return '';
-
-    if (typeof window === 'undefined') return rawBase;
-
-    const allowCrossOrigin = String(env.VITE_ALLOW_CROSS_ORIGIN_API || '').toLowerCase() === 'true';
-    try {
-        const configured = new URL(rawBase, window.location.origin);
-        const isSameOrigin = configured.origin === window.location.origin;
-
-        if (isSameOrigin || allowCrossOrigin) {
-            return configured.origin === window.location.origin ? '' : configured.origin;
-        }
-
-        console.warn(
-            `[liveApiService] Ignoring cross-origin VITE_API_BASE_URL (${configured.origin}). ` +
-            'Using same-origin `/api` routes to avoid CORS/auth failures. ' +
-            'Set VITE_ALLOW_CROSS_ORIGIN_API=true to opt in explicitly.'
-        );
-        return '';
-    } catch {
-        console.warn('[liveApiService] Invalid VITE_API_BASE_URL value. Falling back to same-origin API routes.');
-        return '';
-    }
-};
-
-const API_BASE_URL = resolveApiBaseUrl();
+// Use relative path so the Vercel proxy/rewrite handles the domain automatically.
+const API_BASE_URL = ''; 
 const DEFAULT_PROXY_UPLOAD_MAX_BYTES = 4 * 1024 * 1024; // Keep below common serverless payload limits (e.g. Vercel ~4.5MB)
 
 const resolveProxyUploadMaxBytes = () => {
