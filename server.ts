@@ -2753,6 +2753,8 @@ const initDatabase = async (client) => {
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS review_requested_at TIMESTAMP;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS is_terminated BOOLEAN DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN DEFAULT FALSE;`);
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP;`);
     await client.query(`CREATE TABLE IF NOT EXISTS daily_performance_metrics (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -5267,6 +5269,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
                     (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document', 'voice', 'sticker')) as user_media_count,
                     (SELECT count(*) FROM jsonb_object_keys(c.variables)) as var_count
                 FROM candidates c 
+                WHERE COALESCE(c.is_hidden, FALSE) = FALSE
                 ORDER BY last_message_at DESC NULLS LAST LIMIT 50
             `);
             const drivers = driverRows.rows.map((row) => {
@@ -5297,6 +5300,8 @@ apiRouter.get('/updates/stream', async (req, res) => {
                     lastMessageTime: parseInt(row.last_message_at || '0'),
                     source: row.source,
                     isHumanMode: row.is_human_mode,
+                    isHidden: Boolean(row.is_hidden),
+                    isTerminated: Boolean(row.is_terminated),
                     created_at: row.created_at,
                     lead_score: leadScore,
                     progress_percent: progress,
@@ -5408,6 +5413,7 @@ apiRouter.get('/drivers', async (req, res) => {
                     (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document', 'voice', 'sticker')) as user_media_count,
                     (SELECT count(*) FROM jsonb_object_keys(c.variables)) as var_count
                 FROM candidates c 
+                WHERE COALESCE(c.is_hidden, FALSE) = FALSE
                 ORDER BY last_message_at DESC NULLS LAST LIMIT 50
             `);
             res.json(r.rows.map(row => {
@@ -5424,6 +5430,8 @@ apiRouter.get('/drivers', async (req, res) => {
                     id: row.id, phoneNumber: row.phone_number, name: row.name, status: row.stage, 
                     lastMessage: row.last_message, lastMessageTime: parseInt(row.last_message_at || '0'), 
                     source: row.source, isHumanMode: row.is_human_mode,
+                    isHidden: Boolean(row.is_hidden),
+                    isTerminated: Boolean(row.is_terminated),
                     lead_score: leadScore,
                     progress_percent: progress,
                     user_msg_count: msgCount,
@@ -5437,13 +5445,62 @@ apiRouter.get('/drivers', async (req, res) => {
 
 apiRouter.patch('/drivers/:id', async (req, res) => {
     try {
-        const { status, isHumanMode, name } = req.body;
+        const { status, isHumanMode, name, isTerminated } = req.body;
         await withDb(async (client) => {
             if (status) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [status, req.params.id]);
             if (isHumanMode !== undefined) await client.query("UPDATE candidates SET is_human_mode = $1 WHERE id = $2", [isHumanMode, req.params.id]);
             if (name) await client.query("UPDATE candidates SET name = $1 WHERE id = $2", [name, req.params.id]);
+            if (isTerminated === true) {
+                await client.query(
+                    "UPDATE candidates SET is_terminated = TRUE, is_hidden = TRUE, lead_status = 'terminated' WHERE id = $1",
+                    [req.params.id]
+                );
+            } else if (isTerminated === false) {
+                await client.query(
+                    "UPDATE candidates SET is_terminated = FALSE, is_hidden = FALSE WHERE id = $1",
+                    [req.params.id]
+                );
+            }
         });
         res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/drivers/archived', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query(`
+                SELECT id, phone_number, name, stage, source, created_at, last_message_at, is_hidden, is_terminated
+                FROM candidates
+                WHERE COALESCE(is_terminated, FALSE) = TRUE
+                ORDER BY created_at DESC
+                LIMIT 500
+            `);
+            res.json(r.rows.map((row) => ({
+                id: row.id,
+                phoneNumber: row.phone_number || '',
+                name: row.name || '',
+                status: row.stage || '',
+                source: row.source || '',
+                createdAt: row.created_at ? new Date(row.created_at).toISOString() : '',
+                lastMessageAt: row.last_message_at ? new Date(Number(row.last_message_at) || row.last_message_at).toISOString() : '',
+                isHidden: Boolean(row.is_hidden),
+                isTerminated: Boolean(row.is_terminated)
+            })));
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.patch('/drivers/:id/visibility', async (req, res) => {
+    try {
+        const { isHidden } = req.body || {};
+        if (typeof isHidden !== 'boolean') {
+            return res.status(400).json({ error: 'isHidden (boolean) is required' });
+        }
+        await withDb(async (client) => {
+            await client.query('UPDATE candidates SET is_hidden = $1 WHERE id = $2', [isHidden, req.params.id]);
+        });
+        res.json({ success: true, isHidden });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -5592,16 +5649,21 @@ apiRouter.patch('/drivers/:id/document-status', async (req, res) => {
 apiRouter.get('/reports/driver-excel', async (req, res) => {
     try {
         const search = (req.query.search || '').toString().trim();
+        const includeHidden = String(req.query.includeHidden || 'false').toLowerCase() === 'true';
         await withDb(async (client) => {
             const customCols = await getDriverExcelColumnConfig(client);
             const params = [];
-            let where = '';
+            const conditions = [];
             if (search) {
                 params.push(`%${search}%`);
-                where = `WHERE c.name ILIKE $1 OR c.phone_number ILIKE $1 OR c.stage ILIKE $1`;
+                conditions.push(`(c.name ILIKE $${params.length} OR c.phone_number ILIKE $${params.length} OR c.stage ILIKE $${params.length})`);
             }
+            if (!includeHidden) {
+                conditions.push('COALESCE(c.is_hidden, FALSE) = FALSE');
+            }
+            const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
             const q = `
-                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables
+                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables, c.is_hidden, c.is_terminated
                 FROM candidates c
                 ${where}
                 ORDER BY c.created_at DESC
@@ -5644,6 +5706,8 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
                     source: r.source || '',
                     createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
                     lastMessageAt: r.last_message_at ? new Date(Number(r.last_message_at) || r.last_message_at).toISOString() : '',
+                    isHidden: Boolean(r.is_hidden),
+                    isTerminated: Boolean(r.is_terminated),
                     variables: mergedVars
                 };
             });
