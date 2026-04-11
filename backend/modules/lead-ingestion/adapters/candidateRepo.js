@@ -22,11 +22,15 @@ export const findInboundMessageByWhatsappId = async ({ client, whatsappMessageId
 };
 
 export const insertInboundMessage = async ({ client, candidateId, text, type, whatsappMessageId }) => {
-  await client.query(
+  const result = await client.query(
     `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
-     VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW())`,
+     VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW())
+     ON CONFLICT (whatsapp_message_id) DO NOTHING
+     RETURNING id`,
     [crypto.randomUUID(), candidateId, text, type, whatsappMessageId]
   );
+
+  return result.rows[0] || null;
 };
 
 export default {
