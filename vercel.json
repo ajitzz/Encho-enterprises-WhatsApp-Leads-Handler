@@ -16,7 +16,8 @@
   ],
   "functions": {
     "api/index.ts": {
-      "maxDuration": 60
+      "maxDuration": 30,
+      "memory": 512
     }
   }
 }

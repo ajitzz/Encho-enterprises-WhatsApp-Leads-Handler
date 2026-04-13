@@ -31,6 +31,7 @@ import analyticsRouter from './backend/modules/analytics/api.js';
 import { runNurtureTriggers } from './backend/modules/automation/nurture.js';
 
 const notifyUpdates = (candidateId = null) => {
+    memoryCache.dashboardSnapshotCache.clear();
     broadcastUpdate(candidateId);
 };
 
@@ -166,6 +167,14 @@ const SYSTEM_CONFIG: any = {
     CACHE_TTL: 60 * 1000, // 60 Seconds Cache for Bot Settings
     RUNTIME_CONFIG_CACHE_TTL: Number.parseInt(process.env.RUNTIME_CONFIG_CACHE_TTL_MS || '30000', 10),
     WEBHOOK_MESSAGE_ID_CACHE_TTL_MS: Number.parseInt(process.env.WEBHOOK_MESSAGE_ID_CACHE_TTL_MS || String(6 * 60 * 60 * 1000), 10),
+    MEDIA_URL_CACHE_TTL_MS: Math.max(30_000, Number.parseInt(process.env.MEDIA_URL_CACHE_TTL_MS || String(10 * 60 * 1000), 10)),
+    MEDIA_URL_CACHE_MAX_ITEMS: Math.max(100, Number.parseInt(process.env.MEDIA_URL_CACHE_MAX_ITEMS || '2000', 10)),
+    DASHBOARD_SNAPSHOT_CACHE_TTL_MS: Math.max(1_000, Number.parseInt(process.env.DASHBOARD_SNAPSHOT_CACHE_TTL_MS || '5000', 10)),
+    SCHEDULED_QUEUE_MAX_JOBS_PER_RUN: Math.max(1, Number.parseInt(process.env.SCHEDULED_QUEUE_MAX_JOBS_PER_RUN || '20', 10)),
+    SCHEDULED_QUEUE_BATCH_SIZE: Math.max(1, Number.parseInt(process.env.SCHEDULED_QUEUE_BATCH_SIZE || '3', 10)),
+    SCHEDULED_QUEUE_MAX_RUNTIME_MS: Math.max(2_000, Number.parseInt(process.env.SCHEDULED_QUEUE_MAX_RUNTIME_MS || '25000', 10)),
+    REQUEST_JSON_LIMIT: process.env.REQUEST_JSON_LIMIT || '2mb',
+    REQUEST_TIMEOUT_MS: Math.max(5_000, Number.parseInt(process.env.REQUEST_TIMEOUT_MS || '25000', 10)),
     PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
 };
 
@@ -195,6 +204,9 @@ const memoryCache = {
     runtimeConfigInFlight: null,
     botSettingsInFlight: null,
     recentWebhookMessageIds: new Map<string, number>(),
+    mediaUrlCache: new Map<string, { value: string; expiresAt: number }>(),
+    dashboardSnapshotCache: new Map<string, { value: any; expiresAt: number }>(),
+    dashboardSnapshotInFlight: new Map<string, Promise<any>>(),
 };
 
 const markRecentWebhookMessageId = (messageId: string | null) => {
@@ -220,6 +232,32 @@ const hasRecentWebhookMessageId = (messageId: string | null) => {
         return false;
     }
     return true;
+};
+
+const getCachedMapValue = <T>(map: Map<string, { value: T; expiresAt: number }>, key: string) => {
+    const hit = map.get(key);
+    if (!hit) return null;
+    if (hit.expiresAt <= Date.now()) {
+        map.delete(key);
+        return null;
+    }
+    return hit.value;
+};
+
+const setCachedMapValue = <T>(map: Map<string, { value: T; expiresAt: number }>, key: string, value: T, ttlMs: number, maxItems: number) => {
+    map.set(key, { value, expiresAt: Date.now() + ttlMs });
+    if (map.size <= maxItems) return;
+    for (const [existingKey, entry] of map.entries()) {
+        if (entry.expiresAt <= Date.now()) {
+            map.delete(existingKey);
+        }
+        if (map.size <= maxItems) return;
+    }
+    while (map.size > maxItems) {
+        const firstKey = map.keys().next().value;
+        if (!firstKey) break;
+        map.delete(firstKey);
+    }
 };
 
 const getRuntimeConfigCached = async (client) => {
@@ -854,6 +892,10 @@ const persistDriverExcelSyncStatus = async () => {
 const refreshMediaUrl = async (url) => {
     if (!url || typeof url !== 'string') return null;
     if (!url.includes('amazonaws.com') && !url.includes(SYSTEM_CONFIG.AWS_BUCKET)) return url;
+    const cached = getCachedMapValue<string>(memoryCache.mediaUrlCache, url);
+    if (cached) {
+        return cached;
+    }
 
     try {
         const urlObj = new URL(url);
@@ -862,7 +904,15 @@ const refreshMediaUrl = async (url) => {
             key = key.substring(SYSTEM_CONFIG.AWS_BUCKET.length + 1);
         }
         const command = new GetObjectCommand({ Bucket: SYSTEM_CONFIG.AWS_BUCKET, Key: key });
-        return await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+        const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+        setCachedMapValue(
+            memoryCache.mediaUrlCache,
+            url,
+            signedUrl,
+            SYSTEM_CONFIG.MEDIA_URL_CACHE_TTL_MS,
+            SYSTEM_CONFIG.MEDIA_URL_CACHE_MAX_ITEMS
+        );
+        return signedUrl;
     } catch (e) {
         return url; 
     }
@@ -3716,7 +3766,46 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 // --- EXPRESS APP ---
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: SYSTEM_CONFIG.REQUEST_JSON_LIMIT }));
+app.use((req, res, next) => {
+    const startedAt = Date.now();
+    const timeoutHandle = setTimeout(() => {
+        if (res.headersSent) return;
+        structuredLog({
+            level: 'error',
+            module: 'http',
+            message: 'request.timeout',
+            requestId: req?.requestId || null,
+            meta: {
+                method: req.method,
+                path: req.originalUrl || req.url,
+                timeoutMs: SYSTEM_CONFIG.REQUEST_TIMEOUT_MS
+            }
+        });
+        res.status(503).json({ error: 'Request timed out before completion' });
+    }, SYSTEM_CONFIG.REQUEST_TIMEOUT_MS);
+    res.on('finish', () => {
+        clearTimeout(timeoutHandle);
+        const durationMs = Date.now() - startedAt;
+        if (durationMs >= Math.max(5000, SYSTEM_CONFIG.REQUEST_TIMEOUT_MS * 0.8)) {
+            const memoryUsage = process.memoryUsage();
+            structuredLog({
+                level: 'info',
+                module: 'http',
+                message: 'request.slow_path',
+                requestId: req?.requestId || null,
+                meta: {
+                    method: req.method,
+                    path: req.originalUrl || req.url,
+                    durationMs,
+                    rssMb: Number((memoryUsage.rss / (1024 * 1024)).toFixed(2)),
+                    heapUsedMb: Number((memoryUsage.heapUsed / (1024 * 1024)).toFixed(2))
+                }
+            });
+        }
+    });
+    next();
+});
 
 if (REQUEST_CONTEXT_FLAG) {
     app.use((req, res, next) => {
@@ -5232,6 +5321,123 @@ registerAuthConfigRoutes({
     },
 });
 
+const getDashboardSnapshotCacheKey = (driverId: string | null) => `driver:${driverId || 'all'}`;
+
+const fetchDashboardSnapshot = async ({ driverId = null, forceRefresh = false }: { driverId?: string | null; forceRefresh?: boolean } = {}) => {
+    const cacheKey = getDashboardSnapshotCacheKey(driverId);
+    if (!forceRefresh) {
+        const cached = getCachedMapValue<any>(memoryCache.dashboardSnapshotCache, cacheKey);
+        if (cached) return cached;
+    }
+
+    const existingInFlight = memoryCache.dashboardSnapshotInFlight.get(cacheKey);
+    if (existingInFlight) return existingInFlight;
+
+    const snapshotPromise = withDb(async (client) => {
+        const botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
+        const publishedBot = botRes.rows[0];
+        const totalNodes = publishedBot?.settings?.nodes?.length || 10;
+
+        const driverRows = await client.query(`
+            SELECT c.*, 
+                (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in') as user_msg_count,
+                (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document', 'voice', 'sticker')) as user_media_count,
+                (SELECT count(*) FROM jsonb_object_keys(c.variables)) as var_count
+            FROM candidates c 
+            WHERE COALESCE(c.is_hidden, FALSE) = FALSE
+            ORDER BY last_message_at DESC NULLS LAST LIMIT 50
+        `);
+        const drivers = driverRows.rows.map((row) => {
+            const msgCount = parseInt(row.user_msg_count || '0');
+            const mediaCount = parseInt(row.user_media_count || '0');
+            const varCount = parseInt(row.var_count || '0');
+
+            let leadScore = (msgCount * 10) + (mediaCount * 50) + (varCount * 20);
+            if (row.is_human_mode) leadScore += 100;
+            const progress = Math.min(100, Math.round((varCount / Math.max(1, totalNodes)) * 100));
+
+            return {
+                id: row.id,
+                phoneNumber: row.phone_number,
+                phone_number: row.phone_number,
+                name: row.name,
+                status: row.stage,
+                lead_status: row.lead_status,
+                assigned_to: row.assigned_to,
+                lastMessage: row.last_message,
+                lastMessageTime: parseInt(row.last_message_at || '0'),
+                source: row.source,
+                isHumanMode: row.is_human_mode,
+                isHidden: Boolean(row.is_hidden),
+                isTerminated: Boolean(row.is_terminated),
+                created_at: row.created_at,
+                lead_score: leadScore,
+                progress_percent: progress,
+                user_msg_count: msgCount,
+                user_media_count: mediaCount,
+                var_count: varCount
+            };
+        });
+
+        const payload: any = { drivers };
+        if (!driverId) return payload;
+
+        const [messagesRes, scheduledRes] = await Promise.all([
+            client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [driverId]),
+            client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed'])
+        ]);
+
+        const mappedMessages = await Promise.all(messagesRes.rows.map(async (row) => {
+            let imageUrl, videoUrl, documentUrl, audioUrl;
+            let text = row.text;
+            if (row.type !== 'text' && row.type !== 'variable_capture') {
+                try {
+                    const media = JSON.parse(row.text || '{}');
+                    text = media.caption || '';
+                    const resolvedMediaUrl = await refreshMediaUrl(media.url);
+                    if (row.type === 'video') videoUrl = resolvedMediaUrl;
+                    else if (row.type === 'document') documentUrl = resolvedMediaUrl;
+                    else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
+                    else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
+                } catch (e) {}
+            }
+            return {
+                id: row.id,
+                sender: row.direction === 'in' ? 'driver' : 'agent',
+                senderType: row.sender_type || (row.direction === 'in' ? 'driver' : 'bot'),
+                text,
+                imageUrl,
+                videoUrl,
+                documentUrl,
+                audioUrl,
+                timestamp: new Date(row.created_at).getTime(),
+                type: row.type || 'text',
+                status: row.status,
+            };
+        }));
+
+        payload.messagesByDriver = { [driverId]: mappedMessages.sort((a, b) => a.timestamp - b.timestamp) };
+        payload.scheduledByDriver = {
+            [driverId]: scheduledRes.rows.map((row) => ({
+                id: row.id,
+                scheduledTime: new Date(row.scheduled_time).getTime(),
+                payload: row.payload,
+                status: row.status,
+            }))
+        };
+        return payload;
+    });
+
+    memoryCache.dashboardSnapshotInFlight.set(cacheKey, snapshotPromise);
+    try {
+        const snapshot = await snapshotPromise;
+        setCachedMapValue(memoryCache.dashboardSnapshotCache, cacheKey, snapshot, SYSTEM_CONFIG.DASHBOARD_SNAPSHOT_CACHE_TTL_MS, 20);
+        return snapshot;
+    } finally {
+        memoryCache.dashboardSnapshotInFlight.delete(cacheKey);
+    }
+};
+
 apiRouter.get('/updates/stream', async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -5258,127 +5464,35 @@ apiRouter.get('/updates/stream', async (req, res) => {
         res.write(`data: ${JSON.stringify(data)}\n\n`);
     };
 
-    const fetchSnapshot = async () => {
-        return withDb(async (client) => {
-            const botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
-            const publishedBot = botRes.rows[0];
-            const totalNodes = publishedBot?.settings?.nodes?.length || 10;
-
-            const driverRows = await client.query(`
-                SELECT c.*, 
-                    (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in') as user_msg_count,
-                    (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document', 'voice', 'sticker')) as user_media_count,
-                    (SELECT count(*) FROM jsonb_object_keys(c.variables)) as var_count
-                FROM candidates c 
-                WHERE COALESCE(c.is_hidden, FALSE) = FALSE
-                ORDER BY last_message_at DESC NULLS LAST LIMIT 50
-            `);
-            const drivers = driverRows.rows.map((row) => {
-                const msgCount = parseInt(row.user_msg_count || '0');
-                const mediaCount = parseInt(row.user_media_count || '0');
-                const varCount = parseInt(row.var_count || '0');
-                
-                // Heuristic for lead genuineness
-                // 1. Message volume (engagement)
-                // 2. Media uploads (high effort/intent)
-                // 3. Variables collected (form completion)
-                // 4. Human mode (handoff reached)
-                let leadScore = (msgCount * 10) + (mediaCount * 50) + (varCount * 20);
-                if (row.is_human_mode) leadScore += 100; // Handoff is high value
-
-                // Progress percentage
-                const progress = Math.min(100, Math.round((varCount / Math.max(1, totalNodes)) * 100));
-
-                return {
-                    id: row.id,
-                    phoneNumber: row.phone_number,
-                    phone_number: row.phone_number,
-                    name: row.name,
-                    status: row.stage,
-                    lead_status: row.lead_status,
-                    assigned_to: row.assigned_to,
-                    lastMessage: row.last_message,
-                    lastMessageTime: parseInt(row.last_message_at || '0'),
-                    source: row.source,
-                    isHumanMode: row.is_human_mode,
-                    isHidden: Boolean(row.is_hidden),
-                    isTerminated: Boolean(row.is_terminated),
-                    created_at: row.created_at,
-                    lead_score: leadScore,
-                    progress_percent: progress,
-                    user_msg_count: msgCount,
-                    user_media_count: mediaCount,
-                    var_count: varCount
-                };
-            });
-
-            const payload: any = { drivers };
-
-                const messagesByDriver = {};
-                if (driverId) {
-                    const [messagesRes, scheduledRes] = await Promise.all([
-                        client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [driverId]),
-                        client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed'])
-                    ]);
-
-                    messagesByDriver[driverId] = await Promise.all(messagesRes.rows.map(async (row) => {
-                        let imageUrl, videoUrl, documentUrl, audioUrl;
-                        let text = row.text;
-                        if (row.type !== 'text' && row.type !== 'variable_capture') {
-                            try {
-                                const media = JSON.parse(row.text || '{}');
-                                text = media.caption || '';
-                                const resolvedMediaUrl = await refreshMediaUrl(media.url);
-                                if (row.type === 'video') videoUrl = resolvedMediaUrl;
-                                else if (row.type === 'document') documentUrl = resolvedMediaUrl;
-                                else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
-                                else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
-                            } catch(e){}
-                        }
-                        return {
-                            id: row.id,
-                            sender: row.direction === 'in' ? 'driver' : 'agent',
-                            senderType: row.sender_type || (row.direction === 'in' ? 'driver' : 'bot'),
-                            text,
-                            imageUrl,
-                            videoUrl,
-                            documentUrl,
-                            audioUrl,
-                            timestamp: new Date(row.created_at).getTime(),
-                            type: row.type || 'text',
-                            status: row.status,
-                        };
-                    }));
-                    messagesByDriver[driverId].sort((a, b) => a.timestamp - b.timestamp);
-
-                    payload.messagesByDriver = messagesByDriver;
-                    payload.scheduledByDriver = {
-                        [driverId]: scheduledRes.rows.map((row) => ({
-                            id: row.id,
-                            scheduledTime: new Date(row.scheduled_time).getTime(),
-                            payload: row.payload,
-                            status: row.status,
-                        }))
-                    };
-                }
-
-            return payload;
-        });
-    };
+    let streamSnapshotInFlight = false;
+    let pendingStreamRefresh = false;
+    let lastSnapshotSentAt = 0;
 
     const streamSnapshot = async () => {
+        if (streamSnapshotInFlight) {
+            pendingStreamRefresh = true;
+            return;
+        }
+        streamSnapshotInFlight = true;
         try {
-            const snapshot = await fetchSnapshot();
+            const snapshot = await fetchDashboardSnapshot({ driverId });
+            lastSnapshotSentAt = Date.now();
             sendEvent(snapshot);
         } catch (e) {
             sendEvent({ error: e.message || 'snapshot_error' });
+        } finally {
+            streamSnapshotInFlight = false;
+            if (pendingStreamRefresh) {
+                pendingStreamRefresh = false;
+                setImmediate(() => streamSnapshot());
+            }
         }
     };
 
     const handleUpdate = (data) => {
         if (closed) return;
-        // If candidateId is provided, we could optimize to only fetch that candidate,
-        // but for now, we'll just refresh the whole snapshot to keep it simple and consistent.
+        if (Date.now() - lastSnapshotSentAt < 1000) return;
+        memoryCache.dashboardSnapshotCache.delete(getDashboardSnapshotCacheKey(driverId));
         streamSnapshot();
     };
 
@@ -5403,44 +5517,26 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
 apiRouter.get('/drivers', async (req, res) => {
     try {
-        await withDb(async (client) => {
-            const botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
-            const publishedBot = botRes.rows[0];
-            const totalNodes = publishedBot?.settings?.nodes?.length || 10;
-
-            const r = await client.query(`
-                SELECT c.*, 
-                    (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in') as user_msg_count,
-                    (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document', 'voice', 'sticker')) as user_media_count,
-                    (SELECT count(*) FROM jsonb_object_keys(c.variables)) as var_count
-                FROM candidates c 
-                WHERE COALESCE(c.is_hidden, FALSE) = FALSE
-                ORDER BY last_message_at DESC NULLS LAST LIMIT 50
-            `);
-            res.json(r.rows.map(row => {
-                const msgCount = parseInt(row.user_msg_count || '0');
-                const mediaCount = parseInt(row.user_media_count || '0');
-                const varCount = parseInt(row.var_count || '0');
-                
-                let leadScore = (msgCount * 10) + (mediaCount * 50) + (varCount * 20);
-                if (row.is_human_mode) leadScore += 100;
-
-                const progress = Math.min(100, Math.round((varCount / Math.max(1, totalNodes)) * 100));
-
-                return {
-                    id: row.id, phoneNumber: row.phone_number, name: row.name, status: row.stage, 
-                    lastMessage: row.last_message, lastMessageTime: parseInt(row.last_message_at || '0'), 
-                    source: row.source, isHumanMode: row.is_human_mode,
-                    isHidden: Boolean(row.is_hidden),
-                    isTerminated: Boolean(row.is_terminated),
-                    lead_score: leadScore,
-                    progress_percent: progress,
-                    user_msg_count: msgCount,
-                    user_media_count: mediaCount,
-                    var_count: varCount
-                };
-            }));
-        });
+        const snapshot = await fetchDashboardSnapshot({ driverId: null });
+        const drivers = Array.isArray(snapshot?.drivers) ? snapshot.drivers : [];
+        res.setHeader('Cache-Control', 'private, max-age=5, stale-while-revalidate=10');
+        res.json(drivers.map((row) => ({
+            id: row.id,
+            phoneNumber: row.phone_number || row.phoneNumber,
+            name: row.name,
+            status: row.status,
+            lastMessage: row.lastMessage,
+            lastMessageTime: row.lastMessageTime,
+            source: row.source,
+            isHumanMode: row.isHumanMode,
+            isHidden: Boolean(row.isHidden),
+            isTerminated: Boolean(row.isTerminated),
+            lead_score: row.lead_score,
+            progress_percent: row.progress_percent,
+            user_msg_count: row.user_msg_count,
+            user_media_count: row.user_media_count,
+            var_count: row.var_count
+        })));
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -6019,8 +6115,14 @@ const handlePatchScheduledMessageLegacy = async (req, res) => {
 };
 
 // --- ADVANCED PARALLEL CRON PROCESSOR ---
+let scheduledQueueRunInFlight = false;
 const handleCronProcessQueueLegacy = async (req, res) => {
+    if (scheduledQueueRunInFlight) {
+        return res.status(202).json({ status: 'skipped', reason: 'queue_run_in_flight' });
+    }
+    scheduledQueueRunInFlight = true;
     let processed = 0, errors = 0;
+    const startedAt = Date.now();
     try {
         const perf = createPerfTracker({ requestId: req?.requestId || null, module: 'reminders-escalations', event: 'reminders.queue.stage' });
         await withDb(async (client) => {
@@ -6034,9 +6136,9 @@ const handleCronProcessQueueLegacy = async (req, res) => {
                     FROM scheduled_messages sm 
                     JOIN candidates c ON sm.candidate_id = c.id 
                     WHERE sm.status = 'pending' AND sm.scheduled_time <= $1 
-                    LIMIT 50 
+                    LIMIT $2
                     FOR UPDATE OF sm SKIP LOCKED
-                `, [now]);
+                `, [now, SYSTEM_CONFIG.SCHEDULED_QUEUE_MAX_JOBS_PER_RUN]);
                 perf.markEnd('jobs_select', { selectedJobs: jobs.rows.length });
 
                 if (jobs.rows.length === 0) return;
@@ -6096,16 +6198,26 @@ const handleCronProcessQueueLegacy = async (req, res) => {
                 };
 
                 // PARALLEL EXECUTION (Batch of 5 concurrently)
-                const BATCH_SIZE = 5;
+                const BATCH_SIZE = SYSTEM_CONFIG.SCHEDULED_QUEUE_BATCH_SIZE;
                 perf.markStart('jobs_dispatch');
                 for (let i = 0; i < jobs.rows.length; i += BATCH_SIZE) {
+                    if (Date.now() - startedAt >= SYSTEM_CONFIG.SCHEDULED_QUEUE_MAX_RUNTIME_MS) {
+                        structuredLog({
+                            level: 'warn',
+                            module: 'reminders-escalations',
+                            message: 'queue.max_runtime_budget_hit',
+                            requestId: req?.requestId || null,
+                            meta: { processed, errors, maxRuntimeMs: SYSTEM_CONFIG.SCHEDULED_QUEUE_MAX_RUNTIME_MS }
+                        });
+                        break;
+                    }
                     const chunk = jobs.rows.slice(i, i + BATCH_SIZE);
                     await Promise.all(chunk.map(job => processJob(job)));
                 }
                 perf.markEnd('jobs_dispatch', { processed, errors, batchSize: BATCH_SIZE });
             });
         });
-        res.json({ status: 'ok', processed, errors, queueSize: processed + errors });
+        res.json({ status: 'ok', processed, errors, queueSize: processed + errors, durationMs: Date.now() - startedAt });
     } catch (e) {
         if (isRecoverableInfraError(e)) {
             structuredLog({
@@ -6118,6 +6230,8 @@ const handleCronProcessQueueLegacy = async (req, res) => {
             return sendDegradedJson(res, { processed, errors, queueSize: processed + errors, skipped: true });
         }
         res.status(500).json({ error: e.message });
+    } finally {
+        scheduledQueueRunInFlight = false;
     }
 };
 
