@@ -529,10 +529,15 @@ export const liveApiService = {
     return apiRequest(`/api/staff/${id}`, { method: 'DELETE' });
   },
 
-  sendHeartbeat: async (status: string, active_seconds: number, idle_seconds: number) => {
+  sendHeartbeat: async (status: 'online' | 'idle', active_seconds?: number, idle_seconds?: number) => {
+    const payload: { status: 'online' | 'idle'; active_seconds?: number; idle_seconds?: number } = { status };
+
+    if (typeof active_seconds === 'number') payload.active_seconds = active_seconds;
+    if (typeof idle_seconds === 'number') payload.idle_seconds = idle_seconds;
+
     return apiRequest('/api/staff/heartbeat', {
       method: 'POST',
-      body: JSON.stringify({ status, active_seconds, idle_seconds })
+      body: JSON.stringify(payload)
     });
   },
 
@@ -625,12 +630,6 @@ export const liveApiService = {
     return apiRequest<any>('/api/analytics/hierarchy-overview');
   },
 
-  sendHeartbeat: async (status: 'online' | 'idle') => {
-    return apiRequest('/api/staff/heartbeat', {
-      method: 'POST',
-      body: JSON.stringify({ status })
-    });
-  },
 
   getStaffPresence: async () => {
     return apiRequest<any[]>('/api/staff/presence');
