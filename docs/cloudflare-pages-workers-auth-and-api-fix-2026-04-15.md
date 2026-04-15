@@ -67,7 +67,3 @@ Your screenshot appears to expose many secret values in plaintext in Cloudflare 
 - Google service account private key
 - AWS keys
 - Upstash tokens/signing keys
-
-## Beginner-friendly walkthrough
-
-If you are new to deployment, follow this click-by-click guide: `docs/cloudflare-beginner-step-by-step-2026-04-15.md`.

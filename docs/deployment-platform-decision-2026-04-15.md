@@ -70,3 +70,8 @@ Why it is not 10/10 by itself:
 ## Bottom line
 
 Your instinct is correct: changing from Vercel Hobby can remove the immediate pause risk. But the **highest-ROI fix is architectural first, platform second**. If you only change provider without reducing current polling/background patterns, similar limit pressure can reappear.
+
+
+## Cloudflare migration troubleshooting addendum
+
+For concrete fixes for Cloudflare static-only deployment issues (405 on `/api/auth/google`, COOP popup warnings, and API base URL separation), see: `docs/cloudflare-pages-workers-auth-and-api-fix-2026-04-15.md`.
