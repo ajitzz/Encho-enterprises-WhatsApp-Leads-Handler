@@ -1,8 +1,10 @@
 
 import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage, DriverExcelColumn, DriverExcelRow, UserRole } from '../types';
 
-// Use relative path so the Vercel proxy/rewrite handles the domain automatically.
-const API_BASE_URL = ''; 
+// Default to same-origin for Vercel-style rewrites, but allow explicit override for
+// Cloudflare static deployments where API may run on a separate origin.
+const RAW_API_BASE_URL = (import.meta as any)?.env?.VITE_API_BASE_URL || '';
+const API_BASE_URL = String(RAW_API_BASE_URL).replace(/\/$/, '');
 const DEFAULT_PROXY_UPLOAD_MAX_BYTES = 4 * 1024 * 1024; // Keep below common serverless payload limits (e.g. Vercel ~4.5MB)
 
 const resolveProxyUploadMaxBytes = () => {
