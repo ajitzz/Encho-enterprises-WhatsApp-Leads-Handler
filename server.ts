@@ -60,6 +60,17 @@ const MODULE_CANARY_TENANTS = String(process.env.FF_CANARY_TENANTS || '')
     .map((item) => item.trim())
     .filter(Boolean);
 
+const CORS_ALLOWED_ORIGINS = String(process.env.CORS_ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS || '*')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+const isOriginAllowed = (origin = '') => {
+    if (!origin) return true;
+    if (CORS_ALLOWED_ORIGINS.includes('*')) return true;
+    return CORS_ALLOWED_ORIGINS.includes(origin);
+};
+
 const getRequestId = (req: any = {}) => {
     const headerValue = req.headers?.[REQUEST_ID_HEADER];
     if (Array.isArray(headerValue)) return headerValue[0] || crypto.randomUUID();
@@ -3715,7 +3726,19 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
 // --- EXPRESS APP ---
 const app = express();
-app.use(cors());
+app.use(cors({
+    origin(origin, callback) {
+        if (isOriginAllowed(origin || '')) {
+            callback(null, true);
+            return;
+        }
+        callback(new Error('CORS origin not allowed'));
+    },
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'X-Requested-With', 'X-Request-Id'],
+    exposedHeaders: ['X-Request-Id'],
+    maxAge: 86400,
+}));
 app.use(express.json({ limit: '50mb' }));
 
 if (REQUEST_CONTEXT_FLAG) {

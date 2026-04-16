@@ -6,6 +6,11 @@ import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMes
 const RAW_API_BASE_URL = (import.meta as any)?.env?.VITE_API_BASE_URL || '';
 const API_BASE_URL = String(RAW_API_BASE_URL).replace(/\/$/, '');
 
+export const buildApiUrl = (endpoint: string) => {
+    const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+    return `${API_BASE_URL}${normalizedEndpoint}`;
+};
+
 const isCloudflareWorkersHost = typeof window !== 'undefined' && /\.workers\.dev$/i.test(window.location.hostname);
 let didPrintCloudflareApiHint = false;
 
@@ -74,7 +79,7 @@ const apiRequest = async <T>(endpoint: string, options: RequestInit = {}): Promi
     // Based on previous code, let's strictly use the endpoint passed.
     
     maybeWarnCloudflareApiBase('before request');
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+    const response = await fetch(buildApiUrl(endpoint), {
         ...options,
         headers: {
             ...getHeaders(),
@@ -219,7 +224,7 @@ export const liveApiService = {
           try {
               setConnectionState('connecting');
               const tokenQuery = authToken ? `?token=${encodeURIComponent(authToken)}` : '';
-              eventSource = new EventSource(`${API_BASE_URL}/api/updates/stream${tokenQuery}`);
+              eventSource = new EventSource(buildApiUrl(`/api/updates/stream${tokenQuery}`));
 
               eventSource.onopen = () => {
                   reconnectAttempts = 0;
@@ -387,7 +392,7 @@ export const liveApiService = {
               headers['Authorization'] = `Bearer ${authToken}`;
           }
 
-          const response = await fetch(`${API_BASE_URL}/api/media/upload`, {
+          const response = await fetch(buildApiUrl('/api/media/upload'), {
               method: 'POST',
               headers,
               body: formData
