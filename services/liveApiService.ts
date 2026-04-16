@@ -5,6 +5,21 @@ import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMes
 // Cloudflare static deployments where API may run on a separate origin.
 const RAW_API_BASE_URL = (import.meta as any)?.env?.VITE_API_BASE_URL || '';
 const API_BASE_URL = String(RAW_API_BASE_URL).replace(/\/$/, '');
+
+const isCloudflareWorkersHost = typeof window !== 'undefined' && /\.workers\.dev$/i.test(window.location.hostname);
+let didPrintCloudflareApiHint = false;
+
+const maybeWarnCloudflareApiBase = (details?: string) => {
+    if (didPrintCloudflareApiHint) return;
+    if (!isCloudflareWorkersHost) return;
+    if (API_BASE_URL) return;
+    didPrintCloudflareApiHint = true;
+    const extra = details ? ` (${details})` : '';
+    console.warn(
+      `[Cloudflare API Hint] Frontend is running on workers.dev with same-origin API base${extra}. ` +
+      `Set VITE_API_BASE_URL to your backend origin and redeploy production.`
+    );
+};
 const DEFAULT_PROXY_UPLOAD_MAX_BYTES = 4 * 1024 * 1024; // Keep below common serverless payload limits (e.g. Vercel ~4.5MB)
 
 const resolveProxyUploadMaxBytes = () => {
@@ -58,6 +73,7 @@ const apiRequest = async <T>(endpoint: string, options: RequestInit = {}): Promi
     // We assume the caller passes '/api/...' or just '/drivers' if rewrite handles it.
     // Based on previous code, let's strictly use the endpoint passed.
     
+    maybeWarnCloudflareApiBase('before request');
     const response = await fetch(`${API_BASE_URL}${endpoint}`, {
         ...options,
         headers: {
@@ -67,6 +83,9 @@ const apiRequest = async <T>(endpoint: string, options: RequestInit = {}): Promi
     });
     
     if (!response.ok) {
+        if (response.status === 405 && isCloudflareWorkersHost && !API_BASE_URL) {
+            maybeWarnCloudflareApiBase('received 405 on same-origin /api path');
+        }
         const errorBody = await response.text();
         throw new Error(`API Error ${response.status}: ${errorBody}`);
     }

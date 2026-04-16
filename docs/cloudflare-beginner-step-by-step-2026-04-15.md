@@ -57,6 +57,10 @@ Expected: JSON/health response (not 404 HTML, not 405 for GET).
 
 If `/api/health` fails, fix backend first before moving on.
 
+Important: opening only the base Render URL (without `/api/...`) may show:
+- `{"error":"Route not found"}`
+This is normal for an API-only backend and does not mean the service is down.
+
 Tip: For your Render URL, test:
 - `https://encho-enterprises-whatsapp-leads-handler-q7ac.onrender.com/api/health`
 
@@ -276,3 +280,26 @@ If still wrong after this, clear Cloudflare build cache and redeploy once more.
 ## Visual forensics companion
 
 For screenshot-by-screenshot diagnostics, see: `docs/cloudflare-screenshot-forensics-2026-04-15.md`.
+
+
+---
+
+## URL meaning — Production vs Preview vs local developer mode
+
+For Cloudflare Workers/Pages, URL pattern helps identify environment:
+
+1. **Production workers.dev URL** (your current one):
+   - `https://encho-whatsapp-lead-handler.enchoenterprises.workers.dev`
+   - This is your **production** service URL.
+
+2. **Preview URL**:
+   - Usually appears as a branch/commit-style preview subdomain (different from the main production workers.dev hostname).
+   - Cloudflare dashboard Deployments page labels these as preview/non-production deployments.
+
+3. **Developer/local mode**:
+   - Local dev usually runs from `localhost` via wrangler/vite (`wrangler dev` or `npm run dev`).
+   - It is not the public workers.dev production hostname.
+
+So for your exact question: the URL
+`https://encho-whatsapp-lead-handler.enchoenterprises.workers.dev/`
+indicates the deployed public Workers domain (production target), not localhost developer mode.

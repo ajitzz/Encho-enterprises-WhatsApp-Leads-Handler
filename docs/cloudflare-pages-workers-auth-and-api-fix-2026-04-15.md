@@ -67,3 +67,17 @@ Your screenshot appears to expose many secret values in plaintext in Cloudflare 
 - Google service account private key
 - AWS keys
 - Upstash tokens/signing keys
+
+## Beginner-friendly walkthrough
+
+If you are new to deployment, follow this click-by-click guide: `docs/cloudflare-beginner-step-by-step-2026-04-15.md`.
+
+
+## Runtime diagnostic hint now included in frontend
+
+The frontend now emits a console warning when:
+- app runs on `*.workers.dev`,
+- `VITE_API_BASE_URL` is effectively empty in the deployed build,
+- and requests hit same-origin `/api` paths (often resulting in 405).
+
+This helps quickly confirm env-var/deploy mismatch without guessing.
