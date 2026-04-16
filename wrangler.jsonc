@@ -1,9 +1,14 @@
 {
+  // Keep Cloudflare dashboard + repo settings aligned by using only this config file.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "encho-enterprises-whatsapp-leads-handler",
-  "compatibility_date": "2026-04-13",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-04-16",
   "assets": {
     "directory": "./dist",
     "not_found_handling": "single-page-application"
+  },
+  "vars": {
+    "ALLOWED_ORIGINS": "*"
   }
 }
