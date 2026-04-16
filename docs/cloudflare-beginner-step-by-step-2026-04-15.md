@@ -303,3 +303,73 @@ For Cloudflare Workers/Pages, URL pattern helps identify environment:
 So for your exact question: the URL
 `https://encho-whatsapp-lead-handler.enchoenterprises.workers.dev/`
 indicates the deployed public Workers domain (production target), not localhost developer mode.
+
+---
+
+## Step 10 — Render + Cloudflare + Google OAuth (click-by-click, from zero)
+
+Follow this exact order. Doing this out of order is the #1 cause of `405` and Google auth failure.
+
+### Part A: Render backend (API)
+
+1. Open **Render Dashboard**.
+2. Click **New +** → **Web Service**.
+3. Connect your GitHub repo.
+4. In setup form, choose:
+   - **Runtime:** Node
+   - **Build Command:** `npm install`
+   - **Start Command:** `npm run start`
+5. Click **Create Web Service**.
+6. Wait for deploy to finish.
+7. Open:
+   - `https://<your-render-service>.onrender.com/api/health`
+8. Confirm you get JSON (or success health response).
+
+If `/api/health` fails, stop and fix Render first.
+
+### Part B: Cloudflare frontend variable
+
+1. Open **Cloudflare Dashboard**.
+2. Go to **Workers & Pages**.
+3. Open project **encho-whatsapp-lead-handler**.
+4. Click **Settings**.
+5. Open **Variables and Secrets**.
+6. Under production environment, add:
+   - Name: `VITE_API_BASE_URL`
+   - Value: `https://encho-enterprises-whatsapp-leads-handler-q7ac.onrender.com`
+7. Click **Save**.
+8. Go to **Deployments**.
+9. Click **Retry deployment** (or create a new production deployment).
+10. Wait until deployment is green/success.
+
+Important: `VITE_*` values are baked at build time; saving variable without redeploy does nothing.
+
+### Part C: Google Cloud OAuth setup (must match your live domain)
+
+1. Open **Google Cloud Console**.
+2. Select your project.
+3. Go to **APIs & Services** → **Credentials**.
+4. Click your **OAuth 2.0 Client ID** (Web type).
+5. In **Authorized JavaScript origins**, add:
+   - `https://encho-whatsapp-lead-handler.enchoenterprises.workers.dev`
+6. If you also use a custom frontend domain, add it too.
+7. Click **Save**.
+
+For this app's current `google.accounts.id` token flow, **origins** are the critical setting.
+
+### Part D: Verify request target (the key test)
+
+1. Open app in Incognito.
+2. Press `F12` → **Network** tab.
+3. Click Google Sign-In.
+4. Click the `google` request row.
+5. In Headers, check **Request URL**:
+   - ✅ Correct: `https://encho-enterprises-whatsapp-leads-handler-q7ac.onrender.com/api/auth/google`
+   - ❌ Wrong: `https://encho-whatsapp-lead-handler.enchoenterprises.workers.dev/api/auth/google`
+
+If it is still the workers.dev URL, your deployed frontend bundle still does not have `VITE_API_BASE_URL`.
+
+### Part E: If you want one single domain later (advanced)
+
+If you want Cloudflare domain to serve both UI and API, you must add a real Worker/Pages Function proxy for `/api/*` to Render (or migrate API to Workers). Static assets alone cannot handle `POST /api/auth/google` and will keep returning `405`.
+
