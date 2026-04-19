@@ -26,6 +26,7 @@ const maybeWarnCloudflareApiBase = (details?: string) => {
     );
 };
 const DEFAULT_PROXY_UPLOAD_MAX_BYTES = 4 * 1024 * 1024; // Keep below common serverless payload limits (e.g. Vercel ~4.5MB)
+const DEFAULT_FALLBACK_POLL_INTERVAL_MS = 60000;
 
 const resolveProxyUploadMaxBytes = () => {
     const raw = (import.meta as any)?.env?.VITE_PROXY_UPLOAD_MAX_BYTES;
@@ -171,7 +172,7 @@ export const liveApiService = {
   subscribeToUpdates: (callback: (drivers: Driver[]) => void, options: SubscribeToUpdatesOptions = {}) => {
       const {
           driverId,
-          pollIntervalMs = 10000,
+          pollIntervalMs = DEFAULT_FALLBACK_POLL_INTERVAL_MS,
           onMessages,
           onScheduledMessages,
           onConnectionStateChange,

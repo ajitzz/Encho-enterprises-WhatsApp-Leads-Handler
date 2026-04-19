@@ -360,6 +360,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     window.addEventListener('scroll', updateActivity);
 
     const heartbeatInterval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       const now = Date.now();
       const isIdle = (now - lastActivity) > 5 * 60 * 1000; // 5 minutes idle threshold
       
@@ -376,7 +377,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           idleSeconds = 0;
         })
         .catch(err => console.error('Telemetry ping failed', err));
-    }, 30000); // Ping every 30 seconds
+    }, 60000); // Ping every 60 seconds to reduce control-plane load
 
     return () => {
       window.removeEventListener('mousemove', updateActivity);
@@ -452,6 +453,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       new Set<string>(JSON.parse(localStorage.getItem(seenKey) || '[]'));
 
     const syncDueAlerts = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       try {
         const alerts = await liveApiService.getDueAlerts();
         const seenIds = readSeenIds();
@@ -471,7 +473,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     };
 
     syncDueAlerts();
-    const timer = setInterval(syncDueAlerts, 30000);
+    const timer = setInterval(syncDueAlerts, 60000);
     return () => clearInterval(timer);
   }, [user.staffId, user.email, activeDueAlert?.event_id]);
 
