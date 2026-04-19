@@ -34,6 +34,8 @@ const resolveProxyUploadMaxBytes = () => {
 };
 
 let authToken: string | null = localStorage.getItem('uber_fleet_auth_token');
+let driversEtag: string | null = null;
+let driversSnapshotCache: Driver[] | null = null;
 
 export type UpdateConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'polling' | 'disconnected';
 export interface DueAlertItem {
@@ -129,7 +131,30 @@ export const liveApiService = {
   },
 
   getDrivers: async (): Promise<Driver[]> => {
-      return apiRequest<Driver[]>('/api/drivers');
+      const headers: Record<string, string> = {};
+      if (driversEtag) headers['If-None-Match'] = driversEtag;
+
+      const response = await fetch(buildApiUrl('/api/drivers'), {
+          headers: {
+              ...getHeaders(),
+              ...headers
+          }
+      });
+
+      if (response.status === 304 && driversSnapshotCache) {
+          return driversSnapshotCache;
+      }
+
+      if (!response.ok) {
+          const errorBody = await response.text();
+          throw new Error(`API Error ${response.status}: ${errorBody}`);
+      }
+
+      const etag = response.headers.get('etag');
+      if (etag) driversEtag = etag;
+      const payload = await response.json() as Driver[];
+      driversSnapshotCache = payload;
+      return payload;
   },
 
   verifyLogin: async (credential: string): Promise<{success: boolean, user?: any}> => {
