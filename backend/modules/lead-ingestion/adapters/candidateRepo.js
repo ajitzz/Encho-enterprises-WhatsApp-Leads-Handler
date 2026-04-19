@@ -22,10 +22,12 @@ export const findInboundMessageByWhatsappId = async ({ client, whatsappMessageId
 };
 
 export const insertInboundMessage = async ({ client, candidateId, text, type, whatsappMessageId }) => {
+  // Dedupe is handled in the service layer via findInboundMessageByWhatsappId + in-memory guards.
+  // Avoid ON CONFLICT (whatsapp_message_id) here because the legacy schema does not enforce
+  // a UNIQUE constraint on that column in production databases.
   const result = await client.query(
     `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
      VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW())
-     ON CONFLICT (whatsapp_message_id) DO NOTHING
      RETURNING id`,
     [crypto.randomUUID(), candidateId, text, type, whatsappMessageId]
   );
