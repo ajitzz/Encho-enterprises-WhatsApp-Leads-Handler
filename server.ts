@@ -5448,12 +5448,30 @@ apiRouter.get('/updates/stream', async (req, res) => {
 apiRouter.get('/drivers', async (req, res) => {
     try {
         await withDb(async (client) => {
+            const snapshotRes = await client.query(`
+                SELECT id, phone_number, stage, is_human_mode, is_hidden, is_terminated, last_message_at, last_action_at
+                FROM candidates
+                WHERE COALESCE(is_hidden, FALSE) = FALSE
+                ORDER BY last_message_at DESC NULLS LAST
+                LIMIT 50
+            `);
+
+            const transferFingerprint = crypto
+                .createHash('sha1')
+                .update(JSON.stringify(snapshotRes.rows))
+                .digest('hex');
+            const etag = `"drivers-${transferFingerprint}"`;
+            if (req.headers['if-none-match'] === etag) {
+                res.status(304).end();
+                return;
+            }
+
             const botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
             const publishedBot = botRes.rows[0];
             const totalNodes = publishedBot?.settings?.nodes?.length || 10;
 
             const r = await client.query(`
-                SELECT c.*, 
+                SELECT c.id, c.phone_number, c.name, c.stage, c.last_message, c.last_message_at, c.source, c.is_human_mode, c.is_hidden, c.is_terminated,
                     (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in') as user_msg_count,
                     (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document', 'voice', 'sticker')) as user_media_count,
                     (SELECT count(*) FROM jsonb_object_keys(c.variables)) as var_count
@@ -5461,6 +5479,8 @@ apiRouter.get('/drivers', async (req, res) => {
                 WHERE COALESCE(c.is_hidden, FALSE) = FALSE
                 ORDER BY last_message_at DESC NULLS LAST LIMIT 50
             `);
+            res.setHeader('ETag', etag);
+            res.setHeader('Cache-Control', 'private, no-cache, must-revalidate');
             res.json(r.rows.map(row => {
                 const msgCount = parseInt(row.user_msg_count || '0');
                 const mediaCount = parseInt(row.user_media_count || '0');
