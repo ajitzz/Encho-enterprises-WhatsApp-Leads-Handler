@@ -42,9 +42,3 @@ QSTASH_TOKEN="..."
 4.  **Redeploy**.
 
 The chatbot will now respond instantly by serving logic from Redis and offloading database writes to the background worker.
-
-## ☁️ Cloudflare Deployment Guides
-
-- Beginner walkthrough (frontend on Cloudflare + backend on Node host): `docs/cloudflare-beginner-step-by-step-2026-04-15.md`
-- Section-by-section backend runbook (why static-assets-only happens + exact fix paths): `docs/cloudflare-backend-runbook-2026-04-16.md`
-

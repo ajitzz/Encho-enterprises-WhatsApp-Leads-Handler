@@ -1,7 +1,7 @@
 
 import { Type } from "@google/genai";
 import { LeadStatus, AuditReport, AuditIssue } from "../types";
-import { liveApiService, buildApiUrl } from './liveApiService.ts';
+import { liveApiService } from './liveApiService.ts';
 
 // --- COST SAVING STRATEGY ---
 const MODELS = {
@@ -38,7 +38,7 @@ const generateWithBackend = async (params: any) => {
     const token = localStorage.getItem('uber_fleet_auth_token');
     
     try {
-        const response = await fetch(buildApiUrl('/api/ai/generate'), {
+        const response = await fetch('/api/ai/generate', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -56,7 +56,7 @@ const generateWithBackend = async (params: any) => {
                 console.warn(`[AI] Rate Limit Hit on ${currentModel}. Switching to Economy Model.`);
                 currentModel = MODELS.ECONOMY;
                 // Retry
-                return await fetch(buildApiUrl('/api/ai/generate'), {
+                return await fetch('/api/ai/generate', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
                     body: JSON.stringify({ ...params, model: currentModel })

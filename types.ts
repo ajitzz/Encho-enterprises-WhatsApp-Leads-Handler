@@ -235,8 +235,6 @@ export interface Driver extends Candidate {
     hasVehicle: boolean;
     isLocallyAvailable: boolean;
   };
-  isHidden?: boolean;
-  isTerminated?: boolean;
 }
 
 export interface SystemStats {
@@ -299,8 +297,6 @@ export interface DriverExcelRow {
   source: string;
   createdAt: string;
   lastMessageAt: string;
-  isHidden?: boolean;
-  isTerminated?: boolean;
   variables: Record<string, any>;
 }
 

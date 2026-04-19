@@ -23,7 +23,7 @@ import { StaffPortal } from './components/StaffPortal.tsx';
 import { StaffManagement } from './components/StaffManagement.tsx';
 import { ScheduledAlertPopup } from './components/ScheduledAlertPopup.tsx';
 import { mockBackend } from './services/mockBackend.ts';
-import { liveApiService, setAuthToken, UpdateConnectionState, DueAlertItem, buildApiUrl } from './services/liveApiService.ts';
+import { liveApiService, setAuthToken, UpdateConnectionState, DueAlertItem } from './services/liveApiService.ts';
 import { reportUiFailure, reportUiRecovery } from './services/uiFailureMonitor.ts';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types.ts';
 import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle, Wifi, WifiOff, Loader2 } from 'lucide-react';
@@ -133,7 +133,7 @@ export default function App() {
       let failedAttempts = 0;
       const triggerCron = async () => {
           try {
-              const response = await fetch(buildApiUrl('/api/cron/process-queue'), {
+              const response = await fetch('/api/cron/process-queue', {
                   headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }
               });
 
@@ -655,7 +655,6 @@ export default function App() {
         {activeTab === 'media-library' && <MediaLibrary />}
         {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
         {activeTab === 'staff' && <StaffManagement onShadowUser={setShadowUser} />}
-        {activeTab === 'staff-portal' && <StaffPortal user={userProfile} onLogout={() => setActiveTab('dashboard')} />}
 
         {showWebhookModal && <WebhookConfigModal onClose={() => setShowWebhookModal(false)} onSuccess={() => { addNotification({ type: 'success', title: 'Webhook Configured', message: 'Meta App settings updated successfully.' }); }} />}
         {showSettingsModal && <SettingsModal onClose={() => setShowSettingsModal(false)} />}
