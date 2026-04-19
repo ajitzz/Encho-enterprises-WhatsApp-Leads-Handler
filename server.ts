@@ -347,6 +347,11 @@ const isRecoverableInfraError = (error) => {
     return ['57P01', '57P03', '53300', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND'].includes(code);
 };
 
+const isUpstreamQuotaExceededError = (error) => {
+    const message = String(error?.message || '').toLowerCase();
+    return message.includes('data transfer quota') || message.includes('quota exceeded');
+};
+
 const sendDegradedJson = (res, payload = {}) => {
     res.status(200).json({
         status: 'degraded',
@@ -5147,7 +5152,23 @@ const handleAuthGoogleLegacy = async (req, res) => {
             success: true, 
             user: { ...payload, role: userRole, staffId } 
         });
-    } catch (e) { res.status(401).json({ success: false, error: e.message }); }
+    } catch (e) {
+        if (isUpstreamQuotaExceededError(e)) {
+            return res.status(503).json({
+                success: false,
+                code: 'UPSTREAM_QUOTA_EXCEEDED',
+                error: 'Authentication backend quota exceeded. Please restore backend quota and retry.',
+            });
+        }
+        if (isRecoverableInfraError(e)) {
+            return res.status(503).json({
+                success: false,
+                code: 'AUTH_BACKEND_DEGRADED',
+                error: 'Authentication backend is temporarily degraded. Please retry shortly.',
+            });
+        }
+        res.status(401).json({ success: false, error: e.message });
+    }
 };
 
 const handleBotSettingsGetLegacy = async (req, res) => {

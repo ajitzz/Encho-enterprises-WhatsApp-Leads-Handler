@@ -78,7 +78,6 @@ const apiRequest = async <T>(endpoint: string, options: RequestInit = {}): Promi
     // We assume the caller passes '/api/...' or just '/drivers' if rewrite handles it.
     // Based on previous code, let's strictly use the endpoint passed.
     
-    maybeWarnCloudflareApiBase('before request');
     const response = await fetch(buildApiUrl(endpoint), {
         ...options,
         headers: {
