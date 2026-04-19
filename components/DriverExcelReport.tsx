@@ -175,9 +175,15 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
 
   useEffect(() => {
     if (!isLiveMode) return;
-    const interval = setInterval(loadSyncStatus, 2000);
+    const isSyncActive = Boolean(
+      syncStatus?.syncInProgress ||
+      syncStatus?.incremental?.status === 'syncing' ||
+      syncStatus?.hasQueuedSync
+    );
+    const intervalMs = isSyncActive ? 5000 : 30000;
+    const interval = setInterval(loadSyncStatus, intervalMs);
     return () => clearInterval(interval);
-  }, [isLiveMode]);
+  }, [isLiveMode, syncStatus?.syncInProgress, syncStatus?.incremental?.status, syncStatus?.hasQueuedSync]);
 
   useEffect(() => {
     if (!isLiveMode || columns.length === 0) return;

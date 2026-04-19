@@ -55,6 +55,8 @@ const SYSTEM_HEALTH_MODULE_FLAG = String(process.env.FF_SYSTEM_HEALTH_MODULE || 
 const SYSTEM_HEALTH_CANARY_PERCENT = parsePercent(process.env.FF_SYSTEM_HEALTH_MODULE_PERCENT || 0);
 const isServerlessRuntime = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, !isServerlessRuntime);
+const STREAM_SNAPSHOT_INTERVAL_MS = Math.max(30_000, Number(process.env.STREAM_SNAPSHOT_INTERVAL_MS || 60_000));
+const STREAM_EVENT_THROTTLE_MS = Math.max(500, Number(process.env.STREAM_EVENT_THROTTLE_MS || 2_000));
 const MODULE_CANARY_TENANTS = String(process.env.FF_CANARY_TENANTS || '')
     .split(',')
     .map((item) => item.trim())
@@ -4908,6 +4910,7 @@ const handlePingLegacy = async (req, res) => {
 };
 
 const handleDebugStatusLegacy = async (req, res) => {
+    const includeExpensiveDetails = req.query.verbose === '1';
     const status = {
         postgres: 'unknown',
         tables: { candidates: false, bot_versions: false },
@@ -4919,13 +4922,15 @@ const handleDebugStatusLegacy = async (req, res) => {
         await withDb(async (client) => {
             await client.query('SELECT 1');
             status.postgres = 'connected';
-            const tablesRes = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
-            const tables = tablesRes.rows.map(r => r.table_name);
-            status.tables.candidates = tables.includes('candidates');
-            status.tables.bot_versions = tables.includes('bot_versions');
-            if (status.tables.candidates) {
-                const countRes = await client.query('SELECT COUNT(*) FROM candidates');
-                status.counts.candidates = parseInt(countRes.rows[0].count);
+            if (includeExpensiveDetails) {
+                const tablesRes = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
+                const tables = tablesRes.rows.map(r => r.table_name);
+                status.tables.candidates = tables.includes('candidates');
+                status.tables.bot_versions = tables.includes('bot_versions');
+                if (status.tables.candidates) {
+                    const countRes = await client.query('SELECT COUNT(*) FROM candidates');
+                    status.counts.candidates = parseInt(countRes.rows[0].count);
+                }
             }
         });
     } catch (e) {
@@ -5284,6 +5289,8 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
     let closed = false;
     let unsubscribe: () => void;
+    let lastSnapshotSentAt = 0;
+    let pendingSnapshotTimer: ReturnType<typeof setTimeout> | null = null;
 
     // Vercel timeout guard: close connection before 60s limit
     const vercelTimeout = setTimeout(() => {
@@ -5309,7 +5316,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
             const totalNodes = publishedBot?.settings?.nodes?.length || 10;
 
             const driverRows = await client.query(`
-                SELECT c.*, 
+                SELECT c.id, c.phone_number, c.name, c.stage, c.lead_status, c.assigned_to, c.last_message, c.last_message_at, c.source, c.is_human_mode, c.is_hidden, c.is_terminated, c.created_at,
                     (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in') as user_msg_count,
                     (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document', 'voice', 'sticker')) as user_media_count,
                     (SELECT count(*) FROM jsonb_object_keys(c.variables)) as var_count
@@ -5361,8 +5368,8 @@ apiRouter.get('/updates/stream', async (req, res) => {
                 const messagesByDriver = {};
                 if (driverId) {
                     const [messagesRes, scheduledRes] = await Promise.all([
-                        client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [driverId]),
-                        client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed'])
+                        client.query('SELECT id, direction, text, type, status, sender_type, created_at FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [driverId]),
+                        client.query('SELECT id, scheduled_time, payload, status FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed'])
                     ]);
 
                     messagesByDriver[driverId] = await Promise.all(messagesRes.rows.map(async (row) => {
@@ -5414,21 +5421,33 @@ apiRouter.get('/updates/stream', async (req, res) => {
         try {
             const snapshot = await fetchSnapshot();
             sendEvent(snapshot);
+            lastSnapshotSentAt = Date.now();
         } catch (e) {
             sendEvent({ error: e.message || 'snapshot_error' });
         }
+    };
+
+    const scheduleThrottledSnapshot = () => {
+        if (closed) return;
+        const elapsed = Date.now() - lastSnapshotSentAt;
+        const waitMs = Math.max(0, STREAM_EVENT_THROTTLE_MS - elapsed);
+        if (pendingSnapshotTimer) return;
+        pendingSnapshotTimer = setTimeout(async () => {
+            pendingSnapshotTimer = null;
+            await streamSnapshot();
+        }, waitMs);
     };
 
     const handleUpdate = (data) => {
         if (closed) return;
         // If candidateId is provided, we could optimize to only fetch that candidate,
         // but for now, we'll just refresh the whole snapshot to keep it simple and consistent.
-        streamSnapshot();
+        scheduleThrottledSnapshot();
     };
 
     unsubscribe = onUpdate(handleUpdate);
 
-    const snapshotInterval = setInterval(streamSnapshot, 10000); // Polling as fallback, less frequent
+    const snapshotInterval = setInterval(streamSnapshot, STREAM_SNAPSHOT_INTERVAL_MS);
     const heartbeat = setInterval(() => {
         if (!closed) res.write('data: heartbeat\n\n');
     }, 20000);
@@ -5438,6 +5457,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
     req.on('close', () => {
         closed = true;
         clearTimeout(vercelTimeout);
+        if (pendingSnapshotTimer) clearTimeout(pendingSnapshotTimer);
         if (unsubscribe) unsubscribe();
         clearInterval(snapshotInterval);
         clearInterval(heartbeat);
