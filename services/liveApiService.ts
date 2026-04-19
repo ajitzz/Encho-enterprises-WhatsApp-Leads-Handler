@@ -1,32 +1,9 @@
 
 import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage, DriverExcelColumn, DriverExcelRow, UserRole } from '../types';
 
-// Default to same-origin for Vercel-style rewrites, but allow explicit override for
-// Cloudflare static deployments where API may run on a separate origin.
-const RAW_API_BASE_URL = (import.meta as any)?.env?.VITE_API_BASE_URL || '';
-const API_BASE_URL = String(RAW_API_BASE_URL).replace(/\/$/, '');
-
-export const buildApiUrl = (endpoint: string) => {
-    const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
-    return `${API_BASE_URL}${normalizedEndpoint}`;
-};
-
-const isCloudflareWorkersHost = typeof window !== 'undefined' && /\.workers\.dev$/i.test(window.location.hostname);
-let didPrintCloudflareApiHint = false;
-
-const maybeWarnCloudflareApiBase = (details?: string) => {
-    if (didPrintCloudflareApiHint) return;
-    if (!isCloudflareWorkersHost) return;
-    if (API_BASE_URL) return;
-    didPrintCloudflareApiHint = true;
-    const extra = details ? ` (${details})` : '';
-    console.warn(
-      `[Cloudflare API Hint] Frontend is running on workers.dev with same-origin API base${extra}. ` +
-      `Set VITE_API_BASE_URL to your backend origin and redeploy production.`
-    );
-};
+// Use relative path so the Vercel proxy/rewrite handles the domain automatically.
+const API_BASE_URL = ''; 
 const DEFAULT_PROXY_UPLOAD_MAX_BYTES = 4 * 1024 * 1024; // Keep below common serverless payload limits (e.g. Vercel ~4.5MB)
-const DEFAULT_FALLBACK_POLL_INTERVAL_MS = 60000;
 
 const resolveProxyUploadMaxBytes = () => {
     const raw = (import.meta as any)?.env?.VITE_PROXY_UPLOAD_MAX_BYTES;
@@ -35,8 +12,6 @@ const resolveProxyUploadMaxBytes = () => {
 };
 
 let authToken: string | null = localStorage.getItem('uber_fleet_auth_token');
-let driversEtag: string | null = null;
-let driversSnapshotCache: Driver[] | null = null;
 
 export type UpdateConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'polling' | 'disconnected';
 export interface DueAlertItem {
@@ -81,7 +56,7 @@ const apiRequest = async <T>(endpoint: string, options: RequestInit = {}): Promi
     // We assume the caller passes '/api/...' or just '/drivers' if rewrite handles it.
     // Based on previous code, let's strictly use the endpoint passed.
     
-    const response = await fetch(buildApiUrl(endpoint), {
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
         ...options,
         headers: {
             ...getHeaders(),
@@ -90,9 +65,6 @@ const apiRequest = async <T>(endpoint: string, options: RequestInit = {}): Promi
     });
     
     if (!response.ok) {
-        if (response.status === 405 && isCloudflareWorkersHost && !API_BASE_URL) {
-            maybeWarnCloudflareApiBase('received 405 on same-origin /api path');
-        }
         const errorBody = await response.text();
         throw new Error(`API Error ${response.status}: ${errorBody}`);
     }
@@ -132,30 +104,7 @@ export const liveApiService = {
   },
 
   getDrivers: async (): Promise<Driver[]> => {
-      const headers: Record<string, string> = {};
-      if (driversEtag) headers['If-None-Match'] = driversEtag;
-
-      const response = await fetch(buildApiUrl('/api/drivers'), {
-          headers: {
-              ...getHeaders(),
-              ...headers
-          }
-      });
-
-      if (response.status === 304 && driversSnapshotCache) {
-          return driversSnapshotCache;
-      }
-
-      if (!response.ok) {
-          const errorBody = await response.text();
-          throw new Error(`API Error ${response.status}: ${errorBody}`);
-      }
-
-      const etag = response.headers.get('etag');
-      if (etag) driversEtag = etag;
-      const payload = await response.json() as Driver[];
-      driversSnapshotCache = payload;
-      return payload;
+      return apiRequest<Driver[]>('/api/drivers');
   },
 
   verifyLogin: async (credential: string): Promise<{success: boolean, user?: any}> => {
@@ -172,7 +121,7 @@ export const liveApiService = {
   subscribeToUpdates: (callback: (drivers: Driver[]) => void, options: SubscribeToUpdatesOptions = {}) => {
       const {
           driverId,
-          pollIntervalMs = DEFAULT_FALLBACK_POLL_INTERVAL_MS,
+          pollIntervalMs = 10000,
           onMessages,
           onScheduledMessages,
           onConnectionStateChange,
@@ -249,7 +198,7 @@ export const liveApiService = {
           try {
               setConnectionState('connecting');
               const tokenQuery = authToken ? `?token=${encodeURIComponent(authToken)}` : '';
-              eventSource = new EventSource(buildApiUrl(`/api/updates/stream${tokenQuery}`));
+              eventSource = new EventSource(`${API_BASE_URL}/api/updates/stream${tokenQuery}`);
 
               eventSource.onopen = () => {
                   reconnectAttempts = 0;
@@ -417,7 +366,7 @@ export const liveApiService = {
               headers['Authorization'] = `Bearer ${authToken}`;
           }
 
-          const response = await fetch(buildApiUrl('/api/media/upload'), {
+          const response = await fetch(`${API_BASE_URL}/api/media/upload`, {
               method: 'POST',
               headers,
               body: formData
@@ -491,19 +440,8 @@ export const liveApiService = {
       });
   },
 
-  getDriverExcelReport: async (search: string = '', includeHidden: boolean = false): Promise<{ columns: DriverExcelColumn[]; rows: DriverExcelRow[] }> => {
-      return apiRequest(`/api/reports/driver-excel?search=${encodeURIComponent(search)}&includeHidden=${includeHidden ? 'true' : 'false'}`);
-  },
-
-  getArchivedDrivers: async (): Promise<DriverExcelRow[]> => {
-      return apiRequest<DriverExcelRow[]>('/api/drivers/archived');
-  },
-
-  setDriverVisibility: async (id: string, isHidden: boolean) => {
-      return apiRequest(`/api/drivers/${id}/visibility`, {
-          method: 'PATCH',
-          body: JSON.stringify({ isHidden })
-      });
+  getDriverExcelReport: async (search: string = ''): Promise<{ columns: DriverExcelColumn[]; rows: DriverExcelRow[] }> => {
+      return apiRequest(`/api/reports/driver-excel?search=${encodeURIComponent(search)}`);
   },
 
   getDriverExcelSyncStatus: async (): Promise<{ state: string; lastTriggeredAt?: string; lastRunAt?: string; lastSuccessAt?: string; lastError?: string; inProgress?: boolean; hasQueuedSync?: boolean; lastDurationMs?: number }> => {
@@ -580,15 +518,10 @@ export const liveApiService = {
     return apiRequest(`/api/staff/${id}`, { method: 'DELETE' });
   },
 
-  sendHeartbeat: async (status: 'online' | 'idle', active_seconds?: number, idle_seconds?: number) => {
-    const payload: { status: 'online' | 'idle'; active_seconds?: number; idle_seconds?: number } = { status };
-
-    if (typeof active_seconds === 'number') payload.active_seconds = active_seconds;
-    if (typeof idle_seconds === 'number') payload.idle_seconds = idle_seconds;
-
+  sendHeartbeat: async (status: string, active_seconds: number, idle_seconds: number) => {
     return apiRequest('/api/staff/heartbeat', {
       method: 'POST',
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ status, active_seconds, idle_seconds })
     });
   },
 
@@ -681,6 +614,12 @@ export const liveApiService = {
     return apiRequest<any>('/api/analytics/hierarchy-overview');
   },
 
+  sendHeartbeat: async (status: 'online' | 'idle') => {
+    return apiRequest('/api/staff/heartbeat', {
+      method: 'POST',
+      body: JSON.stringify({ status })
+    });
+  },
 
   getStaffPresence: async () => {
     return apiRequest<any[]>('/api/staff/presence');

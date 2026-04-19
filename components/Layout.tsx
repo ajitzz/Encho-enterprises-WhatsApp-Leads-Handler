@@ -98,21 +98,6 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
             </button>
           )}
 
-          {(userRole === 'admin' || userRole === 'manager') && (
-            <button
-              onClick={() => onTabChange('staff-portal')}
-              title={isCollapsed ? "Staff Portal" : ""}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-                activeTab === 'staff-portal' 
-                  ? 'bg-white text-black font-medium' 
-                  : 'text-gray-400 hover:bg-gray-900 hover:text-white'
-              } ${isCollapsed ? 'justify-center px-2' : ''}`}
-            >
-              <Users size={20} className="shrink-0" />
-              <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Staff Portal</span>
-            </button>
-          )}
-
           <button
             onClick={() => onTabChange('excel-report')}
             title={isCollapsed ? "Driver Excel Report" : ""}
