@@ -436,7 +436,7 @@ export class LeadIngestionService {
       // - has NOT reached their max_capacity
       // - has the oldest last_assigned_at
       const staffRes = await client.query(`
-        SELECT s.id, s.name, s.email, s.max_capacity,
+        SELECT s.id, s.name, s.max_capacity,
                (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('closed', 'archived', 'rejected')) as active_leads
         FROM staff_members s
         WHERE s.is_active_for_auto_dist = TRUE 

@@ -26,7 +26,8 @@
     "start:modular": "node backend/app/server.js",
     "check:rollout-modes": "node scripts/check-rollout-modes.js",
     "check:industrial-readiness": "node scripts/check-industrial-readiness.js",
-    "estimate:transfer": "node scripts/estimate-network-transfer.js"
+    "estimate:transfer": "node scripts/estimate-network-transfer.js",
+    "check:transfer-guardrails": "node scripts/check-transfer-guardrails.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.400.0",
