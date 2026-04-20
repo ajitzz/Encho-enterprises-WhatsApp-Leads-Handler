@@ -367,3 +367,19 @@ Implemented controls to permanently reduce transfer on the hottest dashboard end
 - Combined with strict projection, practical reduction for `/api/drivers` transfer is typically **~85–97%** compared with always returning full payloads.
 
 This gives a durable budget shield for Neon free-tier transfer while preserving fast dashboard updates.
+
+## Edge-driven forecast (Cloudflare -> Neon)
+
+When you have fresh Cloudflare request/status mix, run the edge-based estimator:
+
+```bash
+npm run estimate:transfer:edge
+```
+
+Tune with observed values:
+
+```bash
+CF_REQUESTS_24H=16000 RATIO_2XX=0.31 RATIO_3XX=0.38 RATIO_4XX=0.31 RATIO_5XX=0.0005 CACHE_HIT_RATIO=0.7 WRITE_BATCH_SIZE=4 RETRY_MULTIPLIER=1.05 npm run estimate:transfer:edge
+```
+
+Use this to validate whether request-quality improvements (lower 3xx/4xx and fewer retries) are actually reducing Neon transfer burn rate.
