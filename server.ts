@@ -53,11 +53,23 @@ const AUTH_CONFIG_MODULE_FLAG = String(process.env.FF_AUTH_CONFIG_MODULE || 'off
 const AUTH_CONFIG_CANARY_PERCENT = parsePercent(process.env.FF_AUTH_CONFIG_MODULE_PERCENT || 0);
 const SYSTEM_HEALTH_MODULE_FLAG = String(process.env.FF_SYSTEM_HEALTH_MODULE || 'off').toLowerCase();
 const SYSTEM_HEALTH_CANARY_PERCENT = parsePercent(process.env.FF_SYSTEM_HEALTH_MODULE_PERCENT || 0);
-const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, true);
+const isServerlessRuntime = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, !isServerlessRuntime);
 const MODULE_CANARY_TENANTS = String(process.env.FF_CANARY_TENANTS || '')
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
+
+const CORS_ALLOWED_ORIGINS = String(process.env.CORS_ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS || '*')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+const isOriginAllowed = (origin = '') => {
+    if (!origin) return true;
+    if (CORS_ALLOWED_ORIGINS.includes('*')) return true;
+    return CORS_ALLOWED_ORIGINS.includes(origin);
+};
 
 const getRequestId = (req: any = {}) => {
     const headerValue = req.headers?.[REQUEST_ID_HEADER];
@@ -333,6 +345,11 @@ const isRecoverableInfraError = (error) => {
     const message = String(error?.message || '').toLowerCase();
     if (message.includes('database not initialized')) return true;
     return ['57P01', '57P03', '53300', 'ETIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND'].includes(code);
+};
+
+const isUpstreamQuotaExceededError = (error) => {
+    const message = String(error?.message || '').toLowerCase();
+    return message.includes('data transfer quota') || message.includes('quota exceeded');
 };
 
 const sendDegradedJson = (res, payload = {}) => {
@@ -2623,7 +2640,6 @@ const ensureLeadOpsSchema = async (client) => {
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_date TIMESTAMP WITH TIME ZONE;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS follow_up_note TEXT;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'none';`);
-    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP;`);
     await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS next_followup_at TIMESTAMP WITH TIME ZONE;`);
     await client.query(`ALTER TABLE lead_activity_log ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;`);
 
@@ -2752,6 +2768,25 @@ const initDatabase = async (client) => {
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS last_action_at TIMESTAMP;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS first_response_time INT;`);
     await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS review_requested_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS closed_at TIMESTAMP;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS is_terminated BOOLEAN DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE candidates ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP;`);
+    await client.query(`CREATE TABLE IF NOT EXISTS daily_performance_metrics (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        staff_id UUID REFERENCES staff_members(id) ON DELETE CASCADE,
+        record_date DATE NOT NULL DEFAULT CURRENT_DATE,
+        leads_claimed INT DEFAULT 0,
+        notes_added INT DEFAULT 0,
+        reviews_submitted INT DEFAULT 0,
+        leads_closed INT DEFAULT 0,
+        leads_rejected INT DEFAULT 0,
+        total_time_to_review_mins INT DEFAULT 0, 
+        total_manager_approval_time_mins INT DEFAULT 0,
+        total_online_minutes INT DEFAULT 0,
+        UNIQUE(staff_id, record_date)
+    );`);
     await client.query(`CREATE TABLE IF NOT EXISTS candidate_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, direction VARCHAR(10), text TEXT, type VARCHAR(50), status VARCHAR(50), whatsapp_message_id VARCHAR(255), created_at TIMESTAMP DEFAULT NOW());`);
     await client.query(`ALTER TABLE candidate_messages ADD COLUMN IF NOT EXISTS sender_type VARCHAR(20);`);
     await client.query(`CREATE TABLE IF NOT EXISTS scheduled_messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE, payload JSONB, scheduled_time BIGINT, status VARCHAR(50), error_log TEXT, created_at TIMESTAMP DEFAULT NOW());`);
@@ -3696,7 +3731,19 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
 
 // --- EXPRESS APP ---
 const app = express();
-app.use(cors());
+app.use(cors({
+    origin(origin, callback) {
+        if (isOriginAllowed(origin || '')) {
+            callback(null, true);
+            return;
+        }
+        callback(new Error('CORS origin not allowed'));
+    },
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'X-Requested-With', 'X-Request-Id'],
+    exposedHeaders: ['X-Request-Id'],
+    maxAge: 86400,
+}));
 app.use(express.json({ limit: '50mb' }));
 
 if (REQUEST_CONTEXT_FLAG) {
@@ -5105,7 +5152,23 @@ const handleAuthGoogleLegacy = async (req, res) => {
             success: true, 
             user: { ...payload, role: userRole, staffId } 
         });
-    } catch (e) { res.status(401).json({ success: false, error: e.message }); }
+    } catch (e) {
+        if (isUpstreamQuotaExceededError(e)) {
+            return res.status(503).json({
+                success: false,
+                code: 'UPSTREAM_QUOTA_EXCEEDED',
+                error: 'Authentication backend quota exceeded. Please restore backend quota and retry.',
+            });
+        }
+        if (isRecoverableInfraError(e)) {
+            return res.status(503).json({
+                success: false,
+                code: 'AUTH_BACKEND_DEGRADED',
+                error: 'Authentication backend is temporarily degraded. Please retry shortly.',
+            });
+        }
+        res.status(401).json({ success: false, error: e.message });
+    }
 };
 
 const handleBotSettingsGetLegacy = async (req, res) => {
@@ -5251,6 +5314,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
                     (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document', 'voice', 'sticker')) as user_media_count,
                     (SELECT count(*) FROM jsonb_object_keys(c.variables)) as var_count
                 FROM candidates c 
+                WHERE COALESCE(c.is_hidden, FALSE) = FALSE
                 ORDER BY last_message_at DESC NULLS LAST LIMIT 50
             `);
             const drivers = driverRows.rows.map((row) => {
@@ -5281,6 +5345,8 @@ apiRouter.get('/updates/stream', async (req, res) => {
                     lastMessageTime: parseInt(row.last_message_at || '0'),
                     source: row.source,
                     isHumanMode: row.is_human_mode,
+                    isHidden: Boolean(row.is_hidden),
+                    isTerminated: Boolean(row.is_terminated),
                     created_at: row.created_at,
                     lead_score: leadScore,
                     progress_percent: progress,
@@ -5382,18 +5448,39 @@ apiRouter.get('/updates/stream', async (req, res) => {
 apiRouter.get('/drivers', async (req, res) => {
     try {
         await withDb(async (client) => {
+            const snapshotRes = await client.query(`
+                SELECT id, phone_number, stage, is_human_mode, is_hidden, is_terminated, last_message_at, last_action_at
+                FROM candidates
+                WHERE COALESCE(is_hidden, FALSE) = FALSE
+                ORDER BY last_message_at DESC NULLS LAST
+                LIMIT 50
+            `);
+
+            const transferFingerprint = crypto
+                .createHash('sha1')
+                .update(JSON.stringify(snapshotRes.rows))
+                .digest('hex');
+            const etag = `"drivers-${transferFingerprint}"`;
+            if (req.headers['if-none-match'] === etag) {
+                res.status(304).end();
+                return;
+            }
+
             const botRes = await client.query("SELECT settings FROM bot_versions WHERE status = 'published' ORDER BY created_at DESC LIMIT 1");
             const publishedBot = botRes.rows[0];
             const totalNodes = publishedBot?.settings?.nodes?.length || 10;
 
             const r = await client.query(`
-                SELECT c.*, 
+                SELECT c.id, c.phone_number, c.name, c.stage, c.last_message, c.last_message_at, c.source, c.is_human_mode, c.is_hidden, c.is_terminated,
                     (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in') as user_msg_count,
                     (SELECT COUNT(*) FROM candidate_messages cm WHERE cm.candidate_id = c.id AND cm.direction = 'in' AND cm.type IN ('image', 'video', 'audio', 'document', 'voice', 'sticker')) as user_media_count,
                     (SELECT count(*) FROM jsonb_object_keys(c.variables)) as var_count
                 FROM candidates c 
+                WHERE COALESCE(c.is_hidden, FALSE) = FALSE
                 ORDER BY last_message_at DESC NULLS LAST LIMIT 50
             `);
+            res.setHeader('ETag', etag);
+            res.setHeader('Cache-Control', 'private, no-cache, must-revalidate');
             res.json(r.rows.map(row => {
                 const msgCount = parseInt(row.user_msg_count || '0');
                 const mediaCount = parseInt(row.user_media_count || '0');
@@ -5408,6 +5495,8 @@ apiRouter.get('/drivers', async (req, res) => {
                     id: row.id, phoneNumber: row.phone_number, name: row.name, status: row.stage, 
                     lastMessage: row.last_message, lastMessageTime: parseInt(row.last_message_at || '0'), 
                     source: row.source, isHumanMode: row.is_human_mode,
+                    isHidden: Boolean(row.is_hidden),
+                    isTerminated: Boolean(row.is_terminated),
                     lead_score: leadScore,
                     progress_percent: progress,
                     user_msg_count: msgCount,
@@ -5421,13 +5510,62 @@ apiRouter.get('/drivers', async (req, res) => {
 
 apiRouter.patch('/drivers/:id', async (req, res) => {
     try {
-        const { status, isHumanMode, name } = req.body;
+        const { status, isHumanMode, name, isTerminated } = req.body;
         await withDb(async (client) => {
             if (status) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [status, req.params.id]);
             if (isHumanMode !== undefined) await client.query("UPDATE candidates SET is_human_mode = $1 WHERE id = $2", [isHumanMode, req.params.id]);
             if (name) await client.query("UPDATE candidates SET name = $1 WHERE id = $2", [name, req.params.id]);
+            if (isTerminated === true) {
+                await client.query(
+                    "UPDATE candidates SET is_terminated = TRUE, is_hidden = TRUE, lead_status = 'terminated' WHERE id = $1",
+                    [req.params.id]
+                );
+            } else if (isTerminated === false) {
+                await client.query(
+                    "UPDATE candidates SET is_terminated = FALSE, is_hidden = FALSE WHERE id = $1",
+                    [req.params.id]
+                );
+            }
         });
         res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.get('/drivers/archived', async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query(`
+                SELECT id, phone_number, name, stage, source, created_at, last_message_at, is_hidden, is_terminated
+                FROM candidates
+                WHERE COALESCE(is_terminated, FALSE) = TRUE
+                ORDER BY created_at DESC
+                LIMIT 500
+            `);
+            res.json(r.rows.map((row) => ({
+                id: row.id,
+                phoneNumber: row.phone_number || '',
+                name: row.name || '',
+                status: row.stage || '',
+                source: row.source || '',
+                createdAt: row.created_at ? new Date(row.created_at).toISOString() : '',
+                lastMessageAt: row.last_message_at ? new Date(Number(row.last_message_at) || row.last_message_at).toISOString() : '',
+                isHidden: Boolean(row.is_hidden),
+                isTerminated: Boolean(row.is_terminated)
+            })));
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+apiRouter.patch('/drivers/:id/visibility', async (req, res) => {
+    try {
+        const { isHidden } = req.body || {};
+        if (typeof isHidden !== 'boolean') {
+            return res.status(400).json({ error: 'isHidden (boolean) is required' });
+        }
+        await withDb(async (client) => {
+            await client.query('UPDATE candidates SET is_hidden = $1 WHERE id = $2', [isHidden, req.params.id]);
+        });
+        res.json({ success: true, isHidden });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -5576,16 +5714,21 @@ apiRouter.patch('/drivers/:id/document-status', async (req, res) => {
 apiRouter.get('/reports/driver-excel', async (req, res) => {
     try {
         const search = (req.query.search || '').toString().trim();
+        const includeHidden = String(req.query.includeHidden || 'false').toLowerCase() === 'true';
         await withDb(async (client) => {
             const customCols = await getDriverExcelColumnConfig(client);
             const params = [];
-            let where = '';
+            const conditions = [];
             if (search) {
                 params.push(`%${search}%`);
-                where = `WHERE c.name ILIKE $1 OR c.phone_number ILIKE $1 OR c.stage ILIKE $1`;
+                conditions.push(`(c.name ILIKE $${params.length} OR c.phone_number ILIKE $${params.length} OR c.stage ILIKE $${params.length})`);
             }
+            if (!includeHidden) {
+                conditions.push('COALESCE(c.is_hidden, FALSE) = FALSE');
+            }
+            const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
             const q = `
-                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables
+                SELECT c.id, c.phone_number, c.name, c.stage, c.source, c.created_at, c.last_message_at, c.variables, c.is_hidden, c.is_terminated
                 FROM candidates c
                 ${where}
                 ORDER BY c.created_at DESC
@@ -5628,6 +5771,8 @@ apiRouter.get('/reports/driver-excel', async (req, res) => {
                     source: r.source || '',
                     createdAt: r.created_at ? new Date(r.created_at).toISOString() : '',
                     lastMessageAt: r.last_message_at ? new Date(Number(r.last_message_at) || r.last_message_at).toISOString() : '',
+                    isHidden: Boolean(r.is_hidden),
+                    isTerminated: Boolean(r.is_terminated),
                     variables: mergedVars
                 };
             });

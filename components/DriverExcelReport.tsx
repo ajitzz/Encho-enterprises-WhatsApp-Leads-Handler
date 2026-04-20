@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { liveApiService } from '../services/liveApiService';
 import { DriverExcelColumn, DriverExcelRow } from '../types';
-import { ArrowDown, ArrowUp, CheckSquare, GripVertical, Pencil, Plus, RotateCcw, Save, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, CheckSquare, Eye, EyeOff, GripVertical, Pencil, Plus, RotateCcw, Save, Trash2, X } from 'lucide-react';
 
 interface VariableOption {
   key: string;
@@ -37,6 +37,8 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
   const [syncStatus, setSyncStatus] = useState<any>(null);
   const [uiMessage, setUiMessage] = useState('');
   const [actionKey, setActionKey] = useState<string | null>(null);
+  const [archivedDrivers, setArchivedDrivers] = useState<DriverExcelRow[]>([]);
+  const [showHiddenRecords, setShowHiddenRecords] = useState(false);
 
   const getCurrentUserScope = () => {
     try {
@@ -103,7 +105,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     if (!isLiveMode) return;
     setLoading(true);
     try {
-      const data = await liveApiService.getDriverExcelReport(search);
+      const data = await liveApiService.getDriverExcelReport(search, showHiddenRecords);
       const rawColumns = data.columns || [];
       const prefKey = getColumnPrefsStorageKey();
       const savedKeys = JSON.parse(localStorage.getItem(prefKey) || 'null') as string[] | null;
@@ -124,6 +126,16 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     }
   };
 
+  const loadArchivedDrivers = async () => {
+    if (!isLiveMode) return;
+    try {
+      const data = await liveApiService.getArchivedDrivers();
+      setArchivedDrivers(Array.isArray(data) ? data : []);
+    } catch {
+      setArchivedDrivers([]);
+    }
+  };
+
   const loadVariableOptions = async () => {
     if (!isLiveMode) return;
     try {
@@ -141,6 +153,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     loadReport();
     loadSyncStatus();
     loadVariableOptions();
+    loadArchivedDrivers();
 
     const savedRaw = localStorage.getItem(getColumnViewsStorageKey());
     if (savedRaw) {
@@ -155,6 +168,10 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     const autoAddRaw = localStorage.getItem(getAutoAddStorageKey());
     setAutoAddNewVariables(autoAddRaw === '1');
   }, [isLiveMode]);
+
+  useEffect(() => {
+    loadReport();
+  }, [showHiddenRecords]);
 
   useEffect(() => {
     if (!isLiveMode) return;
@@ -262,6 +279,34 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
     await loadReport();
     await loadSyncStatus();
     await loadVariableOptions();
+  };
+
+  const setArchivedVisibility = async (driver: DriverExcelRow, isHidden: boolean) => {
+    const key = `archive:${driver.id}:${isHidden ? 'hide' : 'unhide'}`;
+    setActionKey(key);
+    try {
+      await liveApiService.setDriverVisibility(driver.id, isHidden);
+      showMessage(`Driver ${isHidden ? 'hidden' : 'unhidden'} successfully.`);
+      await Promise.all([loadArchivedDrivers(), loadReport()]);
+    } catch (e: any) {
+      alert(e.message || 'Failed to update driver visibility');
+    } finally {
+      setActionKey(null);
+    }
+  };
+
+  const cancelTermination = async (driver: DriverExcelRow) => {
+    const key = `archive:${driver.id}:restore`;
+    setActionKey(key);
+    try {
+      await liveApiService.updateDriver(driver.id, { isTerminated: false, isHidden: false } as any);
+      showMessage('Termination cancelled and driver restored.');
+      await Promise.all([loadArchivedDrivers(), loadReport(), loadSyncStatus()]);
+    } catch (e: any) {
+      alert(e.message || 'Failed to cancel termination');
+    } finally {
+      setActionKey(null);
+    }
   };
 
   const addSelectedVariables = async () => {
@@ -567,6 +612,14 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
         </div>
 
         <div className="ml-auto flex flex-wrap items-start gap-3">
+          <label className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-xs font-medium text-gray-700 bg-white">
+            <input
+              type="checkbox"
+              checked={showHiddenRecords}
+              onChange={(e) => setShowHiddenRecords(e.target.checked)}
+            />
+            Show hidden (terminated) records
+          </label>
           <div className="flex items-center gap-2">
             <input
               className="px-3 py-2 border rounded-lg text-sm"
@@ -619,6 +672,56 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
               )}
             </div>
           </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <div className="px-4 py-3 border-b bg-gray-50 flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-gray-900">Archived Drivers (Terminated)</h3>
+            <p className="text-xs text-gray-500">Use hide/unhide and cancel termination to control visibility across portal and records.</p>
+          </div>
+          <button onClick={loadArchivedDrivers} className="px-3 py-1.5 border rounded-lg text-xs font-medium">Refresh</button>
+        </div>
+        <div className="max-h-64 overflow-auto">
+          {archivedDrivers.length === 0 ? (
+            <div className="p-4 text-sm text-gray-500">No archived drivers found.</div>
+          ) : (
+            <div className="divide-y">
+              {archivedDrivers.map((driver) => {
+                const hideKey = `archive:${driver.id}:${driver.isHidden ? 'unhide' : 'hide'}`;
+                const restoreKey = `archive:${driver.id}:restore`;
+                return (
+                  <div key={driver.id} className="px-4 py-3 flex flex-wrap items-center gap-3">
+                    <div className="min-w-[220px]">
+                      <div className="text-sm font-semibold text-gray-900">{driver.name || 'Unnamed Driver'}</div>
+                      <div className="text-xs text-gray-500">{driver.phoneNumber}</div>
+                    </div>
+                    <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${driver.isHidden ? 'bg-gray-100 text-gray-700 border-gray-300' : 'bg-emerald-100 text-emerald-700 border-emerald-200'}`}>
+                      {driver.isHidden ? 'Hidden' : 'Visible'}
+                    </span>
+                    <div className="ml-auto flex items-center gap-2">
+                      <button
+                        disabled={actionKey === hideKey}
+                        onClick={() => setArchivedVisibility(driver, !driver.isHidden)}
+                        className="px-3 py-1.5 text-xs rounded-lg border disabled:opacity-50 flex items-center gap-1"
+                      >
+                        {driver.isHidden ? <Eye size={12} /> : <EyeOff size={12} />}
+                        {actionKey === hideKey ? 'Saving...' : driver.isHidden ? 'Unhide' : 'Hide'}
+                      </button>
+                      <button
+                        disabled={actionKey === restoreKey}
+                        onClick={() => cancelTermination(driver)}
+                        className="px-3 py-1.5 text-xs rounded-lg bg-blue-600 text-white disabled:opacity-50"
+                      >
+                        {actionKey === restoreKey ? 'Restoring...' : 'Cancel Termination'}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
 
