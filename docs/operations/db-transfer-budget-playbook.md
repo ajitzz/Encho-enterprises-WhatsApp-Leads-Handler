@@ -258,6 +258,55 @@ If monthly transfer already reached **5.5 GB** against a **5 GB cap**, treat it 
 3. Apply emergency budget profile for remainder of month:
    - Dashboard refresh >= 60s.
    - Pause non-critical exports.
+
+## 2026-04-20 hot-path transfer patch (permanent)
+
+### What changed in code
+
+1. Inbound candidate upsert no longer uses `RETURNING *` in the webhook ingestion path.
+   - It now returns only `id`, `is_human_mode`, and `assigned_to` (the only fields needed immediately after insert/upsert).
+2. Auto-distribution staff lookup no longer fetches `email` because it is unused in the assignment flow.
+3. Added a CI/runtime guard script (`npm run check:transfer-guardrails`) that fails if broad projections return in the hot ingestion path.
+
+### Why this matters at micro level
+
+When Neon counts network transfer, every unnecessary column in result sets multiplies by message volume.
+
+- If `RETURNING *` includes large JSON/state fields (for example `variables`) and the webhook path processes thousands of messages, this creates avoidable outbound DB bytes.
+- Returning only needed columns turns each upsert response into a bounded, predictable payload.
+- Removing `email` from staff lookup avoids repeated transfer of PII and unused bytes on every assignment evaluation.
+
+### Expected effectiveness (formula you can plug into your production metrics)
+
+Savings from the `RETURNING *` fix:
+
+```text
+monthly_saved_gb ~= (bytes_removed_per_upsert * monthly_inbound_messages) / 1024^3
+```
+
+Example:
+
+- bytes removed per upsert = 2 KB (conservative if `variables` grows)
+- monthly inbound messages = 25,000
+- saved transfer ~= 0.048 GB/month
+
+If bytes removed are 8 KB, savings become ~0.190 GB/month.
+
+This is not the only optimization, but it is a **permanent transfer leak closure** because it eliminates waste at source rather than relying on manual ops discipline.
+
+### Validation loop after patch
+
+Run weekly:
+
+```bash
+npm run check:transfer-guardrails
+LEADS_PER_WEEK=300 MSGS_PER_LEAD=18 DOC_RATE=0.2 CACHE_HIT_RATIO=0.7 WRITE_BATCH_SIZE=4 RETRY_MULTIPLIER=1.05 npm run estimate:transfer
+```
+
+Then compare with Neon dashboard:
+
+- If estimator stays low but Neon transfer rises fast, the leak is likely outside webhook hot path (admin polling, exports, analytics scans).
+- If both rise together, tighten cache hit ratio and batching first before plan upgrade.
    - Cache bot/session reads in Redis with longer TTL.
    - Increase write batching by +1 step.
 
