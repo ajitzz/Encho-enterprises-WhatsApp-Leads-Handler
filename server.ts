@@ -340,6 +340,46 @@ let s3Client, googleClient;
 
 const hasConnectionString = () => Boolean((process.env.POSTGRES_URL || process.env.DATABASE_URL || '').trim());
 
+const logWhatsAppReadinessDiagnostics = ({ source = 'startup', requestId = null, mode = null } = {}) => {
+    const missing = [];
+    if (!String(process.env.META_API_TOKEN || '').trim()) missing.push('META_API_TOKEN');
+    if (!String(process.env.PHONE_NUMBER_ID || '').trim()) missing.push('PHONE_NUMBER_ID');
+    if (!String(process.env.VERIFY_TOKEN || '').trim()) missing.push('VERIFY_TOKEN');
+    if (!hasConnectionString()) missing.push('POSTGRES_URL|DATABASE_URL');
+
+    if (missing.length > 0) {
+        structuredLog({
+            level: 'error',
+            module: 'lead-ingestion',
+            requestId,
+            message: 'whatsapp.readiness.failed',
+            meta: {
+                source,
+                mode,
+                missingEnv: missing,
+                recommendation: 'Set missing env vars, redeploy, then retry webhook/send flow.',
+            },
+        });
+        return false;
+    }
+
+    structuredLog({
+        level: 'info',
+        module: 'lead-ingestion',
+        requestId,
+        message: 'whatsapp.readiness.ok',
+        meta: {
+            source,
+            mode,
+            phoneNumberIdConfigured: true,
+            verifyTokenConfigured: true,
+            metaApiTokenConfigured: true,
+            hasDatabaseConnectionString: true,
+        },
+    });
+    return true;
+};
+
 const isRecoverableInfraError = (error) => {
     const code = String(error?.code || '').toUpperCase();
     const message = String(error?.message || '').toLowerCase();
@@ -786,6 +826,11 @@ const getMetaSendMetricsSnapshot = () => Object.entries(metaSendMetrics).reduce(
 
 const getMetaClient = () => {
     const token = process.env.META_API_TOKEN;
+    if (!String(token || '').trim()) {
+        const error: any = new Error('META_API_TOKEN is missing. Meta outbound send is blocked.');
+        error.code = 'META_TOKEN_MISSING';
+        throw error;
+    }
 
     if (!metaHttpsAgent) {
         metaHttpsAgent = new https.Agent({ keepAlive: true, maxSockets: 128, keepAliveMsecs: 1000 });
@@ -2193,6 +2238,11 @@ const sendToMeta = async (phoneNumber: any, payload: any, options: any = {}) => 
     const timeoutBudgetMs = getSendTimeoutBudgetMs(sendType);
     const maxAttempts = options.enableRetry ? SYSTEM_CONFIG.META_RETRY_MAX_ATTEMPTS : 1;
 
+    if (!String(phoneId || '').trim()) {
+        console.error('[Meta Config Error] PHONE_NUMBER_ID is missing. Outbound message blocked.');
+        return { delivered: false, blocked: true, reason: 'PHONE_NUMBER_ID is missing' };
+    }
+
     const validation = validateOutboundPayload(payload);
     if (!validation.valid) {
         console.warn(`[Meta] Blocked outbound payload (${validation.reason})`);
@@ -2934,12 +2984,37 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         const engineStart = nowMs();
         const MAX_ENGINE_MS = Number.parseInt(process.env.BOT_ENGINE_MAX_EXEC_MS || '1500', 10);
         const config = await getRuntimeConfigCached(client);
-        if (config.automation_enabled === false || candidate.is_human_mode) return;
+        if (config.automation_enabled === false) {
+            structuredLog({
+                level: 'warn',
+                module: 'bot-conversation',
+                message: 'bot.engine.skipped',
+                meta: { candidateId: candidate.id, reason: 'automation_disabled' },
+            });
+            return;
+        }
+        if (candidate.is_human_mode) {
+            structuredLog({
+                level: 'warn',
+                module: 'bot-conversation',
+                message: 'bot.engine.skipped',
+                meta: { candidateId: candidate.id, reason: 'human_mode_enabled' },
+            });
+            return;
+        }
 
         const botSettings = await getBotSettingsCached(client);
         
         const { nodes, nodeMap, edgeMap, startNode } = getCompiledBotGraph(botSettings);
-        if (!nodes || nodes.length === 0) return;
+        if (!nodes || nodes.length === 0) {
+            structuredLog({
+                level: 'warn',
+                module: 'bot-conversation',
+                message: 'bot.engine.skipped',
+                meta: { candidateId: candidate.id, reason: 'published_bot_nodes_missing' },
+            });
+            return;
+        }
 
         let currentNodeId = candidate.current_bot_step_id;
         let nextNodeId = null;
@@ -5079,6 +5154,7 @@ apiRouter.post('/webhook', async (req, res) => {
         canaryPercent: 100,
         tenantAllowList: MODULE_CANARY_TENANTS,
     });
+    logWhatsAppReadinessDiagnostics({ source: 'webhook.post', requestId: (req as any).requestId || null, mode });
 
     if (mode !== 'off') {
         await leadIngestionFacade({ body: req.body, req, res, context: { requestId: (req as any).requestId || null, tenantId } });
@@ -6479,6 +6555,7 @@ async function startLeadAutoDistributor() {
 }
 
 const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
+    logWhatsAppReadinessDiagnostics({ source: 'startup', mode: LEAD_INGESTION_FLAG });
     startLeadAutoDistributor();
     
     // Start background jobs
