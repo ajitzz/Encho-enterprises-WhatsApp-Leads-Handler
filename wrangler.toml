@@ -1,4 +1,4 @@
-name = "encho-enterprises-whatsapp-leads-handler"
+name = "encho-whatsapp-lead-handler"
 main = "src/worker.ts"
 compatibility_date = "2026-04-16"
 
