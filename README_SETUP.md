@@ -46,6 +46,34 @@ Since your server runs on your laptop (`localhost`), Facebook cannot see it. You
    - *If it fails, make sure your node server is running!*
 7. Click **Manage** (under Webhook Fields) and check the box for `messages`.
 
+### 4.1 If you use Cloudflare Worker + separate backend (important)
+If your frontend is on `*.workers.dev` and your Node backend is on another domain (Render/Railway/etc):
+
+1. Keep your callback URL as:
+   - `https://<your-workers-domain>/webhook`
+2. Ensure Worker variable `BACKEND_API_ORIGIN` is set to your backend domain.
+3. Redeploy worker after setting variables.
+
+The worker will proxy `/webhook` to backend `/api/webhook`.
+
+### 4.2 Browser Console quick checks (copy/paste)
+Open your app in browser → press `F12` → Console, then run:
+
+```js
+fetch('/api/health').then(async r => ({status: r.status, body: await r.text()})).then(console.log)
+fetch('/webhook?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=123').then(async r => ({status: r.status, body: await r.text()})).then(console.log)
+fetch('/api/webhook', {
+  method:'POST',
+  headers:{'content-type':'application/json'},
+  body: JSON.stringify({object:'whatsapp_business_account', entry:[{changes:[{value:{messages:[{id:'wamid.TEST123',from:'15551234567',type:'text',text:{body:'hello'}}],contacts:[{profile:{name:'Test'}}]}}]}]})
+}).then(async r => ({status:r.status, body: await r.text()})).then(console.log)
+```
+
+Expected:
+- `/api/health` should be `200`.
+- `/webhook?...wrong token` should be `403` (this is normal with wrong token).
+- POST `/api/webhook` should return `200` (accepted).
+
 ### 5. Running the Project
 1. Start the Backend:
    ```bash
