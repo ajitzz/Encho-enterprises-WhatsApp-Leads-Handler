@@ -257,11 +257,12 @@ export class LeadIngestionService {
       }
 
       const candidate = state.candidate;
+      const hydratedCandidate = await this.ensureCandidateHydrated({ client, candidate });
 
       // --- AUTO DISTRIBUTION LOGIC ---
-      await this.distributeLeadAutomatically({ client, candidate, requestId, tenantId });
+      await this.distributeLeadAutomatically({ client, candidate: hydratedCandidate, requestId, tenantId });
 
-      if (!candidate.is_human_mode) {
+      if (!hydratedCandidate.is_human_mode) {
         const elapsed = Date.now() - webhookStartedMs;
         const shouldDeferForBudget = WEBHOOK_ADAPTIVE_BOT_DEFER && elapsed >= WEBHOOK_SYNC_BUDGET_MS;
         const shouldDeferForBackpressure = WEBHOOK_BACKPRESSURE_DEFER && activeBotExecutions >= BOT_ENGINE_MAX_CONCURRENCY;
@@ -274,7 +275,7 @@ export class LeadIngestionService {
 
         if (shouldDeferBot) {
           this.runBotDeferred({
-            candidate,
+            candidate: hydratedCandidate,
             parsed,
             requestId,
             tenantId,
@@ -283,12 +284,12 @@ export class LeadIngestionService {
             activeExecutions: activeBotExecutions,
           });
         } else {
-          await this.runBotWithinBudget({ client, candidate, parsed, requestId, tenantId });
+          await this.runBotWithinBudget({ client, candidate: hydratedCandidate, parsed, requestId, tenantId });
         }
       }
 
       this.triggerReportingSyncDeferred({
-        candidateId: candidate.id,
+        candidateId: hydratedCandidate.id,
         action: 'upsert',
         requestId,
         source: 'webhook',
@@ -416,6 +417,27 @@ export class LeadIngestionService {
     }
 
     botStage.end({ timedOut: Boolean(botResult && botResult.timedOut) });
+  }
+
+  async ensureCandidateHydrated({ client, candidate }) {
+    if (!candidate?.id) return candidate;
+
+    const hasPhoneNumber = typeof candidate.phone_number === 'string' && candidate.phone_number.trim().length > 0;
+    const hasVariablesObject = candidate.variables && typeof candidate.variables === 'object' && !Array.isArray(candidate.variables);
+    const hasCurrentStep = Object.prototype.hasOwnProperty.call(candidate, 'current_bot_step_id');
+
+    if (hasPhoneNumber && hasVariablesObject && hasCurrentStep) return candidate;
+
+    const result = await client.query(
+      `SELECT id, phone_number, name, stage, is_human_mode, assigned_to, current_bot_step_id, variables
+       FROM candidates
+       WHERE id = $1
+       LIMIT 1`,
+      [candidate.id]
+    );
+
+    if (!result.rows[0]) return candidate;
+    return result.rows[0];
   }
 
   async distributeLeadAutomatically({ client, candidate, requestId, tenantId }) {
