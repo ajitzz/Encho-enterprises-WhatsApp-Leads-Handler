@@ -40,7 +40,10 @@ export default {
     const allowedOrigins = parseAllowedOrigins(env.ALLOWED_ORIGINS);
     const corsOrigin = resolveCorsOrigin(request.headers.get('origin'), allowedOrigins);
 
-    if (url.pathname.startsWith('/api/')) {
+    const isApiProxyPath = url.pathname.startsWith('/api/');
+    const isWebhookProxyPath = url.pathname === '/webhook';
+
+    if (isApiProxyPath || isWebhookProxyPath) {
       if (request.method === 'OPTIONS') {
         if (!corsOrigin) {
           return new Response('CORS origin not allowed', { status: 403 });
@@ -71,7 +74,8 @@ export default {
         );
       }
 
-      const upstreamUrl = joinUrl(env.BACKEND_API_ORIGIN, url.pathname, url.search);
+      const upstreamPath = isWebhookProxyPath ? '/api/webhook' : url.pathname;
+      const upstreamUrl = joinUrl(env.BACKEND_API_ORIGIN, upstreamPath, url.search);
       const upstreamRequest = buildProxyRequest(request, upstreamUrl);
       const upstreamResponse = await fetch(upstreamRequest);
       const responseHeaders = new Headers(upstreamResponse.headers);
@@ -82,6 +86,7 @@ export default {
       }
 
       responseHeaders.set('x-proxied-by', 'cloudflare-worker-edge-proxy');
+      responseHeaders.set('x-proxy-path-type', isWebhookProxyPath ? 'webhook' : 'api');
 
       return new Response(upstreamResponse.body, {
         status: upstreamResponse.status,

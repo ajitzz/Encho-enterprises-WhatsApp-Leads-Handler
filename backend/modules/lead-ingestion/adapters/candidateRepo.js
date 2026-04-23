@@ -22,15 +22,36 @@ export const findInboundMessageByWhatsappId = async ({ client, whatsappMessageId
 };
 
 export const insertInboundMessage = async ({ client, candidateId, text, type, whatsappMessageId }) => {
-  const result = await client.query(
-    `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
-     VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW())
-     ON CONFLICT (whatsapp_message_id) DO NOTHING
-     RETURNING id`,
-    [crypto.randomUUID(), candidateId, text, type, whatsappMessageId]
-  );
+  try {
+    const result = await client.query(
+      `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
+       VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW())
+       ON CONFLICT (whatsapp_message_id) DO NOTHING
+       RETURNING id`,
+      [crypto.randomUUID(), candidateId, text, type, whatsappMessageId]
+    );
 
-  return result.rows[0] || null;
+    return result.rows[0] || null;
+  } catch (error) {
+    const missingConflictConstraint = error?.code === '42P10';
+    if (!missingConflictConstraint) throw error;
+
+    // Backward compatibility fallback for databases that don't yet have a UNIQUE
+    // constraint/index on whatsapp_message_id.
+    const existing = await client.query(
+      'SELECT id FROM candidate_messages WHERE whatsapp_message_id = $1',
+      [whatsappMessageId]
+    );
+    if (existing.rows[0]) return null;
+
+    const insertResult = await client.query(
+      `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, created_at)
+       VALUES ($1, $2, 'in', $3, $4, 'received', $5, NOW())
+       RETURNING id`,
+      [crypto.randomUUID(), candidateId, text, type, whatsappMessageId]
+    );
+    return insertResult.rows[0] || null;
+  }
 };
 
 export default {
