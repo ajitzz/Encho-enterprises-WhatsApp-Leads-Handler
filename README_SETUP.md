@@ -56,6 +56,43 @@ If your frontend is on `*.workers.dev` and your Node backend is on another domai
 
 The worker will proxy `/webhook` to backend `/api/webhook`.
 
+### 4.1.1 Meta Dashboard click-by-click (exact path)
+Use this when your callback must stay:
+`https://<your-workers-domain>/webhook`
+
+1. Open: [https://developers.facebook.com/apps](https://developers.facebook.com/apps)
+2. Click your app (the one connected to your WhatsApp Business Account).
+3. In the left menu, click **WhatsApp**.
+4. Click **Configuration**.
+5. Scroll to the **Webhook** card.
+6. Click **Edit** (or **Manage**, depending on UI version).
+7. In **Callback URL**, paste exactly:
+   - `https://<your-workers-domain>/webhook`
+8. In **Verify token**, enter the same value used in backend `VERIFY_TOKEN`.
+9. Click **Verify and Save**.
+10. After save, in **Webhook fields**, click **Manage**.
+11. Enable/check at least:
+    - `messages`
+    - `message_template_status_update` (optional but recommended for visibility)
+12. Click **Done** / **Save**.
+
+If verification fails:
+- Confirm Worker is deployed.
+- Confirm `BACKEND_API_ORIGIN` is set.
+- Confirm backend endpoint `https://<backend-domain>/api/webhook` is reachable.
+
+### 4.1.2 How to confirm Meta is actually sending events
+1. In the same **WhatsApp > Configuration > Webhook** area, look for delivery/test controls.
+2. Use **Test** / **Send test** for the `messages` field (if visible in your app UI).
+3. Send a real WhatsApp message from a phone to your connected business number.
+4. In Meta panel, check last delivery result:
+   - `200` means webhook accepted.
+   - `4xx/5xx` means route/config/backend issue.
+5. In your browser DevTools Network tab, inspect `/webhook` or `/api/webhook` calls and verify:
+   - response status,
+   - `x-proxied-by: cloudflare-worker-edge-proxy`,
+   - `x-proxy-path-type: webhook`.
+
 ### 4.2 Browser Console quick checks (copy/paste)
 Open your app in browser → press `F12` → Console, then run:
 

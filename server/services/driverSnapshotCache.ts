@@ -108,7 +108,14 @@ const buildDriverSnapshot = async (): Promise<DriverSnapshot> => {
             t.created_at,
             COALESCE(m.user_msg_count, 0) AS user_msg_count,
             COALESCE(m.user_media_count, 0) AS user_media_count,
-            jsonb_object_length(COALESCE(t.variables, '{}'::jsonb))::int AS var_count
+            CASE
+                WHEN jsonb_typeof(COALESCE(t.variables, '{}'::jsonb)) = 'object'
+                    THEN (
+                        SELECT COUNT(*)::int
+                        FROM jsonb_object_keys(COALESCE(t.variables, '{}'::jsonb))
+                    )
+                ELSE 0
+            END AS var_count
         FROM top_candidates t
         LEFT JOIN msg_counts m ON m.candidate_id = t.id
         ORDER BY t.last_message_at DESC NULLS LAST
