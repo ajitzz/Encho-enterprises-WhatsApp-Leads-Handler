@@ -9,7 +9,7 @@ export const upsertCandidateFromInbound = async ({ client, phoneNumber, name, la
        name = COALESCE(NULLIF(EXCLUDED.name, ''), candidates.name),
        last_message = EXCLUDED.last_message,
        last_message_at = EXCLUDED.last_message_at
-     RETURNING id, is_human_mode, assigned_to`,
+     RETURNING id, phone_number, name, stage, is_human_mode, assigned_to, current_bot_step_id, variables`,
     [crypto.randomUUID(), phoneNumber, name, lastMessage, nowMs]
   );
 
