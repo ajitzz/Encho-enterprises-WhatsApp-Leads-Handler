@@ -1,5 +1,5 @@
 interface Env {
-  ASSETS: { fetch: (request: Request) => Promise<Response> };
+  ASSETS?: { fetch: (request: Request) => Promise<Response> };
   BACKEND_API_ORIGIN?: string;
   ALLOWED_ORIGINS?: string;
 }
@@ -42,8 +42,9 @@ export default {
 
     const isApiProxyPath = url.pathname.startsWith('/api/');
     const isWebhookProxyPath = url.pathname === '/webhook';
+    const isTasksProxyPath = url.pathname.startsWith('/tasks/');
 
-    if (isApiProxyPath || isWebhookProxyPath) {
+    if (isApiProxyPath || isWebhookProxyPath || isTasksProxyPath) {
       if (request.method === 'OPTIONS') {
         if (!corsOrigin) {
           return new Response('CORS origin not allowed', { status: 403 });
@@ -86,7 +87,8 @@ export default {
       }
 
       responseHeaders.set('x-proxied-by', 'cloudflare-worker-edge-proxy');
-      responseHeaders.set('x-proxy-path-type', isWebhookProxyPath ? 'webhook' : 'api');
+      const proxyPathType = isWebhookProxyPath ? 'webhook' : isTasksProxyPath ? 'tasks' : 'api';
+      responseHeaders.set('x-proxy-path-type', proxyPathType);
 
       return new Response(upstreamResponse.body, {
         status: upstreamResponse.status,
@@ -94,6 +96,10 @@ export default {
       });
     }
 
-    return env.ASSETS.fetch(request);
+    if (env.ASSETS?.fetch) {
+      return env.ASSETS.fetch(request);
+    }
+
+    return new Response('Not Found', { status: 404 });
   },
 };
