@@ -1,7 +1,8 @@
 interface Env {
-  ASSETS: { fetch: (request: Request) => Promise<Response> };
+  ASSETS?: { fetch: (request: Request) => Promise<Response> };
   BACKEND_API_ORIGIN?: string;
   ALLOWED_ORIGINS?: string;
+  UPSTREAM_TIMEOUT_MS?: string;
 }
 
 const joinUrl = (base: string, pathname: string, search: string) => {
@@ -34,6 +35,12 @@ const buildProxyRequest = (request: Request, destinationUrl: string) => {
   });
 };
 
+const resolveUpstreamTimeoutMs = (raw: string | undefined) => {
+  const parsed = Number.parseInt(raw || '', 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 15_000;
+  return Math.min(parsed, 60_000);
+};
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -42,8 +49,9 @@ export default {
 
     const isApiProxyPath = url.pathname.startsWith('/api/');
     const isWebhookProxyPath = url.pathname === '/webhook';
+    const isTasksProxyPath = url.pathname.startsWith('/tasks/');
 
-    if (isApiProxyPath || isWebhookProxyPath) {
+    if (isApiProxyPath || isWebhookProxyPath || isTasksProxyPath) {
       if (request.method === 'OPTIONS') {
         if (!corsOrigin) {
           return new Response('CORS origin not allowed', { status: 403 });
@@ -77,7 +85,32 @@ export default {
       const upstreamPath = isWebhookProxyPath ? '/api/webhook' : url.pathname;
       const upstreamUrl = joinUrl(env.BACKEND_API_ORIGIN, upstreamPath, url.search);
       const upstreamRequest = buildProxyRequest(request, upstreamUrl);
-      const upstreamResponse = await fetch(upstreamRequest);
+      const upstreamTimeoutMs = resolveUpstreamTimeoutMs(env.UPSTREAM_TIMEOUT_MS);
+      let upstreamResponse: Response;
+
+      try {
+        upstreamResponse = await fetch(upstreamRequest, {
+          signal: AbortSignal.timeout(upstreamTimeoutMs),
+        });
+      } catch (error) {
+        const code = error instanceof Error && error.name === 'TimeoutError' ? 504 : 502;
+        return new Response(
+          JSON.stringify({
+            error: 'Upstream backend unavailable',
+            path: url.pathname,
+            upstream: upstreamUrl,
+            timeoutMs: upstreamTimeoutMs,
+          }),
+          {
+            status: code,
+            headers: {
+              'content-type': 'application/json',
+              'x-proxied-by': 'cloudflare-worker-edge-proxy',
+              'x-proxy-path-type': isWebhookProxyPath ? 'webhook' : isTasksProxyPath ? 'tasks' : 'api',
+            },
+          },
+        );
+      }
       const responseHeaders = new Headers(upstreamResponse.headers);
 
       if (corsOrigin) {
@@ -86,7 +119,8 @@ export default {
       }
 
       responseHeaders.set('x-proxied-by', 'cloudflare-worker-edge-proxy');
-      responseHeaders.set('x-proxy-path-type', isWebhookProxyPath ? 'webhook' : 'api');
+      const proxyPathType = isWebhookProxyPath ? 'webhook' : isTasksProxyPath ? 'tasks' : 'api';
+      responseHeaders.set('x-proxy-path-type', proxyPathType);
 
       return new Response(upstreamResponse.body, {
         status: upstreamResponse.status,
@@ -94,6 +128,10 @@ export default {
       });
     }
 
-    return env.ASSETS.fetch(request);
+    if (env.ASSETS?.fetch) {
+      return env.ASSETS.fetch(request);
+    }
+
+    return new Response('Not Found', { status: 404 });
   },
 };
