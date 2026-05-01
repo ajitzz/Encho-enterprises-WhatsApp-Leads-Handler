@@ -1,6 +1,7 @@
 interface Env {
   ASSETS?: { fetch: (request: Request) => Promise<Response> };
   BACKEND_API_ORIGIN?: string;
+  BACKEND_API_FALLBACK_ORIGIN?: string;
   ALLOWED_ORIGINS?: string;
   UPSTREAM_TIMEOUT_MS?: string;
 }
@@ -39,6 +40,11 @@ const resolveUpstreamTimeoutMs = (raw: string | undefined) => {
   const parsed = Number.parseInt(raw || '', 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return 15_000;
   return Math.min(parsed, 60_000);
+};
+
+const buildUpstreamOrigins = (primary: string | undefined, fallback: string | undefined) => {
+  const origins = [primary, fallback].filter((value): value is string => Boolean(value && value.trim()));
+  return Array.from(new Set(origins.map((origin) => origin.trim())));
 };
 
 export default {
@@ -83,22 +89,34 @@ export default {
       }
 
       const upstreamPath = isWebhookProxyPath ? '/api/webhook' : url.pathname;
-      const upstreamUrl = joinUrl(env.BACKEND_API_ORIGIN, upstreamPath, url.search);
-      const upstreamRequest = buildProxyRequest(request, upstreamUrl);
+      const upstreamOrigins = buildUpstreamOrigins(env.BACKEND_API_ORIGIN, env.BACKEND_API_FALLBACK_ORIGIN);
       const upstreamTimeoutMs = resolveUpstreamTimeoutMs(env.UPSTREAM_TIMEOUT_MS);
-      let upstreamResponse: Response;
+      let upstreamResponse: Response | null = null;
+      let lastError: Error | null = null;
+      let lastUpstreamUrl = '';
 
-      try {
-        upstreamResponse = await fetch(upstreamRequest, {
-          signal: AbortSignal.timeout(upstreamTimeoutMs),
-        });
-      } catch (error) {
-        const code = error instanceof Error && error.name === 'TimeoutError' ? 504 : 502;
+      for (const origin of upstreamOrigins) {
+        const upstreamUrl = joinUrl(origin, upstreamPath, url.search);
+        const upstreamRequest = buildProxyRequest(request, upstreamUrl);
+        lastUpstreamUrl = upstreamUrl;
+        try {
+          upstreamResponse = await fetch(upstreamRequest, {
+            signal: AbortSignal.timeout(upstreamTimeoutMs),
+          });
+          break;
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+        }
+      }
+
+      if (!upstreamResponse) {
+        const code = lastError?.name === 'TimeoutError' ? 504 : 502;
         return new Response(
           JSON.stringify({
             error: 'Upstream backend unavailable',
             path: url.pathname,
-            upstream: upstreamUrl,
+            upstream: lastUpstreamUrl,
+            attemptedOrigins: upstreamOrigins,
             timeoutMs: upstreamTimeoutMs,
           }),
           {
