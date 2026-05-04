@@ -5,7 +5,7 @@
   "description": "WhatsApp Recruitment Automation for Uber Fleet",
   "main": "server.ts",
   "scripts": {
-    "start": "tsx server.ts",
+    "start": "node --experimental-strip-types server.ts",
     "dev": "tsx server.ts",
     "lint": "tsc --noEmit",
     "build": "vite build",
