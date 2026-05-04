@@ -5,7 +5,7 @@
   "description": "WhatsApp Recruitment Automation for Uber Fleet",
   "main": "server.ts",
   "scripts": {
-    "start": "node --experimental-strip-types server.ts",
+    "start": "tsx server.ts",
     "dev": "tsx server.ts",
     "lint": "tsc --noEmit",
     "build": "vite build",
@@ -50,8 +50,7 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "recharts": "^3.8.0",
-    "zustand": "^4.5.0",
-    "tsx": "^4.21.0"
+    "zustand": "^4.5.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.1",
@@ -64,6 +63,7 @@
     "autoprefixer": "^10.4.27",
     "postcss": "^8.5.8",
     "tailwindcss": "^3.4.19",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vite": "^5.0.0"
   },
