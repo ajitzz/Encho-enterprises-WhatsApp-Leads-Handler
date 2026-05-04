@@ -1,9 +1,7 @@
 interface Env {
-  ASSETS?: { fetch: (request: Request) => Promise<Response> };
+  ASSETS: { fetch: (request: Request) => Promise<Response> };
   BACKEND_API_ORIGIN?: string;
-  BACKEND_API_FALLBACK_ORIGIN?: string;
   ALLOWED_ORIGINS?: string;
-  UPSTREAM_TIMEOUT_MS?: string;
 }
 
 const joinUrl = (base: string, pathname: string, search: string) => {
@@ -36,17 +34,6 @@ const buildProxyRequest = (request: Request, destinationUrl: string) => {
   });
 };
 
-const resolveUpstreamTimeoutMs = (raw: string | undefined) => {
-  const parsed = Number.parseInt(raw || '', 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 15_000;
-  return Math.min(parsed, 60_000);
-};
-
-const buildUpstreamOrigins = (primary: string | undefined, fallback: string | undefined) => {
-  const origins = [primary, fallback].filter((value): value is string => Boolean(value && value.trim()));
-  return Array.from(new Set(origins.map((origin) => origin.trim())));
-};
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -55,9 +42,8 @@ export default {
 
     const isApiProxyPath = url.pathname.startsWith('/api/');
     const isWebhookProxyPath = url.pathname === '/webhook';
-    const isTasksProxyPath = url.pathname.startsWith('/tasks/');
 
-    if (isApiProxyPath || isWebhookProxyPath || isTasksProxyPath) {
+    if (isApiProxyPath || isWebhookProxyPath) {
       if (request.method === 'OPTIONS') {
         if (!corsOrigin) {
           return new Response('CORS origin not allowed', { status: 403 });
@@ -89,46 +75,9 @@ export default {
       }
 
       const upstreamPath = isWebhookProxyPath ? '/api/webhook' : url.pathname;
-      const upstreamOrigins = buildUpstreamOrigins(env.BACKEND_API_ORIGIN, env.BACKEND_API_FALLBACK_ORIGIN);
-      const upstreamTimeoutMs = resolveUpstreamTimeoutMs(env.UPSTREAM_TIMEOUT_MS);
-      let upstreamResponse: Response | null = null;
-      let lastError: Error | null = null;
-      let lastUpstreamUrl = '';
-
-      for (const origin of upstreamOrigins) {
-        const upstreamUrl = joinUrl(origin, upstreamPath, url.search);
-        const upstreamRequest = buildProxyRequest(request, upstreamUrl);
-        lastUpstreamUrl = upstreamUrl;
-        try {
-          upstreamResponse = await fetch(upstreamRequest, {
-            signal: AbortSignal.timeout(upstreamTimeoutMs),
-          });
-          break;
-        } catch (error) {
-          lastError = error instanceof Error ? error : new Error(String(error));
-        }
-      }
-
-      if (!upstreamResponse) {
-        const code = lastError?.name === 'TimeoutError' ? 504 : 502;
-        return new Response(
-          JSON.stringify({
-            error: 'Upstream backend unavailable',
-            path: url.pathname,
-            upstream: lastUpstreamUrl,
-            attemptedOrigins: upstreamOrigins,
-            timeoutMs: upstreamTimeoutMs,
-          }),
-          {
-            status: code,
-            headers: {
-              'content-type': 'application/json',
-              'x-proxied-by': 'cloudflare-worker-edge-proxy',
-              'x-proxy-path-type': isWebhookProxyPath ? 'webhook' : isTasksProxyPath ? 'tasks' : 'api',
-            },
-          },
-        );
-      }
+      const upstreamUrl = joinUrl(env.BACKEND_API_ORIGIN, upstreamPath, url.search);
+      const upstreamRequest = buildProxyRequest(request, upstreamUrl);
+      const upstreamResponse = await fetch(upstreamRequest);
       const responseHeaders = new Headers(upstreamResponse.headers);
 
       if (corsOrigin) {
@@ -137,8 +86,7 @@ export default {
       }
 
       responseHeaders.set('x-proxied-by', 'cloudflare-worker-edge-proxy');
-      const proxyPathType = isWebhookProxyPath ? 'webhook' : isTasksProxyPath ? 'tasks' : 'api';
-      responseHeaders.set('x-proxy-path-type', proxyPathType);
+      responseHeaders.set('x-proxy-path-type', isWebhookProxyPath ? 'webhook' : 'api');
 
       return new Response(upstreamResponse.body, {
         status: upstreamResponse.status,
@@ -146,10 +94,6 @@ export default {
       });
     }
 
-    if (env.ASSETS?.fetch) {
-      return env.ASSETS.fetch(request);
-    }
-
-    return new Response('Not Found', { status: 404 });
+    return env.ASSETS.fetch(request);
   },
 };
