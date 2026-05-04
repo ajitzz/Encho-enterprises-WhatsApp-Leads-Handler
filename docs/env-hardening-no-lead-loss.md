@@ -5,7 +5,7 @@ This checklist is for a production WhatsApp webhook path where low latency and l
 ## Cloudflare Worker variables/secrets
 
 Required:
-- `BACKEND_API_ORIGIN` — primary backend origin (Render API base URL, no trailing slash preferred).
+- `BACKEND_API_ORIGIN` — primary backend/API base URL (for example your Render backend `https://<service>.onrender.com`).
 - `ALLOWED_ORIGINS` — comma-separated frontend origins (or `*` when appropriate).
 
 Strongly recommended:
@@ -22,19 +22,34 @@ If using Upstash/QStash pipeline:
 ## Render environment variables
 
 Required:
-- `PORT` (provided by Render runtime)
+- `PORT` (provided automatically by Render runtime; do not hardcode)
 - `DATABASE_URL` (Neon pooled connection)
 - `WHATSAPP_TOKEN`
-- `WHATSAPP_VERIFY_TOKEN`
+- `VERIFY_TOKEN` (this project currently uses `VERIFY_TOKEN`; if backend code expects `WHATSAPP_VERIFY_TOKEN`, set both to same value)
 
-Strongly recommended:
+Recommended:
 - `NODE_ENV=production`
-- `WEBHOOK_SECRET` (if backend validates signatures itself)
 - `LOG_LEVEL=info`
+
+Optional:
+- `WEBHOOK_SECRET` (only if backend validates request signatures with this env key)
+
+## What to use for `BACKEND_API_ORIGIN` and `BACKEND_API_FALLBACK_ORIGIN`
+
+Use full HTTPS origins (scheme + host, no path):
+
+- `BACKEND_API_ORIGIN=https://<primary-backend-domain>`
+- `BACKEND_API_FALLBACK_ORIGIN=https://<secondary-backend-domain>`
+
+Examples:
+- Primary Render service + secondary Render service (different region/service)
+- Primary Render service + secondary Railway/Fly service
+
+If you only have one backend right now, set just `BACKEND_API_ORIGIN` first. Add fallback once second healthy deployment exists.
 
 ## No-lead-loss posture (recommended)
 
-1. Configure **both** `BACKEND_API_ORIGIN` and `BACKEND_API_FALLBACK_ORIGIN`.
+1. Configure primary + fallback origin when available.
 2. Keep `UPSTREAM_TIMEOUT_MS` bounded (`8000`–`12000`) to avoid long edge stalls.
 3. Ensure backend stores inbound webhook payload quickly before heavy processing.
 4. Use QStash/queue path for async processing and retries.
