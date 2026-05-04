@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: encho-enterprises-whatsapp-leads-handler
+    env: node
+    buildCommand: npm install
+    startCommand: node --experimental-strip-types server.ts
+    autoDeploy: true
