@@ -35,7 +35,6 @@
     "@aws-sdk/s3-request-presigner": "^3.400.0",
     "@google/genai": "latest",
     "@react-oauth/google": "^0.12.1",
-    "@tailwindcss/vite": "^4.2.1",
     "@upstash/qstash": "^2.0.0",
     "@upstash/redis": "^1.28.0",
     "@vitejs/plugin-react": "^4.2.0",
