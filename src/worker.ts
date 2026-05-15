@@ -1,8 +1,13 @@
 interface Env {
-  ASSETS: { fetch: (request: Request) => Promise<Response> };
+  ASSETS?: { fetch: (request: Request) => Promise<Response> };
   BACKEND_API_ORIGIN?: string;
   ALLOWED_ORIGINS?: string;
 }
+
+const STATIC_FALLBACKS: Record<string, { body: string; contentType: string }> = {
+  '/robots.txt': { body: 'User-agent: *\nDisallow:', contentType: 'text/plain; charset=utf-8' },
+  '/favicon.ico': { body: '', contentType: 'image/x-icon' },
+};
 
 const joinUrl = (base: string, pathname: string, search: string) => {
   const normalizedBase = base.replace(/\/$/, '');
@@ -39,6 +44,17 @@ export default {
     const url = new URL(request.url);
     const allowedOrigins = parseAllowedOrigins(env.ALLOWED_ORIGINS);
     const corsOrigin = resolveCorsOrigin(request.headers.get('origin'), allowedOrigins);
+
+    if (STATIC_FALLBACKS[url.pathname]) {
+      const fallback = STATIC_FALLBACKS[url.pathname];
+      return new Response(fallback.body, {
+        status: url.pathname === '/favicon.ico' ? 204 : 200,
+        headers: {
+          'content-type': fallback.contentType,
+          'cache-control': 'public, max-age=3600',
+        },
+      });
+    }
 
     const isApiProxyPath = url.pathname.startsWith('/api/');
     const isWebhookProxyPath = url.pathname === '/webhook';
@@ -94,6 +110,16 @@ export default {
       });
     }
 
-    return env.ASSETS.fetch(request);
+    if (env.ASSETS && typeof env.ASSETS.fetch === 'function') {
+      return env.ASSETS.fetch(request);
+    }
+
+    return new Response('Not Found', {
+      status: 404,
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+      },
+    });
   },
 };
