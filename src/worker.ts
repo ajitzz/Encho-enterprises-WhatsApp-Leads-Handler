@@ -1,6 +1,8 @@
 interface Env {
   ASSETS?: { fetch: (request: Request) => Promise<Response> };
   BACKEND_API_ORIGIN?: string;
+  BACKEND_API_FALLBACK_ORIGIN?: string;
+  BACKEND_API_TIMEOUT_MS?: string;
   ALLOWED_ORIGINS?: string;
 }
 
@@ -8,6 +10,37 @@ const STATIC_FALLBACKS: Record<string, { body: string; contentType: string }> = 
   '/robots.txt': { body: 'User-agent: *\nDisallow:', contentType: 'text/plain; charset=utf-8' },
   '/favicon.ico': { body: '', contentType: 'image/x-icon' },
 };
+
+
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 15_000;
+const MIN_UPSTREAM_TIMEOUT_MS = 3_000;
+const MAX_UPSTREAM_TIMEOUT_MS = 60_000;
+
+const parseTimeoutMs = (raw: string | undefined) => {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_UPSTREAM_TIMEOUT_MS;
+  return Math.max(MIN_UPSTREAM_TIMEOUT_MS, Math.min(MAX_UPSTREAM_TIMEOUT_MS, Math.floor(parsed)));
+};
+
+const withTimeoutFetch = async (request: Request, timeoutMs: number) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort('upstream-timeout'), timeoutMs);
+
+  try {
+    return await fetch(request, { signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const toJsonResponse = (status: number, payload: Record<string, unknown>) =>
+  new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    },
+  });
 
 const joinUrl = (base: string, pathname: string, search: string) => {
   const normalizedBase = base.replace(/\/$/, '');
@@ -91,9 +124,39 @@ export default {
       }
 
       const upstreamPath = isWebhookProxyPath ? '/api/webhook' : url.pathname;
-      const upstreamUrl = joinUrl(env.BACKEND_API_ORIGIN, upstreamPath, url.search);
-      const upstreamRequest = buildProxyRequest(request, upstreamUrl);
-      const upstreamResponse = await fetch(upstreamRequest);
+      const timeoutMs = parseTimeoutMs(env.BACKEND_API_TIMEOUT_MS);
+      const upstreamOrigins = [env.BACKEND_API_ORIGIN, env.BACKEND_API_FALLBACK_ORIGIN]
+        .map((value) => value?.trim())
+        .filter((value, index, arr): value is string => Boolean(value) && arr.indexOf(value) === index);
+
+      let upstreamResponse: Response | null = null;
+      let lastError: unknown = null;
+      let selectedOrigin: string | null = null;
+
+      for (const origin of upstreamOrigins) {
+        const upstreamUrl = joinUrl(origin, upstreamPath, url.search);
+        const upstreamRequest = buildProxyRequest(request, upstreamUrl);
+        selectedOrigin = origin;
+
+        try {
+          upstreamResponse = await withTimeoutFetch(upstreamRequest, timeoutMs);
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      if (!upstreamResponse) {
+        return toJsonResponse(504, {
+          error: 'Upstream unavailable',
+          code: 'UPSTREAM_UNAVAILABLE',
+          hint: 'Backend origin timed out or was unreachable. Check BACKEND_API_ORIGIN health.',
+          timeoutMs,
+          attemptedOrigins: upstreamOrigins,
+          cause: String(lastError || 'unknown_error'),
+        });
+      }
+
       const responseHeaders = new Headers(upstreamResponse.headers);
 
       if (corsOrigin) {
@@ -103,6 +166,9 @@ export default {
 
       responseHeaders.set('x-proxied-by', 'cloudflare-worker-edge-proxy');
       responseHeaders.set('x-proxy-path-type', isWebhookProxyPath ? 'webhook' : 'api');
+      if (selectedOrigin) {
+        responseHeaders.set('x-proxy-upstream-origin', selectedOrigin);
+      }
 
       return new Response(upstreamResponse.body, {
         status: upstreamResponse.status,
