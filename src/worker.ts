@@ -16,6 +16,7 @@ const DEFAULT_UPSTREAM_TIMEOUT_MS = 15_000;
 const MIN_UPSTREAM_TIMEOUT_MS = 3_000;
 const MAX_UPSTREAM_TIMEOUT_MS = 60_000;
 const WEBHOOK_UPSTREAM_TIMEOUT_CAP_MS = 8_000;
+const WEBHOOK_UPSTREAM_MAX_ATTEMPTS = 2;
 
 const parseTimeoutMs = (raw: string | undefined) => {
   const parsed = Number(raw);
@@ -136,18 +137,25 @@ export default {
       let upstreamResponse: Response | null = null;
       let lastError: unknown = null;
       let selectedOrigin: string | null = null;
+      let attempts = 0;
 
       for (const origin of upstreamOrigins) {
-        const upstreamUrl = joinUrl(origin, upstreamPath, url.search);
-        const upstreamRequest = buildProxyRequest(request, upstreamUrl);
-        selectedOrigin = origin;
+        const maxAttemptsForOrigin = isWebhookProxyPath ? WEBHOOK_UPSTREAM_MAX_ATTEMPTS : 1;
+        for (let attempt = 1; attempt <= maxAttemptsForOrigin; attempt += 1) {
+          attempts += 1;
+          const upstreamUrl = joinUrl(origin, upstreamPath, url.search);
+          const upstreamRequest = buildProxyRequest(request.clone(), upstreamUrl);
+          selectedOrigin = origin;
 
-        try {
-          upstreamResponse = await withTimeoutFetch(upstreamRequest, timeoutMs);
-          break;
-        } catch (error) {
-          lastError = error;
+          try {
+            upstreamResponse = await withTimeoutFetch(upstreamRequest, timeoutMs);
+            break;
+          } catch (error) {
+            lastError = error;
+          }
         }
+
+        if (upstreamResponse) break;
       }
 
       if (!upstreamResponse) {
@@ -157,6 +165,7 @@ export default {
           hint: 'Backend origin timed out or was unreachable. Check BACKEND_API_ORIGIN health.',
           timeoutMs,
           attemptedOrigins: upstreamOrigins,
+          attempts,
           cause: String(lastError || 'unknown_error'),
         });
       }
