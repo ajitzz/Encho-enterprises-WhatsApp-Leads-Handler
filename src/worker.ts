@@ -15,6 +15,8 @@ const STATIC_FALLBACKS: Record<string, { body: string; contentType: string }> = 
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 15_000;
 const MIN_UPSTREAM_TIMEOUT_MS = 3_000;
 const MAX_UPSTREAM_TIMEOUT_MS = 60_000;
+const WEBHOOK_UPSTREAM_TIMEOUT_CAP_MS = 8_000;
+const WEBHOOK_UPSTREAM_MAX_ATTEMPTS = 2;
 
 const parseTimeoutMs = (raw: string | undefined) => {
   const parsed = Number(raw);
@@ -80,7 +82,7 @@ export default {
 
     if (STATIC_FALLBACKS[url.pathname]) {
       const fallback = STATIC_FALLBACKS[url.pathname];
-      return new Response(fallback.body, {
+      return new Response(url.pathname === '/favicon.ico' ? null : fallback.body, {
         status: url.pathname === '/favicon.ico' ? 204 : 200,
         headers: {
           'content-type': fallback.contentType,
@@ -124,7 +126,10 @@ export default {
       }
 
       const upstreamPath = isWebhookProxyPath ? '/api/webhook' : url.pathname;
-      const timeoutMs = parseTimeoutMs(env.BACKEND_API_TIMEOUT_MS);
+      const configuredTimeoutMs = parseTimeoutMs(env.BACKEND_API_TIMEOUT_MS);
+      const timeoutMs = isWebhookProxyPath
+        ? Math.min(configuredTimeoutMs, WEBHOOK_UPSTREAM_TIMEOUT_CAP_MS)
+        : configuredTimeoutMs;
       const upstreamOrigins = [env.BACKEND_API_ORIGIN, env.BACKEND_API_FALLBACK_ORIGIN]
         .map((value) => value?.trim())
         .filter((value, index, arr): value is string => Boolean(value) && arr.indexOf(value) === index);
@@ -132,18 +137,25 @@ export default {
       let upstreamResponse: Response | null = null;
       let lastError: unknown = null;
       let selectedOrigin: string | null = null;
+      let attempts = 0;
 
       for (const origin of upstreamOrigins) {
-        const upstreamUrl = joinUrl(origin, upstreamPath, url.search);
-        const upstreamRequest = buildProxyRequest(request, upstreamUrl);
-        selectedOrigin = origin;
+        const maxAttemptsForOrigin = isWebhookProxyPath ? WEBHOOK_UPSTREAM_MAX_ATTEMPTS : 1;
+        for (let attempt = 1; attempt <= maxAttemptsForOrigin; attempt += 1) {
+          attempts += 1;
+          const upstreamUrl = joinUrl(origin, upstreamPath, url.search);
+          const upstreamRequest = buildProxyRequest(request.clone(), upstreamUrl);
+          selectedOrigin = origin;
 
-        try {
-          upstreamResponse = await withTimeoutFetch(upstreamRequest, timeoutMs);
-          break;
-        } catch (error) {
-          lastError = error;
+          try {
+            upstreamResponse = await withTimeoutFetch(upstreamRequest, timeoutMs);
+            break;
+          } catch (error) {
+            lastError = error;
+          }
         }
+
+        if (upstreamResponse) break;
       }
 
       if (!upstreamResponse) {
@@ -153,6 +165,7 @@ export default {
           hint: 'Backend origin timed out or was unreachable. Check BACKEND_API_ORIGIN health.',
           timeoutMs,
           attemptedOrigins: upstreamOrigins,
+          attempts,
           cause: String(lastError || 'unknown_error'),
         });
       }
