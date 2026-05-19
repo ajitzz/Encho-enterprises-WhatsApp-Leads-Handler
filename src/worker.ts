@@ -12,9 +12,10 @@ const STATIC_FALLBACKS: Record<string, { body: string; contentType: string }> = 
 };
 
 
-const DEFAULT_UPSTREAM_TIMEOUT_MS = 15_000;
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 30_000;
 const MIN_UPSTREAM_TIMEOUT_MS = 3_000;
-const MAX_UPSTREAM_TIMEOUT_MS = 60_000;
+const MAX_UPSTREAM_TIMEOUT_MS = 90_000;
+const WEBHOOK_UPSTREAM_TIMEOUT_MS = 55_000;
 
 const parseTimeoutMs = (raw: string | undefined) => {
   const parsed = Number(raw);
@@ -124,7 +125,8 @@ export default {
       }
 
       const upstreamPath = isWebhookProxyPath ? '/api/webhook' : url.pathname;
-      const timeoutMs = parseTimeoutMs(env.BACKEND_API_TIMEOUT_MS);
+      const baseTimeoutMs = parseTimeoutMs(env.BACKEND_API_TIMEOUT_MS);
+      const timeoutMs = isWebhookProxyPath ? Math.max(baseTimeoutMs, WEBHOOK_UPSTREAM_TIMEOUT_MS) : baseTimeoutMs;
       const upstreamOrigins = [env.BACKEND_API_ORIGIN, env.BACKEND_API_FALLBACK_ORIGIN]
         .map((value) => value?.trim())
         .filter((value, index, arr): value is string => Boolean(value) && arr.indexOf(value) === index);
