@@ -144,6 +144,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [closingScreenshot, setClosingScreenshot] = useState<{ file: File; preview: string } | null>(null);
   const [dueAlertQueue, setDueAlertQueue] = useState<DueAlertItem[]>([]);
   const [activeDueAlert, setActiveDueAlert] = useState<DueAlertItem | null>(null);
+  const authoritativeLeadsRef = React.useRef<Map<string, any>>(new Map());
 
   const formatDateTime = (value?: string | null) => {
     if (!value) return '—';
@@ -410,9 +411,16 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   useEffect(() => {
     const unsubscribe = liveApiService.subscribeToUpdates(
       (drivers) => {
-        // The realtime stream is optimized and may not include all historical claimed leads.
-        // Keep stream freshness, but reconcile with authoritative role-scoped leads endpoint.
-        setAllLeads(drivers);
+        // Stream payload can be windowed/truncated. Always merge with authoritative
+        // role-scoped leads that were fetched from /leads/my and /leads/pool.
+        setAllLeads(() => {
+          const merged = new Map<string, any>();
+          drivers.forEach((lead: any) => merged.set(lead.id, lead));
+          authoritativeLeadsRef.current.forEach((lead: any, id: string) => {
+            merged.set(id, { ...(merged.get(id) || {}), ...lead });
+          });
+          return Array.from(merged.values());
+        });
         setLoading(false);
       },
       {
@@ -430,6 +438,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         liveApiService.getMyLeads(),
         liveApiService.getLeadPool()
       ]);
+      const authoritative = new Map<string, any>();
+      [...pool, ...my].forEach((lead: any) => authoritative.set(lead.id, lead));
+      authoritativeLeadsRef.current = authoritative;
       setAllLeads((prev) => {
         const byId = new Map<string, any>();
         prev.forEach((lead: any) => byId.set(lead.id, lead));
