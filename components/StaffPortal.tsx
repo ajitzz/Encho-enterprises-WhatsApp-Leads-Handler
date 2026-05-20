@@ -293,6 +293,26 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     [allLeads]
   );
 
+  const freshClaimedLeads = React.useMemo(
+    () => myLeads
+      .filter((lead) => ['claimed', 'assigned', 'new'].includes(((lead as any).lead_status || '').toLowerCase()))
+      .sort((a, b) => new Date((b as any).claimed_at || (b as any).created_at || 0).getTime() - new Date((a as any).claimed_at || (a as any).created_at || 0).getTime()),
+    [myLeads]
+  );
+
+  const prioritizedReminders = React.useMemo(() => {
+    const now = Date.now();
+    const toTs = (value?: string) => new Date(value || 0).getTime();
+    return [...reminders].sort((a, b) => {
+      const aTs = toTs(a.scheduled_at);
+      const bTs = toTs(b.scheduled_at);
+      const aOverdue = aTs < now;
+      const bOverdue = bTs < now;
+      if (aOverdue !== bOverdue) return aOverdue ? -1 : 1;
+      return aTs - bTs;
+    });
+  }, [reminders]);
+
   const isManagerRole = user.role === 'manager' || user.role === 'admin';
   const teamMemberIds = React.useMemo(() => new Set(teamStaff.map((staff) => staff.id)), [teamStaff]);
   const reportStartDate = React.useMemo(() => {
@@ -390,6 +410,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   useEffect(() => {
     const unsubscribe = liveApiService.subscribeToUpdates(
       (drivers) => {
+        // The realtime stream is optimized and may not include all historical claimed leads.
+        // Keep stream freshness, but reconcile with authoritative role-scoped leads endpoint.
         setAllLeads(drivers);
         setLoading(false);
       },
@@ -401,6 +423,31 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     );
     return () => unsubscribe();
   }, [selectedLead?.id]);
+
+  const refreshOwnedLeadViews = React.useCallback(async () => {
+    try {
+      const [my, pool] = await Promise.all([
+        liveApiService.getMyLeads(),
+        liveApiService.getLeadPool()
+      ]);
+      setAllLeads((prev) => {
+        const byId = new Map<string, any>();
+        prev.forEach((lead: any) => byId.set(lead.id, lead));
+        [...pool, ...my].forEach((lead: any) => {
+          byId.set(lead.id, { ...(byId.get(lead.id) || {}), ...lead });
+        });
+        return Array.from(byId.values());
+      });
+    } catch (err) {
+      console.error('Failed to refresh staff-owned lead views', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshOwnedLeadViews();
+    const timer = setInterval(refreshOwnedLeadViews, 15000);
+    return () => clearInterval(timer);
+  }, [refreshOwnedLeadViews]);
 
   useEffect(() => {
     if (user.role === 'manager' || user.role === 'admin') {
@@ -418,6 +465,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     try {
       setLoading(true);
       await liveApiService.claimLead(id);
+      await refreshOwnedLeadViews();
       setView('my-leads');
     } catch (err: any) {
       setError(err.message);
@@ -527,9 +575,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       setLoading(true);
       await liveApiService.assignLead(leadId, staffId);
       setAssigningTo(null);
-      // Refresh leads
-      const drivers = await liveApiService.getDrivers();
-      setAllLeads(drivers);
+      await refreshOwnedLeadViews();
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -578,11 +624,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       setLoading(true);
       await liveApiService.reassignLead(leadId, staffId);
       setAssigningTo(null);
-      // Refresh leads
-      const drivers = await liveApiService.getDrivers();
-      setAllLeads(drivers);
+      await refreshOwnedLeadViews();
       if (selectedLead?.id === leadId) {
-        const updated = drivers.find(d => d.id === leadId);
+        const updated = allLeads.find(d => d.id === leadId);
         if (updated) setSelectedLead(updated);
       }
     } catch (err: any) {
@@ -705,12 +749,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             </span>
           </div>
           <div className="space-y-2">
-            {reminders.map(reminder => (
+            {prioritizedReminders.map(reminder => (
               <div key={reminder.id} className="bg-white/60 p-3 rounded-2xl flex items-center justify-between gap-3">
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-bold text-gray-900 truncate">{reminder.lead_name}</p>
                   <p className="text-[10px] text-gray-500 truncate">{reminder.title || 'Follow-up'}</p>
-                  <p className="text-[9px] text-amber-600 font-bold mt-0.5">
+                  <p className={`text-[9px] font-bold mt-0.5 ${new Date(reminder.scheduled_at).getTime() < Date.now() ? 'text-red-600' : 'text-amber-600'}`}>
                     {new Date(reminder.scheduled_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                   </p>
                 </div>
@@ -818,6 +862,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       </div>
 
       <div className="pt-4">
+        {freshClaimedLeads.length > 0 && (
+          <div className="mb-4 px-1">
+            <h3 className="text-sm font-bold text-gray-900 mb-2">Fresh Claimed Leads</h3>
+            <p className="text-xs text-gray-500">Prioritize first-response and quick follow-up on newly claimed leads.</p>
+          </div>
+        )}
         <h3 className="text-sm font-bold text-gray-900 mb-4 px-1">Recent Leads</h3>
         <div className="space-y-3">
           {myLeads.slice(0, 3).map(lead => (
