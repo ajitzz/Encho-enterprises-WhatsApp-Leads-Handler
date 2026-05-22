@@ -29,6 +29,14 @@ UPSTASH_REDIS_REST_URL="https://..."
 UPSTASH_REDIS_REST_TOKEN="..."
 QSTASH_URL="https://qstash.upstash.io/v2/publish/"
 QSTASH_TOKEN="..."
+
+# Neon free-tier optimization (recommended starting values)
+PG_POOL_MAX="4"
+PG_IDLE_TIMEOUT_MS="8000"
+LEAD_DISTRIBUTION_CACHE_TTL_MS="120000"
+ANALYTICS_ACTION_CENTER_CACHE_TTL_MS="20000"
+ANALYTICS_COMMAND_CENTER_CACHE_TTL_MS="90000"
+ANALYTICS_HIERARCHY_CACHE_TTL_MS="180000"
 ```
 
 ## 🚀 Quick Setup
@@ -47,4 +55,3 @@ The chatbot will now respond instantly by serving logic from Redis and offloadin
 
 - Beginner walkthrough (frontend on Cloudflare + backend on Node host): `docs/cloudflare-beginner-step-by-step-2026-04-15.md`
 - Section-by-section backend runbook (why static-assets-only happens + exact fix paths): `docs/cloudflare-backend-runbook-2026-04-16.md`
-

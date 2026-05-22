@@ -28,6 +28,9 @@ const WEBHOOK_DEFER_QUEUE_MAX = parsePositiveInt(process.env.WEBHOOK_DEFER_QUEUE
 const WEBHOOK_DEDUPE_MEMORY_TTL_MS = parsePositiveInt(process.env.WEBHOOK_DEDUPE_MEMORY_TTL_MS, 120000);
 const WEBHOOK_DEDUPE_MEMORY_MAX_SIZE = parsePositiveInt(process.env.WEBHOOK_DEDUPE_MEMORY_MAX_SIZE, 5000);
 
+const LEAD_DISTRIBUTION_CACHE_TTL_MS = parsePositiveInt(process.env.LEAD_DISTRIBUTION_CACHE_TTL_MS, 60000);
+let leadDistributionCache = { value: null, expiresAt: 0 };
+
 let activeBotExecutions = 0;
 let drainingDeferredBotQueue = false;
 const deferredBotQueue = [];
@@ -66,6 +69,19 @@ const safeSendStatus = (res, code) => {
   if (!res || typeof res.sendStatus !== 'function') return;
   if (res.statusCode) return;
   res.sendStatus(code);
+};
+
+
+const getLeadDistributionSettings = async (client) => {
+  const now = Date.now();
+  if (leadDistributionCache.value && leadDistributionCache.expiresAt > now) {
+    return leadDistributionCache.value;
+  }
+
+  const settingsRes = await client.query("SELECT value FROM system_settings WHERE key = 'lead_distribution'");
+  const settings = settingsRes.rows[0]?.value || { auto_enabled: false };
+  leadDistributionCache = { value: settings, expiresAt: now + LEAD_DISTRIBUTION_CACHE_TTL_MS };
+  return settings;
 };
 
 const withBotExecutionSlot = async (handler) => {
@@ -443,8 +459,7 @@ export class LeadIngestionService {
   async distributeLeadAutomatically({ client, candidate, requestId, tenantId }) {
     try {
       // 1. Check if auto-distribution is enabled globally
-      const settingsRes = await client.query("SELECT value FROM system_settings WHERE key = 'lead_distribution'");
-      const settings = settingsRes.rows[0]?.value || { auto_enabled: false };
+      const settings = await getLeadDistributionSettings(client);
       
       if (!settings.auto_enabled) return;
 
