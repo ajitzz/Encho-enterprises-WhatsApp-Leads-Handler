@@ -4,6 +4,32 @@ import { withDb } from '../../../server/db.js';
 
 const router = Router();
 
+
+const parsePositiveInt = (value: any, fallback: number) => {
+    const n = Number.parseInt(String(value || ''), 10);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+const ACTION_CENTER_CACHE_TTL_MS = parsePositiveInt(process.env.ANALYTICS_ACTION_CENTER_CACHE_TTL_MS, 15000);
+const COMMAND_CENTER_CACHE_TTL_MS = parsePositiveInt(process.env.ANALYTICS_COMMAND_CENTER_CACHE_TTL_MS, 60000);
+const HIERARCHY_OVERVIEW_CACHE_TTL_MS = parsePositiveInt(process.env.ANALYTICS_HIERARCHY_CACHE_TTL_MS, 120000);
+
+const analyticsCache = new Map<string, { expiresAt: number; payload: any }>();
+
+const getCachedPayload = (key: string) => {
+    const item = analyticsCache.get(key);
+    if (!item) return null;
+    if (item.expiresAt <= Date.now()) {
+        analyticsCache.delete(key);
+        return null;
+    }
+    return item.payload;
+};
+
+const setCachedPayload = (key: string, payload: any, ttlMs: number) => {
+    analyticsCache.set(key, { payload, expiresAt: Date.now() + ttlMs });
+};
+
 const resolveActor = (req: any) => {
     const role = String(req?.user?.role || '').toLowerCase();
     const staffId = String(req?.user?.staffId || '').trim();
@@ -30,6 +56,10 @@ router.get('/action-center', async (req: any, res) => {
     const targetStaffId = requestedStaffId || actor.staffId;
 
     if (!actor.staffId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const cacheKey = `action-center:${actor.role}:${targetStaffId}`;
+    const cached = getCachedPayload(cacheKey);
+    if (cached) return res.json(cached);
 
     try {
         const tasks = await withDb(async (client) => {
@@ -80,6 +110,7 @@ router.get('/action-center', async (req: any, res) => {
         if ((tasks as any)?.error) {
             return res.status((tasks as any).error.status).json({ error: (tasks as any).error.message });
         }
+        setCachedPayload(cacheKey, tasks, ACTION_CENTER_CACHE_TTL_MS);
         res.json(tasks);
     } catch (error: any) {
         res.status(500).json({ error: error.message });
@@ -98,10 +129,15 @@ router.get('/command-center', async (req: any, res) => {
         return res.status(403).json({ error: 'Managers can only view their own command center' });
     }
 
+    const cacheKey = `command-center:${actor.role}:${managerId}`;
+    const cached = getCachedPayload(cacheKey);
+    if (cached) return res.json(cached);
+
     try {
         const analytics = await withDb(async (client) => {
             // Team Performance
-            const teamStats = await client.query(`
+            const [teamStats, velocity, heatmap] = await Promise.all([
+                client.query(`
                 SELECT s.id, s.name, 
                        (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status = 'closed') as closed_leads,
                        (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('closed', 'archived', 'rejected')) as active_leads,
@@ -110,10 +146,10 @@ router.get('/command-center', async (req: any, res) => {
                 FROM staff_members s
                 WHERE s.manager_id = $1 OR s.id = $1
                 ORDER BY closed_leads DESC
-            `, [managerId]);
+            `, [managerId]),
 
             // Conversion Velocity (daily closures in last 14 days)
-            const velocity = await client.query(`
+                client.query(`
                 SELECT
                     DATE(l.created_at) as date,
                     COUNT(*)::int as count
@@ -124,10 +160,10 @@ router.get('/command-center', async (req: any, res) => {
                   AND (s.id = $1 OR s.manager_id = $1)
                 GROUP BY DATE(l.created_at)
                 ORDER BY DATE(l.created_at) ASC
-            `, [managerId]);
+            `, [managerId]),
 
             // Lead Distribution Heatmap by staff
-            const heatmap = await client.query(`
+                client.query(`
                 SELECT
                     COALESCE(s.name, 'Unassigned') as name,
                     COUNT(*)::int as count
@@ -137,7 +173,9 @@ router.get('/command-center', async (req: any, res) => {
                   AND (s.id = $1 OR s.manager_id = $1)
                 GROUP BY COALESCE(s.name, 'Unassigned')
                 ORDER BY count DESC
-            `, [managerId]);
+            `, [managerId]),
+
+            ]);
 
             return {
                 teamStats: teamStats.rows,
@@ -145,6 +183,7 @@ router.get('/command-center', async (req: any, res) => {
                 distributionHeatmap: heatmap.rows
             };
         });
+        setCachedPayload(cacheKey, analytics, COMMAND_CENTER_CACHE_TTL_MS);
         res.json(analytics);
     } catch (error: any) {
         res.status(500).json({ error: error.message });
@@ -157,12 +196,17 @@ router.get('/hierarchy-overview', async (req: any, res) => {
     if (!actor.staffId) return res.status(401).json({ error: 'Unauthorized' });
     if (!['admin', 'manager'].includes(actor.role)) return res.status(403).json({ error: 'Manager/admin only' });
 
+    const cacheKey = `hierarchy-overview:${actor.role}:${actor.staffId}`;
+    const cached = getCachedPayload(cacheKey);
+    if (cached) return res.json(cached);
+
     try {
         const payload = await withDb(async (client) => {
             const scopeFilter = actor.role === 'admin' ? '' : 'WHERE m.id = $1';
             const scopeParams = actor.role === 'admin' ? [] : [actor.staffId];
 
-            const managers = await client.query(`
+            const [managers, staffLoad] = await Promise.all([
+                client.query(`
                 SELECT
                     m.id as manager_id,
                     m.name as manager_name,
@@ -180,9 +224,9 @@ router.get('/hierarchy-overview', async (req: any, res) => {
                 ${scopeFilter}
                 GROUP BY m.id, m.name, m.email, m.current_status, m.last_seen_at
                 ORDER BY total_leads DESC, m.name ASC
-            `, scopeParams);
+            `, scopeParams),
 
-            const staffLoad = await client.query(`
+                client.query(`
                 SELECT
                     s.id as staff_id,
                     s.name as staff_name,
@@ -203,7 +247,9 @@ router.get('/hierarchy-overview', async (req: any, res) => {
                   AND ($1::text = 'admin' OR s.manager_id = $2)
                 GROUP BY s.id, s.name, s.email, s.current_status, s.last_seen_at, m.id, m.name
                 ORDER BY active_leads DESC, total_leads DESC
-            `, [actor.role, actor.staffId]);
+            `, [actor.role, actor.staffId]),
+
+            ]);
 
             return {
                 scope: actor.role,
@@ -212,6 +258,7 @@ router.get('/hierarchy-overview', async (req: any, res) => {
             };
         });
 
+        setCachedPayload(cacheKey, payload, HIERARCHY_OVERVIEW_CACHE_TTL_MS);
         res.json(payload);
     } catch (error: any) {
         res.status(500).json({ error: error.message });
