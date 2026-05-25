@@ -653,6 +653,10 @@ export const liveApiService = {
     });
   },
 
+  unclaimLead: async (id: string) => {
+    return apiRequest(`/api/leads/${id}/unclaim`, { method: 'POST' });
+  },
+
   getReminders: async (): Promise<any[]> => {
     return apiRequest<any[]>('/api/leads/reminders');
   },
