@@ -647,6 +647,22 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     }
   };
 
+
+  const handleUnclaimLead = async (leadId: string) => {
+    try {
+      setLoading(true);
+      await liveApiService.unclaimLead(leadId);
+      await refreshOwnedLeadViews();
+      if (selectedLead?.id === leadId) {
+        setSelectedLead(null);
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
     const loadManagerAudit = async () => {
       if (!isManagerRole || managerTab !== 'audit') return;
@@ -1740,6 +1756,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                                 {!(lead as any).assigned_to && teamStaff[0] && (
                                   <button onClick={() => handleStrategyAssign(lead.id)} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-bold">Smart Assign</button>
                                 )}
+                                {!!(lead as any).assigned_to && (
+                                  <button onClick={() => handleUnclaimLead(lead.id)} className="px-3 py-1.5 rounded-lg bg-amber-500 text-white text-xs font-bold">Unclaim</button>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -1759,6 +1778,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       <p className="text-xs text-gray-500 mt-1">Owner: {teamStaff.find((staff) => staff.id === (lead as any).assigned_to)?.name || 'Unassigned'}</p>
                       <p className="text-xs text-gray-500">Follow-up: {formatDateTime((lead as any).next_followup_at)}</p>
                       <button onClick={() => handleOpenDetail(lead)} className="mt-3 w-full py-2 rounded-xl bg-black text-white text-xs font-bold">Open Lead</button>
+                      {!!(lead as any).assigned_to && (
+                        <button onClick={() => handleUnclaimLead(lead.id)} className="mt-2 w-full py-2 rounded-xl bg-amber-500 text-white text-xs font-bold">Unclaim to Pool</button>
+                      )}
                     </div>
                   ))}
                 </div>

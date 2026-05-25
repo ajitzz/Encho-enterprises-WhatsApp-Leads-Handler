@@ -4265,6 +4265,61 @@ apiRouter.post('/leads/:id/reassign', authMiddleware, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+
+apiRouter.post('/leads/:id/unclaim', authMiddleware, async (req, res) => {
+    try {
+        await withDb(async (client) => {
+            const leadCheck = await client.query(`
+                SELECT c.assigned_to, s.manager_id, s.name as staff_name
+                FROM candidates c
+                LEFT JOIN staff_members s ON c.assigned_to = s.id
+                WHERE c.id = $1
+            `, [req.params.id]);
+
+            const lead = leadCheck.rows[0];
+            if (!lead) {
+                return res.status(404).json({ error: 'Lead not found' });
+            }
+            if (!lead.assigned_to) {
+                return res.status(400).json({ error: 'Lead is already in the pool' });
+            }
+
+            if (req.user.role !== 'admin') {
+                if (req.user.role === 'manager') {
+                    const isManagerOfCurrent = lead.manager_id === req.user.staffId || lead.assigned_to === req.user.staffId;
+                    if (!isManagerOfCurrent) {
+                        return res.status(403).json({ error: 'Can only unclaim leads from your team' });
+                    }
+                } else {
+                    return res.status(403).json({ error: 'Only admins and managers can unclaim leads' });
+                }
+            }
+
+            await client.query(
+                'UPDATE candidates SET assigned_to = NULL, lead_status = $1, last_action_at = NOW() WHERE id = $2',
+                ['new', req.params.id]
+            );
+            await client.query(
+                'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)',
+                [req.params.id, req.user.staffId, 'unclaimed', `Lead returned to pool from ${lead.assigned_to}`]
+            );
+            await client.query(
+                'INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, previous_state, new_state) VALUES ($1, $2, $3, $4, $5, $6)',
+                [
+                    req.user.staffId,
+                    'lead_unclaim',
+                    'candidate',
+                    req.params.id,
+                    JSON.stringify({ assigned_to: lead.assigned_to, staff_name: lead.staff_name || null }),
+                    JSON.stringify({ assigned_to: null, lead_status: 'new' })
+                ]
+            );
+
+            res.json({ success: true });
+        });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
     const { action, notes, status, media_url, next_followup_at } = req.body;
     if (!action) return res.status(400).json({ error: 'Action required' });
