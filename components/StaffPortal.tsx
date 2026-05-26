@@ -290,7 +290,10 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   );
 
   const poolLeads = React.useMemo(() => 
-    allLeads.filter(l => !(l as any).assigned_to),
+    allLeads
+      .filter(l => !(l as any).assigned_to)
+      .sort((a, b) => (((b as any).priority_score || 0) - ((a as any).priority_score || 0)),
+    ),
     [allLeads]
   );
 
@@ -647,6 +650,22 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     }
   };
 
+
+  const handleUnclaimLead = async (leadId: string) => {
+    try {
+      setLoading(true);
+      await liveApiService.unclaimLead(leadId);
+      await refreshOwnedLeadViews();
+      if (selectedLead?.id === leadId) {
+        setSelectedLead(null);
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
     const loadManagerAudit = async () => {
       if (!isManagerRole || managerTab !== 'audit') return;
@@ -913,6 +932,21 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     </div>
   );
 
+
+  const getLeadPriority = (lead: Driver) => {
+    const botResponses = (lead as any).bot_response_count || 0;
+    const mediaSignals = (lead as any).driver_media_count || 0;
+    const priorityScore = (lead as any).priority_score || 0;
+
+    if (mediaSignals > 0 || botResponses >= 3) {
+      return { label: 'High Priority', style: 'bg-red-100 text-red-700 border-red-200', reason: `${botResponses} bot replies • ${mediaSignals} media signal${mediaSignals === 1 ? '' : 's'}`, score: priorityScore };
+    }
+    if (botResponses >= 2) {
+      return { label: 'Medium Priority', style: 'bg-amber-100 text-amber-700 border-amber-200', reason: `${botResponses} bot replies`, score: priorityScore };
+    }
+    return { label: 'Standard', style: 'bg-gray-100 text-gray-700 border-gray-200', reason: `${botResponses} bot repl${botResponses === 1 ? 'y' : 'ies'}`, score: priorityScore };
+  };
+
   const renderLeadList = (isPool: boolean) => (
     <div className="flex flex-col h-full animate-in slide-in-from-right duration-300">
       <div className="p-4 bg-white border-b border-gray-100 sticky top-0 z-10">
@@ -981,6 +1015,16 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                 </div>
               </div>
               
+              {isPool && (() => {
+                const priority = getLeadPriority(lead);
+                return (
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <span className={`px-2 py-1 rounded-full border text-[10px] font-bold uppercase tracking-wide ${priority.style}`}>{priority.label}</span>
+                    <span className="text-[10px] text-gray-500 font-semibold">{priority.reason} • Score {priority.score}</span>
+                  </div>
+                );
+              })()}
+
               <div className="flex items-center gap-2 mt-4">
                 {isPool ? (
                   <div className="flex flex-col w-full gap-2">
@@ -1740,6 +1784,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                                 {!(lead as any).assigned_to && teamStaff[0] && (
                                   <button onClick={() => handleStrategyAssign(lead.id)} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-bold">Smart Assign</button>
                                 )}
+                                {!!(lead as any).assigned_to && (
+                                  <button onClick={() => handleUnclaimLead(lead.id)} className="px-3 py-1.5 rounded-lg bg-amber-500 text-white text-xs font-bold">Unclaim</button>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -1759,6 +1806,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       <p className="text-xs text-gray-500 mt-1">Owner: {teamStaff.find((staff) => staff.id === (lead as any).assigned_to)?.name || 'Unassigned'}</p>
                       <p className="text-xs text-gray-500">Follow-up: {formatDateTime((lead as any).next_followup_at)}</p>
                       <button onClick={() => handleOpenDetail(lead)} className="mt-3 w-full py-2 rounded-xl bg-black text-white text-xs font-bold">Open Lead</button>
+                      {!!(lead as any).assigned_to && (
+                        <button onClick={() => handleUnclaimLead(lead.id)} className="mt-2 w-full py-2 rounded-xl bg-amber-500 text-white text-xs font-bold">Unclaim to Pool</button>
+                      )}
                     </div>
                   ))}
                 </div>
