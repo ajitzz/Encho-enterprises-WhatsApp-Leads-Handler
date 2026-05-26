@@ -937,14 +937,10 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     const botResponses = (lead as any).bot_response_count || 0;
     const mediaSignals = (lead as any).driver_media_count || 0;
     const priorityScore = (lead as any).priority_score || 0;
-
-    if (mediaSignals > 0 || botResponses >= 3) {
-      return { label: 'High Priority', style: 'bg-red-100 text-red-700 border-red-200', reason: `${botResponses} bot replies • ${mediaSignals} media signal${mediaSignals === 1 ? '' : 's'}`, score: priorityScore };
-    }
-    if (botResponses >= 2) {
-      return { label: 'Medium Priority', style: 'bg-amber-100 text-amber-700 border-amber-200', reason: `${botResponses} bot replies`, score: priorityScore };
-    }
-    return { label: 'Standard', style: 'bg-gray-100 text-gray-700 border-gray-200', reason: `${botResponses} bot repl${botResponses === 1 ? 'y' : 'ies'}`, score: priorityScore };
+    return {
+      reason: `${botResponses} bot repl${botResponses === 1 ? 'y' : 'ies'} • ${mediaSignals} media signal${mediaSignals === 1 ? '' : 's'}`,
+      score: priorityScore
+    };
   };
 
   const renderLeadList = (isPool: boolean) => (
@@ -1019,8 +1015,10 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                 const priority = getLeadPriority(lead);
                 return (
                   <div className="mb-3 flex items-center justify-between gap-2">
-                    <span className={`px-2 py-1 rounded-full border text-[10px] font-bold uppercase tracking-wide ${priority.style}`}>{priority.label}</span>
-                    <span className="text-[10px] text-gray-500 font-semibold">{priority.reason} • Score {priority.score}</span>
+                    <span className="px-2 py-1 rounded-full border text-[10px] font-bold tracking-wide bg-indigo-100 text-indigo-700 border-indigo-200">
+                      Priority #{priority.score}
+                    </span>
+                    <span className="text-[10px] text-gray-500 font-semibold">{priority.reason}</span>
                   </div>
                 );
               })()}
