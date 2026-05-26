@@ -4134,7 +4134,29 @@ apiRouter.post('/system/lead-distribution', authMiddleware, async (req, res) => 
 apiRouter.get('/leads/pool', authMiddleware, async (req, res) => {
     try {
         await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM candidates WHERE assigned_to IS NULL ORDER BY created_at DESC');
+            const r = await client.query(`
+                SELECT c.*,
+                       COALESCE(bot.bot_response_count, 0) AS bot_response_count,
+                       COALESCE(driver.driver_media_count, 0) AS driver_media_count,
+                       (COALESCE(bot.bot_response_count, 0) * 2) + (COALESCE(driver.driver_media_count, 0) * 5) AS priority_score
+                FROM candidates c
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*)::int AS bot_response_count
+                    FROM candidate_messages cm
+                    WHERE cm.candidate_id = c.id
+                      AND cm.direction = 'out'
+                      AND COALESCE(cm.sender_type, 'bot') = 'bot'
+                ) bot ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*)::int AS driver_media_count
+                    FROM candidate_messages cm
+                    WHERE cm.candidate_id = c.id
+                      AND cm.direction = 'in'
+                      AND cm.type IN ('image', 'document', 'video', 'audio', 'voice', 'sticker')
+                ) driver ON TRUE
+                WHERE c.assigned_to IS NULL
+                ORDER BY priority_score DESC, c.created_at DESC
+            `);
             res.json(r.rows);
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
