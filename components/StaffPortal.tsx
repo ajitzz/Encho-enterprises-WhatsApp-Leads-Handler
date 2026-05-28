@@ -146,11 +146,31 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [activeDueAlert, setActiveDueAlert] = useState<DueAlertItem | null>(null);
   const authoritativeLeadsRef = React.useRef<Map<string, any>>(new Map());
 
-  const formatDateTime = (value?: string | null) => {
-    if (!value) return '—';
-    const parsed = new Date(value);
-    if (Number.isNaN(parsed.getTime())) return '—';
-    return parsed.toLocaleString();
+  const parseDateValue = (value?: string | number | null) => {
+    if (value === undefined || value === null || value === '') return null;
+    if (typeof value === 'number') {
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    const trimmed = String(value).trim();
+    const numericValue = Number(trimmed);
+    const parsed = Number.isFinite(numericValue) && /^\d+$/.test(trimmed)
+      ? new Date(numericValue)
+      : new Date(trimmed);
+
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  const getLeadFreshnessTimestamp = (lead: Driver) => (
+    parseDateValue((lead as any).last_message_at || (lead as any).lastMessageAt)?.getTime()
+    || parseDateValue((lead as any).created_at)?.getTime()
+    || 0
+  );
+
+  const formatDateTime = (value?: string | number | null) => {
+    const parsed = parseDateValue(value);
+    return parsed ? parsed.toLocaleString() : '—';
   };
 
   const formatTimelineTime = formatDateTime;
@@ -292,8 +312,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const poolLeads = React.useMemo(() =>
     allLeads
       .filter(l => !(l as any).assigned_to)
-      .sort((a, b) => (((b as any).priority_score || 0) - ((a as any).priority_score || 0)),
-    ),
+      .sort((a, b) => getLeadFreshnessTimestamp(b) - getLeadFreshnessTimestamp(a)),
     [allLeads]
   );
 
@@ -943,6 +962,37 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     };
   };
 
+  const getUploadedFileTypes = (lead: Driver) => {
+    const rawTypes = Array.isArray((lead as any).uploaded_file_types) ? (lead as any).uploaded_file_types : [];
+    return rawTypes
+      .map((type: unknown) => String(type || '').trim().toLowerCase())
+      .filter(Boolean)
+      .filter((type: string, index: number, values: string[]) => values.indexOf(type) === index);
+  };
+
+  const getUploadedFilesLabel = (lead: Driver) => {
+    const typeLabels: Record<string, string> = {
+      image: 'Image',
+      document: 'Document',
+      video: 'Video',
+      audio: 'Audio',
+      voice: 'Voice note',
+      sticker: 'Sticker'
+    };
+    const uploadedTypes = getUploadedFileTypes(lead);
+    const uploadedCount = Number((lead as any).uploaded_file_count || (lead as any).driver_media_count || 0);
+
+    if (uploadedTypes.length > 0) {
+      return `Uploaded: ${uploadedTypes.map(type => typeLabels[type] || toLabel(type)).join(', ')}`;
+    }
+
+    if (uploadedCount > 0) {
+      return `${uploadedCount} file${uploadedCount === 1 ? '' : 's'} uploaded`;
+    }
+
+    return null;
+  };
+
   const renderLeadList = (isPool: boolean) => (
     <div className="flex flex-col h-full animate-in slide-in-from-right duration-300">
       <div className="p-4 bg-white border-b border-gray-100 sticky top-0 z-10">
@@ -1013,12 +1063,41 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
               {isPool && (() => {
                 const priority = getLeadPriority(lead);
+                const uploadedFilesLabel = getUploadedFilesLabel(lead);
+                const lastCustomerMessage = formatDateTime((lead as any).last_message_at || (lead as any).lastMessageAt);
+                const isBotFlowCompleted = Boolean((lead as any).bot_flow_completed);
+
                 return (
-                  <div className="mb-3 flex items-center justify-between gap-2">
-                    <span className="px-2 py-1 rounded-full border text-[10px] font-bold tracking-wide bg-indigo-100 text-indigo-700 border-indigo-200">
-                      Priority #{priority.score}
-                    </span>
-                    <span className="text-[10px] text-gray-500 font-semibold">{priority.reason}</span>
+                  <div className="mb-3 space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="px-2 py-1 rounded-full border text-[10px] font-bold tracking-wide bg-indigo-100 text-indigo-700 border-indigo-200">
+                        Priority #{priority.score}
+                      </span>
+                      <span className="text-[10px] text-gray-500 font-semibold">{priority.reason}</span>
+                    </div>
+
+                    <div className="rounded-2xl border border-gray-100 bg-gray-50 p-3 space-y-2">
+                      <div className="flex items-center gap-2 text-[11px] font-semibold text-gray-700">
+                        <Clock size={13} className="text-blue-500" />
+                        <span>Last customer message:</span>
+                        <span className="ml-auto text-gray-900">{lastCustomerMessage}</span>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2">
+                        {uploadedFilesLabel && (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-orange-100 px-2.5 py-1 text-[10px] font-bold text-orange-700 border border-orange-200">
+                            <Paperclip size={11} />
+                            {uploadedFilesLabel}
+                          </span>
+                        )}
+                        {isBotFlowCompleted && (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-bold text-emerald-700 border border-emerald-200">
+                            <CheckCircle size={11} />
+                            Completed
+                          </span>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 );
               })()}
