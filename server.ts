@@ -4134,10 +4134,15 @@ apiRouter.post('/system/lead-distribution', authMiddleware, async (req, res) => 
 apiRouter.get('/leads/pool', authMiddleware, async (req, res) => {
     try {
         await withDb(async (client) => {
+            const botSettings = await getBotSettingsCached(client);
+            const botGraph = getCompiledBotGraph(botSettings);
             const r = await client.query(`
                 SELECT c.*,
                        COALESCE(bot.bot_response_count, 0) AS bot_response_count,
                        COALESCE(driver.driver_media_count, 0) AS driver_media_count,
+                       COALESCE(driver.driver_document_count, 0) AS driver_document_count,
+                       (COALESCE(driver.driver_media_count, 0) + COALESCE(driver.driver_document_count, 0)) AS uploaded_file_count,
+                       COALESCE(driver.uploaded_file_types, ARRAY[]::text[]) AS uploaded_file_types,
                        (COALESCE(bot.bot_response_count, 0) * 2) + (COALESCE(driver.driver_media_count, 0) * 5) AS priority_score
                 FROM candidates c
                 LEFT JOIN LATERAL (
@@ -4148,16 +4153,53 @@ apiRouter.get('/leads/pool', authMiddleware, async (req, res) => {
                       AND COALESCE(cm.sender_type, 'bot') = 'bot'
                 ) bot ON TRUE
                 LEFT JOIN LATERAL (
-                    SELECT COUNT(*)::int AS driver_media_count
-                    FROM candidate_messages cm
-                    WHERE cm.candidate_id = c.id
-                      AND cm.direction = 'in'
-                      AND cm.type IN ('image', 'document', 'video', 'audio', 'voice', 'sticker')
+                    SELECT (
+                               SELECT COUNT(*)::int
+                               FROM candidate_messages cm
+                               WHERE cm.candidate_id = c.id
+                                 AND cm.direction = 'in'
+                                 AND cm.type IN ('image', 'document', 'video', 'audio', 'voice', 'sticker')
+                           ) AS driver_media_count,
+                           (
+                               SELECT COUNT(*)::int
+                               FROM driver_documents dd
+                               WHERE dd.candidate_id = c.id
+                           ) AS driver_document_count,
+                           ARRAY(
+                               SELECT DISTINCT media_type
+                               FROM (
+                                   SELECT LOWER(cm.type) AS media_type
+                                   FROM candidate_messages cm
+                                   WHERE cm.candidate_id = c.id
+                                     AND cm.direction = 'in'
+                                     AND cm.type IN ('image', 'document', 'video', 'audio', 'voice', 'sticker')
+                                   UNION ALL
+                                   SELECT LOWER(dd.type) AS media_type
+                                   FROM driver_documents dd
+                                   WHERE dd.candidate_id = c.id
+                                     AND dd.type IS NOT NULL
+                               ) uploaded
+                               WHERE media_type IS NOT NULL
+                               ORDER BY media_type
+                           ) AS uploaded_file_types
                 ) driver ON TRUE
                 WHERE c.assigned_to IS NULL
-                ORDER BY priority_score DESC, c.created_at DESC
+                ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC
             `);
-            res.json(r.rows);
+            const rows = r.rows.map((row) => {
+                const currentStepId = row.current_bot_step_id;
+                const isCompleted = Boolean(
+                    currentStepId
+                    && botGraph.nodeMap.has(currentStepId)
+                    && (botGraph.edgeMap.get(currentStepId) || []).length === 0
+                );
+
+                return {
+                    ...row,
+                    bot_flow_completed: isCompleted
+                };
+            });
+            res.json(rows);
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
