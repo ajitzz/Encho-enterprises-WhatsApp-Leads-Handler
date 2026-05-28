@@ -2036,13 +2036,26 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           </div>
           <button
             onClick={onLogout}
-            title="Logout"
-            aria-label="Logout"
-            className="p-2 text-gray-400 hover:text-red-600 transition-colors"
+            title="Sign out"
+            aria-label="Sign out of Encho"
+            className="inline-flex items-center gap-2 rounded-xl border border-red-100 bg-red-50 px-3 py-2 text-xs font-bold text-red-600 transition-colors hover:border-red-200 hover:bg-red-100"
           >
-            <LogOut size={20} />
+            <LogOut size={18} />
+            <span className="hidden sm:inline">Sign out</span>
           </button>
         </header>
+      )}
+
+      {view === 'detail' && (
+        <button
+          onClick={onLogout}
+          title="Sign out"
+          aria-label="Sign out of Encho"
+          className="fixed right-4 top-4 z-30 inline-flex items-center gap-2 rounded-xl border border-red-100 bg-white/95 px-3 py-2 text-xs font-bold text-red-600 shadow-lg shadow-red-950/10 backdrop-blur transition-colors hover:border-red-200 hover:bg-red-50"
+        >
+          <LogOut size={18} />
+          <span className="hidden sm:inline">Sign out</span>
+        </button>
       )}
 
       {/* Content Area */}

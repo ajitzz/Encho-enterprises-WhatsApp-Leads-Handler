@@ -1,6 +1,6 @@
 
 import React, { lazy, Suspense, useState, useEffect } from 'react';
-import { GoogleOAuthProvider } from '@react-oauth/google';
+import { GoogleOAuthProvider, googleLogout } from '@react-oauth/google';
 import { Layout } from './components/Layout.tsx';
 import { LeadTable } from './components/LeadTable.tsx';
 import { LeadManager } from './components/LeadManager.tsx';
@@ -259,6 +259,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
+      googleLogout();
       clearAuthToken();
       setIsAuthenticated(false);
       setUserProfile(null);
@@ -269,6 +270,7 @@ export default function App() {
       setNotifications([]);
       setDueAlertQueue([]);
       setActiveDueAlert(null);
+      setIsEmergencyMode(false);
   };
 
   useEffect(() => {
