@@ -11,22 +11,22 @@ import { NotificationToast } from './components/NotificationToast.tsx';
 import { BotBuilder } from './components/BotBuilder.tsx';
 import { AssistantChat } from './components/AssistantChat.tsx';
 import { MediaLibrary } from './components/MediaLibrary.tsx';
-import { PublicShowcase } from './components/PublicShowcase.tsx'; 
-import { PrivacyPolicy } from './components/PrivacyPolicy.tsx'; 
-import { TermsOfService } from './components/TermsOfService.tsx'; 
-import { DataDeletion } from './components/DataDeletion.tsx'; 
-import { SystemMonitor } from './components/SystemMonitor.tsx'; 
-import { IsolatedFeatureBoundary } from './components/IsolatedFeatureBoundary.tsx'; 
-import { SettingsModal } from './components/SettingsModal.tsx'; 
-import { Login } from './components/Login.tsx'; 
+import { PublicShowcase } from './components/PublicShowcase.tsx';
+import { PrivacyPolicy } from './components/PrivacyPolicy.tsx';
+import { TermsOfService } from './components/TermsOfService.tsx';
+import { DataDeletion } from './components/DataDeletion.tsx';
+import { SystemMonitor } from './components/SystemMonitor.tsx';
+import { IsolatedFeatureBoundary } from './components/IsolatedFeatureBoundary.tsx';
+import { SettingsModal } from './components/SettingsModal.tsx';
+import { Login } from './components/Login.tsx';
 import { StaffPortal } from './components/StaffPortal.tsx';
 import { StaffManagement } from './components/StaffManagement.tsx';
 import { ScheduledAlertPopup } from './components/ScheduledAlertPopup.tsx';
 import { mockBackend } from './services/mockBackend.ts';
-import { liveApiService, setAuthToken, UpdateConnectionState, DueAlertItem, buildApiUrl } from './services/liveApiService.ts';
+import { clearAuthToken, liveApiService, setAuthToken, UpdateConnectionState, DueAlertItem, buildApiUrl } from './services/liveApiService.ts';
 import { reportUiFailure, reportUiRecovery } from './services/uiFailureMonitor.ts';
 import { Driver, LeadStatus, AppNotification, BotSettings, Message } from './types.ts';
-import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle, Wifi, WifiOff, Loader2 } from 'lucide-react';
+import { Users, FileText, CheckCircle, Send, MessageSquare, Database, Radio, Settings as SettingsIcon, Repeat, AlertTriangle, Wifi, WifiOff, Loader2, LogOut } from 'lucide-react';
 
 const FALLBACK_CLIENT_ID = "764842119656-ufuaijbp0kb4m0ql6tjhdmmr3hr24t15.apps.googleusercontent.com";
 const ENV_CLIENT_ID = (import.meta as any)?.env?.VITE_GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
@@ -40,7 +40,7 @@ export default function App() {
   const [showcaseToken, setShowcaseToken] = useState<string | undefined>(undefined);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [userProfile, setUserProfile] = useState<any>(null);
-  
+
   const [isEmergencyMode, setIsEmergencyMode] = useState(false); // NEW: Recovery State
 
   useEffect(() => {
@@ -55,15 +55,15 @@ export default function App() {
           return;
       }
       const token = localStorage.getItem('uber_fleet_auth_token');
-      if (token) { 
-          setAuthToken(token); 
-          setIsAuthenticated(true); 
+      if (token) {
+          setAuthToken(token);
+          setIsAuthenticated(true);
           liveApiService.getProfile()
             .then(res => {
                 if (res.success) setUserProfile(res.user);
             })
             .catch(() => {
-                localStorage.removeItem('uber_fleet_auth_token');
+                clearAuthToken();
                 setIsAuthenticated(false);
             });
       }
@@ -75,7 +75,7 @@ export default function App() {
   const [selectedBulkIds, setSelectedBulkIds] = useState<string[]>([]);
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [showWebhookModal, setShowWebhookModal] = useState(false);
-  const [showSettingsModal, setShowSettingsModal] = useState(false); 
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [botSettings, setBotSettings] = useState<BotSettings | null>(null);
   const [isRepeatToggling, setIsRepeatToggling] = useState(false);
@@ -84,7 +84,7 @@ export default function App() {
   const [dueAlertQueue, setDueAlertQueue] = useState<DueAlertItem[]>([]);
   const [activeDueAlert, setActiveDueAlert] = useState<DueAlertItem | null>(null);
   const [shadowUser, setShadowUser] = useState<any>(null);
-  
+
   const [dataSource, setDataSource] = useState<'mock' | 'live'>(() => {
       const saved = localStorage.getItem('uber_fleet_data_source');
       if (saved === 'live' || saved === 'mock') return saved;
@@ -189,7 +189,7 @@ export default function App() {
   }, [activeTab, dataSource, isAuthenticated, isEmergencyMode]);
 
   useEffect(() => {
-    if (isShowcaseMode || activePublicPage !== 'none' || !isAuthenticated || isEmergencyMode) return; 
+    if (isShowcaseMode || activePublicPage !== 'none' || !isAuthenticated || isEmergencyMode) return;
     let unsubscribe: () => void = () => {};
     const fetchData = async () => {
       if (dataSource === 'mock') {
@@ -249,13 +249,26 @@ export default function App() {
       setUpdateConnectionState('disconnected');
       unsubscribe();
     };
-  }, [dataSource, activeTab, isShowcaseMode, activePublicPage, isAuthenticated, isEmergencyMode]); 
+  }, [dataSource, activeTab, isShowcaseMode, activePublicPage, isAuthenticated, isEmergencyMode]);
 
   const handleLoginSuccess = (token: string, user: any) => {
       setAuthToken(token);
       setUserProfile(user);
       setIsAuthenticated(true);
       if ("Notification" in window) Notification.requestPermission();
+  };
+
+  const handleLogout = () => {
+      clearAuthToken();
+      setIsAuthenticated(false);
+      setUserProfile(null);
+      setShadowUser(null);
+      setSelectedDriver(null);
+      setSelectedBulkIds([]);
+      setActiveTab('dashboard');
+      setNotifications([]);
+      setDueAlertQueue([]);
+      setActiveDueAlert(null);
   };
 
   useEffect(() => {
@@ -346,7 +359,7 @@ export default function App() {
                       <span className="animate-pulse">👁️</span>
                       SHADOW MODE ACTIVE: You are viewing {shadowUser.name}'s workspace
                   </div>
-                  <button 
+                  <button
                       onClick={() => setShadowUser(null)}
                       className="bg-white text-purple-700 px-4 py-1 rounded-md font-bold hover:bg-purple-100 transition-colors text-sm"
                   >
@@ -354,9 +367,9 @@ export default function App() {
                   </button>
               </div>
               <div className="flex-1 overflow-hidden">
-                  <StaffPortal 
-                      user={shadowUser} 
-                      onLogout={() => setShadowUser(null)} 
+                  <StaffPortal
+                      user={shadowUser}
+                      onLogout={() => setShadowUser(null)}
                   />
               </div>
           </div>
@@ -366,13 +379,9 @@ export default function App() {
   // --- STAFF / MANAGER PORTAL VIEW ---
   if (userProfile?.role === 'staff' || userProfile?.role === 'manager') {
       return (
-          <StaffPortal 
-              user={userProfile} 
-              onLogout={() => {
-                  localStorage.removeItem('uber_fleet_auth_token');
-                  setIsAuthenticated(false);
-                  setUserProfile(null);
-              }} 
+          <StaffPortal
+              user={userProfile}
+              onLogout={handleLogout}
           />
       );
   }
@@ -381,6 +390,13 @@ export default function App() {
   if (isEmergencyMode) {
       return (
           <div className="h-screen bg-gray-900 flex flex-col items-center justify-center p-8 relative overflow-hidden">
+              <button
+                onClick={handleLogout}
+                className="absolute right-6 top-6 z-20 inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/10 px-4 py-2 text-sm font-semibold text-white backdrop-blur transition-colors hover:bg-white/20"
+              >
+                <LogOut size={16} />
+                Logout
+              </button>
               <div className="absolute inset-0 bg-red-900/10 z-0 animate-pulse"></div>
               <div className="z-10 bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-8 text-center border-t-8 border-red-600">
                   <div className="mx-auto w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mb-6">
@@ -391,7 +407,7 @@ export default function App() {
                       The system connected to the database but could not find the required tables. <br/>
                       This usually happens after a "Hard Reset" where tables were dropped but not recreated.
                   </p>
-                  
+
                   <div className="bg-gray-50 p-6 rounded-xl border-2 border-dashed border-gray-300 mb-8">
                       <h3 className="font-bold text-gray-800 flex items-center justify-center gap-2 mb-4">
                           <Database size={20} /> System Diagnostics Active
@@ -400,8 +416,8 @@ export default function App() {
                       <p className="text-sm text-gray-500 mb-4">Please use the tool below to rebuild the schema.</p>
                   </div>
 
-                  <button 
-                    onClick={() => window.location.reload()} 
+                  <button
+                    onClick={() => window.location.reload()}
                     className="bg-gray-800 text-white px-6 py-3 rounded-lg font-bold hover:bg-black transition-all shadow-lg"
                   >
                     Reload Application
@@ -412,9 +428,9 @@ export default function App() {
           </div>
       );
   }
-  
+
   // ... (Rest of App Logic)
-  
+
   const handleSelectDriver = async (driver: Driver) => {
       setSelectedDriver(driver);
       if (dataSource === 'live' && (!driver.messages || driver.messages.length === 0)) {
@@ -459,7 +475,7 @@ export default function App() {
         } catch (e) { alert("Failed to update driver details"); }
     }
   };
-  
+
   const handleBulkStatusUpdate = async (ids: string[], status: LeadStatus) => {
       for (const id of ids) await handleUpdateDriver(id, { status });
       addNotification({ type: 'success', title: 'Bulk Update Complete', message: `Moved ${ids.length} leads to ${status}` });
@@ -468,11 +484,11 @@ export default function App() {
   const handleSendMessage = async (text: string, options?: { mediaUrl?: string, mediaType?: string }) => {
     if (!selectedDriver) return;
     if (dataSource === 'mock') {
-        const msg: Message = { 
-            id: Date.now().toString(), 
-            sender: 'agent', 
-            text: text, 
-            timestamp: Date.now(), 
+        const msg: Message = {
+            id: Date.now().toString(),
+            sender: 'agent',
+            text: text,
+            timestamp: Date.now(),
             type: options?.mediaType as any || 'text',
             imageUrl: options?.mediaType === 'image' ? options.mediaUrl : undefined,
             videoUrl: options?.mediaType === 'video' ? options.mediaUrl : undefined,
@@ -483,12 +499,12 @@ export default function App() {
     } else {
         try {
             await liveApiService.sendMessage(selectedDriver.id, text, options);
-            const msg: Message = { 
-                id: Date.now().toString(), 
-                sender: 'agent', 
-                text: text, 
-                timestamp: Date.now(), 
-                type: options?.mediaType as any || 'text', 
+            const msg: Message = {
+                id: Date.now().toString(),
+                sender: 'agent',
+                text: text,
+                timestamp: Date.now(),
+                type: options?.mediaType as any || 'text',
                 status: 'sent',
                 imageUrl: options?.mediaType === 'image' ? options.mediaUrl : undefined,
                 videoUrl: options?.mediaType === 'video' ? options.mediaUrl : undefined,
@@ -503,7 +519,7 @@ export default function App() {
   };
 
   const handleSendWelcome = (driver: Driver) => {
-    const welcomeVideoUrl = "https://your-s3-bucket.s3.amazonaws.com/welcome-video.mp4"; 
+    const welcomeVideoUrl = "https://your-s3-bucket.s3.amazonaws.com/welcome-video.mp4";
     if (dataSource === 'mock') {
         mockBackend.addMessage(driver.id, { id: Date.now().toString(), sender: 'system' as const, text: welcomeVideoUrl, timestamp: Date.now(), type: 'video_link' as const });
         addNotification({ type: 'success', title: 'Welcome Video Sent', message: `Onboarding initiated for ${driver.name}` });
@@ -525,14 +541,14 @@ export default function App() {
         alert("Bulk Send not available in Read-Only Live Mode");
     }
   };
-  
+
   const handleBulkSendDirect = async (ids: string[], message: string, mediaUrl?: string, mediaType?: string, options?: string[], templateName?: string, scheduledTime?: number) => {
       if (dataSource === 'mock') {
           ids.forEach(id => {
               mockBackend.addMessage(id, { id: Date.now().toString() + id, sender: 'agent', text: message, imageUrl: mediaUrl, options: options, timestamp: Date.now(), type: templateName ? 'template' : (mediaType ? (mediaType as any) : options ? 'options' : 'text'), templateName: templateName });
           });
       }
-      
+
       if (scheduledTime && scheduledTime > Date.now()) {
           addNotification({ type: 'success', title: 'Broadcast Scheduled', message: `Message queued for ${new Date(scheduledTime).toLocaleString()}` });
       } else {
@@ -580,11 +596,13 @@ export default function App() {
 
   return (
     <>
-      <Layout 
-        activeTab={activeTab} 
-        onTabChange={setActiveTab} 
+      <Layout
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
         onOpenSettings={() => setShowSettingsModal(true)}
+        onLogout={handleLogout}
         userRole={userProfile?.role}
+        userName={userProfile?.name || userProfile?.email}
       >
         {activeTab === 'dashboard' && (
         <div className="p-8 max-w-7xl mx-auto space-y-8">
@@ -643,7 +661,7 @@ export default function App() {
           </div>
         </div>
         )}
-        
+
         {activeTab === 'leads' && <div className="p-4 h-screen bg-gray-50"><LeadManager drivers={drivers} onSelectDriver={handleSelectDriver} onBulkSend={handleBulkSendDirect} onUpdateDriverStatus={handleBulkStatusUpdate} /></div>}
         {activeTab === 'excel-report' && (
           <IsolatedFeatureBoundary featureName="Driver Excel Report">
@@ -655,18 +673,18 @@ export default function App() {
         {activeTab === 'media-library' && <MediaLibrary />}
         {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
         {activeTab === 'staff' && <StaffManagement onShadowUser={setShadowUser} />}
-        {activeTab === 'staff-portal' && <StaffPortal user={userProfile} onLogout={() => setActiveTab('dashboard')} />}
+        {activeTab === 'staff-portal' && <StaffPortal user={userProfile} onLogout={handleLogout} />}
 
         {showWebhookModal && <WebhookConfigModal onClose={() => setShowWebhookModal(false)} onSuccess={() => { addNotification({ type: 'success', title: 'Webhook Configured', message: 'Meta App settings updated successfully.' }); }} />}
         {showSettingsModal && <SettingsModal onClose={() => setShowSettingsModal(false)} />}
         {showBulkModal && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"><div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md m-4"><h3 className="text-lg font-bold mb-4">Send Bulk Message</h3><div className="flex gap-3"><button onClick={() => setShowBulkModal(false)} className="flex-1 px-4 py-2 border rounded-lg">Cancel</button><button onClick={handleBulkSendLegacy} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg">Send</button></div></div></div>}
 
-        <ChatDrawer 
-          driver={selectedDriver} 
-          onClose={() => setSelectedDriver(null)} 
-          onSendMessage={handleSendMessage} 
-          onUpdateDriver={handleUpdateDriver} 
-          updateConnectionState={updateConnectionState} 
+        <ChatDrawer
+          driver={selectedDriver}
+          onClose={() => setSelectedDriver(null)}
+          onSendMessage={handleSendMessage}
+          onUpdateDriver={handleUpdateDriver}
+          updateConnectionState={updateConnectionState}
           userName={userProfile?.name}
           botSettings={botSettings}
         />

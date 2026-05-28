@@ -1,10 +1,10 @@
 
 import React, { useState } from 'react';
-import { 
-  LayoutDashboard, 
-  MessageSquare, 
-  Settings, 
-  LogOut, 
+import {
+  LayoutDashboard,
+  MessageSquare,
+  Settings,
+  LogOut,
   Users,
   Bot,
   Cloud,
@@ -19,16 +19,18 @@ interface LayoutProps {
   activeTab: string;
   onTabChange: (tab: string) => void;
   onOpenSettings?: () => void;
-  userRole?: 'admin' | 'staff';
+  onLogout: () => void;
+  userRole?: 'admin' | 'manager' | 'staff';
+  userName?: string;
 }
 
-export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange, onOpenSettings, userRole }) => {
+export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange, onOpenSettings, onLogout, userRole, userName }) => {
   const [isCollapsed, setIsCollapsed] = useState(false);
 
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden">
       {/* Sidebar */}
-      <aside 
+      <aside
         className={`${
           isCollapsed ? 'w-20' : 'w-64'
         } bg-black text-white flex flex-col shadow-xl z-20 transition-all duration-300 ease-in-out relative shrink-0`}
@@ -61,21 +63,21 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
             onClick={() => onTabChange('dashboard')}
             title={isCollapsed ? "Dashboard" : ""}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'dashboard' 
-                ? 'bg-white text-black font-medium' 
+              activeTab === 'dashboard'
+                ? 'bg-white text-black font-medium'
                 : 'text-gray-400 hover:bg-gray-900 hover:text-white'
             } ${isCollapsed ? 'justify-center px-2' : ''}`}
           >
             <LayoutDashboard size={20} className="shrink-0" />
             <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Dashboard</span>
           </button>
-          
+
           <button
             onClick={() => onTabChange('leads')}
             title={isCollapsed ? "Leads & Campaigns" : ""}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'leads' 
-                ? 'bg-white text-black font-medium' 
+              activeTab === 'leads'
+                ? 'bg-white text-black font-medium'
                 : 'text-gray-400 hover:bg-gray-900 hover:text-white'
             } ${isCollapsed ? 'justify-center px-2' : ''}`}
           >
@@ -88,8 +90,8 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
               onClick={() => onTabChange('staff')}
               title={isCollapsed ? "Staff Management" : ""}
               className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-                activeTab === 'staff' 
-                  ? 'bg-white text-black font-medium' 
+                activeTab === 'staff'
+                  ? 'bg-white text-black font-medium'
                   : 'text-gray-400 hover:bg-gray-900 hover:text-white'
               } ${isCollapsed ? 'justify-center px-2' : ''}`}
             >
@@ -103,8 +105,8 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
               onClick={() => onTabChange('staff-portal')}
               title={isCollapsed ? "Staff Portal" : ""}
               className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-                activeTab === 'staff-portal' 
-                  ? 'bg-white text-black font-medium' 
+                activeTab === 'staff-portal'
+                  ? 'bg-white text-black font-medium'
                   : 'text-gray-400 hover:bg-gray-900 hover:text-white'
               } ${isCollapsed ? 'justify-center px-2' : ''}`}
             >
@@ -117,8 +119,8 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
             onClick={() => onTabChange('excel-report')}
             title={isCollapsed ? "Driver Excel Report" : ""}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'excel-report' 
-                ? 'bg-white text-black font-medium' 
+              activeTab === 'excel-report'
+                ? 'bg-white text-black font-medium'
                 : 'text-gray-400 hover:bg-gray-900 hover:text-white'
             } ${isCollapsed ? 'justify-center px-2' : ''}`}
           >
@@ -129,15 +131,15 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
             onClick={() => onTabChange('media-library')}
             title={isCollapsed ? "Media Library" : ""}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'media-library' 
-                ? 'bg-white text-black font-medium' 
+              activeTab === 'media-library'
+                ? 'bg-white text-black font-medium'
                 : 'text-gray-400 hover:bg-gray-900 hover:text-white'
             } ${isCollapsed ? 'justify-center px-2' : ''}`}
           >
             <Cloud size={20} className="shrink-0" />
             <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Media Library (S3)</span>
           </button>
-          
+
           <div className={`pt-4 pb-2 transition-all duration-200 ${isCollapsed ? 'border-t border-gray-800 mt-2 pt-2' : ''}`}>
             {!isCollapsed ? (
               <p className="px-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider whitespace-nowrap">Automation</p>
@@ -150,8 +152,8 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
             onClick={() => onTabChange('bot-studio')}
             title={isCollapsed ? "Bot Studio" : ""}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'bot-studio' 
-                ? 'bg-white text-black font-medium' 
+              activeTab === 'bot-studio'
+                ? 'bg-white text-black font-medium'
                 : 'text-gray-400 hover:bg-gray-900 hover:text-white'
             } ${isCollapsed ? 'justify-center px-2' : ''}`}
           >
@@ -161,7 +163,15 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
         </nav>
 
         <div className="p-4 border-t border-gray-800">
-          <button 
+          {!isCollapsed && (
+            <div className="px-4 pb-3 mb-3 border-b border-gray-800">
+              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Signed in</p>
+              <p className="text-sm font-semibold text-gray-200 truncate" title={userName || userRole || 'Current user'}>
+                {userName || userRole || 'Current user'}
+              </p>
+            </div>
+          )}
+          <button
             onClick={onOpenSettings}
             title={isCollapsed ? "Settings" : ""}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-gray-400 hover:bg-gray-900 hover:text-white transition-all ${isCollapsed ? 'justify-center px-2' : ''}`}
@@ -169,9 +179,11 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
             <Settings size={20} className="shrink-0" />
             <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Settings</span>
           </button>
-          <button 
-            title={isCollapsed ? "Logout" : ""}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-red-400 hover:bg-gray-900 hover:text-red-300 transition-all mt-2 ${isCollapsed ? 'justify-center px-2' : ''}`}
+          <button
+            onClick={onLogout}
+            title="Logout"
+            aria-label="Logout"
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-red-400 hover:bg-red-950/40 hover:text-red-300 transition-all mt-2 ${isCollapsed ? 'justify-center px-2' : ''}`}
           >
             <LogOut size={20} className="shrink-0" />
             <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Logout</span>

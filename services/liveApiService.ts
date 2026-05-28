@@ -64,6 +64,11 @@ export const setAuthToken = (token: string) => {
     localStorage.setItem('uber_fleet_auth_token', token);
 };
 
+export const clearAuthToken = () => {
+    authToken = null;
+    localStorage.removeItem('uber_fleet_auth_token');
+};
+
 const getHeaders = () => {
     const headers: Record<string, string> = {
         'Content-Type': 'application/json'
@@ -79,7 +84,7 @@ const apiRequest = async <T>(endpoint: string, options: RequestInit = {}): Promi
     // Ensure endpoint starts with /api if not provided, but server.js mounts on /api so just be careful
     // We assume the caller passes '/api/...' or just '/drivers' if rewrite handles it.
     // Based on previous code, let's strictly use the endpoint passed.
-    
+
     const response = await fetch(buildApiUrl(endpoint), {
         ...options,
         headers: {
@@ -87,7 +92,7 @@ const apiRequest = async <T>(endpoint: string, options: RequestInit = {}): Promi
             ...options.headers
         }
     });
-    
+
     if (!response.ok) {
         if (response.status === 405 && isCloudflareWorkersHost && !API_BASE_URL) {
             maybeWarnCloudflareApiBase('received 405 on same-origin /api path');

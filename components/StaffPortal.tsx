@@ -1,20 +1,20 @@
 
 import React, { useState, useEffect } from 'react';
-import { 
-  LayoutDashboard, 
-  Users, 
-  MessageSquare, 
-  Phone, 
-  CheckCircle, 
-  Clock, 
-  ChevronRight, 
-  Search, 
-  Filter, 
-  Plus, 
-  ArrowLeft, 
-  Send, 
-  MoreVertical, 
-  Loader2, 
+import {
+  LayoutDashboard,
+  Users,
+  MessageSquare,
+  Phone,
+  CheckCircle,
+  Clock,
+  ChevronRight,
+  Search,
+  Filter,
+  Plus,
+  ArrowLeft,
+  Send,
+  MoreVertical,
+  Loader2,
   AlertCircle,
   History,
   UserCheck,
@@ -183,12 +183,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
   const handleToggleHumanMode = async () => {
     if (!selectedLead || isHumanModeLoading) return;
-    
+
     const newMode = !selectedLead.isHumanMode;
     setIsHumanModeLoading(true);
     try {
       await liveApiService.updateDriver(selectedLead.id, { isHumanMode: newMode });
-      
+
       // Predefined messages
       if (newMode) {
         // Entering Human Mode
@@ -202,7 +202,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       const updatedLead = { ...selectedLead, isHumanMode: newMode };
       setSelectedLead(updatedLead);
       setAllLeads(prev => prev.map(l => l.id === updatedLead.id ? updatedLead : l));
-      
+
       // Refresh messages
       const messages = await liveApiService.getDriverMessages(selectedLead.id);
       setLeadMessages(messages);
@@ -222,14 +222,14 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     if (file.type.startsWith('image/')) type = 'image';
     else if (file.type.startsWith('video/')) type = 'video';
     else if (file.type.startsWith('audio/')) type = 'audio';
-    
+
     const preview = URL.createObjectURL(file);
     setSelectedMedia({ type, file, preview });
   };
 
   const handleSendReply = async () => {
     if (!selectedLead || (!replyText.trim() && !selectedMedia) || isSending) return;
-    
+
     setIsSending(true);
     try {
       let mediaUrl = undefined;
@@ -268,8 +268,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       const file = new File([blob], `voice_recording_${Date.now()}.ogg`, { type: 'audio/ogg' });
       const uploadResult = await liveApiService.uploadMedia(file, `voice_recordings/${selectedLead.id}`);
       if (uploadResult.success) {
-        await liveApiService.sendMessage(selectedLead.id, '', { 
-          mediaUrl: uploadResult.url, 
+        await liveApiService.sendMessage(selectedLead.id, '', {
+          mediaUrl: uploadResult.url,
           mediaType: 'audio'
         });
         // Refresh messages
@@ -284,12 +284,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     }
   };
 
-  const myLeads = React.useMemo(() => 
+  const myLeads = React.useMemo(() =>
     allLeads.filter(l => (l as any).assigned_to === user.staffId),
     [allLeads, user.staffId]
   );
 
-  const poolLeads = React.useMemo(() => 
+  const poolLeads = React.useMemo(() =>
     allLeads
       .filter(l => !(l as any).assigned_to)
       .sort((a, b) => (((b as any).priority_score || 0) - ((a as any).priority_score || 0)),
@@ -365,8 +365,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     const activeLeads = view === 'pool' ? poolLeads : (view === 'my-leads' || view === 'dashboard' ? myLeads : []);
     if (!searchQuery) return activeLeads;
     const query = searchQuery.toLowerCase();
-    return activeLeads.filter(l => 
-      (l.name || '').toLowerCase().includes(query) || 
+    return activeLeads.filter(l =>
+      (l.name || '').toLowerCase().includes(query) ||
       ((l as any).phone_number || '').includes(query)
     );
   }, [view, poolLeads, myLeads, searchQuery]);
@@ -376,7 +376,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     let lastActivity = Date.now();
     let activeSeconds = 0;
     let idleSeconds = 0;
-    
+
     const updateActivity = () => { lastActivity = Date.now(); };
     window.addEventListener('mousemove', updateActivity);
     window.addEventListener('keydown', updateActivity);
@@ -386,7 +386,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     const heartbeatInterval = setInterval(() => {
       const now = Date.now();
       const isIdle = (now - lastActivity) > 5 * 60 * 1000; // 5 minutes idle threshold
-      
+
       if (isIdle) {
         idleSeconds += 30;
       } else {
@@ -702,7 +702,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     }
     try {
       setLoading(true);
-      
+
       let media_url = undefined;
       if (action === 'submitted_for_closing' && closingScreenshot) {
         const upload = await liveApiService.uploadMedia(
@@ -719,12 +719,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         media_url,
         next_followup_at: nextFollowup || undefined
       });
-      
+
       setActionNote('');
       setActionStatus('');
       setNextFollowup('');
       setClosingScreenshot(null);
-      
+
       // Refresh activity
       const history = await liveApiService.getLeadActivity(selectedLead.id);
       setActivities(history);
@@ -743,7 +743,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       <div className="bg-black text-white p-6 rounded-3xl shadow-xl relative overflow-hidden">
         <div className="absolute top-4 right-4 flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${
-            connectionState === 'connected' ? 'bg-green-500 animate-pulse' : 
+            connectionState === 'connected' ? 'bg-green-500 animate-pulse' :
             connectionState === 'connecting' || connectionState === 'reconnecting' ? 'bg-yellow-500' : 'bg-red-500'
           }`} />
           <span className="text-[10px] font-bold uppercase tracking-widest opacity-50">
@@ -788,7 +788,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                     {new Date(reminder.scheduled_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                   </p>
                 </div>
-                <button 
+                <button
                   onClick={() => handleMarkReminderDone(reminder.id)}
                   className="p-2 bg-white text-emerald-600 rounded-xl border border-emerald-100 hover:bg-emerald-50 transition-colors"
                 >
@@ -801,7 +801,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       )}
 
       <div className="grid grid-cols-1 gap-4">
-        <button 
+        <button
           onClick={() => setView('action-center')}
           className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center justify-between group active:scale-95 transition-all"
         >
@@ -818,7 +818,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         </button>
 
         {(user.role === 'manager' || user.role === 'admin') && (
-          <button 
+          <button
             onClick={() => setView('manager-workspace')}
             className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white p-5 rounded-3xl border border-blue-500 shadow-sm flex items-center justify-between group active:scale-95 transition-all"
           >
@@ -837,7 +837,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
         {(user.role === 'manager' || user.role === 'admin') && (
           <div className="grid grid-cols-2 gap-3">
-            <button 
+            <button
               onClick={() => setView('command-center')}
               className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex flex-col items-center justify-center gap-2 group active:scale-95 transition-all"
             >
@@ -846,7 +846,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
               </div>
               <h3 className="font-bold text-gray-900 text-xs">Command Center</h3>
             </button>
-            <button 
+            <button
               onClick={() => setView('pending-reviews')}
               className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex flex-col items-center justify-center gap-2 group active:scale-95 transition-all"
             >
@@ -858,7 +858,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           </div>
         )}
 
-        <button 
+        <button
           onClick={() => setView('pool')}
           className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center justify-between group active:scale-95 transition-all"
         >
@@ -874,7 +874,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           <ChevronRight className="text-gray-300 group-hover:text-gray-900 transition-colors" />
         </button>
 
-        <button 
+        <button
           onClick={() => setView('my-leads')}
           className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm flex items-center justify-between group active:scale-95 transition-all"
         >
@@ -954,8 +954,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         </div>
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
-          <input 
-            type="text" 
+          <input
+            type="text"
             placeholder="Search leads..."
             className="w-full pl-10 pr-4 py-3 bg-gray-100 rounded-2xl text-sm border-none focus:ring-2 focus:ring-blue-500 transition-all"
             value={searchQuery}
@@ -979,8 +979,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           </div>
         ) : (
           filteredLeads.map(lead => (
-            <div 
-              key={lead.id} 
+            <div
+              key={lead.id}
               onClick={() => isPool ? null : handleOpenDetail(lead)}
               className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm active:scale-[0.98] transition-all"
             >
@@ -1003,14 +1003,14 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                   </div>
                 </div>
                 <div className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                  (lead as any).lead_status === 'new' ? 'bg-green-100 text-green-700' : 
+                  (lead as any).lead_status === 'new' ? 'bg-green-100 text-green-700' :
                   (lead as any).lead_status === 'claimed' ? 'bg-blue-100 text-blue-700' :
                   'bg-gray-100 text-gray-700'
                 }`}>
                   {(lead as any).lead_status || 'New'}
                 </div>
               </div>
-              
+
               {isPool && (() => {
                 const priority = getLeadPriority(lead);
                 return (
@@ -1026,7 +1026,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
               <div className="flex items-center gap-2 mt-4">
                 {isPool ? (
                   <div className="flex flex-col w-full gap-2">
-                    <button 
+                    <button
                       onClick={(e) => { e.stopPropagation(); handleClaim(lead.id); }}
                       className="flex-1 bg-black text-white py-3 rounded-2xl text-xs font-bold flex items-center justify-center gap-2"
                     >
@@ -1051,14 +1051,14 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                   </div>
                 ) : (
                   <>
-                    <a 
+                    <a
                       href={`tel:${(lead as any).phone_number}`}
                       onClick={(e) => e.stopPropagation()}
                       className="flex-1 bg-blue-600 text-white py-3 rounded-2xl text-xs font-bold flex items-center justify-center gap-2"
                     >
                       <Phone size={14} /> Call
                     </a>
-                    <a 
+                    <a
                       href={`https://wa.me/${((lead as any).phone_number || '').replace(/\D/g, '')}`}
                       onClick={(e) => e.stopPropagation()}
                       target="_blank"
@@ -1090,12 +1090,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             <h2 className="text-lg font-bold">Lead Details</h2>
           </div>
           <div className="flex items-center gap-2">
-            <button 
+            <button
               onClick={handleToggleHumanMode}
               disabled={isHumanModeLoading}
               className={`flex items-center gap-2 px-3 py-1.5 rounded-2xl text-[10px] font-bold uppercase tracking-wider transition-all ${
-                selectedLead.isHumanMode 
-                  ? 'bg-amber-100 text-amber-700 border border-amber-200' 
+                selectedLead.isHumanMode
+                  ? 'bg-amber-100 text-amber-700 border border-amber-200'
                   : 'bg-blue-50 text-blue-600 border border-blue-100'
               }`}
             >
@@ -1140,7 +1140,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                   <span className="text-[10px] font-bold text-blue-600 uppercase tracking-widest">{lead.progress_percent || 0}%</span>
                 </div>
                 <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
-                  <div 
+                  <div
                     className="h-full bg-blue-600 transition-all duration-500 ease-out"
                     style={{ width: `${lead.progress_percent || 0}%` }}
                   />
@@ -1154,7 +1154,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                   </p>
                 </div>
               </div>
-              
+
               <div className="grid grid-cols-2 gap-3 w-full">
                 <a href={`tel:${lead.phone_number}`} className="flex flex-col items-center justify-center gap-2 p-4 bg-blue-50 text-blue-700 rounded-3xl border border-blue-100 active:scale-95 transition-all">
                   <Phone size={24} />
@@ -1188,7 +1188,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           {/* Tabs */}
           <div className="px-4 mt-6">
             <div className="flex bg-gray-100 p-1 rounded-2xl">
-              <button 
+              <button
                 onClick={() => setDetailTab('chat')}
                 className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 ${
                   detailTab === 'chat' ? 'bg-white text-black shadow-sm' : 'text-gray-500'
@@ -1197,7 +1197,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                 <MessageSquare size={16} />
                 Chat History
               </button>
-              <button 
+              <button
                 onClick={() => setDetailTab('activity')}
                 className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 ${
                   detailTab === 'activity' ? 'bg-white text-black shadow-sm' : 'text-gray-500'
@@ -1216,8 +1216,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                     {leadMessages.map((msg, idx) => (
                       <div key={msg.id || idx} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
                         <div className={`max-w-[85%] p-3 rounded-2xl text-sm relative shadow-sm ${
-                          msg.senderType === 'driver' 
-                            ? 'bg-white text-gray-800 rounded-tl-none border border-gray-100' 
+                          msg.senderType === 'driver'
+                            ? 'bg-white text-gray-800 rounded-tl-none border border-gray-100'
                             : msg.senderType === 'bot'
                             ? 'bg-black text-white rounded-tr-none'
                             : 'bg-emerald-500 text-white rounded-tr-none'
@@ -1231,19 +1231,19 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                                 })() : msg.text}
                               </p>
                             )}
-                            
+
                             {(msg.type === 'image' || msg.type === 'sticker') && msg.imageUrl && (
                               <div className="rounded-lg overflow-hidden border border-black/5">
                                 <img src={msg.imageUrl} alt="Shared" className="max-w-full h-auto block" referrerPolicy="no-referrer" />
                               </div>
                             )}
-                            
+
                             {msg.type === 'video' && msg.videoUrl && (
                               <div className="rounded-lg overflow-hidden border border-black/5 bg-black/10">
                                 <video src={msg.videoUrl} controls className="max-w-full h-auto block" />
                               </div>
                             )}
-                            
+
                             {(msg.type === 'audio' || msg.type === 'voice') && msg.audioUrl && (
                               <div className={`flex items-center gap-3 p-2 rounded-xl ${msg.senderType === 'driver' ? 'bg-gray-200' : msg.senderType === 'bot' ? 'bg-gray-800' : 'bg-emerald-600'}`}>
                                 <div className={`w-8 h-8 rounded-full flex items-center justify-center ${msg.senderType === 'driver' ? 'bg-gray-300 text-gray-600' : msg.senderType === 'bot' ? 'bg-gray-900 text-white' : 'bg-emerald-700 text-white'}`}>
@@ -1252,7 +1252,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                                 <audio src={msg.audioUrl} controls className="h-8 w-40" />
                               </div>
                             )}
-                            
+
                             {msg.type === 'document' && msg.documentUrl && (
                               <a href={msg.documentUrl} target="_blank" rel="noopener noreferrer" className={`flex items-center gap-3 p-3 rounded-xl transition-colors ${
                                 msg.senderType === 'driver' ? 'bg-gray-200 hover:bg-gray-300' : msg.senderType === 'bot' ? 'bg-gray-800 hover:bg-gray-900' : 'bg-emerald-600 hover:bg-emerald-700'
@@ -1310,8 +1310,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                               <img src={selectedMedia.preview} className="w-10 h-10 rounded-lg object-cover border border-blue-200" alt="Preview" />
                             ) : (
                               <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center text-blue-600 border border-blue-200">
-                                {selectedMedia.type === 'video' ? <Video size={18} /> : 
-                                 selectedMedia.type === 'audio' ? <Mic size={18} /> : 
+                                {selectedMedia.type === 'video' ? <Video size={18} /> :
+                                 selectedMedia.type === 'audio' ? <Mic size={18} /> :
                                  <FileText size={18} />}
                               </div>
                             )}
@@ -1327,9 +1327,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       )}
                       <div className="flex items-center gap-2 bg-gray-100 p-1 rounded-3xl">
                         {isRecordingVoice ? (
-                          <VoiceRecorder 
-                            onSend={handleVoiceSend} 
-                            onCancel={() => setIsRecordingVoice(false)} 
+                          <VoiceRecorder
+                            onSend={handleVoiceSend}
+                            onCancel={() => setIsRecordingVoice(false)}
                             isSending={isSending}
                           />
                         ) : (
@@ -1338,15 +1338,15 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                               <Paperclip size={20} />
                               <input type="file" className="hidden" onChange={handleFileSelect} accept="image/*,video/*,audio/*,application/pdf,.doc,.docx,.xls,.xlsx" />
                             </label>
-                            <button 
-                              type="button" 
-                              onClick={() => setIsRecordingVoice(true)} 
-                              disabled={isSending} 
+                            <button
+                              type="button"
+                              onClick={() => setIsRecordingVoice(true)}
+                              disabled={isSending}
                               className="w-10 h-10 flex items-center justify-center rounded-full text-gray-500 hover:text-emerald-600 hover:bg-white transition-all"
                             >
                               <Mic size={20} />
                             </button>
-                            <textarea 
+                            <textarea
                               placeholder="Type a message..."
                               className="flex-1 bg-transparent border-none rounded-2xl text-sm p-2.5 focus:ring-0 resize-none h-10 max-h-32 custom-scrollbar"
                               value={replyText}
@@ -1358,7 +1358,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                                 }
                               }}
                             />
-                            <button 
+                            <button
                               onClick={handleSendReply}
                               disabled={isSending || (!replyText.trim() && !selectedMedia)}
                               className="w-10 h-10 bg-emerald-500 text-white rounded-full flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-emerald-200"
@@ -1382,9 +1382,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                     <History size={16} className="text-blue-600" />
                     Log Interaction
                   </h4>
-                  
+
                   <div className="space-y-3">
-                    <select 
+                    <select
                       className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none text-sm focus:ring-2 focus:ring-blue-500 transition-all"
                       value={actionStatus}
                       onChange={e => setActionStatus(e.target.value)}
@@ -1397,7 +1397,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       <option value="no_answer">No Answer</option>
                     </select>
 
-                    <textarea 
+                    <textarea
                       placeholder="Add a note about this interaction... (Required)"
                       className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none text-sm focus:ring-2 focus:ring-blue-500 transition-all min-h-[100px] resize-none"
                       value={actionNote}
@@ -1406,7 +1406,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
                     <div className="space-y-1">
                       <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest px-1">Next Follow-up (Optional)</p>
-                      <input 
+                      <input
                         type="datetime-local"
                         className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none text-sm focus:ring-2 focus:ring-blue-500 transition-all"
                         value={nextFollowup}
@@ -1422,7 +1422,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                             {closingScreenshot ? (
                               <div className="relative w-full h-20">
                                 <img src={closingScreenshot.preview} className="w-full h-full object-cover rounded-xl" alt="Closing" />
-                                <button 
+                                <button
                                   onClick={(e) => { e.preventDefault(); setClosingScreenshot(null); }}
                                   className="absolute -top-2 -right-2 bg-red-500 text-white p-1 rounded-full shadow-lg"
                                 >
@@ -1435,14 +1435,14 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                                 <span className="text-[10px] font-bold text-gray-500 uppercase">Attach Screenshot</span>
                               </>
                             )}
-                            <input 
-                              type="file" 
-                              className="hidden" 
-                              accept="image/*" 
+                            <input
+                              type="file"
+                              className="hidden"
+                              accept="image/*"
                               onChange={(e) => {
                                 const file = e.target.files?.[0];
                                 if (file) setClosingScreenshot({ file, preview: URL.createObjectURL(file) });
-                              }} 
+                              }}
                             />
                           </label>
                         </div>
@@ -1452,16 +1452,16 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                     <p className="text-[10px] text-gray-400 px-1">Status and note are required. Scheduled date is optional.</p>
 
                     <div className="grid grid-cols-1 gap-2">
-                      <button 
+                      <button
                         onClick={() => handleLogAction('interaction')}
                         disabled={loading || !actionNote.trim() || !actionStatus}
                         className="w-full bg-black text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 transition-all"
                       >
                         {loading ? <Loader2 className="animate-spin" size={20} /> : <><CheckCircle size={20} /> Save Interaction</>}
                       </button>
-                      
+
                       {actionStatus === 'booked' && (
-                        <button 
+                        <button
                           onClick={() => setShowReviewModal(true)}
                           className="w-full bg-blue-600 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-blue-200"
                         >
@@ -1550,7 +1550,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
         {teamStaff.map(staff => {
           const staffLeads = allLeads.filter(l => (l as any).assigned_to === staff.id);
           const closedLeads = staffLeads.filter(l => (l as any).lead_status === 'booked');
-          
+
           return (
             <div key={staff.id} className="bg-white p-5 rounded-3xl border border-gray-100 shadow-sm">
               <div className="flex items-center justify-between mb-4">
@@ -1571,7 +1571,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                   <p className="text-[10px] text-gray-400 mt-0.5">{staffLeads.length} Active Leads</p>
                 </div>
               </div>
-              
+
               <div className="grid grid-cols-2 gap-2">
                 <div className="bg-gray-50 p-3 rounded-2xl text-center">
                   <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest">Performance</p>
@@ -1820,7 +1820,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                   const isIdle = staff.current_status === 'idle';
                   const activeMins = Math.floor((staff.active_seconds_today || 0) / 60);
                   const idleMins = Math.floor((staff.idle_seconds_today || 0) / 60);
-                  
+
                   return (
                     <div key={staff.id} className="bg-white border border-gray-100 rounded-2xl p-5 shadow-sm hover:shadow-md transition-all">
                       <div className="flex items-center justify-between mb-4">
@@ -1840,7 +1840,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                           {staff.is_active_for_auto_dist ? 'Auto-Dist ON' : 'Auto-Dist OFF'}
                         </span>
                       </div>
-                      
+
                       <div className="grid grid-cols-2 gap-3 mb-4">
                         <div className="bg-gray-50 rounded-xl p-3 flex flex-col justify-center">
                           <p className="text-[10px] text-gray-500 uppercase font-semibold mb-1">Active Time</p>
@@ -1868,7 +1868,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       </div>
 
                       <div className="flex items-center gap-2 border-t border-gray-100 pt-4">
-                        <button 
+                        <button
                           onClick={() => {
                             setManagerStaffFilter(staff.id);
                             setManagerTab('assignments');
@@ -1877,7 +1877,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                         >
                           <Eye size={14} /> Monitor
                         </button>
-                        <button 
+                        <button
                           onClick={() => {
                             if (window.confirm(`Are you sure you want to force logout ${staff.name}?`)) {
                               handleForceLogout(staff.id);
@@ -1885,8 +1885,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                           }}
                           disabled={!isOnline && !isIdle}
                           className={`flex-1 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1 transition-colors ${
-                            isOnline || isIdle 
-                              ? 'bg-red-50 text-red-700 hover:bg-red-100' 
+                            isOnline || isIdle
+                              ? 'bg-red-50 text-red-700 hover:bg-red-100'
                               : 'bg-gray-50 text-gray-400 cursor-not-allowed'
                           }`}
                         >
@@ -2034,7 +2034,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
               </p>
             </div>
           </div>
-          <button onClick={onLogout} className="p-2 text-gray-400 hover:text-red-600 transition-colors">
+          <button
+            onClick={onLogout}
+            title="Logout"
+            aria-label="Logout"
+            className="p-2 text-gray-400 hover:text-red-600 transition-colors"
+          >
             <LogOut size={20} />
           </button>
         </header>
@@ -2058,12 +2063,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
               </div>
             </div>
             <div className="flex-1 overflow-y-auto">
-              <ActionCenter 
-                staffId={user.staffId} 
+              <ActionCenter
+                staffId={user.staffId}
                 onSelectLead={(id) => {
                   const lead = allLeads.find(l => l.id === id);
                   if (lead) handleOpenDetail(lead);
-                }} 
+                }}
               />
             </div>
           </div>
@@ -2079,8 +2084,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
       {/* Modals */}
       {showReviewModal && selectedLead && (
-        <LeadReviewModal 
-          lead={selectedLead} 
+        <LeadReviewModal
+          lead={selectedLead}
           onClose={() => setShowReviewModal(false)}
           onSuccess={() => {
             setShowReviewModal(false);
@@ -2094,21 +2099,21 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       {/* Bottom Navigation */}
       {view !== 'detail' && (
         <nav className="bg-white border-t border-gray-100 px-4 md:px-6 py-3 flex items-center justify-around sticky bottom-0 z-20 pb-8">
-          <button 
+          <button
             onClick={() => setView('dashboard')}
             className={`flex flex-col items-center gap-1 transition-all ${view === 'dashboard' ? 'text-blue-600' : 'text-gray-400'}`}
           >
             <LayoutDashboard size={20} />
             <span className="text-[10px] font-bold uppercase tracking-widest">Home</span>
           </button>
-          <button 
+          <button
             onClick={() => setView('pool')}
             className={`flex flex-col items-center gap-1 transition-all ${view === 'pool' ? 'text-blue-600' : 'text-gray-400'}`}
           >
             <Zap size={20} />
             <span className="text-[10px] font-bold uppercase tracking-widest">Pool</span>
           </button>
-          <button 
+          <button
             onClick={() => setView('my-leads')}
             className={`flex flex-col items-center gap-1 transition-all ${view === 'my-leads' ? 'text-blue-600' : 'text-gray-400'}`}
           >
@@ -2116,7 +2121,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             <span className="text-[10px] font-bold uppercase tracking-widest">Leads</span>
           </button>
           {(user.role === 'manager' || user.role === 'admin') && (
-            <button 
+            <button
               onClick={() => setView('manager-workspace')}
               className={`flex flex-col items-center gap-1 transition-all ${view === 'manager-workspace' ? 'text-blue-600' : 'text-gray-400'}`}
             >
