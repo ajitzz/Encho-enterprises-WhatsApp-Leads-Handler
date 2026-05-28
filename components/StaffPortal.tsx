@@ -155,6 +155,55 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
   const formatTimelineTime = formatDateTime;
 
+  const getMessageDate = (timestamp?: number | null) => {
+    if (!timestamp) return null;
+    const parsed = new Date(timestamp);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  const formatMessageTime = (timestamp?: number | null) => {
+    const parsed = getMessageDate(timestamp);
+    if (!parsed) return '—';
+    return parsed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const formatMessageFullDateTime = (timestamp?: number | null) => {
+    const parsed = getMessageDate(timestamp);
+    if (!parsed) return 'Date unavailable';
+    return parsed.toLocaleString([], {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
+  const getMessageDateKey = (timestamp?: number | null) => {
+    const parsed = getMessageDate(timestamp);
+    if (!parsed) return 'unknown';
+
+    const year = parsed.getFullYear();
+    const month = String(parsed.getMonth() + 1).padStart(2, '0');
+    const day = String(parsed.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const formatMessageDateDivider = (timestamp?: number | null) => {
+    const parsed = getMessageDate(timestamp);
+    if (!parsed) return 'Date unavailable';
+
+    const startOfMessageDay = new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()).getTime();
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const startOfYesterday = startOfToday - (24 * 60 * 60 * 1000);
+
+    if (startOfMessageDay === startOfToday) return 'Today';
+    if (startOfMessageDay === startOfYesterday) return 'Yesterday';
+
+    return parsed.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+  };
+
   const toLabel = (value?: string | null) => {
     if (!value) return '—';
     return value.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
@@ -1213,15 +1262,30 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             <div className="p-4 space-y-4 flex flex-col h-full">
               <div className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm flex-1 flex flex-col min-h-[400px]">
                   <div className="flex-1 space-y-4 overflow-y-auto max-h-[400px] pr-2 custom-scrollbar mb-4 p-2">
-                    {leadMessages.map((msg, idx) => (
-                      <div key={msg.id || idx} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
-                        <div className={`max-w-[85%] p-3 rounded-2xl text-sm relative shadow-sm ${
-                          msg.senderType === 'driver'
-                            ? 'bg-white text-gray-800 rounded-tl-none border border-gray-100'
-                            : msg.senderType === 'bot'
-                            ? 'bg-black text-white rounded-tr-none'
-                            : 'bg-emerald-500 text-white rounded-tr-none'
-                        }`}>
+                    {leadMessages.map((msg, idx) => {
+                      const previousMessage = idx > 0 ? leadMessages[idx - 1] : null;
+                      const showDateDivider = !previousMessage || getMessageDateKey(previousMessage.timestamp) !== getMessageDateKey(msg.timestamp);
+
+                      return (
+                        <React.Fragment key={msg.id || idx}>
+                          {showDateDivider && (
+                            <div className="flex justify-center sticky top-0 z-10">
+                              <span
+                                className="px-3 py-1 rounded-full bg-gray-100/95 text-gray-500 text-[10px] font-bold uppercase tracking-wider shadow-sm border border-gray-200/80"
+                                title={formatMessageFullDateTime(msg.timestamp)}
+                              >
+                                {formatMessageDateDivider(msg.timestamp)}
+                              </span>
+                            </div>
+                          )}
+                          <div className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
+                            <div className={`max-w-[85%] p-3 rounded-2xl text-sm relative shadow-sm ${
+                              msg.senderType === 'driver'
+                                ? 'bg-white text-gray-800 rounded-tl-none border border-gray-100'
+                                : msg.senderType === 'bot'
+                                ? 'bg-black text-white rounded-tr-none'
+                                : 'bg-emerald-500 text-white rounded-tr-none'
+                            }`}>
                           {/* Message Content */}
                           <div className="space-y-2">
                             {msg.text && (
@@ -1271,7 +1335,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                           {/* Timestamp & Status */}
                           <div className={`flex items-center justify-end gap-1 mt-1 ${msg.senderType === 'driver' ? 'text-gray-400' : msg.senderType === 'bot' ? 'text-gray-400' : 'text-emerald-100'}`}>
                             <span className="text-[9px] font-medium">
-                              {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              <time dateTime={getMessageDate(msg.timestamp)?.toISOString()} title={formatMessageFullDateTime(msg.timestamp)}>
+                                {formatMessageTime(msg.timestamp)}
+                              </time>
                             </span>
                             {msg.senderType !== 'driver' && (
                               <div className="flex">
@@ -1279,9 +1345,11 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                               </div>
                             )}
                           </div>
-                        </div>
-                      </div>
-                    ))}
+                            </div>
+                          </div>
+                        </React.Fragment>
+                      );
+                    })}
                   {leadMessages.length === 0 && (
                     <div className="flex-1 flex flex-col items-center justify-center text-center p-10">
                       <div className="w-16 h-16 rounded-full bg-gray-50 flex items-center justify-center mb-4">
