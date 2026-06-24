@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "encho-whatsapp-lead-handler",
+  "name": "encho-space-whatsapp-leads-handler",
   "main": "src/worker.ts",
   "compatibility_date": "2026-04-16",
   "assets": {
