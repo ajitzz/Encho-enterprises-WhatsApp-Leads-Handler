@@ -23,13 +23,14 @@ import {
     summarizePayloadForStorage,
     validateOutboundPayload,
 } from './backend/shared/infra/whatsappPayload.js';
+import { isRedisAvailable, enqueueInboundPayload, popInboundBatch, getQueueLength } from './backend/shared/infra/inboundQueue.js';
 import { buildLeadIngestionFacade } from './backend/modules/lead-ingestion/api.js';
 import { buildRemindersRouter } from './backend/modules/reminders-escalations/api.js';
 import { buildAuthConfigRouter, registerAuthConfigRoutes } from './backend/modules/auth-config/api.js';
 import { buildSystemHealthRouter, registerSystemHealthRoutes } from './backend/modules/system-health/api.js';
 import leadReviewRouter from './backend/modules/lead-review/api.js';
 import analyticsRouter from './backend/modules/analytics/api.js';
-import { runNurtureTriggers } from './backend/modules/automation/nurture.js';
+import { runNurtureTriggers } from './backend/modules/automation/api.js';
 
 const notifyUpdates = (candidateId = null) => {
     invalidateDriversSnapshotCache();
@@ -2950,10 +2951,15 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
         const incomingMediaPayload = parseIncomingMediaPayload(incomingText);
 
         // 1. Global Resets
-        if (['start', 'restart', 'hi', 'hello', 'menu'].includes(cleanInput)) {
+        const isExplicitReset = ['restart', 'reset', 'start_over'].includes(cleanInput);
+        const isGreeting = ['start', 'hi', 'hello', 'hey', 'menu'].includes(cleanInput);
+
+        if (isExplicitReset) {
             currentNodeId = null;
             await client.query("UPDATE candidates SET current_bot_step_id = NULL, variables = '{}' WHERE id = $1", [candidate.id]);
             candidate.variables = {}; 
+        } else if (isGreeting && !currentNodeId) {
+            currentNodeId = null;
         }
 
         // 2. Determine Current State
@@ -2963,7 +2969,7 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             const currentNode = nodeMap.get(currentNodeId);
             if (currentNode) {
                 // A. Handle Variable Capture (IMPROVED FOR ALL INTERACTIVE NODES)
-                const captureTypes = ['input', 'location_request', 'pickup_location', 'destination_location', 'datetime_picker', 'interactive_button', 'interactive_list', 'rich_card'];
+                const captureTypes = ['input', 'location_request', 'pickup_location', 'destination_location', 'datetime_picker', 'interactive_button', 'interactive_list', 'rich_card', 'summary'];
                 
                 if (captureTypes.includes(currentNode.data.type)) {
                     let varName = currentNode.data.variable;
@@ -3009,6 +3015,16 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             const row = currentNode.data.sections.flatMap(s => s.rows).find(r => r.id === incomingPayloadId || r.title.toLowerCase().trim() === cleanInput);
                             if (row) valueToSave = row.title;
                         }
+                    }
+
+                    // 3. Check for Summary Confirmation
+                    if (!valueToSave && currentNode.data.type === 'summary') {
+                        const isConfirmed = ['yes', 'confirm', 'confirmed', 'y', 'correct', 'ok'].includes(cleanInput) || incomingPayloadId === 'confirm' || incomingPayloadId?.includes('confirm');
+                        const isEdit = ['no', 'edit', 'change', 'n', 'wrong', 'restart'].includes(cleanInput) || incomingPayloadId === 'edit' || incomingPayloadId?.includes('edit');
+                        if (isConfirmed) valueToSave = 'confirmed';
+                        else if (isEdit) valueToSave = 'edit';
+                        else if (cleanInput) valueToSave = incomingText;
+                        varName = currentNode.data.variable || 'customer_confirmation';
                     }
                     
                     // --- NEW 3-STAGE STATE MACHINE FOR DATETIME PICKER (STRICT & SMART) ---
@@ -3241,6 +3257,17 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                      matchedEdge = outgoingEdges.find(e => !e.sourceHandle || e.sourceHandle === 'default');
                 }
 
+                // Match Summary Confirmation Path
+                if (!matchedEdge && currentNode.data.type === 'summary') {
+                    const isConfirmed = ['yes', 'confirm', 'confirmed', 'y', 'correct', 'ok'].includes(cleanInput) || incomingPayloadId === 'confirm' || incomingPayloadId?.includes('confirm');
+                    const isEdit = ['no', 'edit', 'change', 'n', 'wrong', 'restart'].includes(cleanInput) || incomingPayloadId === 'edit' || incomingPayloadId?.includes('edit');
+                    if (isConfirmed) {
+                        matchedEdge = outgoingEdges.find(e => e.sourceHandle === 'confirm' || e.sourceHandle === 'true' || !e.sourceHandle || e.sourceHandle === 'default');
+                    } else if (isEdit) {
+                        matchedEdge = outgoingEdges.find(e => e.sourceHandle === 'edit' || e.sourceHandle === 'false');
+                    }
+                }
+
                 // Default Path
                 if (!matchedEdge) {
                     const isSmartNode = ['input', 'location_request', 'pickup_location', 'destination_location'].includes(currentNode.data.type);
@@ -3468,7 +3495,28 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             summaryText += `\n\n${formatSummaryToken(rawFooter, data.summaryFooterStyle || 'italic')}`;
                         }
                     }
-                    payload = { type: 'text', text: { body: summaryText } };
+                    if (data.buttons && data.buttons.length > 0) {
+                        payload = {
+                            type: "interactive",
+                            interactive: {
+                                type: "button",
+                                body: { text: summaryText.substring(0, 1024) },
+                                action: {
+                                    buttons: data.buttons.slice(0, 3).map(b => ({
+                                        type: "reply",
+                                        reply: { id: b.id, title: (b.title || 'Option').substring(0, 20) }
+                                    }))
+                                }
+                            }
+                        };
+                        autoAdvance = false;
+                    } else {
+                        payload = { type: 'text', text: { body: summaryText } };
+                        const outgoing = edgeMap.get(node.id) || [];
+                        if (outgoing.length > 0 && (data.requireConfirmation || data.footerText?.toLowerCase().includes('confirm') || data.footerText?.toLowerCase().includes('yes'))) {
+                            autoAdvance = false;
+                        }
+                    }
                 }
 
 
@@ -3746,7 +3794,12 @@ app.use(cors({
     exposedHeaders: ['X-Request-Id'],
     maxAge: 86400,
 }));
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({
+    limit: '50mb',
+    verify: (req: any, _res: any, buf: Buffer) => {
+        req.rawBody = buf;
+    }
+}));
 
 if (REQUEST_CONTEXT_FLAG) {
     app.use((req, res, next) => {
@@ -4236,18 +4289,31 @@ apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
     try {
         await withDb(async (client) => {
             await withSchemaRetry(client, async () => {
-                const check = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
-                if (check.rows[0]?.assigned_to) {
-                    return res.status(400).json({ error: 'Lead already claimed' });
+                // Atomic conditional update: prevents race condition when 50 staff click simultaneously
+                const updateRes = await client.query(
+                    `UPDATE candidates 
+                     SET assigned_to = $1, lead_status = 'claimed', last_action_at = NOW(), claimed_at = NOW() 
+                     WHERE id = $2 AND (assigned_to IS NULL OR assigned_to = $1)
+                     RETURNING id, name, phone_number, assigned_to`,
+                    [req.user.staffId, req.params.id]
+                );
+
+                if (updateRes.rowCount === 0) {
+                    const check = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+                    if (check.rowCount === 0) {
+                        return res.status(404).json({ error: 'Lead not found' });
+                    }
+                    return res.status(409).json({ error: 'Lead already claimed by another agent' });
                 }
-                await client.query('UPDATE candidates SET assigned_to = $1, lead_status = $2, last_action_at = NOW(), claimed_at = NOW() WHERE id = $3', [req.user.staffId, 'claimed', req.params.id]);
+
                 await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, 'claimed', 'Lead claimed from pool']);
                 
                 // Audit log
                 await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, new_state) VALUES ($1, $2, $3, $4, $5)', 
                     [req.user.staffId, 'lead_claim', 'candidate', req.params.id, JSON.stringify({ staff_id: req.user.staffId })]);
                 
-                res.json({ success: true });
+                notifyUpdates(req.params.id);
+                res.json({ success: true, lead: updateRes.rows[0] });
             });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4279,6 +4345,7 @@ apiRouter.post('/leads/:id/assign', authMiddleware, async (req, res) => {
             await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, new_state) VALUES ($1, $2, $3, $4, $5)', 
                 [req.user.staffId, 'lead_assign', 'candidate', req.params.id, JSON.stringify({ assigned_to: staff_id })]);
             
+            notifyUpdates(req.params.id);
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4324,6 +4391,7 @@ apiRouter.post('/leads/:id/reassign', authMiddleware, async (req, res) => {
             await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, previous_state, new_state) VALUES ($1, $2, $3, $4, $5, $6)', 
                 [req.user.staffId, 'lead_reassign', 'candidate', req.params.id, JSON.stringify({ assigned_to: oldStaffId }), JSON.stringify({ assigned_to: staff_id })]);
             
+            notifyUpdates(req.params.id);
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4379,6 +4447,7 @@ apiRouter.post('/leads/:id/unclaim', authMiddleware, async (req, res) => {
                 ]
             );
 
+            notifyUpdates(req.params.id);
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4468,6 +4537,7 @@ apiRouter.post('/leads/:id/action', authMiddleware, async (req, res) => {
                     `, [req.params.id, req.user.staffId, next_followup_at]);
                 }
 
+                notifyUpdates(req.params.id);
                 res.json({ success: true });
             });
         });
@@ -5191,7 +5261,38 @@ const leadIngestionFacade = buildLeadIngestionFacade({
     triggerReportingSyncDeferred,
 });
 
+const verifyMetaWebhookSignature = (req: any): boolean => {
+    const signature = req.headers['x-hub-signature-256'] as string;
+    const appSecret = process.env.META_APP_SECRET;
+    if (!appSecret) {
+        return true;
+    }
+    if (!signature) {
+        return false;
+    }
+    try {
+        const parts = signature.split('=');
+        const signatureHash = parts[1];
+        if (!signatureHash) return false;
+        const rawPayload = req.rawBody || JSON.stringify(req.body);
+        const expectedHash = crypto.createHmac('sha256', appSecret).update(rawPayload).digest('hex');
+        return crypto.timingSafeEqual(Buffer.from(signatureHash, 'hex'), Buffer.from(expectedHash, 'hex'));
+    } catch {
+        return false;
+    }
+};
+
 apiRouter.post('/webhook', async (req, res) => {
+    if (!verifyMetaWebhookSignature(req)) {
+        structuredLog({
+            level: 'error',
+            module: 'lead-ingestion',
+            requestId: (req as any).requestId || null,
+            message: 'webhook.signature_verification_failed',
+        });
+        return res.status(401).json({ error: 'Invalid webhook signature' });
+    }
+
     const tenantId = (req.headers['x-tenant-id'] || req.headers['x-tenant'] || null) as any;
     const mode = resolveModuleMode({
         flagValue: LEAD_INGESTION_FLAG,
@@ -5200,6 +5301,18 @@ apiRouter.post('/webhook', async (req, res) => {
         canaryPercent: 100,
         tenantAllowList: MODULE_CANARY_TENANTS,
     });
+
+    // Redis Write-Behind Queue Buffer: Instantly absorbs peak traffic surges
+    if (isRedisAvailable() && process.env.FF_REDIS_WRITE_BEHIND !== 'false') {
+        const enqueued = await enqueueInboundPayload({
+            body: req.body,
+            requestId: (req as any).requestId,
+            tenantId,
+        });
+        if (enqueued) {
+            return res.status(200).json({ status: 'buffered', queue: 'redis' });
+        }
+    }
 
     if (mode !== 'off') {
         await leadIngestionFacade({ body: req.body, req, res, context: { requestId: (req as any).requestId || null, tenantId } });
@@ -6215,7 +6328,75 @@ const remindersRouter = buildRemindersRouter({
     legacyPatchScheduledHandler: handlePatchScheduledMessageLegacy,
 });
 
-apiRouter.get('/cron/process-queue', async (req, res) => {
+let isQueueTickInProgress = false;
+async function runBackgroundQueueTick() {
+    if (isQueueTickInProgress) return;
+    isQueueTickInProgress = true;
+    try {
+        const mockReq: any = {
+            requestId: `cron-internal-${Date.now()}`,
+            headers: {},
+        };
+        const mockRes: any = {
+            headersSent: false,
+            statusCode: 200,
+            status(code: number) { this.statusCode = code; return this; },
+            json(payload: any) { return payload; },
+            end() {},
+        };
+
+        const mode = resolveModuleMode({
+            flagValue: REMINDERS_MODULE_FLAG,
+            tenantId: null,
+            requestId: mockReq.requestId,
+            canaryPercent: REMINDERS_CANARY_PERCENT,
+            tenantAllowList: MODULE_CANARY_TENANTS,
+        });
+
+        if (mode !== 'off') {
+            await remindersRouter.processQueue(mockReq, mockRes);
+        } else {
+            await handleCronProcessQueueLegacy(mockReq, mockRes);
+        }
+    } catch (err: any) {
+        console.error('[Internal Queue Runner Error]', err?.message || err);
+    } finally {
+        isQueueTickInProgress = false;
+    }
+}
+
+function startBackgroundQueueProcessor() {
+    if (process.env.DISABLE_INTERNAL_CRON === 'true') {
+        console.log('[Queue Processor] Internal runner disabled by DISABLE_INTERNAL_CRON=true');
+        return;
+    }
+    const intervalMs = parseInt(process.env.QUEUE_PROCESS_INTERVAL_MS || '10000', 10);
+    console.log(`[Queue Processor] Starting autonomous background runner (${intervalMs}ms interval)...`);
+    setInterval(runBackgroundQueueTick, intervalMs);
+}
+
+const handleCronProcessQueueEndpoint = async (req: any, res: any) => {
+    const cronSecret = process.env.CRON_SECRET;
+    const reqSecret = req.headers['x-cron-secret'] || req.query.secret;
+
+    if (cronSecret && reqSecret !== cronSecret) {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ error: 'Unauthorized: Valid X-Cron-Secret header or Admin Bearer Token required' });
+        }
+        try {
+            const token = authHeader.split(' ')[1];
+            const ticket = await googleClient.verifyIdToken({ idToken: token, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
+            const payload = ticket.getPayload();
+            const ADMIN_EMAILS = ['ajithsabzz@gmail.com', 'enchoenterprises@gmail.com'];
+            if (!payload?.email || !ADMIN_EMAILS.includes(payload.email)) {
+                return res.status(403).json({ error: 'Forbidden: Admin access required for manual queue trigger' });
+            }
+        } catch {
+            return res.status(401).json({ error: 'Unauthorized: Invalid authentication credentials' });
+        }
+    }
+
     const tenantId = (req.headers['x-tenant-id'] || req.headers['x-tenant'] || null) as any;
     const mode = resolveModuleMode({
         flagValue: REMINDERS_MODULE_FLAG,
@@ -6227,9 +6408,15 @@ apiRouter.get('/cron/process-queue', async (req, res) => {
 
     if (mode !== 'off') return remindersRouter.processQueue(req, res);
     return handleCronProcessQueueLegacy(req, res);
-});
+};
 
-apiRouter.post('/system/init-db', async (req, res) => {
+apiRouter.get('/cron/process-queue', handleCronProcessQueueEndpoint);
+apiRouter.post('/cron/process-queue', handleCronProcessQueueEndpoint);
+
+apiRouter.post('/system/init-db', authMiddleware, async (req: any, res) => {
+    if (req.user?.role !== 'admin') {
+        return res.status(403).json({ error: 'Forbidden: Admin access required' });
+    }
     try {
         await withDb(async (client) => {
             await initDatabase(client);
@@ -6246,7 +6433,14 @@ apiRouter.post('/system/init-db', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.post('/system/hard-reset', async (req, res) => {
+apiRouter.post('/system/hard-reset', authMiddleware, async (req: any, res) => {
+    if (req.user?.role !== 'admin') {
+        return res.status(403).json({ error: 'Forbidden: Admin access required for hard reset' });
+    }
+    const resetSecret = process.env.SYSTEM_RESET_SECRET;
+    if (resetSecret && req.headers['x-reset-secret'] !== resetSecret) {
+        return res.status(403).json({ error: 'Forbidden: Valid X-Reset-Secret header required' });
+    }
     try {
         await withDb(async (client) => {
             await client.query('BEGIN');
@@ -6414,6 +6608,16 @@ apiRouter.get('/system/meta-send-metrics', async (_req, res) => {
     }
 });
 
+apiRouter.all('/', (req, res) => {
+    res.status(200).json({
+        status: 'online',
+        service: 'Encho Space WhatsApp Leads Handler',
+        version: '1.0.0',
+        uptime: Math.round(process.uptime()),
+        timestamp: new Date().toISOString(),
+    });
+});
+
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
 app.use((err, req, res, next) => {
@@ -6431,6 +6635,57 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: 'Internal server error' });
 });
 app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
+
+// --- REDIS WRITE-BEHIND INBOUND WORKER ---
+let isInboundWorkerRunning = false;
+async function processQueuedInboundBatch() {
+    if (isInboundWorkerRunning || !isRedisAvailable()) return;
+    isInboundWorkerRunning = true;
+    try {
+        const batch = await popInboundBatch(10);
+        if (batch.length === 0) return;
+
+        for (const item of batch) {
+            try {
+                const mockReq: any = {
+                    requestId: item.requestId || `queue-${Date.now()}`,
+                    headers: {},
+                    body: item.body,
+                };
+                const mockRes: any = {
+                    headersSent: false,
+                    statusCode: 200,
+                    status(code: number) { this.statusCode = code; return this; },
+                    sendStatus(code: number) { this.statusCode = code; return this; },
+                    json(payload: any) { return payload; },
+                    end() {},
+                };
+                await leadIngestionFacade({
+                    body: item.body,
+                    req: mockReq,
+                    res: mockRes,
+                    context: { requestId: mockReq.requestId, tenantId: item.tenantId || null },
+                });
+            } catch (err: any) {
+                console.error('[Inbound Queue Item Worker Error]:', err?.message || err);
+            }
+        }
+    } catch (err: any) {
+        console.error('[Inbound Queue Batch Worker Error]:', err?.message || err);
+    } finally {
+        isInboundWorkerRunning = false;
+    }
+}
+
+function startInboundQueueWorker() {
+    if (!isRedisAvailable()) {
+        console.log('[Inbound Queue Worker] Redis not configured; using direct fast-ack processing.');
+        return;
+    }
+    const pollIntervalMs = parseInt(process.env.REDIS_QUEUE_POLL_INTERVAL_MS || '100', 10);
+    console.log(`[Inbound Queue Worker] Started Redis write-behind consumer (${pollIntervalMs}ms loop)...`);
+    setInterval(processQueuedInboundBatch, pollIntervalMs);
+}
 
 // --- LEAD AUTO-DISTRIBUTION ---
 async function startLeadAutoDistributor() {
@@ -6502,6 +6757,8 @@ async function startLeadAutoDistributor() {
 
 const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
     startLeadAutoDistributor();
+    startBackgroundQueueProcessor();
+    startInboundQueueWorker();
     
     // Start background jobs
     setInterval(() => {
@@ -6518,15 +6775,16 @@ const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
                 if (pool) {
                     const client = await pool.connect();
                     try {
-                        const res = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'candidates'`);
-                        
-                        // Always run initDatabase to ensure columns and extensions exist (safe due to IF NOT EXISTS)
-                        console.log("[Auto-Init] Verifying database schema...");
-                        await initDatabase(client);
-                        console.log("[Auto-Init] Database schema verified.");
+                        if (process.env.DB_AUTO_INIT !== 'false') {
+                            console.log("[Auto-Init] Verifying database schema...");
+                            await initDatabase(client);
+                            console.log("[Auto-Init] Database schema verified.");
 
-                        await ensurePerformanceIndexes(client);
-                        console.log("[Auto-Init] Performance indexes verified.");
+                            await ensurePerformanceIndexes(client);
+                            console.log("[Auto-Init] Performance indexes verified.");
+                        } else {
+                            console.log("[Auto-Init] DB_AUTO_INIT=false, skipping runtime DDL migration check.");
+                        }
                         
                         await prewarmHotPathCaches(client);
                         console.log("[Auto-Init] Hot-path caches prewarmed.");
@@ -6546,5 +6804,5 @@ if (import.meta.url.startsWith('file:')) {
     }
 }
 
-export { app, startServer };
+export { app, startServer, initDatabase, ensurePerformanceIndexes };
 export default app;

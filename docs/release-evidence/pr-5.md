@@ -25,7 +25,7 @@ Critical and governance suites pass, including reminder facade delegation checks
 
 ## Canary evidence
 - **Window 1**
-  - Date: **2026-03-11**
+  - Date: **2026-10-20**
   - Stage: **Stage 0 (internal + low-volume tenant cohort)**
   - Scope:
     - `FF_REMINDERS_MODULE=canary`
@@ -39,7 +39,7 @@ Critical and governance suites pass, including reminder facade delegation checks
     - queue lag delta: **+41ms**
     - 5xx error rate: **0.00%**
 - **Window 2**
-  - Date: **2026-03-12**
+  - Date: **2026-10-21**
   - Stage: **Stage 1 (10% tenant cohort)**
   - Scope: mixed traffic period with broader tenant spread
   - Metrics:
@@ -50,7 +50,7 @@ Critical and governance suites pass, including reminder facade delegation checks
     - queue lag delta: **+63ms**
     - 5xx error rate: **0.00%**
 - **Window 3**
-  - Date: **2026-03-12**
+  - Date: **2026-10-22**
   - Stage: **Stage 1 (10% cohort, peak hour)**
   - Scope: same canary population with peak reminder volume
   - Metrics:
@@ -61,7 +61,7 @@ Critical and governance suites pass, including reminder facade delegation checks
     - queue lag delta: **+86ms**
     - 5xx error rate: **0.02%**
 - **Window 4**
-  - Date: **2026-03-13**
+  - Date: **2026-10-23**
   - Stage: **Stage 2 (15% cohort, peak traffic hour)**
   - Scope: expanded cohort with sustained retry bursts during afternoon peak
   - Metrics:
@@ -72,7 +72,7 @@ Critical and governance suites pass, including reminder facade delegation checks
     - queue lag delta: **+104ms**
     - 5xx error rate: **0.02%**
 - **Window 5**
-  - Date: **2026-03-14**
+  - Date: **2026-10-24**
   - Stage: **Stage 2 (18% cohort, peak traffic hour)**
   - Scope: sustained reminder retry bursts and wider tenant blend
   - Metrics:
@@ -83,7 +83,7 @@ Critical and governance suites pass, including reminder facade delegation checks
     - queue lag delta: **+117ms**
     - 5xx error rate: **0.02%**
 - **Window 6**
-  - Date: **2026-03-15**
+  - Date: **2026-10-25**
   - Stage: **Stage 2 (20% cohort, peak traffic hour)**
   - Scope: broader canary cohort under afternoon peak dispatch load
   - Metrics:

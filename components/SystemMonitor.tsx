@@ -55,6 +55,7 @@ export const SystemMonitor = () => {
     const [showControls, setShowControls] = useState(false);
     const [dbActionStatus, setDbActionStatus] = useState('');
     const timerRef = useRef<any>(null);
+    const getAuthToken = () => localStorage.getItem('encho_auth_token') || localStorage.getItem('uber_fleet_auth_token') || '';
 
     useEffect(() => {
         startPolling();
@@ -65,7 +66,7 @@ export const SystemMonitor = () => {
         const poll = async () => {
             try {
                 const response = await fetch(buildApiUrl('/api/debug/status'), {
-                   headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }
+                   headers: { 'Authorization': `Bearer ${getAuthToken()}` }
                 });
                 if (response.ok) {
                     reportUiRecovery('polling', '/api/debug/status');
@@ -81,7 +82,7 @@ export const SystemMonitor = () => {
                 }
 
                 const transferResponse = await fetch(buildApiUrl('/api/system/transfer-budget'), {
-                    headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }
+                    headers: { 'Authorization': `Bearer ${getAuthToken()}` }
                 });
                 if (transferResponse.ok) {
                     const transferPayload = await transferResponse.json();
@@ -108,7 +109,7 @@ export const SystemMonitor = () => {
     const handleInitDB = async () => {
         setDbActionStatus('Creating Tables...');
         try {
-            await fetch(buildApiUrl('/api/system/init-db'), { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` } });
+            await fetch(buildApiUrl('/api/system/init-db'), { method: 'POST', headers: { 'Authorization': `Bearer ${getAuthToken()}` } });
             setDbActionStatus('Tables Ready! Reloading...');
             setTimeout(() => window.location.reload(), 2000);
         } catch(e) { setDbActionStatus('Failed'); }
@@ -119,7 +120,7 @@ export const SystemMonitor = () => {
         
         setDbActionStatus('Resetting & Rebuilding...');
         try {
-            const res = await fetch(buildApiUrl('/api/system/hard-reset'), { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` } });
+            const res = await fetch(buildApiUrl('/api/system/hard-reset'), { method: 'POST', headers: { 'Authorization': `Bearer ${getAuthToken()}` } });
             if (!res.ok) throw new Error("Reset Request Failed");
             
             setDbActionStatus('Rebuild Complete. Reloading...');
@@ -130,7 +131,7 @@ export const SystemMonitor = () => {
     const handleSeedDB = async () => {
         setDbActionStatus('Seeding Data...');
         try {
-            await fetch(buildApiUrl('/api/system/seed-db'), { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` } });
+            await fetch(buildApiUrl('/api/system/seed-db'), { method: 'POST', headers: { 'Authorization': `Bearer ${getAuthToken()}` } });
             setDbActionStatus('Seeded! Reloading...');
             setTimeout(() => window.location.reload(), 1000);
         } catch(e) { setDbActionStatus('Failed'); }

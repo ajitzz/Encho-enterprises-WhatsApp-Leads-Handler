@@ -4,15 +4,15 @@ let pgPool: Pool | null = null;
 
 export const buildPoolConfig = () => {
     const isProduction = process.env.NODE_ENV === 'production';
-    const maxConnections = parseInt(process.env.PG_POOL_MAX || '5', 10);
+    const maxConnections = parseInt(process.env.PG_POOL_MAX || '20', 10);
     const idleTimeoutMillis = parseInt(process.env.PG_IDLE_TIMEOUT_MS || '10000', 10);
 
     return {
         connectionString: process.env.POSTGRES_URL,
         ssl: isProduction ? { rejectUnauthorized: false } : false,
-        max: Number.isFinite(maxConnections) && maxConnections > 0 ? maxConnections : 5,
+        max: Number.isFinite(maxConnections) && maxConnections > 0 ? maxConnections : 20,
         idleTimeoutMillis: Number.isFinite(idleTimeoutMillis) && idleTimeoutMillis > 0 ? idleTimeoutMillis : 10000,
-        connectionTimeoutMillis: 2000,
+        connectionTimeoutMillis: 5000,
     };
 };
 

@@ -14,7 +14,7 @@ import {
 const WEBHOOK_REPLY_WARN_MS = parsePositiveInt(process.env.WEBHOOK_REPLY_WARN_MS, 1200);
 const BOT_ENGINE_HARD_TIMEOUT_MS = parsePositiveInt(process.env.BOT_ENGINE_HARD_TIMEOUT_MS, 1800);
 const isServerlessRuntime = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
-const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, !isServerlessRuntime);
+const WEBHOOK_DEFER_POST_RESPONSE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, false);
 const WEBHOOK_DEFER_BOT_ENGINE = parseBooleanFlag(process.env.FF_WEBHOOK_DEFER_BOT_ENGINE, false);
 const WEBHOOK_ADAPTIVE_BOT_DEFER = parseBooleanFlag(process.env.FF_WEBHOOK_ADAPTIVE_BOT_DEFER, false);
 const WEBHOOK_BACKPRESSURE_DEFER = parseBooleanFlag(process.env.FF_WEBHOOK_BACKPRESSURE_DEFER, true);
@@ -37,6 +37,11 @@ const deferredBotQueue = [];
 const recentMessageCache = new Map();
 const inFlightMessageIds = new Set();
 
+export const clearWebhookMemoryCache = () => {
+  recentMessageCache.clear();
+  inFlightMessageIds.clear();
+};
+
 const pruneRecentMessageCache = () => {
   const now = Date.now();
   for (const [messageId, expiresAt] of recentMessageCache.entries()) {
@@ -55,13 +60,13 @@ const hasRecentMessage = (messageId) => {
   return true;
 };
 
-const rememberMessageId = (messageId) => {
+const rememberMessageId = (messageId, maxSize = WEBHOOK_DEDUPE_MEMORY_MAX_SIZE, ttlMs = WEBHOOK_DEDUPE_MEMORY_TTL_MS) => {
   if (!messageId) return;
-  if (recentMessageCache.size >= WEBHOOK_DEDUPE_MEMORY_MAX_SIZE) {
+  if (recentMessageCache.size >= maxSize) {
     const oldestMessageId = recentMessageCache.keys().next()?.value;
     if (oldestMessageId) recentMessageCache.delete(oldestMessageId);
   }
-  recentMessageCache.set(messageId, Date.now() + WEBHOOK_DEDUPE_MEMORY_TTL_MS);
+  recentMessageCache.set(messageId, Date.now() + ttlMs);
 };
 
 
@@ -94,20 +99,43 @@ const withBotExecutionSlot = async (handler) => {
 };
 
 export class LeadIngestionService {
-  constructor({ legacyProcessor, withDb, executeWithRetry, runBotEngine, triggerReportingSyncDeferred }) {
+  constructor({ legacyProcessor, withDb, executeWithRetry, runBotEngine, triggerReportingSyncDeferred, env = {} } = {}) {
     this.legacyProcessor = legacyProcessor;
     this.withDb = withDb;
     this.executeWithRetry = executeWithRetry;
     this.runBotEngine = runBotEngine;
     this.triggerReportingSyncDeferred = triggerReportingSyncDeferred;
+    this.env = env;
+  }
+
+  get config() {
+    const e = this.env || {};
+    return {
+      replyWarnMs: parsePositiveInt(e.WEBHOOK_REPLY_WARN_MS ?? process.env.WEBHOOK_REPLY_WARN_MS, 1200),
+      botHardTimeoutMs: parsePositiveInt(e.BOT_ENGINE_HARD_TIMEOUT_MS ?? process.env.BOT_ENGINE_HARD_TIMEOUT_MS, 1800),
+      deferPostResponse: parseBooleanFlag(e.FF_WEBHOOK_DEFER_POST_RESPONSE ?? process.env.FF_WEBHOOK_DEFER_POST_RESPONSE, false),
+      deferBotEngine: parseBooleanFlag(e.FF_WEBHOOK_DEFER_BOT_ENGINE ?? process.env.FF_WEBHOOK_DEFER_BOT_ENGINE, false),
+      adaptiveBotDefer: parseBooleanFlag(e.FF_WEBHOOK_ADAPTIVE_BOT_DEFER ?? process.env.FF_WEBHOOK_ADAPTIVE_BOT_DEFER, false),
+      backpressureDefer: parseBooleanFlag(e.FF_WEBHOOK_BACKPRESSURE_DEFER ?? process.env.FF_WEBHOOK_BACKPRESSURE_DEFER, true),
+      syncBudgetMs: parsePositiveInt(e.WEBHOOK_SYNC_BUDGET_MS ?? process.env.WEBHOOK_SYNC_BUDGET_MS, 900),
+      dbStageWarnMs: parsePositiveInt(e.WEBHOOK_DB_STAGE_WARN_MS ?? process.env.WEBHOOK_DB_STAGE_WARN_MS, 450),
+      botStageWarnMs: parsePositiveInt(e.WEBHOOK_BOT_STAGE_WARN_MS ?? process.env.WEBHOOK_BOT_STAGE_WARN_MS, 700),
+      botMaxConcurrency: parsePositiveInt(e.BOT_ENGINE_MAX_CONCURRENCY ?? process.env.BOT_ENGINE_MAX_CONCURRENCY, 8),
+      ackTimeoutMs: parsePositiveInt(e.WEBHOOK_ACK_TIMEOUT_MS ?? process.env.WEBHOOK_ACK_TIMEOUT_MS, 950),
+      ackTimeoutGuard: parseBooleanFlag(e.FF_WEBHOOK_ACK_TIMEOUT_GUARD ?? process.env.FF_WEBHOOK_ACK_TIMEOUT_GUARD, true),
+      deferQueueMax: parsePositiveInt(e.WEBHOOK_DEFER_QUEUE_MAX ?? process.env.WEBHOOK_DEFER_QUEUE_MAX, 256),
+      dedupeMemoryTtlMs: parsePositiveInt(e.WEBHOOK_DEDUPE_MEMORY_TTL_MS ?? process.env.WEBHOOK_DEDUPE_MEMORY_TTL_MS, 120000),
+      dedupeMemoryMaxSize: parsePositiveInt(e.WEBHOOK_DEDUPE_MEMORY_MAX_SIZE ?? process.env.WEBHOOK_DEDUPE_MEMORY_MAX_SIZE, 5000),
+    };
   }
 
   async handleIncomingMessage({ body, req, res, context }) {
+    const cfg = this.config;
     const requestId = context?.requestId || req?.requestId || null;
     const tenantId = context?.tenantId || null;
     log({ module: 'lead-ingestion', message: 'ingestion.module_path.selected', requestId, meta: { tenantId } });
 
-    const latency = buildLatencyTracker({ module: 'lead-ingestion', requestId, operation: 'webhook_ingestion', warnThresholdMs: WEBHOOK_REPLY_WARN_MS, extraMeta: { tenantId } });
+    const latency = buildLatencyTracker({ module: 'lead-ingestion', requestId, operation: 'webhook_ingestion', warnThresholdMs: cfg.replyWarnMs, extraMeta: { tenantId } });
     const webhookStartedMs = Date.now();
 
     if (!body?.object) {
@@ -162,11 +190,11 @@ export class LeadIngestionService {
     }).finally(() => {
       if (hasMessageId) inFlightMessageIds.delete(msg.id);
       if (hasMessageId && shouldRememberMessageId) {
-        rememberMessageId(msg.id);
+        rememberMessageId(msg.id, cfg.dedupeMemoryMaxSize, cfg.dedupeMemoryTtlMs);
       }
     });
 
-    if (WEBHOOK_DEFER_POST_RESPONSE) {
+    if (cfg.deferPostResponse) {
       safeSendStatus(res, 200);
       processPromise.catch((error) => {
         log({
@@ -181,7 +209,7 @@ export class LeadIngestionService {
       return { accepted: true, path: 'module-service', deferred: true };
     }
 
-    if (!FF_WEBHOOK_ACK_TIMEOUT_GUARD) {
+    if (!cfg.ackTimeoutGuard) {
       await processPromise;
       safeSendStatus(res, 200);
       latency.end({ path: 'module-service' });
@@ -190,13 +218,13 @@ export class LeadIngestionService {
 
     const guardedResult = await runWithTimeout({
       promise: processPromise,
-      timeoutMs: WEBHOOK_ACK_TIMEOUT_MS,
+      timeoutMs: cfg.ackTimeoutMs,
       onTimeout: () => {
         log({
           module: 'lead-ingestion',
           message: 'webhook.ack_timeout_guard.triggered',
           requestId,
-          meta: { tenantId, timeoutMs: WEBHOOK_ACK_TIMEOUT_MS },
+          meta: { tenantId, timeoutMs: cfg.ackTimeoutMs },
         });
       },
     });
@@ -227,7 +255,7 @@ export class LeadIngestionService {
         module: 'lead-ingestion',
         requestId,
         operation: 'webhook_ingestion_db',
-        warnThresholdMs: WEBHOOK_DB_STAGE_WARN_MS,
+        warnThresholdMs: this.config.dbStageWarnMs,
         extraMeta: { tenantId },
       });
 
@@ -280,9 +308,9 @@ export class LeadIngestionService {
 
       if (!hydratedCandidate.is_human_mode) {
         const elapsed = Date.now() - webhookStartedMs;
-        const shouldDeferForBudget = WEBHOOK_ADAPTIVE_BOT_DEFER && elapsed >= WEBHOOK_SYNC_BUDGET_MS;
-        const shouldDeferForBackpressure = WEBHOOK_BACKPRESSURE_DEFER && activeBotExecutions >= BOT_ENGINE_MAX_CONCURRENCY;
-        const shouldDeferBot = WEBHOOK_DEFER_BOT_ENGINE || shouldDeferForBudget || shouldDeferForBackpressure;
+        const shouldDeferForBudget = this.config.adaptiveBotDefer && elapsed >= this.config.syncBudgetMs;
+        const shouldDeferForBackpressure = this.config.backpressureDefer && activeBotExecutions >= this.config.botMaxConcurrency;
+        const shouldDeferBot = this.config.deferBotEngine || shouldDeferForBudget || shouldDeferForBackpressure;
         const deferReason = shouldDeferForBackpressure
           ? 'backpressure'
           : shouldDeferForBudget
@@ -316,7 +344,7 @@ export class LeadIngestionService {
   }
 
   runBotDeferred({ candidate, parsed, requestId, tenantId, elapsed, reason = 'flag', activeExecutions = activeBotExecutions }) {
-    if (deferredBotQueue.length >= WEBHOOK_DEFER_QUEUE_MAX) {
+    if (deferredBotQueue.length >= this.config.deferQueueMax) {
       const dropped = deferredBotQueue.shift();
       log({
         level: 'error',
@@ -326,7 +354,7 @@ export class LeadIngestionService {
         meta: {
           candidateId: candidate.id,
           queueDepth: deferredBotQueue.length,
-          queueMax: WEBHOOK_DEFER_QUEUE_MAX,
+          queueMax: this.config.deferQueueMax,
           droppedCandidateId: dropped?.candidate?.id || null,
         },
       });
@@ -339,10 +367,10 @@ export class LeadIngestionService {
       meta: {
         candidateId: candidate.id,
         elapsedMs: elapsed,
-        syncBudgetMs: WEBHOOK_SYNC_BUDGET_MS,
+        syncBudgetMs: this.config.syncBudgetMs,
         reason,
         activeExecutions,
-        maxConcurrency: BOT_ENGINE_MAX_CONCURRENCY,
+        maxConcurrency: this.config.botMaxConcurrency,
         queueDepth: deferredBotQueue.length,
       },
     });
@@ -361,7 +389,7 @@ export class LeadIngestionService {
         return;
       }
 
-      if (activeBotExecutions >= BOT_ENGINE_MAX_CONCURRENCY) {
+      if (activeBotExecutions >= this.config.botMaxConcurrency) {
         setTimeout(drainLoop, 1);
         return;
       }
@@ -401,13 +429,13 @@ export class LeadIngestionService {
       module: 'lead-ingestion',
       requestId,
       operation: 'webhook_ingestion_bot',
-      warnThresholdMs: WEBHOOK_BOT_STAGE_WARN_MS,
+      warnThresholdMs: this.config.botStageWarnMs,
       extraMeta: { tenantId, candidateId: candidate.id, deferred },
     });
 
     const botResult = await withBotExecutionSlot(async () => runWithTimeout({
       promise: this.runBotEngine(client, candidate, parsed.text, parsed.payloadId),
-      timeoutMs: BOT_ENGINE_HARD_TIMEOUT_MS,
+      timeoutMs: this.config.botHardTimeoutMs,
       onTimeout: async () => {
         log({
           level: 'error',
@@ -416,7 +444,7 @@ export class LeadIngestionService {
           requestId,
           meta: {
             candidateId: candidate.id,
-            timeoutMs: BOT_ENGINE_HARD_TIMEOUT_MS,
+            timeoutMs: this.config.botHardTimeoutMs,
             deferred,
           },
         });

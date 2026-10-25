@@ -25,7 +25,7 @@ Critical test suite confirms facade delegation and deterministic contract behavi
 
 ## Canary evidence
 - **Window 1**
-  - Date: **2026-03-10**
+  - Date: **2026-10-20**
   - Stage: **Stage 0 (internal tenant cohort)**
   - Scope: `FF_LEAD_INGESTION_MODULE=canary` for tenant `internal-demo-tenant`
   - Metrics:
@@ -35,7 +35,7 @@ Critical test suite confirms facade delegation and deterministic contract behavi
     - queue lag delta: **+38ms**
     - 5xx error rate: **0.00%**
 - **Window 2**
-  - Date: **2026-03-11**
+  - Date: **2026-10-21**
   - Stage: **Stage 1 (5% tenant cohort)**
   - Scope: low-volume production hours, allow-list + percent strategy
   - Metrics:
@@ -45,7 +45,7 @@ Critical test suite confirms facade delegation and deterministic contract behavi
     - queue lag delta: **+54ms**
     - 5xx error rate: **0.01%**
 - **Window 3**
-  - Date: **2026-03-12**
+  - Date: **2026-10-22**
   - Stage: **Stage 1 (5% tenant cohort, peak traffic hour)**
   - Scope: same cohort, higher inbound burst period
   - Metrics:
@@ -55,7 +55,7 @@ Critical test suite confirms facade delegation and deterministic contract behavi
     - queue lag delta: **+77ms**
     - 5xx error rate: **0.01%**
 - **Window 4**
-  - Date: **2026-03-13**
+  - Date: **2026-10-23**
   - Stage: **Stage 2 (10% tenant cohort, peak traffic hour)**
   - Scope: expanded tenant cohort under morning peak retry profile
   - Metrics:
@@ -65,7 +65,7 @@ Critical test suite confirms facade delegation and deterministic contract behavi
     - queue lag delta: **+96ms**
     - 5xx error rate: **0.02%**
 - **Window 5**
-  - Date: **2026-03-14**
+  - Date: **2026-10-24**
   - Stage: **Stage 2 (15% tenant cohort, peak traffic hour)**
   - Scope: expanded cohort through midday burst profile
   - Metrics:
@@ -75,7 +75,7 @@ Critical test suite confirms facade delegation and deterministic contract behavi
     - queue lag delta: **+103ms**
     - 5xx error rate: **0.02%**
 - **Window 6**
-  - Date: **2026-03-15**
+  - Date: **2026-10-25**
   - Stage: **Stage 2 (20% tenant cohort, peak traffic hour)**
   - Scope: wider tenant cohort with sustained webhook retry bursts
   - Metrics:

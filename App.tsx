@@ -54,7 +54,7 @@ export default function App() {
           if (parts.length > 1 && parts[1].trim() !== '') setShowcaseToken(decodeURIComponent(parts[1]));
           return;
       }
-      const token = localStorage.getItem('uber_fleet_auth_token');
+      const token = localStorage.getItem('encho_auth_token') || localStorage.getItem('uber_fleet_auth_token');
       if (token) {
           setAuthToken(token);
           setIsAuthenticated(true);
@@ -127,42 +127,6 @@ export default function App() {
       };
   }, [isAuthenticated, userProfile]);
 
-  useEffect(() => {
-      if (dataSource !== 'live' || !isAuthenticated || isEmergencyMode) return;
-
-      let failedAttempts = 0;
-      const triggerCron = async () => {
-          try {
-              const response = await fetch(buildApiUrl('/api/cron/process-queue'), {
-                  headers: { 'Authorization': `Bearer ${localStorage.getItem('uber_fleet_auth_token')}` }
-              });
-
-              if (!response.ok) {
-                  failedAttempts += 1;
-                  if (failedAttempts >= 3) {
-                      console.warn('[Cron Heartbeat] queue processor unhealthy', response.status);
-                  }
-                  return;
-              }
-
-              reportUiRecovery('polling', '/api/cron/process-queue');
-              failedAttempts = 0;
-          } catch(e) {
-              const streak = reportUiFailure({
-                channel: 'polling',
-                endpoint: '/api/cron/process-queue',
-                error: e,
-                notifyUser: (message) => addNotification({ type: 'warning', title: 'Queue Heartbeat Degraded', message }),
-                notifyAdmin: (message) => console.warn('[admin.notify]', message)
-              });
-              failedAttempts = streak;
-          }
-      };
-
-      const interval = setInterval(triggerCron, 10000);
-      triggerCron();
-      return () => clearInterval(interval);
-  }, [dataSource, isAuthenticated, isEmergencyMode]);
 
   const changeDataSource = (mode: 'mock' | 'live') => {
       setDataSource(mode);

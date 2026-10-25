@@ -42,7 +42,7 @@ export const DriverExcelReport: React.FC<DriverExcelReportProps> = ({ isLiveMode
 
   const getCurrentUserScope = () => {
     try {
-      const token = localStorage.getItem('uber_fleet_auth_token') || '';
+      const token = localStorage.getItem('encho_auth_token') || localStorage.getItem('uber_fleet_auth_token') || '';
       const payload = token.split('.')[1];
       if (!payload) return 'anonymous';
       const parsed = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));

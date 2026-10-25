@@ -33,7 +33,7 @@ const resolveProxyUploadMaxBytes = () => {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_PROXY_UPLOAD_MAX_BYTES;
 };
 
-let authToken: string | null = localStorage.getItem('uber_fleet_auth_token');
+let authToken: string | null = localStorage.getItem('encho_auth_token') || localStorage.getItem('uber_fleet_auth_token');
 let driversEtag: string | null = null;
 let driversSnapshotCache: Driver[] | null = null;
 
@@ -61,11 +61,13 @@ interface SubscribeToUpdatesOptions {
 
 export const setAuthToken = (token: string) => {
     authToken = token;
+    localStorage.setItem('encho_auth_token', token);
     localStorage.setItem('uber_fleet_auth_token', token);
 };
 
 export const clearAuthToken = () => {
     authToken = null;
+    localStorage.removeItem('encho_auth_token');
     localStorage.removeItem('uber_fleet_auth_token');
 };
 

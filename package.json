@@ -2,7 +2,7 @@
   "name": "uber-fleet-recruiter",
   "version": "1.0.0",
   "type": "module",
-  "description": "WhatsApp Recruitment Automation for Uber Fleet",
+  "description": "Encho Space — WhatsApp Enterprise Leads Automation Platform",
   "main": "server.ts",
   "scripts": {
     "start": "node --import tsx server.ts",
@@ -10,6 +10,7 @@
     "lint": "tsc --noEmit",
     "build": "vite build",
     "preview": "vite preview",
+    "db:migrate": "node --import tsx scripts/migrate.ts",
     "test:critical": "node --test tests/critical-flows.test.js",
     "test:smoke": "node scripts/run-smoke-checks.js",
     "test:rollback": "node scripts/run-rollback-validation.js",

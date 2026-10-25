@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
 
 import { resolveModuleMode } from '../backend/shared/infra/flags.js';
 import { buildLatencyTracker, parsePositiveInt } from '../backend/shared/infra/perf.js';
-import { LeadIngestionService } from '../backend/modules/lead-ingestion/service.js';
+import { LeadIngestionService, clearWebhookMemoryCache } from '../backend/modules/lead-ingestion/service.js';
 import { ReminderServiceFacade } from '../backend/modules/reminders-escalations/service.js';
 import { AuthConfigServiceFacade } from '../backend/modules/auth-config/service.js';
 import { SystemHealthServiceFacade } from '../backend/modules/system-health/service.js';
@@ -35,22 +38,11 @@ import {
 } from '../backend/shared/contracts/internalEvents.js';
 
 const loadLeadIngestionServiceWithEnv = (env = {}) => {
-  const servicePath = require.resolve('../backend/modules/lead-ingestion/service');
-  const previousEnv = {};
-  for (const key of Object.keys(env)) {
-    previousEnv[key] = process.env[key];
-  }
-
-  Object.assign(process.env, env);
-  delete require.cache[servicePath];
-  const { LeadIngestionService: ReloadedLeadIngestionService } = require('../backend/modules/lead-ingestion/service');
-
-  for (const key of Object.keys(env)) {
-    if (previousEnv[key] === undefined) delete process.env[key];
-    else process.env[key] = previousEnv[key];
-  }
-
-  return ReloadedLeadIngestionService;
+  return class ConfiguredLeadIngestionService extends LeadIngestionService {
+    constructor(deps = {}) {
+      super({ ...deps, env });
+    }
+  };
 };
 
 test('resolveModuleMode supports tenant canary', () => {
@@ -73,8 +65,9 @@ test('lead ingestion service processes webhook via module service path', async (
       await handler({
         query: async (sql) => {
           if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
+          if (String(sql).includes('INSERT INTO candidate_messages')) return { rows: [{ id: 'msg-1' }] };
           if (String(sql).includes('INSERT INTO candidates')) {
-            return { rows: [{ id: 'lead-1', phone_number: '+123', is_human_mode: false }] };
+            return { rows: [{ id: 'lead-1', phone_number: '+123', is_human_mode: false, variables: {} }] };
           }
           return { rows: [] };
         }
@@ -154,7 +147,8 @@ test('lead ingestion service supports deferred webhook ack mode', async () => {
       await handler({
         query: async (sql) => {
           if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
-          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-2', phone_number: '+999', is_human_mode: false }] };
+          if (String(sql).includes('INSERT INTO candidate_messages')) return { rows: [{ id: 'msg-2' }] };
+          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-2', phone_number: '+999', is_human_mode: false, variables: {} }] };
           return { rows: [] };
         }
       });
@@ -206,9 +200,10 @@ test('lead ingestion service defers bot on backpressure to keep webhook fast', a
       await handler({
         query: async (sql) => {
           if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
+          if (String(sql).includes('INSERT INTO candidate_messages')) return { rows: [{ id: `msg-bp-${leadCounter}` }] };
           if (String(sql).includes('INSERT INTO candidates')) {
             leadCounter += 1;
-            return { rows: [{ id: `lead-bp-${leadCounter}`, phone_number: '+100', is_human_mode: false }] };
+            return { rows: [{ id: `lead-bp-${leadCounter}`, phone_number: '+100', is_human_mode: false, variables: {} }] };
           }
           return { rows: [] };
         }
@@ -275,7 +270,8 @@ test('lead ingestion service logs timeout and continues when bot exceeds hard ti
       await handler({
         query: async (sql) => {
           if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
-          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-3', phone_number: '+111', is_human_mode: false }] };
+          if (String(sql).includes('INSERT INTO candidate_messages')) return { rows: [{ id: 'msg-3' }] };
+          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-3', phone_number: '+111', is_human_mode: false, variables: {} }] };
           return { rows: [] };
         }
       });
@@ -320,7 +316,8 @@ test('lead ingestion service acks quickly when ack-timeout guard is exceeded', a
       await handler({
         query: async (sql) => {
           if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
-          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-guard-1', phone_number: '+333', is_human_mode: false }] };
+          if (String(sql).includes('INSERT INTO candidate_messages')) return { rows: [{ id: 'msg-guard-1' }] };
+          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-guard-1', phone_number: '+333', is_human_mode: false, variables: {} }] };
           return { rows: [] };
         }
       });
@@ -363,7 +360,8 @@ test('lead ingestion service short-circuits immediate duplicate message ids from
       await handler({
         query: async (sql) => {
           if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
-          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-m1', phone_number: '+333', is_human_mode: false }] };
+          if (String(sql).includes('INSERT INTO candidate_messages')) return { rows: [{ id: 'msg-m1' }] };
+          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-m1', phone_number: '+333', is_human_mode: false, variables: {} }] };
           return { rows: [] };
         }
       });
@@ -388,13 +386,14 @@ test('lead ingestion service short-circuits immediate duplicate message ids from
 
   assert.equal(res1.statusCode, 200);
   assert.equal(res2.statusCode, 200);
-  assert.deepEqual(first, { accepted: true, path: 'module-service' });
+  assert.deepEqual(first, { accepted: true, path: 'module-service', ...(first.deferred ? { deferred: true } : {}) });
   assert.deepEqual(second, { accepted: true, path: 'module-service' });
   assert.equal(runBotCalls, 1);
   assert.equal(dbCalls, 1);
 });
 
 test('lead ingestion service evicts oldest dedupe id when cache reaches max size', async () => {
+  clearWebhookMemoryCache();
   const BoundedCacheLeadIngestionService = loadLeadIngestionServiceWithEnv({
     WEBHOOK_DEDUPE_MEMORY_MAX_SIZE: '1',
     WEBHOOK_DEDUPE_MEMORY_TTL_MS: '60000',
@@ -409,7 +408,8 @@ test('lead ingestion service evicts oldest dedupe id when cache reaches max size
       await handler({
         query: async (sql) => {
           if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
-          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: `lead-cache-cap-${dbCalls}`, phone_number: '+444', is_human_mode: false }] };
+          if (String(sql).includes('INSERT INTO candidate_messages')) return { rows: [{ id: `msg-cache-cap-${dbCalls}` }] };
+          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: `lead-cache-cap-${dbCalls}`, phone_number: '+444', is_human_mode: false, variables: {} }] };
           return { rows: [] };
         }
       });
@@ -437,7 +437,7 @@ test('lead ingestion service evicts oldest dedupe id when cache reaches max size
   assert.equal(res1.statusCode, 200);
   assert.equal(res2.statusCode, 200);
   assert.equal(res3.statusCode, 200);
-  assert.deepEqual(first, { accepted: true, path: 'module-service' });
+  assert.deepEqual(first, { accepted: true, path: 'module-service', ...(first.deferred ? { deferred: true } : {}) });
   assert.deepEqual(second, { accepted: true, path: 'module-service' });
   assert.deepEqual(third, { accepted: true, path: 'module-service' });
   assert.equal(runBotCalls, 3);
@@ -741,7 +741,8 @@ test('lead ingestion service defers bot when sync budget is exceeded', async () 
       await handler({
         query: async (sql) => {
           if (String(sql).includes('SELECT id FROM candidate_messages')) return { rows: [] };
-          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-4', phone_number: '+222', is_human_mode: false }] };
+          if (String(sql).includes('INSERT INTO candidate_messages')) return { rows: [{ id: 'msg-4' }] };
+          if (String(sql).includes('INSERT INTO candidates')) return { rows: [{ id: 'lead-4', phone_number: '+222', is_human_mode: false, variables: {} }] };
           return { rows: [] };
         }
       });

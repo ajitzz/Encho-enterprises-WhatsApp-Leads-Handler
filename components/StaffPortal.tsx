@@ -444,6 +444,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           return Array.from(merged.values());
         });
         setLoading(false);
+        // Instant real-time sync of role-scoped pool/my views when server pushes updates
+        refreshOwnedLeadViews();
       },
       {
         driverId: selectedLead?.id,
@@ -452,7 +454,7 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       }
     );
     return () => unsubscribe();
-  }, [selectedLead?.id]);
+  }, [selectedLead?.id, refreshOwnedLeadViews]);
 
   const refreshOwnedLeadViews = React.useCallback(async () => {
     try {
@@ -478,7 +480,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
   useEffect(() => {
     refreshOwnedLeadViews();
-    const timer = setInterval(refreshOwnedLeadViews, 15000);
+    // Relaxed fallback interval: SSE stream handles instant real-time sync
+    const timer = setInterval(refreshOwnedLeadViews, 60000);
     return () => clearInterval(timer);
   }, [refreshOwnedLeadViews]);
 
