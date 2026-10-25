@@ -94,13 +94,25 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
   const isWindowActive = driver ? (Date.now() - driver.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
+  const loadMessages = async (driverId: string) => {
+      try {
+          const msgs = await liveApiService.getDriverMessages(driverId);
+          if (Array.isArray(msgs)) {
+              setLocalMessages(msgs);
+          }
+      } catch (e: any) {
+          console.warn('[ChatDrawer] Failed to load messages:', e?.message || e);
+      }
+  };
+
   useEffect(() => {
     if (driver) {
         setLocalMessages(driver.messages || []);
+        loadMessages(driver.id);
         loadDocuments(driver.id);
         loadScheduledMessages(driver.id);
     }
-  }, [driver]);
+  }, [driver?.id]);
 
   useEffect(() => {
       if (!driver) return;

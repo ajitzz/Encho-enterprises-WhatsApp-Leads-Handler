@@ -254,8 +254,11 @@ export const liveApiService = {
 
           try {
               setConnectionState('connecting');
-              const tokenQuery = authToken ? `?token=${encodeURIComponent(authToken)}` : '';
-              eventSource = new EventSource(buildApiUrl(`/api/updates/stream${tokenQuery}`));
+              const params = new URLSearchParams();
+              if (authToken) params.set('token', authToken);
+              if (driverId) params.set('driverId', driverId);
+              const queryString = params.toString() ? `?${params.toString()}` : '';
+              eventSource = new EventSource(buildApiUrl(`/api/updates/stream${queryString}`));
 
               eventSource.onopen = () => {
                   reconnectAttempts = 0;
