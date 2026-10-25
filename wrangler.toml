@@ -8,3 +8,4 @@ not_found_handling = "single-page-application"
 
 [vars]
 ALLOWED_ORIGINS = "*"
+BACKEND_API_ORIGIN = "https://encho-enterprises-whatsapp-leads-handler-q7ac.onrender.com"
