@@ -5129,33 +5129,13 @@ const handleDebugStatusLegacy = async (req, res) => {
     res.json(status);
 };
 
-const isValidVerifyToken = (token: any): boolean => {
-    if (!token || typeof token !== 'string') return false;
-    const allowed = [
-        process.env.VERIFY_TOKEN,
-        process.env.WHATSAPP_VERIFY_TOKEN,
-        process.env.META_VERIFY_TOKEN,
-        process.env.WEBHOOK_VERIFY_TOKEN,
-        'uber_fleet_verify_token'
-    ].filter(Boolean) as string[];
-    return allowed.includes(token);
-};
-
-const handleWebhookVerify = (req: any, res: any) => {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
-
-    if (mode === 'subscribe' && isValidVerifyToken(token)) {
-        console.log('[Webhook Verification] Successfully verified Meta webhook with challenge token.');
-        return res.status(200).send(challenge);
+apiRouter.get('/webhook', (req, res) => {
+    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
+        res.status(200).send(req.query['hub.challenge']);
+    } else {
+        res.sendStatus(403);
     }
-    console.warn('[Webhook Verification] Rejected verification attempt. Received token:', token);
-    return res.sendStatus(403);
-};
-
-apiRouter.get('/webhook', handleWebhookVerify);
-app.get('/webhook', handleWebhookVerify);
+});
 
 const processWebhookLegacy = async ({ body, req, res }) => {
     if (!body.object) { res.sendStatus(404); return; }
@@ -5279,6 +5259,7 @@ const leadIngestionFacade = buildLeadIngestionFacade({
     executeWithRetry,
     runBotEngine,
     triggerReportingSyncDeferred,
+    notifyUpdates,
 });
 
 const verifyMetaWebhookSignature = (req: any): boolean => {
@@ -5302,7 +5283,7 @@ const verifyMetaWebhookSignature = (req: any): boolean => {
     }
 };
 
-const handleWebhookPost = async (req: any, res: any) => {
+apiRouter.post('/webhook', async (req, res) => {
     if (!verifyMetaWebhookSignature(req)) {
         structuredLog({
             level: 'error',
@@ -5362,10 +5343,7 @@ const handleWebhookPost = async (req: any, res: any) => {
         meta: { tenantId, mode, emergencyFallbackEnabled: true },
     });
     await processWebhookLegacy({ body: req.body, req, res });
-};
-
-apiRouter.post('/webhook', handleWebhookPost);
-app.post('/webhook', handleWebhookPost);
+});
 
 const handleAuthGoogleLegacy = async (req, res) => {
     try {

@@ -99,12 +99,13 @@ const withBotExecutionSlot = async (handler) => {
 };
 
 export class LeadIngestionService {
-  constructor({ legacyProcessor, withDb, executeWithRetry, runBotEngine, triggerReportingSyncDeferred, env = {} } = {}) {
+  constructor({ legacyProcessor, withDb, executeWithRetry, runBotEngine, triggerReportingSyncDeferred, notifyUpdates, env = {} } = {}) {
     this.legacyProcessor = legacyProcessor;
     this.withDb = withDb;
     this.executeWithRetry = executeWithRetry;
     this.runBotEngine = runBotEngine;
     this.triggerReportingSyncDeferred = triggerReportingSyncDeferred;
+    this.notifyUpdates = notifyUpdates;
     this.env = env;
   }
 
@@ -301,6 +302,9 @@ export class LeadIngestionService {
       }
 
       const candidate = state.candidate;
+      if (typeof this.notifyUpdates === 'function') {
+        this.notifyUpdates(candidate.id);
+      }
       const hydratedCandidate = await this.ensureCandidateHydrated({ client, candidate });
 
       // --- AUTO DISTRIBUTION LOGIC ---
@@ -329,6 +333,9 @@ export class LeadIngestionService {
           });
         } else {
           await this.runBotWithinBudget({ client, candidate: hydratedCandidate, parsed, requestId, tenantId });
+        }
+        if (typeof this.notifyUpdates === 'function') {
+          this.notifyUpdates(hydratedCandidate.id);
         }
       }
 

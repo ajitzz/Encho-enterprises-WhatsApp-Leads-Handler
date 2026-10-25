@@ -7,6 +7,7 @@ export const buildLeadIngestionFacade = ({
   executeWithRetry,
   runBotEngine,
   triggerReportingSyncDeferred,
+  notifyUpdates,
 }) => {
   const assignmentService = new LeadAssignmentService({
     withDb,
@@ -20,6 +21,7 @@ export const buildLeadIngestionFacade = ({
     runBotEngine,
     triggerReportingSyncDeferred,
     assignmentService,
+    notifyUpdates,
   });
 
   return async ({ body, req, res, context }) => {

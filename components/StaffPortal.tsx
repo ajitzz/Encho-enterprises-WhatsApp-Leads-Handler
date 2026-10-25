@@ -456,6 +456,31 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     return () => unsubscribe();
   }, [selectedLead?.id, refreshOwnedLeadViews]);
 
+  // Infallible live refresh while viewing lead chat in Staff Portal
+  useEffect(() => {
+    if (!selectedLead?.id || view !== 'detail') return;
+
+    const liveInterval = setInterval(async () => {
+      try {
+        const msgs = await liveApiService.getDriverMessages(selectedLead.id, 50);
+        if (Array.isArray(msgs)) {
+          setLeadMessages(prev => {
+            if (msgs.length === 0) return prev;
+            if (prev.length !== msgs.length) return msgs;
+            const prevLast = prev[prev.length - 1];
+            const newLast = msgs[msgs.length - 1];
+            if (prevLast?.id !== newLast?.id || prevLast?.status !== newLast?.status) {
+              return msgs;
+            }
+            return prev;
+          });
+        }
+      } catch {}
+    }, 2500);
+
+    return () => clearInterval(liveInterval);
+  }, [selectedLead?.id, view]);
+
   const refreshOwnedLeadViews = React.useCallback(async () => {
     try {
       const [my, pool] = await Promise.all([

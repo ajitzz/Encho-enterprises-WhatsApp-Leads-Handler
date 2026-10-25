@@ -98,7 +98,16 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       try {
           const msgs = await liveApiService.getDriverMessages(driverId);
           if (Array.isArray(msgs)) {
-              setLocalMessages(msgs);
+              setLocalMessages(prev => {
+                  if (msgs.length === 0) return prev;
+                  if (prev.length !== msgs.length) return msgs;
+                  const prevLast = prev[prev.length - 1];
+                  const newLast = msgs[msgs.length - 1];
+                  if (prevLast?.id !== newLast?.id || prevLast?.status !== newLast?.status) {
+                      return msgs;
+                  }
+                  return prev;
+              });
           }
       } catch (e: any) {
           console.warn('[ChatDrawer] Failed to load messages:', e?.message || e);
@@ -114,18 +123,32 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     }
   }, [driver?.id]);
 
+  // High-frequency live poll safety net while chat drawer is open
+  useEffect(() => {
+    if (!driver?.id) return;
+
+    const livePollTimer = setInterval(() => {
+      loadMessages(driver.id);
+    }, 2500);
+
+    return () => clearInterval(livePollTimer);
+  }, [driver?.id]);
+
   useEffect(() => {
       if (!driver) return;
 
       const unsubscribe = liveApiService.subscribeToUpdates(() => {}, {
           driverId: driver.id,
-          pollIntervalMs: 12000,
+          pollIntervalMs: 3000,
           onMessages: (latestMsgs) => {
+              if (!Array.isArray(latestMsgs) || latestMsgs.length === 0) return;
               setLocalMessages(prev => {
-                  if (latestMsgs.length === 0) return prev;
-                  const newLastId = latestMsgs[latestMsgs.length - 1].id;
-                  const prevLastId = prev.length > 0 ? prev[prev.length - 1].id : '';
-                  if (latestMsgs.length !== prev.length || newLastId !== prevLastId) return latestMsgs;
+                  if (prev.length !== latestMsgs.length) return latestMsgs;
+                  const prevLast = prev[prev.length - 1];
+                  const newLast = latestMsgs[latestMsgs.length - 1];
+                  if (prevLast?.id !== newLast?.id || prevLast?.status !== newLast?.status) {
+                      return latestMsgs;
+                  }
                   return prev;
               });
           },
@@ -302,7 +325,25 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             setShowSchedule(false); setScheduleTime('');
             await loadScheduledMessages(driver.id); 
         } else {
-            await onSendMessage(replyText, selectedMedia ? { mediaUrl: selectedMedia.url, mediaType: selectedMedia.type } : undefined);
+            const outgoingText = replyText;
+            const outgoingMedia = selectedMedia ? { mediaUrl: selectedMedia.url, mediaType: selectedMedia.type } : undefined;
+            const optimisticMsg: Message = {
+                id: `opt-${Date.now()}`,
+                sender: 'agent',
+                senderType: 'staff',
+                text: outgoingText,
+                imageUrl: outgoingMedia?.mediaType === 'image' ? outgoingMedia.mediaUrl : undefined,
+                videoUrl: outgoingMedia?.mediaType === 'video' ? outgoingMedia.mediaUrl : undefined,
+                documentUrl: outgoingMedia?.mediaType === 'document' ? outgoingMedia.mediaUrl : undefined,
+                audioUrl: outgoingMedia?.mediaType === 'audio' ? outgoingMedia.mediaUrl : undefined,
+                timestamp: Date.now(),
+                type: (outgoingMedia?.mediaType as any) || 'text',
+                status: 'sent'
+            };
+            setLocalMessages(prev => [...prev, optimisticMsg]);
+
+            await onSendMessage(outgoingText, outgoingMedia);
+            await loadMessages(driver.id);
         }
         setReplyText('');
         setSelectedMedia(null);
@@ -325,6 +366,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
           mediaUrl: uploadResult.url, 
           mediaType: 'audio'
         });
+        await loadMessages(driver.id);
       }
     } catch (error) {
       console.error('Failed to send voice recording:', error);
