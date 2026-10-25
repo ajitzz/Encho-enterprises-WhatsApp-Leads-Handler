@@ -5545,7 +5545,14 @@ apiRouter.get('/updates/stream', async (req, res) => {
                 const messagesByDriver = {};
                 if (driverId) {
                     const [messagesRes, scheduledRes] = await Promise.all([
-                        client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [driverId]),
+                        client.query(`
+                            SELECT * FROM candidate_messages 
+                            WHERE candidate_id = $1 
+                              AND (type IS NULL OR type != 'variable_capture')
+                              AND (direction IS NULL OR direction != 'system')
+                            ORDER BY created_at DESC 
+                            LIMIT 50
+                        `, [driverId]),
                         client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed'])
                     ]);
 
@@ -5708,7 +5715,14 @@ apiRouter.patch('/drivers/:id/visibility', async (req, res) => {
 apiRouter.get('/drivers/:id/messages', async (req, res) => {
     try {
         await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM candidate_messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 50', [req.params.id]);
+            const r = await client.query(`
+                SELECT * FROM candidate_messages 
+                WHERE candidate_id = $1 
+                  AND (type IS NULL OR type != 'variable_capture')
+                  AND (direction IS NULL OR direction != 'system')
+                ORDER BY created_at DESC 
+                LIMIT 50
+            `, [req.params.id]);
             const msgs = await Promise.all(r.rows.map(async row => {
                 let text = row.text;
                 let imageUrl = null;

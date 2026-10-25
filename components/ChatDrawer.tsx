@@ -287,9 +287,10 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const filteredMessages = localMessages.filter(msg => 
-    !searchQuery || msg.text?.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredMessages = localMessages.filter(msg => {
+    if ((msg as any).type === 'variable_capture' || (msg as any).direction === 'system') return false;
+    return !searchQuery || msg.text?.toLowerCase().includes(searchQuery.toLowerCase());
+  });
 
   const groupedMessages = filteredMessages.reduce((groups: { [key: string]: Message[] }, message) => {
     const date = new Date(message.timestamp).toLocaleDateString();
@@ -514,6 +515,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                       {msgs.map((msg) => {
                         const media = getMessageMedia(msg);
                         const isOwn = msg.sender !== 'driver';
+                        const textContent = renderMessageText(msg.text);
+
+                        // Suppress empty bubbles that have neither media nor displayable text
+                        if (!media.url && !textContent) {
+                          return null;
+                        }
                         
                         return (
                           <div key={msg.id} className={`flex ${isOwn ? 'justify-end' : 'justify-start'} group`}>
@@ -563,7 +570,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                                 )}
 
                                 <div className="px-4 py-2">
-                                  {renderMessageText(msg.text)}
+                                  {textContent}
                                   <div className={`flex items-center justify-end gap-1.5 mt-1 text-[10px] ${isOwn ? 'text-emerald-100' : 'text-gray-400'}`}>
                                     {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                     {isOwn && (
