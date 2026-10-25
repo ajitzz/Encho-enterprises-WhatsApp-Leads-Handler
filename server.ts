@@ -6608,6 +6608,35 @@ apiRouter.get('/system/meta-send-metrics', async (_req, res) => {
     }
 });
 
+apiRouter.get('/system/whatsapp-account', async (_req, res) => {
+    const phoneId = process.env.PHONE_NUMBER_ID;
+    const token = process.env.META_API_TOKEN;
+    if (!phoneId || !token) {
+        return res.json({
+            configured: false,
+            error: 'PHONE_NUMBER_ID or META_API_TOKEN is not configured in environment variables.',
+        });
+    }
+    try {
+        const response = await getMetaClient().get(`https://graph.facebook.com/v18.0/${phoneId}?fields=display_phone_number,verified_name,quality_rating,code_verification_status`);
+        return res.json({
+            configured: true,
+            phoneNumberId: phoneId,
+            displayPhoneNumber: response.data?.display_phone_number || null,
+            verifiedName: response.data?.verified_name || null,
+            qualityRating: response.data?.quality_rating || null,
+            verificationStatus: response.data?.code_verification_status || null,
+        });
+    } catch (e: any) {
+        return res.json({
+            configured: true,
+            phoneNumberId: phoneId,
+            error: e.response?.data?.error?.message || e.message,
+            hint: 'Verify that META_API_TOKEN is valid and has whatsapp_business_messaging permissions.',
+        });
+    }
+});
+
 apiRouter.all('/', (req, res) => {
     res.status(200).json({
         status: 'online',
