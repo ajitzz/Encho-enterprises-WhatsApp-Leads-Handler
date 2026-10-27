@@ -1,5 +1,5 @@
 
-import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage, DriverExcelColumn, DriverExcelRow, UserRole } from '../types';
+import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage, DriverExcelColumn, DriverExcelRow, UserRole, CannedResponse, ActiveLeadViewer } from '../types';
 
 // Default to same-origin for Vercel-style rewrites, but allow explicit override for
 // Cloudflare static deployments where API may run on a separate origin.
@@ -677,6 +677,41 @@ export const liveApiService = {
 
   markReminderDone: async (id: string) => {
     return apiRequest(`/api/leads/reminders/${id}/done`, { method: 'POST' });
+  },
+
+  // Agent Collision Detection
+  notifyViewingLead: async (leadId: string): Promise<{ success: boolean; viewers: ActiveLeadViewer[] }> => {
+    return apiRequest<{ success: boolean; viewers: ActiveLeadViewer[] }>(`/api/leads/${leadId}/viewing`, {
+      method: 'POST'
+    });
+  },
+
+  leaveViewingLead: async (leadId: string): Promise<{ success: boolean }> => {
+    return apiRequest<{ success: boolean }>(`/api/leads/${leadId}/leave-viewing`, {
+      method: 'POST'
+    });
+  },
+
+  getLeadViewers: async (leadId: string): Promise<{ viewers: ActiveLeadViewer[] }> => {
+    return apiRequest<{ viewers: ActiveLeadViewer[] }>(`/api/leads/${leadId}/viewers`);
+  },
+
+  // Recruiter Macros & Canned Responses Engine
+  getCannedResponses: async (): Promise<CannedResponse[]> => {
+    return apiRequest<CannedResponse[]>('/api/canned-responses');
+  },
+
+  saveCannedResponse: async (canned: Partial<CannedResponse>): Promise<CannedResponse> => {
+    return apiRequest<CannedResponse>('/api/canned-responses', {
+      method: 'POST',
+      body: JSON.stringify(canned)
+    });
+  },
+
+  deleteCannedResponse: async (id: string): Promise<{ success: boolean; deletedId: string }> => {
+    return apiRequest<{ success: boolean; deletedId: string }>(`/api/canned-responses/${id}`, {
+      method: 'DELETE'
+    });
   },
 
   getDueAlerts: async (): Promise<DueAlertItem[]> => {

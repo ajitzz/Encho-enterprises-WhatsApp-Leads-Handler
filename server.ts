@@ -2707,6 +2707,37 @@ const ensureLeadOpsSchema = async (client) => {
         CREATE INDEX IF NOT EXISTS idx_lead_reviews_manager
         ON lead_reviews(manager_id);
     `);
+
+    // FAANG Lead Management Upgrades: Internal Notes, Canned Responses & Skills
+    await client.query(`ALTER TABLE candidate_messages ADD COLUMN IF NOT EXISTS is_internal BOOLEAN DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS languages TEXT[] DEFAULT ARRAY['english']::TEXT[];`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS vehicle_skills TEXT[] DEFAULT ARRAY['auto', 'cab', 'bike']::TEXT[];`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS max_capacity INTEGER DEFAULT 15;`);
+
+    await client.query(`
+        CREATE TABLE IF NOT EXISTS canned_responses (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            shortcut VARCHAR(50) UNIQUE NOT NULL,
+            title VARCHAR(100) NOT NULL,
+            body TEXT NOT NULL,
+            category VARCHAR(50) DEFAULT 'general',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+    `);
+
+    // Seed default recruitment macros if empty
+    const cannedCount = await client.query('SELECT COUNT(*)::int AS count FROM canned_responses');
+    if ((cannedCount.rows[0]?.count || 0) === 0) {
+        await client.query(`
+            INSERT INTO canned_responses (shortcut, title, body, category) VALUES
+            ('dl', 'Request Driving Licence', 'Hi {{name}}, please share clear photos of your Driving Licence (front and back) to proceed with your onboarding.', 'documents'),
+            ('rc', 'Request Vehicle RC', 'Hi {{name}}, please share your Vehicle RC copy and insurance certificate so we can verify your vehicle.', 'documents'),
+            ('pay', 'Weekly Payout Details', 'Hi {{name}}, your weekly payout will be credited directly to your bank account every Tuesday, plus a ₹2,000 joining bonus after your first 15 completed trips.', 'incentives'),
+            ('location', 'Request Live Location', 'Hi {{name}}, please share your current WhatsApp live location so we can allocate you to the nearest fleet hub.', 'onboarding'),
+            ('schedule', 'Verification Session Scheduled', 'Hi {{name}}, your document verification session has been scheduled. Please visit our hub with your original documents.', 'scheduling')
+            ON CONFLICT (shortcut) DO NOTHING;
+        `);
+    }
 };
 
 const withSchemaRetry = async (client, operation) => {
@@ -4712,6 +4743,141 @@ apiRouter.get('/leads/:id/activity', authMiddleware, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- AGENT COLLISION DETECTION SYSTEM ---
+interface ActiveViewerEntry {
+    staffId: string;
+    staffName: string;
+    role: string;
+    lastPing: number;
+}
+const activeLeadViewers = new Map<string, Map<string, ActiveViewerEntry>>();
+
+function cleanStaleLeadViewers(leadId?: string) {
+    const now = Date.now();
+    const STALE_TTL = 45000; // 45 seconds
+    if (leadId) {
+        const viewersMap = activeLeadViewers.get(leadId);
+        if (viewersMap) {
+            for (const [staffId, viewer] of viewersMap.entries()) {
+                if (now - viewer.lastPing > STALE_TTL) {
+                    viewersMap.delete(staffId);
+                }
+            }
+            if (viewersMap.size === 0) activeLeadViewers.delete(leadId);
+        }
+    } else {
+        for (const [id, viewersMap] of activeLeadViewers.entries()) {
+            for (const [staffId, viewer] of viewersMap.entries()) {
+                if (now - viewer.lastPing > STALE_TTL) {
+                    viewersMap.delete(staffId);
+                }
+            }
+            if (viewersMap.size === 0) activeLeadViewers.delete(id);
+        }
+    }
+}
+
+apiRouter.post('/leads/:id/viewing', authMiddleware, async (req: any, res: any) => {
+    try {
+        const leadId = req.params.id;
+        const staffId = req.user?.staffId || req.user?.userId || 'unknown';
+        const staffName = req.user?.name || req.user?.username || 'Team Member';
+        const role = req.user?.role || 'staff';
+
+        cleanStaleLeadViewers(leadId);
+
+        if (!activeLeadViewers.has(leadId)) {
+            activeLeadViewers.set(leadId, new Map());
+        }
+        const viewersMap = activeLeadViewers.get(leadId)!;
+        viewersMap.set(staffId, {
+            staffId,
+            staffName,
+            role,
+            lastPing: Date.now()
+        });
+
+        const otherViewers = Array.from(viewersMap.values()).filter(v => v.staffId !== staffId);
+        res.json({ success: true, viewers: otherViewers });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+apiRouter.post('/leads/:id/leave-viewing', authMiddleware, async (req: any, res: any) => {
+    try {
+        const leadId = req.params.id;
+        const staffId = req.user?.staffId || req.user?.userId || 'unknown';
+        const viewersMap = activeLeadViewers.get(leadId);
+        if (viewersMap) {
+            viewersMap.delete(staffId);
+            if (viewersMap.size === 0) activeLeadViewers.delete(leadId);
+        }
+        res.json({ success: true });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+apiRouter.get('/leads/:id/viewers', authMiddleware, async (req: any, res: any) => {
+    try {
+        const leadId = req.params.id;
+        const staffId = req.user?.staffId || req.user?.userId || 'unknown';
+        cleanStaleLeadViewers(leadId);
+        const viewersMap = activeLeadViewers.get(leadId);
+        const viewers = viewersMap ? Array.from(viewersMap.values()).filter(v => v.staffId !== staffId) : [];
+        res.json({ viewers });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- CANNED RESPONSES & RECRUITER MACROS ENGINE ---
+apiRouter.get('/canned-responses', authMiddleware, async (_req: any, res: any) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query('SELECT id, shortcut, title, body, category, created_at FROM canned_responses ORDER BY category, shortcut ASC');
+            res.json(r.rows);
+        });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+apiRouter.post('/canned-responses', authMiddleware, requireRole('admin', 'manager'), async (req: any, res: any) => {
+    try {
+        const { shortcut, title, body, category } = req.body;
+        if (!shortcut || !title || !body) {
+            return res.status(400).json({ error: 'Shortcut, title, and body are required' });
+        }
+        const cleanShortcut = String(shortcut).trim().toLowerCase().replace(/^\//, '');
+        await withDb(async (client) => {
+            const r = await client.query(`
+                INSERT INTO canned_responses (shortcut, title, body, category)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (shortcut) DO UPDATE 
+                SET title = EXCLUDED.title, body = EXCLUDED.body, category = EXCLUDED.category
+                RETURNING *
+            `, [cleanShortcut, title.trim(), body.trim(), (category || 'general').trim()]);
+            res.json(r.rows[0]);
+        });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+apiRouter.delete('/canned-responses/:id', authMiddleware, requireRole('admin', 'manager'), async (req: any, res: any) => {
+    try {
+        await withDb(async (client) => {
+            const r = await client.query('DELETE FROM canned_responses WHERE id = $1 RETURNING id', [req.params.id]);
+            if (r.rows.length === 0) return res.status(404).json({ error: 'Canned response not found' });
+            res.json({ success: true, deletedId: r.rows[0].id });
+        });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 apiRouter.get('/media', async (req, res) => {
     const requestedPath = typeof req.query.path === 'string' ? req.query.path : '/';
 
@@ -5244,10 +5410,12 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                 perf.markStart('lead_upsert');
                 let c = await client.query('SELECT * FROM candidates WHERE phone_number = $1', [from]);
                 let candidate;
+                let isNewLead = false;
                 if (c.rows.length === 0) {
                     const id = crypto.randomUUID();
                     await client.query(`INSERT INTO candidates (id, phone_number, name, stage, last_message, last_message_at, is_human_mode, variables) VALUES ($1, $2, $3, 'New', $4, $5, FALSE, '{}')`, [id, from, name, text, Date.now()]);
                     candidate = { id, phone_number: from, name, stage: 'New', is_human_mode: false };
+                    isNewLead = true;
                 } else {
                     candidate = c.rows[0];
                     await client.query('UPDATE candidates SET last_message = $1, last_message_at = $2 WHERE id = $3', [text, Date.now(), candidate.id]);
@@ -5280,6 +5448,9 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                 );
                 markRecentWebhookMessageId(msg.id);
                 notifyUpdates(candidate.id);
+                if (isNewLead || !candidate.assigned_to) {
+                    await distributeLeadInstantly(candidate.id, client).catch((err: any) => console.error('[Instant Router] Error:', err));
+                }
                 perf.markEnd('inbound_message_insert', { candidateId: candidate.id, messageType });
 
                 if (!candidate.is_human_mode) {
@@ -5645,6 +5816,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
                         videoUrl,
                         documentUrl,
                         audioUrl,
+                        isInternal: Boolean(row.is_internal),
                         timestamp: new Date(row.created_at).getTime(),
                         type: row.type || 'text',
                         status: row.status,
@@ -5719,6 +5891,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
                                 videoUrl,
                                 documentUrl,
                                 audioUrl,
+                                isInternal: Boolean(r.is_internal),
                                 timestamp: new Date(r.created_at).getTime(),
                                 type: r.type || 'text',
                                 status: r.status,
@@ -5947,6 +6120,7 @@ apiRouter.get('/drivers/:id/messages', authMiddleware, async (req: any, res: any
                     videoUrl,
                     documentUrl,
                     audioUrl,
+                    isInternal: Boolean(row.is_internal),
                     timestamp: new Date(row.created_at).getTime(), type: row.type || 'text', status: row.status 
                 };
             }));
@@ -5957,10 +6131,40 @@ apiRouter.get('/drivers/:id/messages', authMiddleware, async (req: any, res: any
 
 apiRouter.post('/drivers/:id/messages', authMiddleware, async (req: any, res: any) => {
     try {
-        const { text, mediaUrl: rawMediaUrl, mediaType: rawMediaType, imageUrl, videoUrl, audioUrl, documentUrl, type: rawType } = req.body;
+        const { text, mediaUrl: rawMediaUrl, mediaType: rawMediaType, imageUrl, videoUrl, audioUrl, documentUrl, type: rawType, isInternal } = req.body;
+        const normalizedText = normalizeTextBody(text);
+
+        // FAANG Supervisor Whisper & Internal Team Notes: Private agent notes never sent to WhatsApp
+        if (isInternal === true) {
+            const cleanNote = normalizedText.trim();
+            if (!cleanNote) return res.status(400).json({ error: 'Internal note text cannot be empty' });
+            
+            await withDb(async (client) => {
+                const c = await client.query('SELECT id FROM candidates WHERE id = $1', [req.params.id]);
+                if (c.rows.length === 0) throw new Error("Candidate not found");
+                const senderRole = req.user?.role || 'staff';
+                const staffId = req.user?.staffId || null;
+                const staffName = req.user?.name || req.user?.username || 'Team Member';
+                
+                await client.query(
+                    `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, sender_type, is_internal, created_at)
+                     VALUES ($1, $2, 'out', $3, 'internal_note', 'sent', $4, TRUE, NOW())`,
+                    [crypto.randomUUID(), req.params.id, cleanNote, senderRole]
+                );
+
+                await client.query(
+                    `INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes)
+                     VALUES ($1, $2, 'internal_note', $3)`,
+                    [req.params.id, staffId, `[${senderRole.toUpperCase()}] ${staffName}: ${cleanNote.slice(0, 100)}`]
+                );
+
+                notifyUpdates(req.params.id);
+            });
+            return res.json({ success: true, isInternal: true });
+        }
+
         const mediaUrl = rawMediaUrl || imageUrl || videoUrl || audioUrl || documentUrl;
         const mediaType = rawMediaType || (imageUrl ? 'image' : (videoUrl ? 'video' : (audioUrl ? 'audio' : (documentUrl ? 'document' : (rawType !== 'text' ? rawType : undefined)))));
-        const normalizedText = normalizeTextBody(text);
         if (!mediaUrl) {
             const trimmed = normalizedText.trim();
             if (!trimmed) return res.status(400).json({ error: 'Text is required when mediaUrl is not provided' });
@@ -6905,7 +7109,58 @@ function startInboundQueueWorker() {
     setInterval(processQueuedInboundBatch, pollIntervalMs);
 }
 
-// --- LEAD AUTO-DISTRIBUTION ---
+// --- LEAD AUTO-DISTRIBUTION & INSTANT EVENT ROUTER ---
+async function distributeLeadInstantly(candidateId: string, client?: any): Promise<boolean> {
+    const execute = async (db: any) => {
+        const settingsRes = await db.query("SELECT value FROM system_settings WHERE key = 'lead_distribution'");
+        const settings = settingsRes.rows[0]?.value || { auto_enabled: false };
+        if (!settings.auto_enabled) return false;
+
+        const candRes = await db.query(`
+            SELECT id, assigned_to, lead_status, vehicle_type, preferred_language 
+            FROM candidates 
+            WHERE id = $1 AND assigned_to IS NULL AND (lead_status IS NULL OR lead_status = 'new')
+            FOR UPDATE SKIP LOCKED
+        `, [candidateId]);
+
+        if (candRes.rows.length === 0) return false;
+
+        const activeStaffRes = await db.query(`
+            SELECT 
+                s.id, 
+                s.last_assigned_at,
+                COALESCE(s.max_capacity, 15) as max_cap,
+                (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) as active_leads
+            FROM staff_members s
+            WHERE s.is_active_for_auto_dist = TRUE 
+              AND s.current_status = 'online'
+              AND s.last_ping_at > NOW() - INTERVAL '2 minutes'
+              AND (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) < COALESCE(s.max_capacity, 15)
+            ORDER BY 
+              (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) ASC,
+              s.last_assigned_at ASC NULLS FIRST
+            LIMIT 1
+        `);
+
+        if (activeStaffRes.rows.length === 0) return false;
+        const bestStaff = activeStaffRes.rows[0];
+
+        await db.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2 AND assigned_to IS NULL", [bestStaff.id, candidateId]);
+        await db.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [bestStaff.id]);
+        await db.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned_instant', 'Lead routed instantly (<500ms) upon inbound webhook')", [candidateId, bestStaff.id]);
+
+        console.log(`[Instant Router] Routed lead ${candidateId} to staff ${bestStaff.id} (Active Workload: ${bestStaff.active_leads})`);
+        notifyUpdates(candidateId);
+        return true;
+    };
+
+    if (client) {
+        return await execute(client);
+    } else {
+        return await withDb(execute);
+    }
+}
+
 async function startLeadAutoDistributor() {
     console.log("Starting Lead Auto-Distributor & SLA Watchdog (PostgreSQL Cluster-Locked)...");
     const DISTRIBUTOR_LOCK_ID = 987654321;
@@ -6940,6 +7195,27 @@ async function startLeadAutoDistributor() {
                             notifyUpdates(revoked.id);
                         }
                         console.log(`[SLA Watchdog] Auto-revoked ${slaRevoked.rows.length} inactive leads back to pool.`);
+                    }
+
+                    // 1b. Human-Mode SLA Watchdog: Auto-unclaim and reset human mode if agent is silent > 30m
+                    const humanModeRevoked = await client.query(`
+                        UPDATE candidates 
+                        SET assigned_to = NULL, lead_status = 'new', is_human_mode = FALSE, last_action_at = NOW()
+                        WHERE assigned_to IS NOT NULL 
+                          AND COALESCE(is_human_mode, FALSE) = TRUE
+                          AND (last_action_at IS NULL OR last_action_at < NOW() - INTERVAL '30 minutes')
+                        RETURNING id, assigned_to
+                    `);
+
+                    if (humanModeRevoked.rows.length > 0) {
+                        for (const revoked of humanModeRevoked.rows) {
+                            await client.query(`
+                                INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes)
+                                VALUES ($1, $2, 'human_mode_sla_revocation', 'Human mode auto-disabled & lead returned to pool due to 30m agent silence')
+                            `, [revoked.id, revoked.assigned_to]);
+                            notifyUpdates(revoked.id);
+                        }
+                        console.log(`[SLA Watchdog] Auto-revoked ${humanModeRevoked.rows.length} abandoned human-mode leads back to pool.`);
                     }
 
                     // 2. Check if auto-distribution is enabled

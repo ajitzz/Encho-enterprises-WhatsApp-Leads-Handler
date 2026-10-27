@@ -187,18 +187,19 @@ export interface BotVersion {
 export interface Message {
   id: string;
   sender: 'system' | 'agent' | 'driver' | 'bot';
-  senderType?: 'bot' | 'staff' | 'driver';
+  senderType?: 'bot' | 'staff' | 'driver' | 'manager' | 'admin';
   text?: string;
   imageUrl?: string;
   videoUrl?: string;
   documentUrl?: string;
   audioUrl?: string;
   timestamp: number;
-  type: 'text' | 'image' | 'video' | 'document' | 'audio' | 'voice' | 'sticker' | 'location' | 'template' | 'interactive' | 'options' | 'video_link' | 'system_error';
+  type: 'text' | 'image' | 'video' | 'document' | 'audio' | 'voice' | 'sticker' | 'location' | 'template' | 'interactive' | 'options' | 'video_link' | 'system_error' | 'internal_note';
   status?: 'sent' | 'delivered' | 'read' | 'failed' | 'processing' | 'sending';
   options?: string[];
   templateName?: string;
   payload?: any;
+  isInternal?: boolean;
 }
 
 export interface Candidate {
@@ -326,4 +327,20 @@ export interface AuditIssue {
 export interface AuditReport {
   isValid: boolean;
   issues: AuditIssue[];
+}
+
+export interface CannedResponse {
+  id: string;
+  shortcut: string;
+  title: string;
+  body: string;
+  category: string;
+  created_at?: string;
+}
+
+export interface ActiveLeadViewer {
+  staffId: string;
+  staffName: string;
+  role: string;
+  lastPing: number;
 }

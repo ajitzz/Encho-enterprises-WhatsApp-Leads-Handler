@@ -37,11 +37,12 @@ import {
   ListFilter,
   TrendingUp,
   AlertTriangle,
-  Eye
+  Eye,
+  Lock
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 import { getLeadScreenshotUploadPath } from '../services/mediaPaths';
-import { Driver, Message } from '../types.ts';
+import { Driver, Message, CannedResponse, ActiveLeadViewer } from '../types.ts';
 import { VoiceRecorder } from './VoiceRecorder.tsx';
 import { ActionCenter } from './ActionCenter.tsx';
 import { CommandCenter } from './CommandCenter.tsx';
@@ -145,6 +146,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [dueAlertQueue, setDueAlertQueue] = useState<DueAlertItem[]>([]);
   const [activeDueAlert, setActiveDueAlert] = useState<DueAlertItem | null>(null);
   const authoritativeLeadsRef = React.useRef<Map<string, any>>(new Map());
+
+  // FAANG Agent Workspace: Collision, Whisper Notes & Recruiter Macros
+  const [activeViewers, setActiveViewers] = useState<ActiveLeadViewer[]>([]);
+  const [isInternalNoteMode, setIsInternalNoteMode] = useState<boolean>(false);
+  const [cannedResponses, setCannedResponses] = useState<CannedResponse[]>([]);
+  const [showMacrosMenu, setShowMacrosMenu] = useState<boolean>(false);
 
   const parseDateValue = (value?: string | number | null) => {
     if (value === undefined || value === null || value === '') return null;
@@ -252,6 +259,17 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
     setIsSending(true);
     try {
+      if (isInternalNoteMode) {
+        // Send as Internal Team Note (Bypasses WhatsApp / Meta)
+        await liveApiService.sendMessage(selectedLead.id, replyText, {
+          isInternal: true
+        });
+        setReplyText('');
+        const messages = await liveApiService.getDriverMessages(selectedLead.id);
+        setLeadMessages(messages);
+        return;
+      }
+
       let mediaUrl = undefined;
       let mediaType = undefined;
 
@@ -278,6 +296,43 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       console.error('Failed to send message:', err);
     } finally {
       setIsSending(false);
+    }
+  };
+
+  const handleSelectMacro = (macro: CannedResponse) => {
+    if (!selectedLead) return;
+    const interpolated = macro.body
+      .replace(/\{\{name\}\}/gi, selectedLead.name || 'Driver')
+      .replace(/\{\{phone\}\}/gi, (selectedLead as any).phone_number || selectedLead.phoneNumber || '');
+    setReplyText(interpolated);
+    setShowMacrosMenu(false);
+  };
+
+  const getLeadSlaBadge = (lead: Driver) => {
+    const status = ((lead as any).lead_status || '').toLowerCase();
+    if (!['claimed', 'assigned'].includes(status)) return null;
+
+    const claimedAt = (lead as any).claimed_at || (lead as any).last_action_at || (lead as any).created_at;
+    if (!claimedAt) return null;
+
+    const elapsedMinutes = Math.floor((Date.now() - new Date(claimedAt).getTime()) / 60000);
+    const TARGET_FRT_MINUTES = 15;
+
+    if (elapsedMinutes > TARGET_FRT_MINUTES) {
+      const overdue = elapsedMinutes - TARGET_FRT_MINUTES;
+      return {
+        label: `⚠️ SLA Overdue (+${overdue}m)`,
+        className: 'bg-red-500/10 text-red-600 border border-red-200 animate-pulse font-bold'
+      };
+    } else {
+      const remaining = TARGET_FRT_MINUTES - elapsedMinutes;
+      const isUrgent = remaining <= 5;
+      return {
+        label: `⏱️ ${remaining}m FRT SLA`,
+        className: isUrgent
+          ? 'bg-amber-500/10 text-amber-700 border border-amber-200 font-semibold'
+          : 'bg-emerald-500/10 text-emerald-700 border border-emerald-200 font-semibold'
+      };
     }
   };
 
@@ -520,6 +575,50 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       }).catch(err => console.error('Failed to fetch team', err));
     }
   }, [user.role, user.staffId]);
+
+  // Active Lead Viewing Heartbeat (Agent Collision Detection)
+  useEffect(() => {
+    if (!selectedLead?.id) {
+      setActiveViewers([]);
+      return;
+    }
+
+    let isMounted = true;
+    const leadId = selectedLead.id;
+
+    liveApiService.notifyViewingLead(leadId)
+      .then(res => {
+        if (isMounted && res?.viewers) {
+          setActiveViewers(res.viewers);
+        }
+      })
+      .catch(err => console.error('[Collision Warning] Ping failed:', err));
+
+    const interval = setInterval(() => {
+      liveApiService.notifyViewingLead(leadId)
+        .then(res => {
+          if (isMounted && res?.viewers) {
+            setActiveViewers(res.viewers);
+          }
+        })
+        .catch(err => console.error('[Collision Warning] Heartbeat failed:', err));
+    }, 15000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+      liveApiService.leaveViewingLead(leadId).catch(() => null);
+    };
+  }, [selectedLead?.id]);
+
+  // Load Canned Responses & Macros
+  useEffect(() => {
+    liveApiService.getCannedResponses()
+      .then(res => {
+        if (Array.isArray(res)) setCannedResponses(res);
+      })
+      .catch(err => console.error('[Canned Responses] Load failed:', err));
+  }, []);
 
   const handleClaim = async (id: string) => {
     try {
@@ -1079,12 +1178,23 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                     <p className="text-xs text-gray-500">{(lead as any).phone_number}</p>
                   </div>
                 </div>
-                <div className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                  (lead as any).lead_status === 'new' ? 'bg-green-100 text-green-700' :
-                  (lead as any).lead_status === 'claimed' ? 'bg-blue-100 text-blue-700' :
-                  'bg-gray-100 text-gray-700'
-                }`}>
-                  {(lead as any).lead_status || 'New'}
+                <div className="flex flex-col items-end gap-1">
+                  <div className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                    (lead as any).lead_status === 'new' ? 'bg-green-100 text-green-700' :
+                    (lead as any).lead_status === 'claimed' ? 'bg-blue-100 text-blue-700' :
+                    'bg-gray-100 text-gray-700'
+                  }`}>
+                    {(lead as any).lead_status || 'New'}
+                  </div>
+                  {(() => {
+                    const sla = getLeadSlaBadge(lead);
+                    if (!sla) return null;
+                    return (
+                      <span className={`px-2 py-0.5 rounded-md text-[9px] ${sla.className}`}>
+                        {sla.label}
+                      </span>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -1235,6 +1345,15 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                     {(lead as any).lead_score} Score
                   </div>
                 )}
+                {(() => {
+                  const sla = getLeadSlaBadge(lead);
+                  if (!sla) return null;
+                  return (
+                    <div className={`px-2 py-0.5 rounded-lg text-[10px] ${sla.className}`}>
+                      {sla.label}
+                    </div>
+                  );
+                })()}
                 <MetaWindowTimer lastMessageTime={lead.lastMessageTime} />
               </div>
               <p className="text-gray-500 mb-6">{lead.phone_number}</p>
@@ -1318,25 +1437,61 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           {detailTab === 'chat' ? (
             <div className="p-4 space-y-4 flex flex-col h-full">
               <div className="bg-white p-4 rounded-3xl border border-gray-100 shadow-sm flex-1 flex flex-col min-h-[400px]">
-                  <div className="flex-1 space-y-4 overflow-y-auto max-h-[400px] pr-2 custom-scrollbar mb-4 p-2">
-                    {leadMessages
-                      .filter(m => (m as any).type !== 'variable_capture' && (m as any).direction !== 'system')
-                      .map((msg, idx) => {
-                        const hasMedia = (msg.type === 'image' || msg.type === 'sticker') && msg.imageUrl ||
-                                         msg.type === 'video' && msg.videoUrl ||
-                                         (msg.type === 'audio' || msg.type === 'voice') && msg.audioUrl ||
-                                         msg.type === 'document' && msg.documentUrl;
-                        const isJson = msg.text?.trim().startsWith('{');
-                        let displayText = msg.text || '';
-                        if (isJson) {
-                          try {
-                            const parsed = JSON.parse(msg.text || '{}');
-                            displayText = parsed.caption || '';
-                          } catch {
-                            displayText = '';
-                          }
+                {/* Agent Collision Warning Banner */}
+                {activeViewers.length > 0 && (
+                  <div className="mb-3 px-4 py-2.5 bg-amber-500/10 border border-amber-300 rounded-2xl flex items-center justify-between text-amber-900 animate-pulse">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle size={16} className="text-amber-600 flex-shrink-0" />
+                      <span className="text-xs font-semibold">
+                        <strong>Collision Warning:</strong> {activeViewers.map(v => `${v.staffName} (${v.role})`).join(', ')} {activeViewers.length === 1 ? 'is' : 'are'} currently viewing this lead.
+                      </span>
+                    </div>
+                    <span className="text-[10px] bg-amber-200 text-amber-900 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">Active</span>
+                  </div>
+                )}
+
+                <div className="flex-1 space-y-4 overflow-y-auto max-h-[400px] pr-2 custom-scrollbar mb-4 p-2">
+                  {leadMessages
+                    .filter(m => (m as any).type !== 'variable_capture' && (m as any).direction !== 'system')
+                    .map((msg, idx) => {
+                      const hasMedia = (msg.type === 'image' || msg.type === 'sticker') && msg.imageUrl ||
+                                       msg.type === 'video' && msg.videoUrl ||
+                                       (msg.type === 'audio' || msg.type === 'voice') && msg.audioUrl ||
+                                       msg.type === 'document' && msg.documentUrl;
+                      const isJson = msg.text?.trim().startsWith('{');
+                      let displayText = msg.text || '';
+                      if (isJson) {
+                        try {
+                          const parsed = JSON.parse(msg.text || '{}');
+                          displayText = parsed.caption || '';
+                        } catch {
+                          displayText = '';
                         }
-                        if (!hasMedia && !displayText.trim()) return null;
+                      }
+                      if (!hasMedia && !displayText.trim()) return null;
+
+                      // Dedicated Internal Team Note Rendering
+                      if (msg.isInternal || msg.type === 'internal_note') {
+                        return (
+                          <div key={msg.id || idx} className="my-2 p-3 bg-amber-50/90 border border-amber-200 rounded-2xl text-amber-950 shadow-xs">
+                            <div className="flex items-center justify-between mb-1 pb-1 border-b border-amber-200/60">
+                              <div className="flex items-center gap-1.5 text-xs font-bold text-amber-800">
+                                <Lock size={12} className="text-amber-700" />
+                                <span>Internal Team Note</span>
+                                <span className="text-[10px] uppercase font-semibold text-amber-700 bg-amber-200/60 px-1.5 py-0.2 rounded-md">
+                                  {msg.senderType || 'Staff'}
+                                </span>
+                              </div>
+                              <span className="text-[10px] text-amber-600 font-medium">
+                                {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            </div>
+                            <p className="text-xs leading-relaxed whitespace-pre-wrap font-medium">
+                              {displayText}
+                            </p>
+                          </div>
+                        );
+                      }
 
                         return (
                           <div key={msg.id || idx} className={`flex ${msg.sender === 'driver' ? 'justify-start' : 'justify-end'}`}>
@@ -1419,15 +1574,109 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
                 {/* Chat Input Area */}
                 <div className="pt-4 border-t border-gray-100">
-                  {!isWindowActive ? (
-                    <div className="flex flex-col items-center justify-center py-4 px-4 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
-                      <History size={20} className="text-gray-400 mb-2" />
-                      <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">History Mode Only</p>
-                      <p className="text-[9px] text-gray-400 text-center mt-1">Window expired. Waiting for customer response.</p>
+                  {!isWindowActive && !isInternalNoteMode ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-1 bg-gray-100 p-0.5 rounded-xl">
+                          <button
+                            type="button"
+                            onClick={() => setIsInternalNoteMode(false)}
+                            className="px-3 py-1 rounded-lg text-xs font-bold text-gray-400 cursor-not-allowed"
+                            disabled
+                          >
+                            WhatsApp (Expired)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsInternalNoteMode(true)}
+                            className="px-3 py-1 rounded-lg text-xs font-bold bg-amber-500 text-white shadow-xs flex items-center gap-1.5"
+                          >
+                            <Lock size={12} />
+                            Internal Team Note
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex flex-col items-center justify-center py-4 px-4 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+                        <History size={20} className="text-gray-400 mb-2" />
+                        <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">24h Customer Window Expired</p>
+                        <p className="text-[9px] text-gray-400 text-center mt-1">Direct WhatsApp reply is paused until driver messages. Switch to <strong>Internal Team Note</strong> to leave notes.</p>
+                      </div>
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {selectedMedia && (
+                      {/* Mode Toggle & Macros Bar */}
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1 bg-gray-100 p-0.5 rounded-xl">
+                          <button
+                            type="button"
+                            onClick={() => setIsInternalNoteMode(false)}
+                            disabled={!isWindowActive}
+                            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                              !isInternalNoteMode
+                                ? 'bg-white text-emerald-700 shadow-xs'
+                                : isWindowActive ? 'text-gray-500 hover:text-gray-700' : 'text-gray-300 cursor-not-allowed'
+                            }`}
+                          >
+                            <MessageSquare size={12} />
+                            WhatsApp
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsInternalNoteMode(true)}
+                            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                              isInternalNoteMode
+                                ? 'bg-amber-500 text-white shadow-xs'
+                                : 'text-gray-500 hover:text-gray-700'
+                            }`}
+                          >
+                            <Lock size={12} />
+                            Team Note
+                          </button>
+                        </div>
+
+                        {/* Quick Macros Dropdown */}
+                        {!isInternalNoteMode && cannedResponses.length > 0 && (
+                          <div className="relative">
+                            <button
+                              type="button"
+                              onClick={() => setShowMacrosMenu(!showMacrosMenu)}
+                              className="px-2.5 py-1 text-xs font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-xl border border-blue-200 flex items-center gap-1.5 transition-all"
+                            >
+                              <Zap size={12} className="text-blue-600" />
+                              <span>Quick Macros</span>
+                            </button>
+
+                            {showMacrosMenu && (
+                              <div className="absolute right-0 bottom-full mb-2 w-72 bg-white rounded-2xl shadow-xl border border-gray-200 p-2 z-50 animate-in fade-in zoom-in-95">
+                                <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-gray-100 px-2">
+                                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Recruitment Macros</span>
+                                  <button onClick={() => setShowMacrosMenu(false)} className="text-gray-400 hover:text-gray-600">
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                                <div className="max-h-48 overflow-y-auto space-y-1 custom-scrollbar">
+                                  {cannedResponses.map((macro) => (
+                                    <button
+                                      key={macro.id}
+                                      type="button"
+                                      onClick={() => handleSelectMacro(macro)}
+                                      className="w-full text-left p-2 rounded-xl hover:bg-blue-50 transition-colors group"
+                                    >
+                                      <div className="flex items-center justify-between">
+                                        <span className="text-xs font-bold text-gray-900 group-hover:text-blue-700">{macro.title}</span>
+                                        <span className="text-[9px] font-mono bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded uppercase">/{macro.shortcut}</span>
+                                      </div>
+                                      <p className="text-[10px] text-gray-500 truncate mt-0.5">{macro.body}</p>
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {selectedMedia && !isInternalNoteMode && (
                         <div className="flex items-center justify-between p-2 bg-blue-50 rounded-xl border border-blue-100 animate-in slide-in-from-bottom-2">
                           <div className="flex items-center gap-2">
                             {selectedMedia.type === 'image' ? (
@@ -1449,7 +1698,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                           </button>
                         </div>
                       )}
-                      <div className="flex items-center gap-2 bg-gray-100 p-1 rounded-3xl">
+
+                      <div className={`flex items-center gap-2 p-1 rounded-3xl transition-all ${
+                        isInternalNoteMode 
+                          ? 'bg-amber-50/80 border border-amber-300' 
+                          : 'bg-gray-100'
+                      }`}>
                         {isRecordingVoice ? (
                           <VoiceRecorder
                             onSend={handleVoiceSend}
@@ -1458,21 +1712,32 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                           />
                         ) : (
                           <>
-                            <label className="w-10 h-10 flex items-center justify-center text-gray-500 hover:text-blue-600 hover:bg-white rounded-full cursor-pointer transition-all">
-                              <Paperclip size={20} />
-                              <input type="file" className="hidden" onChange={handleFileSelect} accept="image/*,video/*,audio/*,application/pdf,.doc,.docx,.xls,.xlsx" />
-                            </label>
-                            <button
-                              type="button"
-                              onClick={() => setIsRecordingVoice(true)}
-                              disabled={isSending}
-                              className="w-10 h-10 flex items-center justify-center rounded-full text-gray-500 hover:text-emerald-600 hover:bg-white transition-all"
-                            >
-                              <Mic size={20} />
-                            </button>
+                            {!isInternalNoteMode && (
+                              <>
+                                <label className="w-10 h-10 flex items-center justify-center text-gray-500 hover:text-blue-600 hover:bg-white rounded-full cursor-pointer transition-all">
+                                  <Paperclip size={20} />
+                                  <input type="file" className="hidden" onChange={handleFileSelect} accept="image/*,video/*,audio/*,application/pdf,.doc,.docx,.xls,.xlsx" />
+                                </label>
+                                <button
+                                  type="button"
+                                  onClick={() => setIsRecordingVoice(true)}
+                                  disabled={isSending}
+                                  className="w-10 h-10 flex items-center justify-center rounded-full text-gray-500 hover:text-emerald-600 hover:bg-white transition-all"
+                                >
+                                  <Mic size={20} />
+                                </button>
+                              </>
+                            )}
+                            {isInternalNoteMode && (
+                              <div className="w-9 h-9 ml-1 rounded-full bg-amber-200/70 text-amber-800 flex items-center justify-center flex-shrink-0">
+                                <Lock size={16} />
+                              </div>
+                            )}
                             <textarea
-                              placeholder="Type a message..."
-                              className="flex-1 bg-transparent border-none rounded-2xl text-sm p-2.5 focus:ring-0 resize-none h-10 max-h-32 custom-scrollbar"
+                              placeholder={isInternalNoteMode ? "Write private team note (managers & team only, never sent to driver)..." : "Type a message..."}
+                              className={`flex-1 bg-transparent border-none rounded-2xl text-sm p-2.5 focus:ring-0 resize-none h-10 max-h-32 custom-scrollbar ${
+                                isInternalNoteMode ? 'text-amber-950 placeholder-amber-600/60' : 'text-gray-900 placeholder-gray-400'
+                              }`}
                               value={replyText}
                               onChange={e => setReplyText(e.target.value)}
                               onKeyDown={e => {
@@ -1485,9 +1750,13 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                             <button
                               onClick={handleSendReply}
                               disabled={isSending || (!replyText.trim() && !selectedMedia)}
-                              className="w-10 h-10 bg-emerald-500 text-white rounded-full flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all shadow-lg shadow-emerald-200"
+                              className={`w-10 h-10 rounded-full flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all shadow-md ${
+                                isInternalNoteMode
+                                  ? 'bg-amber-600 hover:bg-amber-700 text-white shadow-amber-200'
+                                  : 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-200'
+                              }`}
                             >
-                              {isSending ? <Loader2 className="animate-spin" size={20} /> : <Send size={20} />}
+                              {isSending ? <Loader2 className="animate-spin" size={20} /> : isInternalNoteMode ? <Lock size={16} /> : <Send size={20} />}
                             </button>
                           </>
                         )}

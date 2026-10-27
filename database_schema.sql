@@ -81,6 +81,7 @@ CREATE TABLE candidate_messages (
     status VARCHAR(50) DEFAULT 'sent',
     whatsapp_message_id VARCHAR(255),
     sender_type VARCHAR(50),
+    is_internal BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -133,6 +134,16 @@ CREATE TABLE lead_reminders (
     scheduled_at TIMESTAMP WITH TIME ZONE NOT NULL,
     status VARCHAR(20) DEFAULT 'pending',
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 11. Canned Responses & Macros
+CREATE TABLE canned_responses (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    shortcut VARCHAR(50) UNIQUE NOT NULL,
+    title VARCHAR(100) NOT NULL,
+    body TEXT NOT NULL,
+    category VARCHAR(50) DEFAULT 'general',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
