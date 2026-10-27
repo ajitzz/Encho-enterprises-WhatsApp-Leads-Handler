@@ -10,7 +10,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { OAuth2Client, JWT } from 'google-auth-library';
 import { EventEmitter } from 'events';
 import dotenv from 'dotenv';
-import { withDb, query, getPool } from './server/db.js';
+import { withDb, withTransaction, query, getPool } from './server/db.js';
 import { broadcastUpdate, onUpdate, sendNotification } from './server/services/notificationService.js';
 import { getDriversSnapshotCached, invalidateDriversSnapshotCache } from './server/services/driverSnapshotCache.js';
 
@@ -4330,7 +4330,7 @@ apiRouter.get('/leads/my', authMiddleware, async (req, res) => {
 
 apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
     try {
-        await withDb(async (client) => {
+        await withTransaction(async (client) => {
             await withSchemaRetry(client, async () => {
                 // Hard Agent Capacity Limit: Max 15 active leads
                 const activeCountRes = await client.query(`
@@ -4383,7 +4383,7 @@ apiRouter.post('/leads/:id/assign', authMiddleware, async (req, res) => {
     if (!staff_id) return res.status(400).json({ error: 'Staff ID required' });
 
     try {
-        await withDb(async (client) => {
+        await withTransaction(async (client) => {
             // Check permissions
             if (req.user.role !== 'admin') {
                 if (req.user.role === 'manager') {
@@ -4415,7 +4415,7 @@ apiRouter.post('/leads/:id/reassign', authMiddleware, async (req, res) => {
     if (!staff_id) return res.status(400).json({ error: 'Staff ID required' });
 
     try {
-        await withDb(async (client) => {
+        await withTransaction(async (client) => {
             const leadCheck = await client.query(`
                 SELECT c.assigned_to, s.manager_id 
                 FROM candidates c 
@@ -4459,7 +4459,7 @@ apiRouter.post('/leads/:id/reassign', authMiddleware, async (req, res) => {
 
 apiRouter.post('/leads/:id/unclaim', authMiddleware, async (req, res) => {
     try {
-        await withDb(async (client) => {
+        await withTransaction(async (client) => {
             const leadCheck = await client.query(`
                 SELECT c.assigned_to, s.manager_id, s.name as staff_name
                 FROM candidates c
@@ -4765,7 +4765,7 @@ apiRouter.get('/media', async (req, res) => {
     }
 });
 
-apiRouter.post('/media/upload', upload.single('file'), async (req, res) => {
+apiRouter.post('/media/upload', authMiddleware, upload.single('file'), async (req, res) => {
     if (!req.file) {
         res.status(400).json({ error: 'No file provided' });
         return;
@@ -4788,7 +4788,7 @@ apiRouter.post('/media/upload', upload.single('file'), async (req, res) => {
     }
 });
 
-apiRouter.post('/media/upload/init', async (req, res) => {
+apiRouter.post('/media/upload/init', authMiddleware, async (req, res) => {
     try {
         const fileName = String(req.body?.fileName || '').trim();
         if (!fileName) {
@@ -4819,7 +4819,7 @@ apiRouter.post('/media/upload/init', async (req, res) => {
     }
 });
 
-apiRouter.post('/media/folders', async (req, res) => {
+apiRouter.post('/media/folders', authMiddleware, async (req, res) => {
     try {
         const name = String(req.body?.name || '').trim();
         const parentPath = typeof req.body?.parentPath === 'string' ? req.body.parentPath : '/';
@@ -4854,7 +4854,7 @@ apiRouter.post('/media/folders', async (req, res) => {
     }
 });
 
-apiRouter.patch('/media/folders/:id', async (req, res) => {
+apiRouter.patch('/media/folders/:id', authMiddleware, async (req, res) => {
     try {
         const folderId = decodeURIComponent(String(req.params.id || '').trim());
         const newName = String(req.body?.name || '').trim().replace(/^\/+|\/+$/g, '');
@@ -4913,7 +4913,7 @@ apiRouter.patch('/media/folders/:id', async (req, res) => {
 });
 
 
-apiRouter.post('/media/sync-s3', async (req, res) => {
+apiRouter.post('/media/sync-s3', authMiddleware, requireRole('admin'), async (req, res) => {
     try {
         const listRes = await s3Client.send(new ListObjectsV2Command({
             Bucket: SYSTEM_CONFIG.AWS_BUCKET,
@@ -4936,7 +4936,7 @@ apiRouter.post('/media/sync-s3', async (req, res) => {
     }
 });
 
-apiRouter.delete('/media/files/:id', async (req, res) => {
+apiRouter.delete('/media/files/:id', authMiddleware, requireRole('admin', 'manager'), async (req, res) => {
     try {
         const key = await resolveMediaDeleteKey(req.params.id);
         await deleteFromS3(key);
@@ -4948,7 +4948,7 @@ apiRouter.delete('/media/files/:id', async (req, res) => {
     }
 });
 
-apiRouter.post('/media/folders/:id/public', async (req, res) => {
+apiRouter.post('/media/folders/:id/public', authMiddleware, requireRole('admin', 'manager'), async (req, res) => {
     try {
         const folderId = decodeURIComponent(String(req.params.id || '').trim());
         if (!folderId) return res.status(400).json({ error: 'Invalid folder id' });
@@ -4982,7 +4982,7 @@ apiRouter.post('/media/folders/:id/public', async (req, res) => {
     }
 });
 
-apiRouter.delete('/media/folders/:id/public', async (req, res) => {
+apiRouter.delete('/media/folders/:id/public', authMiddleware, requireRole('admin', 'manager'), async (req, res) => {
     try {
         const folderId = decodeURIComponent(String(req.params.id || '').trim());
         if (!folderId) return res.status(400).json({ error: 'Invalid folder id' });
@@ -4998,7 +4998,7 @@ apiRouter.delete('/media/folders/:id/public', async (req, res) => {
     }
 });
 
-apiRouter.delete('/media/folders/:id', async (req, res) => {
+apiRouter.delete('/media/folders/:id', authMiddleware, requireRole('admin', 'manager'), async (req, res) => {
     try {
         const folderId = decodeURIComponent(String(req.params.id || '').trim());
         const prefix = await resolveFolderPrefixFromId(folderId);
@@ -6133,7 +6133,7 @@ apiRouter.post('/reports/driver-excel/sync', async (req, res) => {
     }
 });
 
-apiRouter.patch('/reports/driver-excel/:id', async (req, res) => {
+apiRouter.patch('/reports/driver-excel/:id', authMiddleware, requireRole('admin', 'manager'), async (req, res) => {
     try {
         const updates = req.body?.updates || {};
         const id = req.params.id;
@@ -6161,7 +6161,7 @@ apiRouter.patch('/reports/driver-excel/:id', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.delete('/reports/driver-excel/:id', async (req, res) => {
+apiRouter.delete('/reports/driver-excel/:id', authMiddleware, requireRole('admin', 'manager'), async (req, res) => {
     try {
         await withDb(async (client) => {
             await client.query('DELETE FROM candidates WHERE id = $1', [req.params.id]);
@@ -6172,7 +6172,7 @@ apiRouter.delete('/reports/driver-excel/:id', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.post('/reports/driver-excel/columns', async (req, res) => {
+apiRouter.post('/reports/driver-excel/columns', authMiddleware, requireRole('admin', 'manager'), async (req, res) => {
     try {
         const requestedKey = normalizeColumnKey((req.body?.key || '').toString());
         const label = (req.body?.label || '').toString().trim();
@@ -6196,7 +6196,7 @@ apiRouter.post('/reports/driver-excel/columns', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.get('/reports/driver-excel/variables', async (req, res) => {
+apiRouter.get('/reports/driver-excel/variables', authMiddleware, requireRole('admin', 'manager'), async (req, res) => {
     try {
         await withDb(async (client) => {
             const variables = await getDriverExcelVariableCatalog(client);
@@ -6205,7 +6205,7 @@ apiRouter.get('/reports/driver-excel/variables', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.patch('/reports/driver-excel/columns/:key', async (req, res) => {
+apiRouter.patch('/reports/driver-excel/columns/:key', authMiddleware, requireRole('admin', 'manager'), async (req, res) => {
     try {
         const key = req.params.key;
         const newLabel = (req.body?.newLabel || '').toString().trim();
@@ -6241,7 +6241,7 @@ apiRouter.patch('/reports/driver-excel/columns/:key', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.post('/reports/driver-excel/columns/reorder', async (req, res) => {
+apiRouter.post('/reports/driver-excel/columns/reorder', authMiddleware, requireRole('admin', 'manager'), async (req, res) => {
     try {
         const orderedKeys = Array.isArray(req.body?.orderedKeys) ? req.body.orderedKeys.map((k) => String(k)) : [];
         await withDb(async (client) => {
@@ -6260,7 +6260,7 @@ apiRouter.post('/reports/driver-excel/columns/reorder', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.delete('/reports/driver-excel/columns/:key', async (req, res) => {
+apiRouter.delete('/reports/driver-excel/columns/:key', authMiddleware, requireRole('admin', 'manager'), async (req, res) => {
     try {
         const key = req.params.key;
         await withDb(async (client) => {
@@ -6303,7 +6303,7 @@ const handleScheduledMessagesLegacy = async (req, res) => {
     }
 };
 
-apiRouter.post('/scheduled-messages', async (req, res) => {
+apiRouter.post('/scheduled-messages', authMiddleware, async (req, res) => {
     const tenantId = (req.headers['x-tenant-id'] || req.headers['x-tenant'] || null) as any;
     const mode = resolveModuleMode({
         flagValue: REMINDERS_MODULE_FLAG,
@@ -6317,11 +6317,11 @@ apiRouter.post('/scheduled-messages', async (req, res) => {
     return handleScheduledMessagesLegacy(req, res);
 });
 
-apiRouter.get('/drivers/:id/scheduled-messages', async (req, res) => remindersRouter.listDriverScheduled(req, res));
+apiRouter.get('/drivers/:id/scheduled-messages', authMiddleware, async (req, res) => remindersRouter.listDriverScheduled(req, res));
 
-apiRouter.delete('/scheduled-messages/:id', async (req, res) => remindersRouter.deleteScheduled(req, res));
+apiRouter.delete('/scheduled-messages/:id', authMiddleware, async (req, res) => remindersRouter.deleteScheduled(req, res));
 
-apiRouter.patch('/scheduled-messages/:id', async (req, res) => remindersRouter.patchScheduled(req, res));
+apiRouter.patch('/scheduled-messages/:id', authMiddleware, async (req, res) => remindersRouter.patchScheduled(req, res));
 
 const handleDriverScheduledMessagesLegacy = async (req, res) => {
     try {
@@ -6609,7 +6609,7 @@ apiRouter.post('/system/hard-reset', authMiddleware, async (req: any, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.post('/system/seed-db', async (req, res) => {
+apiRouter.post('/system/seed-db', authMiddleware, requireRole('admin'), async (req, res) => {
     try {
         await withDb(async (client) => {
             const id = crypto.randomUUID();

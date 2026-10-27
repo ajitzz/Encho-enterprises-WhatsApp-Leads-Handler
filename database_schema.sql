@@ -136,4 +136,16 @@ CREATE TABLE lead_reminders (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Performance Indexes
+CREATE INDEX IF NOT EXISTS idx_candidates_assigned_to ON candidates(assigned_to);
+CREATE INDEX IF NOT EXISTS idx_candidates_unassigned_pool ON candidates(last_message_at DESC NULLS LAST, created_at DESC) WHERE assigned_to IS NULL;
+CREATE INDEX IF NOT EXISTS idx_candidates_last_message_at ON candidates(last_message_at DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS idx_candidates_lead_status ON candidates(lead_status);
+CREATE INDEX IF NOT EXISTS idx_candidate_messages_whatsapp_message_id ON candidate_messages(whatsapp_message_id) WHERE whatsapp_message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_candidate_messages_candidate_created_at ON candidate_messages(candidate_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_scheduled_messages_pending_scheduled_time ON scheduled_messages(scheduled_time ASC) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_scheduled_messages_candidate_pending_time ON scheduled_messages(candidate_id, scheduled_time ASC) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_lead_reminders_staff_status ON lead_reminders(staff_id, status);
+CREATE INDEX IF NOT EXISTS idx_lead_reminders_scheduled_at ON lead_reminders(scheduled_at);
+
 COMMIT;
