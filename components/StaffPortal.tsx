@@ -457,17 +457,15 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       (drivers) => {
         // Stream payload can be windowed/truncated. Always merge with authoritative
         // role-scoped leads that were fetched from /leads/my and /leads/pool.
-        setAllLeads(() => {
+        setAllLeads((prev) => {
           const merged = new Map<string, any>();
-          drivers.forEach((lead: any) => merged.set(lead.id, lead));
-          authoritativeLeadsRef.current.forEach((lead: any, id: string) => {
-            merged.set(id, { ...(merged.get(id) || {}), ...lead });
+          prev.forEach((lead: any) => merged.set(lead.id, lead));
+          drivers.forEach((lead: any) => {
+            merged.set(lead.id, { ...(merged.get(lead.id) || {}), ...lead });
           });
           return Array.from(merged.values());
         });
         setLoading(false);
-        // Instant real-time sync of role-scoped pool/my views when server pushes updates
-        refreshOwnedLeadViews();
       },
       {
         driverId: selectedLead?.id,
@@ -476,11 +474,12 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
       }
     );
     return () => unsubscribe();
-  }, [selectedLead?.id, refreshOwnedLeadViews]);
+  }, [selectedLead?.id]);
 
-  // Infallible live refresh while viewing lead chat in Staff Portal
+  // Adaptive fallback refresh: only polls if push SSE stream is disconnected/reconnecting
   useEffect(() => {
     if (!selectedLead?.id || view !== 'detail') return;
+    if (connectionState === 'connected') return;
 
     const liveInterval = setInterval(async () => {
       try {
@@ -498,10 +497,10 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           });
         }
       } catch {}
-    }, 2500);
+    }, 5000);
 
     return () => clearInterval(liveInterval);
-  }, [selectedLead?.id, view]);
+  }, [selectedLead?.id, view, connectionState]);
 
   useEffect(() => {
     refreshOwnedLeadViews();

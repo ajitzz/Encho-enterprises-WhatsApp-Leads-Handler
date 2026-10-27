@@ -123,13 +123,13 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     }
   }, [driver?.id]);
 
-  // High-frequency live poll safety net while chat drawer is open
+  // Passive fallback reconciliation while chat drawer is open
   useEffect(() => {
     if (!driver?.id) return;
 
     const livePollTimer = setInterval(() => {
       loadMessages(driver.id);
-    }, 2500);
+    }, 10000);
 
     return () => clearInterval(livePollTimer);
   }, [driver?.id]);

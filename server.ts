@@ -5579,19 +5579,24 @@ apiRouter.get('/updates/stream', async (req, res) => {
     let closed = false;
     let unsubscribe: () => void;
 
-    // Vercel timeout guard: close connection before 60s limit
-    const vercelTimeout = setTimeout(() => {
-        if (!closed) {
-            closed = true;
-            if (unsubscribe) unsubscribe();
-            clearInterval(snapshotInterval);
-            clearInterval(heartbeat);
-            res.end();
-        }
-    }, 55000); 
+    // Vercel serverless guard: only set 55s timeout if hosted on Vercel Functions
+    const isVercelServerless = Boolean(process.env.VERCEL || process.env.NOW_REGION);
+    let vercelTimeout: NodeJS.Timeout | null = null;
+    if (isVercelServerless) {
+        vercelTimeout = setTimeout(() => {
+            if (!closed) {
+                closed = true;
+                if (unsubscribe) unsubscribe();
+                clearInterval(snapshotInterval);
+                clearInterval(heartbeat);
+                res.end();
+            }
+        }, 55000);
+    }
+
     const driverId = typeof req.query.driverId === 'string' ? req.query.driverId : null;
 
-    const sendEvent = (data) => {
+    const sendEvent = (data: any) => {
         if (closed) return;
         res.write(`data: ${JSON.stringify(data)}\n\n`);
     };
@@ -5601,60 +5606,60 @@ apiRouter.get('/updates/stream', async (req, res) => {
             const snapshot = await getDriversSnapshotCached();
             const payload: any = { drivers: snapshot.drivers };
 
-                const messagesByDriver = {};
-                if (driverId) {
-                    const [messagesRes, scheduledRes] = await Promise.all([
-                        client.query(`
-                            SELECT * FROM candidate_messages 
-                            WHERE candidate_id = $1 
-                              AND (type IS NULL OR type != 'variable_capture')
-                              AND (direction IS NULL OR direction != 'system')
-                            ORDER BY created_at DESC 
-                            LIMIT 50
-                        `, [driverId]),
-                        client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed'])
-                    ]);
+            const messagesByDriver: Record<string, any> = {};
+            if (driverId) {
+                const [messagesRes, scheduledRes] = await Promise.all([
+                    client.query(`
+                        SELECT * FROM candidate_messages 
+                        WHERE candidate_id = $1 
+                          AND (type IS NULL OR type != 'variable_capture')
+                          AND (direction IS NULL OR direction != 'system')
+                        ORDER BY created_at DESC 
+                        LIMIT 50
+                    `, [driverId]),
+                    client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed'])
+                ]);
 
-                    messagesByDriver[driverId] = await Promise.all(messagesRes.rows.map(async (row) => {
-                        let imageUrl, videoUrl, documentUrl, audioUrl;
-                        let text = row.text;
-                        if (row.type !== 'text' && row.type !== 'variable_capture') {
-                            try {
-                                const media = JSON.parse(row.text || '{}');
-                                text = media.caption || '';
-                                const resolvedMediaUrl = await refreshMediaUrl(media.url);
-                                if (row.type === 'video') videoUrl = resolvedMediaUrl;
-                                else if (row.type === 'document') documentUrl = resolvedMediaUrl;
-                                else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
-                                else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
-                            } catch(e){}
-                        }
-                        return {
-                            id: row.id,
-                            sender: row.direction === 'in' ? 'driver' : 'agent',
-                            senderType: row.sender_type || (row.direction === 'in' ? 'driver' : 'bot'),
-                            text,
-                            imageUrl,
-                            videoUrl,
-                            documentUrl,
-                            audioUrl,
-                            timestamp: new Date(row.created_at).getTime(),
-                            type: row.type || 'text',
-                            status: row.status,
-                        };
-                    }));
-                    messagesByDriver[driverId].sort((a, b) => a.timestamp - b.timestamp);
-
-                    payload.messagesByDriver = messagesByDriver;
-                    payload.scheduledByDriver = {
-                        [driverId]: scheduledRes.rows.map((row) => ({
-                            id: row.id,
-                            scheduledTime: new Date(row.scheduled_time).getTime(),
-                            payload: row.payload,
-                            status: row.status,
-                        }))
+                messagesByDriver[driverId] = await Promise.all(messagesRes.rows.map(async (row) => {
+                    let imageUrl, videoUrl, documentUrl, audioUrl;
+                    let text = row.text;
+                    if (row.type !== 'text' && row.type !== 'variable_capture') {
+                        try {
+                            const media = JSON.parse(row.text || '{}');
+                            text = media.caption || '';
+                            const resolvedMediaUrl = await refreshMediaUrl(media.url);
+                            if (row.type === 'video') videoUrl = resolvedMediaUrl;
+                            else if (row.type === 'document') documentUrl = resolvedMediaUrl;
+                            else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
+                            else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
+                        } catch(e){}
+                    }
+                    return {
+                        id: row.id,
+                        sender: row.direction === 'in' ? 'driver' : 'agent',
+                        senderType: row.sender_type || (row.direction === 'in' ? 'driver' : 'bot'),
+                        text,
+                        imageUrl,
+                        videoUrl,
+                        documentUrl,
+                        audioUrl,
+                        timestamp: new Date(row.created_at).getTime(),
+                        type: row.type || 'text',
+                        status: row.status,
                     };
-                }
+                }));
+                messagesByDriver[driverId].sort((a: any, b: any) => a.timestamp - b.timestamp);
+
+                payload.messagesByDriver = messagesByDriver;
+                payload.scheduledByDriver = {
+                    [driverId]: scheduledRes.rows.map((row) => ({
+                        id: row.id,
+                        scheduledTime: new Date(row.scheduled_time).getTime(),
+                        payload: row.payload,
+                        status: row.status,
+                    }))
+                };
+            }
 
             return payload;
         });
@@ -5664,21 +5669,88 @@ apiRouter.get('/updates/stream', async (req, res) => {
         try {
             const snapshot = await fetchSnapshot();
             sendEvent(snapshot);
-        } catch (e) {
+        } catch (e: any) {
             sendEvent({ error: e.message || 'snapshot_error' });
         }
     };
 
-    const handleUpdate = (data) => {
+    // FAANG Granular Delta Streaming: emits only the mutated lead diff instead of full database serialization
+    const handleUpdate = async (data: { candidateId?: string } = {}) => {
         if (closed) return;
-        // If candidateId is provided, we could optimize to only fetch that candidate,
-        // but for now, we'll just refresh the whole snapshot to keep it simple and consistent.
+        if (data?.candidateId) {
+            try {
+                const deltaPayload = await withDb(async (client) => {
+                    const row = await client.query('SELECT * FROM candidates WHERE id = $1', [data.candidateId]);
+                    if (row.rows.length === 0) return null;
+
+                    let messages = null;
+                    if (driverId && driverId === data.candidateId) {
+                        const mRes = await client.query(`
+                            SELECT * FROM candidate_messages 
+                            WHERE candidate_id = $1 
+                              AND (type IS NULL OR type != 'variable_capture')
+                              AND (direction IS NULL OR direction != 'system')
+                            ORDER BY created_at DESC 
+                            LIMIT 50
+                        `, [driverId]);
+
+                        messages = await Promise.all(mRes.rows.map(async (r) => {
+                            let text = r.text;
+                            let imageUrl, videoUrl, documentUrl, audioUrl;
+                            if (r.type !== 'text' && r.type !== 'variable_capture') {
+                                try {
+                                    const media = JSON.parse(r.text || '{}');
+                                    text = media.caption || '';
+                                    const resolved = await refreshMediaUrl(media.url);
+                                    if (r.type === 'video') videoUrl = resolved;
+                                    else if (r.type === 'document') documentUrl = resolved;
+                                    else if (r.type === 'audio' || r.type === 'voice') audioUrl = resolved;
+                                    else if (r.type === 'image' || r.type === 'sticker') imageUrl = resolved;
+                                } catch {}
+                            }
+                            return {
+                                id: r.id,
+                                sender: r.direction === 'in' ? 'driver' : 'agent',
+                                senderType: r.sender_type || (r.direction === 'in' ? 'driver' : 'bot'),
+                                text,
+                                imageUrl,
+                                videoUrl,
+                                documentUrl,
+                                audioUrl,
+                                timestamp: new Date(r.created_at).getTime(),
+                                type: r.type || 'text',
+                                status: r.status,
+                            };
+                        }));
+                        messages.sort((a: any, b: any) => a.timestamp - b.timestamp);
+                    }
+
+                    return { candidate: row.rows[0], messages };
+                });
+
+                if (deltaPayload?.candidate) {
+                    const eventPayload: any = {
+                        type: 'LEAD_DELTA',
+                        candidate: deltaPayload.candidate,
+                        candidateId: data.candidateId,
+                    };
+                    if (deltaPayload.messages && driverId === data.candidateId) {
+                        eventPayload.messagesByDriver = { [driverId]: deltaPayload.messages };
+                    }
+                    sendEvent(eventPayload);
+                    return;
+                }
+            } catch (err) {
+                // Fallback to full snapshot on delta error
+            }
+        }
         streamSnapshot();
     };
 
     unsubscribe = onUpdate(handleUpdate);
 
-    const snapshotInterval = setInterval(streamSnapshot, 10000); // Polling as fallback, less frequent
+    // Passive fallback reconciliation: every 60s (push handles real-time updates)
+    const snapshotInterval = setInterval(streamSnapshot, 60000);
     const heartbeat = setInterval(() => {
         if (!closed) res.write('data: heartbeat\n\n');
     }, 20000);
@@ -5687,7 +5759,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
     req.on('close', () => {
         closed = true;
-        clearTimeout(vercelTimeout);
+        if (vercelTimeout) clearTimeout(vercelTimeout);
         if (unsubscribe) unsubscribe();
         clearInterval(snapshotInterval);
         clearInterval(heartbeat);

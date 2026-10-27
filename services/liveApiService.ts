@@ -274,7 +274,11 @@ export const liveApiService = {
                   if (!event.data || event.data === 'heartbeat') return;
                   try {
                       const payload = JSON.parse(event.data);
-                      if (Array.isArray(payload?.drivers)) callback(payload.drivers);
+                      if (payload?.type === 'LEAD_DELTA' && payload?.candidate) {
+                          callback([payload.candidate]);
+                      } else if (Array.isArray(payload?.drivers)) {
+                          callback(payload.drivers);
+                      }
                       if (driverId && payload?.messagesByDriver?.[driverId] && onMessages) {
                           onMessages(payload.messagesByDriver[driverId]);
                       }
