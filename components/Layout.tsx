@@ -59,32 +59,39 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
         </div>
 
         <nav className="flex-1 p-4 space-y-2 overflow-y-auto overflow-x-hidden">
-          <button
-            onClick={() => onTabChange('dashboard')}
-            title={isCollapsed ? "Dashboard" : ""}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'dashboard'
-                ? 'bg-white text-black font-medium'
-                : 'text-gray-400 hover:bg-gray-900 hover:text-white'
-            } ${isCollapsed ? 'justify-center px-2' : ''}`}
-          >
-            <LayoutDashboard size={20} className="shrink-0" />
-            <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Dashboard</span>
-          </button>
+          {/* Dashboard: Admin & Manager Only */}
+          {(userRole === 'admin' || userRole === 'manager') && (
+            <button
+              onClick={() => onTabChange('dashboard')}
+              title={isCollapsed ? "Dashboard" : ""}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                activeTab === 'dashboard'
+                  ? 'bg-white text-black font-medium'
+                  : 'text-gray-400 hover:bg-gray-900 hover:text-white'
+              } ${isCollapsed ? 'justify-center px-2' : ''}`}
+            >
+              <LayoutDashboard size={20} className="shrink-0" />
+              <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Dashboard</span>
+            </button>
+          )}
 
-          <button
-            onClick={() => onTabChange('leads')}
-            title={isCollapsed ? "Leads & Campaigns" : ""}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'leads'
-                ? 'bg-white text-black font-medium'
-                : 'text-gray-400 hover:bg-gray-900 hover:text-white'
-            } ${isCollapsed ? 'justify-center px-2' : ''}`}
-          >
-            <Users size={20} className="shrink-0" />
-            <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Leads & Campaigns</span>
-          </button>
+          {/* Leads & Campaigns: Admin & Manager Only */}
+          {(userRole === 'admin' || userRole === 'manager') && (
+            <button
+              onClick={() => onTabChange('leads')}
+              title={isCollapsed ? "Leads & Campaigns" : ""}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                activeTab === 'leads'
+                  ? 'bg-white text-black font-medium'
+                  : 'text-gray-400 hover:bg-gray-900 hover:text-white'
+              } ${isCollapsed ? 'justify-center px-2' : ''}`}
+            >
+              <Users size={20} className="shrink-0" />
+              <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Leads & Campaigns</span>
+            </button>
+          )}
 
+          {/* Staff Management: Admin Only */}
           {userRole === 'admin' && (
             <button
               onClick={() => onTabChange('staff')}
@@ -100,33 +107,37 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
             </button>
           )}
 
-          {(userRole === 'admin' || userRole === 'manager') && (
-            <button
-              onClick={() => onTabChange('staff-portal')}
-              title={isCollapsed ? "Staff Portal" : ""}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-                activeTab === 'staff-portal'
-                  ? 'bg-white text-black font-medium'
-                  : 'text-gray-400 hover:bg-gray-900 hover:text-white'
-              } ${isCollapsed ? 'justify-center px-2' : ''}`}
-            >
-              <Users size={20} className="shrink-0" />
-              <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Staff Portal</span>
-            </button>
-          )}
-
+          {/* Staff Portal: ALL ROLES (Staff, Manager, Admin) */}
           <button
-            onClick={() => onTabChange('excel-report')}
-            title={isCollapsed ? "Driver Excel Report" : ""}
+            onClick={() => onTabChange('staff-portal')}
+            title={isCollapsed ? "Staff Portal" : ""}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'excel-report'
+              activeTab === 'staff-portal'
                 ? 'bg-white text-black font-medium'
                 : 'text-gray-400 hover:bg-gray-900 hover:text-white'
             } ${isCollapsed ? 'justify-center px-2' : ''}`}
           >
-            <Table size={20} className="shrink-0" />
-            <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Driver Excel Report</span>
+            <Users size={20} className="shrink-0" />
+            <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Staff Portal</span>
           </button>
+
+          {/* Driver Excel Report: Admin & Manager Only */}
+          {(userRole === 'admin' || userRole === 'manager') && (
+            <button
+              onClick={() => onTabChange('excel-report')}
+              title={isCollapsed ? "Driver Excel Report" : ""}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                activeTab === 'excel-report'
+                  ? 'bg-white text-black font-medium'
+                  : 'text-gray-400 hover:bg-gray-900 hover:text-white'
+              } ${isCollapsed ? 'justify-center px-2' : ''}`}
+            >
+              <Table size={20} className="shrink-0" />
+              <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Driver Excel Report</span>
+            </button>
+          )}
+
+          {/* Media Library: Accessible to all */}
           <button
             onClick={() => onTabChange('media-library')}
             title={isCollapsed ? "Media Library" : ""}
@@ -140,26 +151,31 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, onTabChange
             <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Media Library (S3)</span>
           </button>
 
-          <div className={`pt-4 pb-2 transition-all duration-200 ${isCollapsed ? 'border-t border-gray-800 mt-2 pt-2' : ''}`}>
-            {!isCollapsed ? (
-              <p className="px-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider whitespace-nowrap">Automation</p>
-            ) : (
-              <div className="h-px w-8 mx-auto bg-gray-800" />
-            )}
-          </div>
+          {/* Bot Studio: Admin Only */}
+          {userRole === 'admin' && (
+            <>
+              <div className={`pt-4 pb-2 transition-all duration-200 ${isCollapsed ? 'border-t border-gray-800 mt-2 pt-2' : ''}`}>
+                {!isCollapsed ? (
+                  <p className="px-4 text-[10px] font-bold text-gray-500 uppercase tracking-wider whitespace-nowrap">Automation</p>
+                ) : (
+                  <div className="h-px w-8 mx-auto bg-gray-800" />
+                )}
+              </div>
 
-          <button
-            onClick={() => onTabChange('bot-studio')}
-            title={isCollapsed ? "Bot Studio" : ""}
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'bot-studio'
-                ? 'bg-white text-black font-medium'
-                : 'text-gray-400 hover:bg-gray-900 hover:text-white'
-            } ${isCollapsed ? 'justify-center px-2' : ''}`}
-          >
-            <Bot size={20} className="shrink-0" />
-            <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Bot Studio</span>
-          </button>
+              <button
+                onClick={() => onTabChange('bot-studio')}
+                title={isCollapsed ? "Bot Studio" : ""}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                  activeTab === 'bot-studio'
+                    ? 'bg-white text-black font-medium'
+                    : 'text-gray-400 hover:bg-gray-900 hover:text-white'
+                } ${isCollapsed ? 'justify-center px-2' : ''}`}
+              >
+                <Bot size={20} className="shrink-0" />
+                <span className={`transition-all duration-200 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100'}`}>Bot Studio</span>
+              </button>
+            </>
+          )}
         </nav>
 
         <div className="p-4 border-t border-gray-800">

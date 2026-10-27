@@ -3958,38 +3958,81 @@ const handleOperationalStatusLegacy = async (req, res) => {
 };
 
 
-const authMiddleware = async (req, res, next) => {
+const tokenCache = new Map<string, { user: any; expiresAt: number }>();
+
+const maskPhoneNumber = (phone: string | null | undefined): string => {
+    if (!phone) return '';
+    const clean = String(phone).trim();
+    if (clean.length <= 5) return '*****';
+    return clean.slice(0, 5) + '*****' + clean.slice(-2);
+};
+
+const authMiddleware = async (req: any, res: any, next: any) => {
     try {
+        let token: string | null = null;
         const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return res.status(401).json({ error: 'Unauthorized' });
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            token = authHeader.split(' ')[1];
+        } else if (req.query?.token) {
+            token = String(req.query.token);
         }
-        const token = authHeader.split(' ')[1];
+
+        if (!token) {
+            return res.status(401).json({ error: 'Unauthorized: Missing authentication token' });
+        }
+
+        // Fast-path: Token Cache (5 min TTL)
+        const cached = tokenCache.get(token);
+        if (cached && cached.expiresAt > Date.now()) {
+            req.user = cached.user;
+            return next();
+        }
+
         const ticket = await googleClient.verifyIdToken({ idToken: token, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
         const payload = ticket.getPayload();
+        if (!payload || !payload.email) {
+            return res.status(401).json({ error: 'Unauthorized: Invalid token payload' });
+        }
         const email = payload.email;
+        const ADMIN_EMAILS = ['ajithsabzz@gmail.com', 'enchoenterprises@gmail.com'];
+        const isSuperAdmin = ADMIN_EMAILS.includes(email);
 
         await withDb(async (client) => {
-            const staffRes = await client.query('SELECT id, role FROM staff_members WHERE email = $1', [email]);
+            const staffRes = await client.query('SELECT id, role, name FROM staff_members WHERE email = $1', [email]);
             if (staffRes.rows.length === 0) {
-                // Check if it's the super admin
-                if (email === 'ajithsabzz@gmail.com') {
+                if (isSuperAdmin) {
                     const insertRes = await client.query(
                         'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id, role',
                         [email, payload.name, 'admin']
                     );
-                    req.user = { ...payload, staffId: insertRes.rows[0].id, role: insertRes.rows[0].role };
+                    req.user = { ...payload, staffId: insertRes.rows[0].id, role: 'admin', name: payload.name };
                 } else {
-                    throw new Error('Access denied. Not a staff member.');
+                    throw new Error('Access denied. Not an authorized staff member.');
                 }
             } else {
-                req.user = { ...payload, staffId: staffRes.rows[0].id, role: staffRes.rows[0].role };
+                const userRole = isSuperAdmin ? 'admin' : (staffRes.rows[0].role || 'staff');
+                req.user = { 
+                    ...payload, 
+                    staffId: staffRes.rows[0].id, 
+                    role: userRole, 
+                    name: staffRes.rows[0].name || payload.name 
+                };
             }
         });
+
+        // Cache valid user
+        tokenCache.set(token, { user: req.user, expiresAt: Date.now() + 5 * 60 * 1000 });
         next();
-    } catch (e) {
-        res.status(401).json({ error: e.message });
+    } catch (e: any) {
+        res.status(401).json({ error: e.message || 'Unauthorized' });
     }
+};
+
+const requireRole = (...allowedRoles: string[]) => (req: any, res: any, next: any) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+        return res.status(403).json({ error: `Forbidden: Requires ${allowedRoles.join(' or ')} privilege` });
+    }
+    next();
 };
 
 // --- STAFF MANAGEMENT ---
@@ -4289,6 +4332,22 @@ apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
     try {
         await withDb(async (client) => {
             await withSchemaRetry(client, async () => {
+                // Hard Agent Capacity Limit: Max 15 active leads
+                const activeCountRes = await client.query(`
+                    SELECT COUNT(*)::int as active_count
+                    FROM candidates
+                    WHERE assigned_to = $1 
+                      AND lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')
+                `, [req.user.staffId]);
+                
+                const activeCount = activeCountRes.rows[0]?.active_count || 0;
+                const MAX_ACTIVE_LEADS = 15;
+                if (activeCount >= MAX_ACTIVE_LEADS) {
+                    return res.status(400).json({ 
+                        error: `Active lead capacity limit reached (${activeCount}/${MAX_ACTIVE_LEADS}). Progress or unclaim existing leads before claiming new ones.` 
+                    });
+                }
+
                 // Atomic conditional update: prevents race condition when 50 staff click simultaneously
                 const updateRes = await client.query(
                     `UPDATE candidates 
@@ -5636,25 +5695,87 @@ apiRouter.get('/updates/stream', async (req, res) => {
     });
 });
 
-apiRouter.get('/drivers', async (req, res) => {
+apiRouter.get('/drivers', authMiddleware, async (req: any, res: any) => {
     try {
-        const snapshot = await getDriversSnapshotCached();
-        const etag = `"drivers-${snapshot.fingerprint}"`;
-        if (req.headers['if-none-match'] === etag) {
-            res.status(304).end();
-            return;
+        const callerRole = req.user?.role || 'staff';
+        const callerStaffId = req.user?.staffId;
+
+        // Admin sees all drivers with cached snapshot & ETag
+        if (callerRole === 'admin') {
+            const snapshot = await getDriversSnapshotCached();
+            const etag = `"drivers-${snapshot.fingerprint}"`;
+            if (req.headers['if-none-match'] === etag) {
+                res.status(304).end();
+                return;
+            }
+
+            res.setHeader('ETag', etag);
+            res.setHeader('Cache-Control', 'private, no-cache, must-revalidate');
+            return res.json(snapshot.drivers);
         }
 
-        res.setHeader('ETag', etag);
-        res.setHeader('Cache-Control', 'private, no-cache, must-revalidate');
-        res.json(snapshot.drivers);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+        // Manager sees their team's drivers + unassigned leads
+        if (callerRole === 'manager') {
+            const drivers = await withDb(async (client) => {
+                const r = await client.query(`
+                    SELECT c.*, s.name as staff_name
+                    FROM candidates c
+                    LEFT JOIN staff_members s ON c.assigned_to = s.id
+                    WHERE c.assigned_to = $1 OR s.manager_id = $1 OR c.assigned_to IS NULL
+                    ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC
+                `, [callerStaffId]);
+                return r.rows;
+            });
+            return res.json(drivers);
+        }
+
+        // Staff sees ONLY their assigned drivers with masked phone numbers (Anti-Poaching Shield)
+        const staffDrivers = await withDb(async (client) => {
+            const r = await client.query(`
+                SELECT c.*, s.name as staff_name
+                FROM candidates c
+                LEFT JOIN staff_members s ON c.assigned_to = s.id
+                WHERE c.assigned_to = $1
+                ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC
+            `, [callerStaffId]);
+            return r.rows.map(row => ({
+                ...row,
+                phone_number: maskPhoneNumber(row.phone_number)
+            }));
+        });
+        return res.json(staffDrivers);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.patch('/drivers/:id', async (req, res) => {
+apiRouter.patch('/drivers/:id', authMiddleware, async (req: any, res: any) => {
     try {
         const { status, isHumanMode, name, isTerminated } = req.body;
+        const callerRole = req.user?.role || 'staff';
+        const callerStaffId = req.user?.staffId;
+
         await withDb(async (client) => {
+            // Permission check: staff can only update their own assigned lead
+            if (callerRole === 'staff') {
+                const leadCheck = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+                if (leadCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
+                if (leadCheck.rows[0].assigned_to !== callerStaffId) {
+                    return res.status(403).json({ error: 'Forbidden: You can only update leads assigned to you' });
+                }
+            } else if (callerRole === 'manager') {
+                const leadCheck = await client.query(`
+                    SELECT c.assigned_to, s.manager_id 
+                    FROM candidates c
+                    LEFT JOIN staff_members s ON c.assigned_to = s.id
+                    WHERE c.id = $1
+                `, [req.params.id]);
+                if (leadCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
+                const lead = leadCheck.rows[0];
+                const isTeamLead = lead.assigned_to === callerStaffId || lead.manager_id === callerStaffId || lead.assigned_to === null;
+                if (!isTeamLead) {
+                    return res.status(403).json({ error: 'Forbidden: You can only update leads within your team' });
+                }
+            }
+
             if (status) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [status, req.params.id]);
             if (isHumanMode !== undefined) await client.query("UPDATE candidates SET is_human_mode = $1 WHERE id = $2", [isHumanMode, req.params.id]);
             if (name) await client.query("UPDATE candidates SET name = $1 WHERE id = $2", [name, req.params.id]);
@@ -5671,10 +5792,10 @@ apiRouter.patch('/drivers/:id', async (req, res) => {
             }
         });
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.get('/drivers/archived', async (req, res) => {
+apiRouter.get('/drivers/archived', authMiddleware, requireRole('admin', 'manager'), async (req: any, res: any) => {
     try {
         await withDb(async (client) => {
             const r = await client.query(`
@@ -5696,10 +5817,10 @@ apiRouter.get('/drivers/archived', async (req, res) => {
                 isTerminated: Boolean(row.is_terminated)
             })));
         });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.patch('/drivers/:id/visibility', async (req, res) => {
+apiRouter.patch('/drivers/:id/visibility', authMiddleware, requireRole('admin', 'manager'), async (req: any, res: any) => {
     try {
         const { isHidden } = req.body || {};
         if (typeof isHidden !== 'boolean') {
@@ -5709,10 +5830,10 @@ apiRouter.patch('/drivers/:id/visibility', async (req, res) => {
             await client.query('UPDATE candidates SET is_hidden = $1 WHERE id = $2', [isHidden, req.params.id]);
         });
         res.json({ success: true, isHidden });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.get('/drivers/:id/messages', async (req, res) => {
+apiRouter.get('/drivers/:id/messages', authMiddleware, async (req: any, res: any) => {
     try {
         await withDb(async (client) => {
             const r = await client.query(`
@@ -5760,7 +5881,7 @@ apiRouter.get('/drivers/:id/messages', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.post('/drivers/:id/messages', async (req, res) => {
+apiRouter.post('/drivers/:id/messages', authMiddleware, async (req: any, res: any) => {
     try {
         const { text, mediaUrl: rawMediaUrl, mediaType: rawMediaType, imageUrl, videoUrl, audioUrl, documentUrl, type: rawType } = req.body;
         const mediaUrl = rawMediaUrl || imageUrl || videoUrl || audioUrl || documentUrl;
@@ -5800,6 +5921,14 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
                  VALUES ($1, $2, 'out', $3, $4, $5, $6, 'staff', NOW())`,
                 [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text', sendStatus, sendResult?.providerMessageId || null]
             );
+
+            // Immutable Audit Log: Track exact staff sender
+            await client.query(
+                `INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes)
+                 VALUES ($1, $2, 'outbound_message', $3)`,
+                [req.params.id, req.user?.staffId || null, `Sent message: ${sanitizedText ? sanitizedText.slice(0, 80) : (mediaType || 'media')}`]
+            );
+
             notifyUpdates(req.params.id);
             scheduleDriverExcelSync();
             scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'upsert' });
@@ -5818,17 +5947,17 @@ apiRouter.post('/drivers/:id/messages', async (req, res) => {
     } catch (e) { return res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.get('/drivers/:id/documents', async (req, res) => {
+apiRouter.get('/drivers/:id/documents', authMiddleware, async (req: any, res: any) => {
     try {
         await withDb(async (client) => {
             const r = await client.query('SELECT * FROM driver_documents WHERE candidate_id = $1 ORDER BY created_at DESC', [req.params.id]);
             const docs = await Promise.all(r.rows.map(async d => ({ id: d.id, docType: d.type, url: await refreshMediaUrl(d.url), verificationStatus: d.status, timestamp: new Date(d.created_at).getTime() })));
             res.json(docs);
         });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-apiRouter.patch('/drivers/:id/document-status', async (req, res) => {
+apiRouter.patch('/drivers/:id/document-status', authMiddleware, async (req: any, res: any) => {
     try {
         const status = String(req.body?.status || '').trim().toLowerCase();
         const reason = String(req.body?.reason || '').trim();
@@ -5861,7 +5990,7 @@ apiRouter.patch('/drivers/:id/document-status', async (req, res) => {
 });
 
 
-apiRouter.get('/reports/driver-excel', async (req, res) => {
+apiRouter.get('/reports/driver-excel', authMiddleware, requireRole('admin', 'manager'), async (req: any, res: any) => {
     try {
         const search = (req.query.search || '').toString().trim();
         const includeHidden = String(req.query.includeHidden || 'false').toLowerCase() === 'true';
@@ -6704,36 +6833,56 @@ function startInboundQueueWorker() {
 
 // --- LEAD AUTO-DISTRIBUTION ---
 async function startLeadAutoDistributor() {
-    console.log("Starting Lead Auto-Distributor...");
+    console.log("Starting Lead Auto-Distributor & SLA Watchdog...");
     setInterval(async () => {
         try {
             await withDb(async (client) => {
-                // Check if auto-distribution is enabled
+                // 1. SLA Watchdog: Auto-unclaim abandoned leads (> 45m inactive while assigned/claimed, non-human-mode)
+                const slaRevoked = await client.query(`
+                    UPDATE candidates 
+                    SET assigned_to = NULL, lead_status = 'new', last_action_at = NOW()
+                    WHERE assigned_to IS NOT NULL 
+                      AND lead_status IN ('claimed', 'assigned')
+                      AND (last_action_at IS NULL OR last_action_at < NOW() - INTERVAL '45 minutes')
+                      AND COALESCE(is_human_mode, FALSE) = FALSE
+                    RETURNING id, assigned_to
+                `);
+
+                if (slaRevoked.rows.length > 0) {
+                    for (const revoked of slaRevoked.rows) {
+                        await client.query(`
+                            INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes)
+                            VALUES ($1, $2, 'sla_revocation', 'Lead automatically returned to pool due to 45m agent inactivity')
+                        `, [revoked.id, revoked.assigned_to]);
+                        notifyUpdates(revoked.id);
+                    }
+                    console.log(`[SLA Watchdog] Auto-revoked ${slaRevoked.rows.length} inactive leads back to pool.`);
+                }
+
+                // 2. Check if auto-distribution is enabled
                 const settingsRes = await client.query("SELECT value FROM system_settings WHERE key = 'lead_distribution'");
                 const settings = settingsRes.rows[0]?.value || { auto_enabled: false };
                 if (!settings.auto_enabled) return;
 
-                // Get unassigned leads
+                // 3. Get unassigned leads
                 const unassignedLeads = await client.query("SELECT id FROM candidates WHERE assigned_to IS NULL AND lead_status = 'new' LIMIT 10");
                 if (unassignedLeads.rows.length === 0) return;
 
-                // God-Eye Engine: Smart Load-Balancing & Skill-Based Router
-                // 1. Only route to staff who are explicitly 'online' and have pinged recently.
-                // 2. Count their current active workload (leads not closed/lost).
-                // 3. Order by least loaded first, then least recently assigned.
+                // 4. Smart Load-Balancing & Skill-Based Router: only active staff with < 15 active leads
                 const activeStaffRes = await client.query(`
                     SELECT 
                         s.id, 
                         s.last_assigned_at,
-                        (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified')) as active_leads
+                        (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) as active_leads
                     FROM staff_members s
                     WHERE s.is_active_for_auto_dist = TRUE 
                       AND s.current_status = 'online'
                       AND s.last_ping_at > NOW() - INTERVAL '2 minutes'
+                      AND (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) < 15
                 `);
                 
                 if (activeStaffRes.rows.length === 0) {
-                    // No online staff available to take leads right now.
+                    // No online staff with available capacity (<15 leads) right now.
                     return;
                 }
 
@@ -6752,14 +6901,16 @@ async function startLeadAutoDistributor() {
                     });
 
                     const bestStaff = staffList[0];
+                    if (!bestStaff || bestStaff.active_leads >= 15) break;
 
                     await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [bestStaff.id, lead.id]);
                     await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [bestStaff.id]);
                     await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead routed via smart load-balancer')", [lead.id, bestStaff.id]);
                     
                     console.log(`Smart-routed lead ${lead.id} to staff ${bestStaff.id} (Active Workload: ${bestStaff.active_leads})`);
+                    notifyUpdates(lead.id);
                     
-                    // Update in-memory stats so they don't get all 10 leads at once if they were tied
+                    // Update in-memory stats
                     bestStaff.active_leads += 1;
                     bestStaff.last_assigned_at = Date.now();
                 }

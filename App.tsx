@@ -60,7 +60,12 @@ export default function App() {
           setIsAuthenticated(true);
           liveApiService.getProfile()
             .then(res => {
-                if (res.success) setUserProfile(res.user);
+                if (res.success) {
+                    setUserProfile(res.user);
+                    if (res.user?.role === 'staff') {
+                        setActiveTab('staff-portal');
+                    }
+                }
             })
             .catch(() => {
                 clearAuthToken();
@@ -219,6 +224,9 @@ export default function App() {
       setAuthToken(token);
       setUserProfile(user);
       setIsAuthenticated(true);
+      if (user?.role === 'staff') {
+          setActiveTab('staff-portal');
+      }
       if ("Notification" in window) Notification.requestPermission();
   };
 
