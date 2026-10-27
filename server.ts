@@ -4232,6 +4232,7 @@ apiRouter.get('/leads/pool', authMiddleware, async (req, res) => {
         await withDb(async (client) => {
             const botSettings = await getBotSettingsCached(client);
             const botGraph = getCompiledBotGraph(botSettings);
+            const limit = Math.min(200, Math.max(10, parseInt(String(req.query?.limit || '100'), 10) || 100));
             const r = await client.query(`
                 SELECT c.*,
                        COALESCE(bot.bot_response_count, 0) AS bot_response_count,
@@ -4281,7 +4282,8 @@ apiRouter.get('/leads/pool', authMiddleware, async (req, res) => {
                 ) driver ON TRUE
                 WHERE c.assigned_to IS NULL
                 ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC
-            `);
+                LIMIT $1
+            `, [limit]);
             const rows = r.rows.map((row) => {
                 const currentStepId = row.current_bot_step_id;
                 const isCompleted = Boolean(
@@ -6905,86 +6907,97 @@ function startInboundQueueWorker() {
 
 // --- LEAD AUTO-DISTRIBUTION ---
 async function startLeadAutoDistributor() {
-    console.log("Starting Lead Auto-Distributor & SLA Watchdog...");
+    console.log("Starting Lead Auto-Distributor & SLA Watchdog (PostgreSQL Cluster-Locked)...");
+    const DISTRIBUTOR_LOCK_ID = 987654321;
+
     setInterval(async () => {
         try {
             await withDb(async (client) => {
-                // 1. SLA Watchdog: Auto-unclaim abandoned leads (> 45m inactive while assigned/claimed, non-human-mode)
-                const slaRevoked = await client.query(`
-                    UPDATE candidates 
-                    SET assigned_to = NULL, lead_status = 'new', last_action_at = NOW()
-                    WHERE assigned_to IS NOT NULL 
-                      AND lead_status IN ('claimed', 'assigned')
-                      AND (last_action_at IS NULL OR last_action_at < NOW() - INTERVAL '45 minutes')
-                      AND COALESCE(is_human_mode, FALSE) = FALSE
-                    RETURNING id, assigned_to
-                `);
+                // Acquire cluster-wide distributed lock (prevents multi-container race conditions)
+                const lockRes = await client.query('SELECT pg_try_advisory_lock($1) AS acquired', [DISTRIBUTOR_LOCK_ID]);
+                if (!lockRes.rows[0]?.acquired) {
+                    return; // Another server instance is currently executing this cycle
+                }
 
-                if (slaRevoked.rows.length > 0) {
-                    for (const revoked of slaRevoked.rows) {
-                        await client.query(`
-                            INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes)
-                            VALUES ($1, $2, 'sla_revocation', 'Lead automatically returned to pool due to 45m agent inactivity')
-                        `, [revoked.id, revoked.assigned_to]);
-                        notifyUpdates(revoked.id);
+                try {
+                    // 1. SLA Watchdog: Auto-unclaim abandoned leads (> 45m inactive while assigned/claimed, non-human-mode)
+                    const slaRevoked = await client.query(`
+                        UPDATE candidates 
+                        SET assigned_to = NULL, lead_status = 'new', last_action_at = NOW()
+                        WHERE assigned_to IS NOT NULL 
+                          AND lead_status IN ('claimed', 'assigned')
+                          AND (last_action_at IS NULL OR last_action_at < NOW() - INTERVAL '45 minutes')
+                          AND COALESCE(is_human_mode, FALSE) = FALSE
+                        RETURNING id, assigned_to
+                    `);
+
+                    if (slaRevoked.rows.length > 0) {
+                        for (const revoked of slaRevoked.rows) {
+                            await client.query(`
+                                INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes)
+                                VALUES ($1, $2, 'sla_revocation', 'Lead automatically returned to pool due to 45m agent inactivity')
+                            `, [revoked.id, revoked.assigned_to]);
+                            notifyUpdates(revoked.id);
+                        }
+                        console.log(`[SLA Watchdog] Auto-revoked ${slaRevoked.rows.length} inactive leads back to pool.`);
                     }
-                    console.log(`[SLA Watchdog] Auto-revoked ${slaRevoked.rows.length} inactive leads back to pool.`);
-                }
 
-                // 2. Check if auto-distribution is enabled
-                const settingsRes = await client.query("SELECT value FROM system_settings WHERE key = 'lead_distribution'");
-                const settings = settingsRes.rows[0]?.value || { auto_enabled: false };
-                if (!settings.auto_enabled) return;
+                    // 2. Check if auto-distribution is enabled
+                    const settingsRes = await client.query("SELECT value FROM system_settings WHERE key = 'lead_distribution'");
+                    const settings = settingsRes.rows[0]?.value || { auto_enabled: false };
+                    if (!settings.auto_enabled) return;
 
-                // 3. Get unassigned leads
-                const unassignedLeads = await client.query("SELECT id FROM candidates WHERE assigned_to IS NULL AND lead_status = 'new' LIMIT 10");
-                if (unassignedLeads.rows.length === 0) return;
+                    // 3. Get unassigned leads
+                    const unassignedLeads = await client.query("SELECT id FROM candidates WHERE assigned_to IS NULL AND lead_status = 'new' LIMIT 10");
+                    if (unassignedLeads.rows.length === 0) return;
 
-                // 4. Smart Load-Balancing & Skill-Based Router: only active staff with < 15 active leads
-                const activeStaffRes = await client.query(`
-                    SELECT 
-                        s.id, 
-                        s.last_assigned_at,
-                        (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) as active_leads
-                    FROM staff_members s
-                    WHERE s.is_active_for_auto_dist = TRUE 
-                      AND s.current_status = 'online'
-                      AND s.last_ping_at > NOW() - INTERVAL '2 minutes'
-                      AND (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) < 15
-                `);
-                
-                if (activeStaffRes.rows.length === 0) {
-                    // No online staff with available capacity (<15 leads) right now.
-                    return;
-                }
-
-                // Keep track of workload in memory during this batch assignment
-                let staffList = activeStaffRes.rows.map(row => ({
-                    id: row.id,
-                    active_leads: parseInt(row.active_leads, 10),
-                    last_assigned_at: row.last_assigned_at ? new Date(row.last_assigned_at).getTime() : 0
-                }));
-
-                for (const lead of unassignedLeads.rows) {
-                    // Re-sort to always pick the absolute best candidate for the next lead
-                    staffList.sort((a, b) => {
-                        if (a.active_leads !== b.active_leads) return a.active_leads - b.active_leads;
-                        return a.last_assigned_at - b.last_assigned_at;
-                    });
-
-                    const bestStaff = staffList[0];
-                    if (!bestStaff || bestStaff.active_leads >= 15) break;
-
-                    await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [bestStaff.id, lead.id]);
-                    await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [bestStaff.id]);
-                    await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead routed via smart load-balancer')", [lead.id, bestStaff.id]);
+                    // 4. Smart Load-Balancing & Skill-Based Router: only active staff with < 15 active leads
+                    const activeStaffRes = await client.query(`
+                        SELECT 
+                            s.id, 
+                            s.last_assigned_at,
+                            (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) as active_leads
+                        FROM staff_members s
+                        WHERE s.is_active_for_auto_dist = TRUE 
+                          AND s.current_status = 'online'
+                          AND s.last_ping_at > NOW() - INTERVAL '2 minutes'
+                          AND (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) < 15
+                    `);
                     
-                    console.log(`Smart-routed lead ${lead.id} to staff ${bestStaff.id} (Active Workload: ${bestStaff.active_leads})`);
-                    notifyUpdates(lead.id);
-                    
-                    // Update in-memory stats
-                    bestStaff.active_leads += 1;
-                    bestStaff.last_assigned_at = Date.now();
+                    if (activeStaffRes.rows.length === 0) {
+                        return;
+                    }
+
+                    // Keep track of workload in memory during this batch assignment
+                    let staffList = activeStaffRes.rows.map(row => ({
+                        id: row.id,
+                        active_leads: parseInt(row.active_leads, 10),
+                        last_assigned_at: row.last_assigned_at ? new Date(row.last_assigned_at).getTime() : 0
+                    }));
+
+                    for (const lead of unassignedLeads.rows) {
+                        // Re-sort to always pick the absolute best candidate for the next lead
+                        staffList.sort((a, b) => {
+                            if (a.active_leads !== b.active_leads) return a.active_leads - b.active_leads;
+                            return a.last_assigned_at - b.last_assigned_at;
+                        });
+
+                        const bestStaff = staffList[0];
+                        if (!bestStaff || bestStaff.active_leads >= 15) break;
+
+                        await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [bestStaff.id, lead.id]);
+                        await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [bestStaff.id]);
+                        await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead routed via smart load-balancer')", [lead.id, bestStaff.id]);
+                        
+                        console.log(`Smart-routed lead ${lead.id} to staff ${bestStaff.id} (Active Workload: ${bestStaff.active_leads})`);
+                        notifyUpdates(lead.id);
+                        
+                        // Update in-memory stats
+                        bestStaff.active_leads += 1;
+                        bestStaff.last_assigned_at = Date.now();
+                    }
+                } finally {
+                    await client.query('SELECT pg_advisory_unlock($1)', [DISTRIBUTOR_LOCK_ID]).catch(() => null);
                 }
             });
         } catch (e) {

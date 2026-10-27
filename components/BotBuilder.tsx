@@ -1196,6 +1196,7 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<'flow' | 'ai' | 'chat-settings'>('flow');
   const [isSaving, setIsSaving] = useState(false);
+  const [saveToast, setSaveToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   const { 
     humanModeEntryMessage, 
@@ -1255,13 +1256,15 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
       try {
           if (isLiveMode) {
               await liveApiService.saveBotSettings(settings);
-              alert("Live Bot Updated!");
+              setSaveToast({ message: "Live Bot Flow Saved & Deployed Successfully!", type: 'success' });
           } else {
               mockBackend.updateBotSettings(settings as any);
-              alert("Simulator Bot Updated!");
+              setSaveToast({ message: "Simulator Bot Flow Updated Successfully!", type: 'success' });
           }
+          setTimeout(() => setSaveToast(null), 3500);
       } catch(e) {
-          alert("Save Failed");
+          setSaveToast({ message: "Save Failed. Please check system connection.", type: 'error' });
+          setTimeout(() => setSaveToast(null), 4000);
       } finally {
           setIsSaving(false);
       }
@@ -1520,6 +1523,14 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
               onChange={updateNodeData} 
               onClose={() => setSelectedNodeId(null)} 
           />
+      )}
+
+      {/* Modern Non-Blocking Notification Toast */}
+      {saveToast && (
+          <div className="fixed bottom-6 right-6 z-50 flex items-center gap-3 px-5 py-3 rounded-xl shadow-2xl bg-gray-950 text-white border border-gray-800 transition-all animate-in slide-in-from-bottom duration-200">
+              <span className={`w-2.5 h-2.5 rounded-full ${saveToast.type === 'success' ? 'bg-emerald-400' : 'bg-red-400'}`} />
+              <span className="text-sm font-semibold">{saveToast.message}</span>
+          </div>
       )}
     </div>
   );
