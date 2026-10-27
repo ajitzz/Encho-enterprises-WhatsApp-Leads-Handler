@@ -390,6 +390,28 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     );
   }, [view, poolLeads, myLeads, searchQuery]);
 
+  const refreshOwnedLeadViews = React.useCallback(async () => {
+    try {
+      const [my, pool] = await Promise.all([
+        liveApiService.getMyLeads(),
+        liveApiService.getLeadPool()
+      ]);
+      const authoritative = new Map<string, any>();
+      [...pool, ...my].forEach((lead: any) => authoritative.set(lead.id, lead));
+      authoritativeLeadsRef.current = authoritative;
+      setAllLeads((prev) => {
+        const byId = new Map<string, any>();
+        prev.forEach((lead: any) => byId.set(lead.id, lead));
+        [...pool, ...my].forEach((lead: any) => {
+          byId.set(lead.id, { ...(byId.get(lead.id) || {}), ...lead });
+        });
+        return Array.from(byId.values());
+      });
+    } catch (err) {
+      console.error('Failed to refresh staff-owned lead views', err);
+    }
+  }, []);
+
   // Background Telemetry Pinger (God-Eye Engine)
   useEffect(() => {
     let lastActivity = Date.now();
@@ -480,28 +502,6 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
     return () => clearInterval(liveInterval);
   }, [selectedLead?.id, view]);
-
-  const refreshOwnedLeadViews = React.useCallback(async () => {
-    try {
-      const [my, pool] = await Promise.all([
-        liveApiService.getMyLeads(),
-        liveApiService.getLeadPool()
-      ]);
-      const authoritative = new Map<string, any>();
-      [...pool, ...my].forEach((lead: any) => authoritative.set(lead.id, lead));
-      authoritativeLeadsRef.current = authoritative;
-      setAllLeads((prev) => {
-        const byId = new Map<string, any>();
-        prev.forEach((lead: any) => byId.set(lead.id, lead));
-        [...pool, ...my].forEach((lead: any) => {
-          byId.set(lead.id, { ...(byId.get(lead.id) || {}), ...lead });
-        });
-        return Array.from(byId.values());
-      });
-    } catch (err) {
-      console.error('Failed to refresh staff-owned lead views', err);
-    }
-  }, []);
 
   useEffect(() => {
     refreshOwnedLeadViews();

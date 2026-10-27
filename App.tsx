@@ -341,10 +341,12 @@ export default function App() {
                   </button>
               </div>
               <div className="flex-1 overflow-hidden">
-                  <StaffPortal
-                      user={shadowUser}
-                      onLogout={() => setShadowUser(null)}
-                  />
+                  <IsolatedFeatureBoundary featureName="Staff Portal (Shadow Mode)">
+                      <StaffPortal
+                          user={shadowUser}
+                          onLogout={() => setShadowUser(null)}
+                      />
+                  </IsolatedFeatureBoundary>
               </div>
           </div>
       );
@@ -353,10 +355,12 @@ export default function App() {
   // --- STAFF / MANAGER PORTAL VIEW ---
   if (userProfile?.role === 'staff' || userProfile?.role === 'manager') {
       return (
-          <StaffPortal
-              user={userProfile}
-              onLogout={handleLogout}
-          />
+          <IsolatedFeatureBoundary featureName="Staff Portal">
+              <StaffPortal
+                  user={userProfile}
+                  onLogout={handleLogout}
+              />
+          </IsolatedFeatureBoundary>
       );
   }
 
@@ -647,7 +651,11 @@ export default function App() {
         {activeTab === 'media-library' && <MediaLibrary />}
         {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
         {activeTab === 'staff' && <StaffManagement onShadowUser={setShadowUser} />}
-        {activeTab === 'staff-portal' && <StaffPortal user={userProfile} onLogout={handleLogout} />}
+        {activeTab === 'staff-portal' && (
+          <IsolatedFeatureBoundary featureName="Staff Portal">
+            <StaffPortal user={userProfile} onLogout={handleLogout} />
+          </IsolatedFeatureBoundary>
+        )}
 
         {showWebhookModal && <WebhookConfigModal onClose={() => setShowWebhookModal(false)} onSuccess={() => { addNotification({ type: 'success', title: 'Webhook Configured', message: 'Meta App settings updated successfully.' }); }} />}
         {showSettingsModal && <SettingsModal onClose={() => setShowSettingsModal(false)} />}
