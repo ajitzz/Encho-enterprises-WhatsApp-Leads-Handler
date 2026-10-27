@@ -1,5 +1,5 @@
 
-import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage, DriverExcelColumn, DriverExcelRow, UserRole, CannedResponse, ActiveLeadViewer } from '../types';
+import { BotSettings, Driver, Message, SystemStats, DriverDocument, ScheduledMessage, DriverExcelColumn, DriverExcelRow, UserRole, CannedResponse, ActiveLeadViewer, LeadCall } from '../types';
 
 // Default to same-origin for Vercel-style rewrites, but allow explicit override for
 // Cloudflare static deployments where API may run on a separate origin.
@@ -754,14 +754,36 @@ export const liveApiService = {
     return apiRequest<any[]>(`/api/reviews/inbox/${managerId}?status=${encodeURIComponent(status)}`);
   },
 
-  reviewDecision: async (reviewId: string, data: { decision: 'approved' | 'rejected' | 'returned_for_call_again'; feedback?: string; reasonCode?: string }) => {
+  reviewDecision: async (reviewId: string, data: { decision: 'approved' | 'rejected' | 'returned_for_call_again'; feedback?: string; reasonCode?: string; scorecard?: any; qaScore?: number }) => {
     return apiRequest(`/api/reviews/${reviewId}/decision`, {
       method: 'POST',
       body: JSON.stringify({
         status: data.decision,
         feedback: data.feedback || '',
-        reasonCode: data.reasonCode || ''
+        reasonCode: data.reasonCode || '',
+        scorecard: data.scorecard,
+        qaScore: data.qaScore
       })
+    });
+  },
+
+  // Telephony CTI Call Logs
+  logLeadCall: async (leadId: string, callData: { durationSeconds: number; disposition: string; notes?: string; phoneNumber?: string; recordingUrl?: string }) => {
+    return apiRequest<{ success: boolean; callId: string }>(`/api/leads/${leadId}/calls`, {
+      method: 'POST',
+      body: JSON.stringify(callData)
+    });
+  },
+
+  getLeadCalls: async (leadId: string): Promise<LeadCall[]> => {
+    return apiRequest<LeadCall[]>(`/api/leads/${leadId}/calls`);
+  },
+
+  // Recruiter Presence & Idle Management
+  updateStaffStatus: async (status: 'online' | 'away' | 'idle' | 'offline', activeSeconds = 0, idleSeconds = 0) => {
+    return apiRequest('/api/staff/heartbeat', {
+      method: 'POST',
+      body: JSON.stringify({ status, active_seconds: activeSeconds, idle_seconds: idleSeconds })
     });
   }
 };

@@ -12,7 +12,10 @@ import {
   Inbox,
   BadgeCheck,
   Ban,
-  Undo2
+  Undo2,
+  Star,
+  Award,
+  ShieldCheck
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 
@@ -23,6 +26,26 @@ interface PendingReviewsProps {
   managerId: string;
   onBack: () => void;
 }
+
+interface ScorecardItem {
+  greetingTone: number; // 1 to 5
+  documentAccuracy: number; // 1 to 5
+  payoutClarity: number; // 1 to 5
+  fraudCheckPassed: boolean;
+}
+
+const DEFAULT_SCORECARD: ScorecardItem = {
+  greetingTone: 5,
+  documentAccuracy: 5,
+  payoutClarity: 5,
+  fraudCheckPassed: true
+};
+
+const calculateQaScore = (sc: ScorecardItem): number => {
+  if (!sc.fraudCheckPassed) return 0;
+  const totalStars = (sc.greetingTone || 5) + (sc.documentAccuracy || 5) + (sc.payoutClarity || 5);
+  return Math.round((totalStars / 15) * 100);
+};
 
 const STATUS_META: Record<InboxStatus, { label: string; icon: React.ReactNode }> = {
   pending: { label: 'Pending', icon: <Inbox size={14} /> },
@@ -44,6 +67,7 @@ export const PendingReviews: React.FC<PendingReviewsProps> = ({ managerId, onBac
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Record<string, string>>({});
   const [reasonCode, setReasonCode] = useState<Record<string, string>>({});
+  const [scorecards, setScorecards] = useState<Record<string, ScorecardItem>>({});
   const [activeTab, setActiveTab] = useState<InboxStatus>('pending');
 
   const fetchReviews = async (status: InboxStatus) => {
@@ -80,10 +104,15 @@ export const PendingReviews: React.FC<PendingReviewsProps> = ({ managerId, onBac
     try {
       setProcessingId(reviewId);
       setError(null);
+      const currentScorecard = scorecards[reviewId] || DEFAULT_SCORECARD;
+      const currentQaScore = calculateQaScore(currentScorecard);
+
       await liveApiService.reviewDecision(reviewId, {
         decision,
         feedback: feedback[reviewId] || '',
-        reasonCode: reasonCode[reviewId] || ''
+        reasonCode: reasonCode[reviewId] || '',
+        scorecard: currentScorecard,
+        qaScore: currentQaScore
       });
 
       if (activeTab === 'pending') {
@@ -162,9 +191,18 @@ export const PendingReviews: React.FC<PendingReviewsProps> = ({ managerId, onBac
                   <p className="text-[10px] text-gray-400 uppercase font-bold tracking-widest">Submitted by {review.staff_name}</p>
                 </div>
               </div>
-              <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-gray-100 text-gray-700">
-                {STATUS_META[(review.status as InboxStatus) || activeTab]?.label || review.status}
-              </span>
+              <div className="flex items-center gap-2">
+                {review.qa_score !== undefined && review.qa_score !== null && (
+                  <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest ${
+                    review.qa_score >= 80 ? 'bg-emerald-100 text-emerald-800' : review.qa_score >= 60 ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800'
+                  }`}>
+                    QA: {review.qa_score}%
+                  </span>
+                )}
+                <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-gray-100 text-gray-700">
+                  {STATUS_META[(review.status as InboxStatus) || activeTab]?.label || review.status}
+                </span>
+              </div>
             </div>
 
             <div className="bg-gray-50 p-4 rounded-2xl space-y-2">
@@ -190,6 +228,117 @@ export const PendingReviews: React.FC<PendingReviewsProps> = ({ managerId, onBac
 
             {!isHistoryTab && (
               <div className="space-y-3 pt-2">
+                {/* FAANG Industrial QA Scorecard Rubric */}
+                <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Award size={16} className="text-blue-600" />
+                      <span className="text-xs font-bold text-gray-800 uppercase tracking-wide">Recruiter QA Scorecard</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-bold text-gray-500">Audit Score:</span>
+                      <span className={`text-xs font-extrabold px-2.5 py-0.5 rounded-full ${
+                        calculateQaScore(scorecards[review.id] || DEFAULT_SCORECARD) >= 80
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : calculateQaScore(scorecards[review.id] || DEFAULT_SCORECARD) >= 60
+                          ? 'bg-amber-100 text-amber-800'
+                          : 'bg-red-100 text-red-800'
+                      }`}>
+                        {calculateQaScore(scorecards[review.id] || DEFAULT_SCORECARD)}%
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Rubric Rating Rows */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                    {/* Greeting & Tone */}
+                    <div className="bg-white p-2.5 rounded-xl border border-gray-100 flex flex-col justify-between">
+                      <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Driver Greeting</span>
+                      <div className="flex items-center gap-1 mt-1.5">
+                        {[1, 2, 3, 4, 5].map((star) => {
+                          const current = (scorecards[review.id] || DEFAULT_SCORECARD).greetingTone;
+                          return (
+                            <button
+                              key={star}
+                              type="button"
+                              onClick={() => {
+                                const prev = scorecards[review.id] || { ...DEFAULT_SCORECARD };
+                                setScorecards(s => ({ ...s, [review.id]: { ...prev, greetingTone: star } }));
+                              }}
+                              className={`p-0.5 transition-transform hover:scale-110 ${star <= current ? 'text-amber-400' : 'text-gray-200'}`}
+                            >
+                              <Star size={14} fill={star <= current ? 'currentColor' : 'none'} />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Document Verification */}
+                    <div className="bg-white p-2.5 rounded-xl border border-gray-100 flex flex-col justify-between">
+                      <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Doc Accuracy (DL/RC)</span>
+                      <div className="flex items-center gap-1 mt-1.5">
+                        {[1, 2, 3, 4, 5].map((star) => {
+                          const current = (scorecards[review.id] || DEFAULT_SCORECARD).documentAccuracy;
+                          return (
+                            <button
+                              key={star}
+                              type="button"
+                              onClick={() => {
+                                const prev = scorecards[review.id] || { ...DEFAULT_SCORECARD };
+                                setScorecards(s => ({ ...s, [review.id]: { ...prev, documentAccuracy: star } }));
+                              }}
+                              className={`p-0.5 transition-transform hover:scale-110 ${star <= current ? 'text-amber-400' : 'text-gray-200'}`}
+                            >
+                              <Star size={14} fill={star <= current ? 'currentColor' : 'none'} />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Payout Clarity */}
+                    <div className="bg-white p-2.5 rounded-xl border border-gray-100 flex flex-col justify-between">
+                      <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Payout Clarity</span>
+                      <div className="flex items-center gap-1 mt-1.5">
+                        {[1, 2, 3, 4, 5].map((star) => {
+                          const current = (scorecards[review.id] || DEFAULT_SCORECARD).payoutClarity;
+                          return (
+                            <button
+                              key={star}
+                              type="button"
+                              onClick={() => {
+                                const prev = scorecards[review.id] || { ...DEFAULT_SCORECARD };
+                                setScorecards(s => ({ ...s, [review.id]: { ...prev, payoutClarity: star } }));
+                              }}
+                              className={`p-0.5 transition-transform hover:scale-110 ${star <= current ? 'text-amber-400' : 'text-gray-200'}`}
+                            >
+                              <Star size={14} fill={star <= current ? 'currentColor' : 'none'} />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Anti-Fraud Check Toggle */}
+                  <label className="flex items-center gap-2 cursor-pointer pt-1">
+                    <input
+                      type="checkbox"
+                      checked={(scorecards[review.id] || DEFAULT_SCORECARD).fraudCheckPassed}
+                      onChange={(e) => {
+                        const prev = scorecards[review.id] || { ...DEFAULT_SCORECARD };
+                        setScorecards(s => ({ ...s, [review.id]: { ...prev, fraudCheckPassed: e.target.checked } }));
+                      }}
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span className="text-xs font-semibold text-gray-700 flex items-center gap-1">
+                      <ShieldCheck size={14} className="text-emerald-600" />
+                      Fraud / Identity Check Passed (DL/RC genuine and matched to driver)
+                    </span>
+                  </label>
+                </div>
+
                 <div className="relative">
                   <MessageSquare className="absolute left-4 top-4 text-gray-400" size={16} />
                   <textarea

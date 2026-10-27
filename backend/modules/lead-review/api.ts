@@ -126,6 +126,10 @@ router.post('/:reviewId/decision', async (req, res) => {
     const normalizedStatus = status === 'returned' ? 'returned_for_call_again' : status;
     const feedback = String(req.body?.feedback || '').trim();
     const reasonCode = String(req.body?.reasonCode || req.body?.reason_code || '').trim();
+    const scorecard = req.body?.scorecard || null;
+    const qaScore = typeof req.body?.qaScore === 'number' 
+        ? Math.max(0, Math.min(100, Math.round(req.body.qaScore))) 
+        : (normalizedStatus === 'approved' ? 100 : 0);
 
     if (!actorStaffId) return res.status(401).json({ error: 'Unauthorized' });
     if (!['manager', 'admin'].includes(actorRole)) return res.status(403).json({ error: 'Only managers/admins can decide reviews' });
@@ -142,12 +146,12 @@ router.post('/:reviewId/decision', async (req, res) => {
             const review = reviewRes.rows[0];
             const candidateId = review.candidate_id;
 
-            // 1. Update review record
+            // 1. Update review record with QA Scorecard
             await client.query(`
                 UPDATE lead_reviews 
-                SET status = $1, manager_feedback = $2, updated_at = NOW()
-                WHERE id = $3
-            `, [normalizedStatus, feedback, reviewId]);
+                SET status = $1, manager_feedback = $2, scorecard = $3::jsonb, qa_score = $4, updated_at = NOW()
+                WHERE id = $5
+            `, [normalizedStatus, feedback, JSON.stringify(scorecard || {}), qaScore, reviewId]);
 
             // 2. Update lead status
             const newLeadStatus = normalizedStatus === 'approved'
@@ -162,7 +166,8 @@ router.post('/:reviewId/decision', async (req, res) => {
                 WHERE id = $3
             `, [newLeadStatus, newReviewStatus, candidateId]);
 
-            // 3. Log activity
+            // 3. Log activity with QA score
+            const scoreLabel = normalizedStatus === 'approved' ? ` [QA Score: ${qaScore}%]` : '';
             await client.query(`
                 INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes)
                 VALUES ($1, $2, $3, $4)
@@ -170,7 +175,7 @@ router.post('/:reviewId/decision', async (req, res) => {
                 candidateId,
                 actorStaffId,
                 `review_${normalizedStatus}`,
-                `Review ${normalizedStatus} by manager. Reason: ${reasonCode || 'n/a'}. Feedback: ${feedback || 'n/a'}`
+                `Review ${normalizedStatus}${scoreLabel} by manager. Reason: ${reasonCode || 'n/a'}. Feedback: ${feedback || 'n/a'}`
             ]);
 
             log({ module: 'lead-review', message: `review.${normalizedStatus}`, meta: { reviewId, candidateId, reasonCode } });

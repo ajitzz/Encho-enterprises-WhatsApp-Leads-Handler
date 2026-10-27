@@ -38,11 +38,14 @@ import {
   TrendingUp,
   AlertTriangle,
   Eye,
-  Lock
+  Lock,
+  PhoneCall,
+  PhoneOff,
+  PhoneForwarded
 } from 'lucide-react';
 import { liveApiService } from '../services/liveApiService.ts';
 import { getLeadScreenshotUploadPath } from '../services/mediaPaths';
-import { Driver, Message, CannedResponse, ActiveLeadViewer } from '../types.ts';
+import { Driver, Message, CannedResponse, ActiveLeadViewer, LeadCall } from '../types.ts';
 import { VoiceRecorder } from './VoiceRecorder.tsx';
 import { ActionCenter } from './ActionCenter.tsx';
 import { CommandCenter } from './CommandCenter.tsx';
@@ -152,6 +155,18 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const [isInternalNoteMode, setIsInternalNoteMode] = useState<boolean>(false);
   const [cannedResponses, setCannedResponses] = useState<CannedResponse[]>([]);
   const [showMacrosMenu, setShowMacrosMenu] = useState<boolean>(false);
+
+  // FAANG Shift Presence & Mouse-Idle Engine
+  const [presenceStatus, setPresenceStatus] = useState<'online' | 'away'>('online');
+  const lastActivityRef = React.useRef<number>(Date.now());
+
+  // FAANG In-Browser Telephony CTI Call Logger
+  const [showCallModal, setShowCallModal] = useState<boolean>(false);
+  const [callActive, setCallActive] = useState<boolean>(false);
+  const [callSeconds, setCallSeconds] = useState<number>(0);
+  const [callDisposition, setCallDisposition] = useState<string>('Connected - Interested');
+  const [callNotes, setCallNotes] = useState<string>('');
+  const [isSubmittingCall, setIsSubmittingCall] = useState<boolean>(false);
 
   const parseDateValue = (value?: string | number | null) => {
     if (value === undefined || value === null || value === '') return null;
@@ -333,6 +348,83 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           ? 'bg-amber-500/10 text-amber-700 border border-amber-200 font-semibold'
           : 'bg-emerald-500/10 text-emerald-700 border border-emerald-200 font-semibold'
       };
+    }
+  };
+
+  // Live Call Timer Effect
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (callActive) {
+      timer = setInterval(() => {
+        setCallSeconds(prev => prev + 1);
+      }, 1000);
+    }
+    return () => clearInterval(timer);
+  }, [callActive]);
+
+  // Mouse & Keyboard Inactivity Auto-Away Engine
+  useEffect(() => {
+    const INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+    const onUserActivity = () => {
+      lastActivityRef.current = Date.now();
+      if (presenceStatus === 'away') {
+        setPresenceStatus('online');
+        liveApiService.updateStaffStatus('online').catch(() => null);
+      }
+    };
+
+    window.addEventListener('mousemove', onUserActivity, { passive: true });
+    window.addEventListener('keydown', onUserActivity, { passive: true });
+    window.addEventListener('touchstart', onUserActivity, { passive: true });
+    window.addEventListener('scroll', onUserActivity, { passive: true });
+    window.addEventListener('click', onUserActivity, { passive: true });
+
+    const checker = setInterval(() => {
+      const idleTime = Date.now() - lastActivityRef.current;
+      if (idleTime >= INACTIVITY_TIMEOUT_MS && presenceStatus === 'online') {
+        setPresenceStatus('away');
+        liveApiService.updateStaffStatus('away', 0, Math.round(idleTime / 1000)).catch(() => null);
+      }
+    }, 15000);
+
+    return () => {
+      window.removeEventListener('mousemove', onUserActivity);
+      window.removeEventListener('keydown', onUserActivity);
+      window.removeEventListener('touchstart', onUserActivity);
+      window.removeEventListener('scroll', onUserActivity);
+      window.removeEventListener('click', onUserActivity);
+      clearInterval(checker);
+    };
+  }, [presenceStatus]);
+
+  const handleStartCallModal = (lead: Driver) => {
+    setCallSeconds(0);
+    setCallActive(true);
+    setCallDisposition('Connected - Interested');
+    setCallNotes('');
+    setShowCallModal(true);
+  };
+
+  const handleSaveCallLog = async () => {
+    if (!selectedLead) return;
+    setIsSubmittingCall(true);
+    try {
+      await liveApiService.logLeadCall(selectedLead.id, {
+        durationSeconds: callSeconds,
+        disposition: callDisposition,
+        notes: callNotes,
+        phoneNumber: selectedLead.phone_number
+      });
+      setShowCallModal(false);
+      setCallSeconds(0);
+      setCallActive(false);
+      const acts = await liveApiService.getLeadActivity(selectedLead.id);
+      setActivities(acts);
+    } catch (err) {
+      console.error('Failed to log call:', err);
+    } finally {
+      setIsSubmittingCall(false);
     }
   };
 
@@ -1381,10 +1473,13 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
               </div>
 
               <div className="grid grid-cols-2 gap-3 w-full">
-                <a href={`tel:${lead.phone_number}`} className="flex flex-col items-center justify-center gap-2 p-4 bg-blue-50 text-blue-700 rounded-3xl border border-blue-100 active:scale-95 transition-all">
-                  <Phone size={24} />
-                  <span className="text-[10px] font-bold uppercase tracking-widest">Call Now</span>
-                </a>
+                <button
+                  onClick={() => handleStartCallModal(lead)}
+                  className="flex flex-col items-center justify-center gap-2 p-4 bg-blue-50 text-blue-700 rounded-3xl border border-blue-100 active:scale-95 transition-all hover:bg-blue-100"
+                >
+                  <PhoneCall size={24} />
+                  <span className="text-[10px] font-bold uppercase tracking-widest">Call & Log</span>
+                </button>
                 <a href={`https://wa.me/${(lead.phone_number || '').replace(/\D/g, '')}`} target="_blank" rel="noopener noreferrer" className="flex flex-col items-center justify-center gap-2 p-4 bg-emerald-50 text-emerald-700 rounded-3xl border border-emerald-100 active:scale-95 transition-all">
                   <MessageSquare size={24} />
                   <span className="text-[10px] font-bold uppercase tracking-widest">WhatsApp</span>
@@ -1880,9 +1975,39 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
                       </div>
                       <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
                         <div className="flex justify-between items-start mb-1">
-                          <p className="text-xs font-bold text-gray-900 uppercase tracking-wider">{activity.action.replace(/_/g, ' ')}</p>
+                          <div className="flex items-center gap-1.5">
+                            {activity.action === 'phone_call' && (
+                              <span className="p-1 rounded-md bg-emerald-50 text-emerald-600 inline-flex items-center">
+                                <PhoneCall size={12} />
+                              </span>
+                            )}
+                            <p className="text-xs font-bold text-gray-900 uppercase tracking-wider">{activity.action.replace(/_/g, ' ')}</p>
+                          </div>
                           <p className="text-[10px] text-gray-400">{formatTimelineTime(activity.created_at)}</p>
                         </div>
+                        {activity.action === 'phone_call' && (() => {
+                          let meta: any = {};
+                          try {
+                            meta = typeof activity.metadata === 'string' ? JSON.parse(activity.metadata || '{}') : (activity.metadata || {});
+                          } catch {
+                            meta = {};
+                          }
+                          const durSecs = meta.duration_seconds || 0;
+                          const minutes = Math.floor(durSecs / 60);
+                          const seconds = durSecs % 60;
+                          return (
+                            <div className="flex flex-wrap items-center gap-2 mt-1 mb-2">
+                              {meta.disposition && (
+                                <span className="text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-0.5 rounded-full">
+                                  {meta.disposition}
+                                </span>
+                              )}
+                              <span className="text-[10px] font-semibold text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">
+                                Duration: {minutes}m {seconds.toString().padStart(2, '0')}s
+                              </span>
+                            </div>
+                          );
+                        })()}
                         <div className="mt-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2">
                           <p className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Note</p>
                           <p className="text-sm text-gray-700 leading-relaxed mt-1">{activity.notes || 'No notes added.'}</p>
@@ -2412,6 +2537,26 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
 
   return (
     <div className={`min-h-screen bg-gray-50 flex flex-col font-sans mx-auto border-gray-200 ${isManagerRole ? 'max-w-[1400px] lg:border-x lg:shadow-xl' : 'max-w-md border-x shadow-2xl'}`}>
+      {/* FAANG Mouse-Idle Away Banner */}
+      {presenceStatus === 'away' && (
+        <div className="bg-amber-500 text-white px-4 py-2.5 text-xs font-semibold flex items-center justify-between shadow-md z-40 animate-in slide-in-from-top duration-200 sticky top-0">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-white animate-ping" />
+            <span>You are marked <strong>AWAY</strong> due to inactivity. Hot leads are bypassed to active staff.</span>
+          </div>
+          <button
+            onClick={() => {
+              lastActivityRef.current = Date.now();
+              setPresenceStatus('online');
+              liveApiService.updateStaffStatus('online').catch(() => null);
+            }}
+            className="px-3 py-1 bg-white text-amber-800 rounded-lg text-xs font-bold shadow hover:bg-amber-50 transition-colors"
+          >
+            Resume Online
+          </button>
+        </div>
+      )}
+
       {/* Top Bar */}
       {view !== 'detail' && (
         <header className="bg-white px-4 md:px-6 py-4 border-b border-gray-100 flex items-center justify-between sticky top-0 z-20">
@@ -2421,9 +2566,9 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
             </div>
             <div>
               <h1 className="text-sm font-bold text-gray-900">{isManagerRole ? 'Encho Workspace' : 'Encho Staff'}</h1>
-              <p className="text-[10px] text-emerald-600 font-bold uppercase tracking-widest flex items-center gap-1">
-                <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                Online
+              <p className={`text-[10px] font-bold uppercase tracking-widest flex items-center gap-1 ${presenceStatus === 'online' ? 'text-emerald-600' : 'text-amber-600'}`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${presenceStatus === 'online' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                {presenceStatus === 'online' ? 'Online' : 'Away (Idle)'}
               </p>
             </div>
           </div>
@@ -2559,6 +2704,136 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
           }
         }}
       />
+
+      {/* FAANG In-Browser Telephony CTI Call Logger Modal */}
+      {showCallModal && selectedLead && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl overflow-hidden border border-gray-100 animate-in zoom-in-95 duration-200">
+            {/* Modal Header */}
+            <div className="bg-gradient-to-r from-blue-600 to-indigo-700 text-white p-6 relative">
+              <button
+                onClick={() => {
+                  if (callActive && !confirm('Call timer is currently running. Stop timer and close modal?')) {
+                    return;
+                  }
+                  setShowCallModal(false);
+                  setCallActive(false);
+                }}
+                className="absolute top-4 right-4 p-2 text-white/80 hover:text-white rounded-full hover:bg-white/10 transition-colors"
+              >
+                <X size={20} />
+              </button>
+              <div className="flex items-center gap-3 mb-2">
+                <div className="p-3 bg-white/20 rounded-2xl">
+                  <PhoneCall size={24} className={callActive ? "animate-pulse" : ""} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-lg leading-tight">{selectedLead.name}</h3>
+                  <p className="text-blue-100 text-xs font-medium">{selectedLead.phone_number}</p>
+                </div>
+              </div>
+              <div className="flex items-center justify-between mt-4 pt-4 border-t border-white/20">
+                <span className="text-[10px] font-bold tracking-widest uppercase text-blue-200">
+                  {callActive ? 'Live Call In Progress' : 'Call Ended / Ready to Log'}
+                </span>
+                <div className="font-mono text-xl font-bold tracking-wider">
+                  {Math.floor(callSeconds / 60).toString().padStart(2, '0')}:{(callSeconds % 60).toString().padStart(2, '0')}
+                </div>
+              </div>
+            </div>
+
+            {/* Actions & Body */}
+            <div className="p-6 space-y-5">
+              <div className="grid grid-cols-2 gap-3">
+                {callActive ? (
+                  <button
+                    type="button"
+                    onClick={() => setCallActive(false)}
+                    className="flex items-center justify-center gap-2 py-3 px-4 bg-red-600 hover:bg-red-700 text-white font-bold rounded-2xl text-xs transition-all shadow-md shadow-red-200"
+                  >
+                    <PhoneOff size={16} /> Stop Timer
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setCallActive(true)}
+                    className="flex items-center justify-center gap-2 py-3 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-2xl text-xs transition-all shadow-md shadow-emerald-200"
+                  >
+                    <PhoneCall size={16} /> Resume Timer
+                  </button>
+                )}
+                <a
+                  href={`tel:${selectedLead.phone_number}`}
+                  className="flex items-center justify-center gap-2 py-3 px-4 bg-gray-100 hover:bg-gray-200 text-gray-800 font-bold rounded-2xl text-xs transition-all"
+                >
+                  <PhoneForwarded size={16} /> Dial via Phone
+                </a>
+              </div>
+
+              {/* Disposition Selector */}
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-2">
+                  Call Outcome / Disposition
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    'Connected - Interested',
+                    'Scheduled Hub Visit',
+                    'Call Back Later',
+                    'Busy / Unreachable',
+                    'Wrong Number / Not Interested',
+                    'Document Issue'
+                  ].map((disp) => (
+                    <button
+                      key={disp}
+                      type="button"
+                      onClick={() => setCallDisposition(disp)}
+                      className={`py-2 px-3 text-left rounded-xl text-xs font-semibold border transition-all ${
+                        callDisposition === disp
+                          ? 'border-blue-600 bg-blue-50 text-blue-700 font-bold shadow-sm'
+                          : 'border-gray-200 hover:border-gray-300 text-gray-700'
+                      }`}
+                    >
+                      {disp}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Call Notes */}
+              <div>
+                <label className="block text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-1">
+                  Recruiter Call Notes
+                </label>
+                <textarea
+                  value={callNotes}
+                  onChange={(e) => setCallNotes(e.target.value)}
+                  placeholder="Key conversation notes, vehicle details, driver questions, or next steps..."
+                  className="w-full h-24 p-3 bg-gray-50 border border-gray-200 rounded-2xl text-xs text-gray-800 placeholder-gray-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none transition-all"
+                />
+              </div>
+
+              {/* Save Button */}
+              <button
+                type="button"
+                onClick={handleSaveCallLog}
+                disabled={isSubmittingCall}
+                className="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-2xl text-sm transition-all shadow-lg shadow-blue-200 flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isSubmittingCall ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" /> Saving Call...
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle size={16} /> Complete & Log Call ({Math.floor(callSeconds / 60)}m {callSeconds % 60}s)
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

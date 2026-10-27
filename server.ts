@@ -2713,6 +2713,34 @@ const ensureLeadOpsSchema = async (client) => {
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS languages TEXT[] DEFAULT ARRAY['english']::TEXT[];`);
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS vehicle_skills TEXT[] DEFAULT ARRAY['auto', 'cab', 'bike']::TEXT[];`);
     await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS max_capacity INTEGER DEFAULT 15;`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS shift_start TIME DEFAULT '09:00:00';`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS shift_end TIME DEFAULT '19:00:00';`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS working_days INTEGER[] DEFAULT ARRAY[1,2,3,4,5,6]::INTEGER[];`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS timezone VARCHAR(50) DEFAULT 'Asia/Kolkata';`);
+    await client.query(`ALTER TABLE staff_members ADD COLUMN IF NOT EXISTS auto_away_timeout_minutes INTEGER DEFAULT 5;`);
+
+    // QA Review Scorecards
+    await client.query(`ALTER TABLE lead_reviews ADD COLUMN IF NOT EXISTS scorecard JSONB DEFAULT '{}'::jsonb;`);
+    await client.query(`ALTER TABLE lead_reviews ADD COLUMN IF NOT EXISTS qa_score INTEGER DEFAULT 100;`);
+
+    // Telephony CTI Call Logs
+    await client.query(`
+        CREATE TABLE IF NOT EXISTS lead_calls (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+            staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+            phone_number VARCHAR(50) NOT NULL,
+            direction VARCHAR(20) DEFAULT 'outbound',
+            duration_seconds INTEGER DEFAULT 0,
+            status VARCHAR(50) DEFAULT 'completed',
+            recording_url TEXT,
+            disposition VARCHAR(100),
+            notes TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_lead_calls_candidate ON lead_calls(candidate_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_lead_calls_staff ON lead_calls(staff_id, created_at DESC);
+    `);
 
     await client.query(`
         CREATE TABLE IF NOT EXISTS canned_responses (
@@ -4872,6 +4900,64 @@ apiRouter.delete('/canned-responses/:id', authMiddleware, requireRole('admin', '
             const r = await client.query('DELETE FROM canned_responses WHERE id = $1 RETURNING id', [req.params.id]);
             if (r.rows.length === 0) return res.status(404).json({ error: 'Canned response not found' });
             res.json({ success: true, deletedId: r.rows[0].id });
+        });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- TELEPHONY CTI & CALL LOGS ENGINE ---
+apiRouter.post('/leads/:id/calls', authMiddleware, async (req: any, res: any) => {
+    try {
+        const candidateId = req.params.id;
+        const staffId = req.user?.staffId || null;
+        const { durationSeconds = 0, disposition = 'completed', notes = '', recordingUrl = null, phoneNumber, status = 'completed' } = req.body;
+
+        await withDb(async (client) => {
+            const candRes = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [candidateId]);
+            if (candRes.rows.length === 0) return res.status(404).json({ error: 'Candidate not found' });
+            
+            const targetPhone = phoneNumber || candRes.rows[0].phone_number;
+            const callId = crypto.randomUUID();
+
+            await client.query(`
+                INSERT INTO lead_calls (id, candidate_id, staff_id, phone_number, direction, duration_seconds, status, recording_url, disposition, notes, created_at)
+                VALUES ($1, $2, $3, $4, 'outbound', $5, $6, $7, $8, $9, NOW())
+            `, [callId, candidateId, staffId, targetPhone, durationSeconds, status, recordingUrl, disposition, notes]);
+
+            const minutes = Math.floor(durationSeconds / 60);
+            const seconds = durationSeconds % 60;
+            const durationLabel = `${minutes > 0 ? `${minutes}m ` : ''}${seconds}s`;
+            const logNotes = `[📞 Call: ${durationLabel}] ${disposition}${notes ? ` - ${notes}` : ''}`;
+
+            await client.query(`
+                INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes)
+                VALUES ($1, $2, 'phone_call', $3)
+            `, [candidateId, staffId, logNotes]);
+
+            // Satisfy the SLA Watchdog
+            await client.query(`UPDATE candidates SET last_action_at = NOW() WHERE id = $1`, [candidateId]);
+
+            notifyUpdates(candidateId);
+            res.json({ success: true, callId });
+        });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+apiRouter.get('/leads/:id/calls', authMiddleware, async (req: any, res: any) => {
+    try {
+        const candidateId = req.params.id;
+        await withDb(async (client) => {
+            const r = await client.query(`
+                SELECT lc.*, s.name as staff_name 
+                FROM lead_calls lc 
+                LEFT JOIN staff_members s ON lc.staff_id = s.id 
+                WHERE lc.candidate_id = $1 
+                ORDER BY lc.created_at DESC
+            `, [candidateId]);
+            res.json(r.rows);
         });
     } catch (e: any) {
         res.status(500).json({ error: e.message });
@@ -7130,14 +7216,39 @@ async function distributeLeadInstantly(candidateId: string, client?: any): Promi
                 s.id, 
                 s.last_assigned_at,
                 COALESCE(s.max_capacity, 15) as max_cap,
-                (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) as active_leads
+                COALESCE(SUM(
+                  CASE 
+                    WHEN c.lead_status = 'review_pending' THEN 1.5
+                    WHEN c.lead_status IN ('booked', 'lost', 'unqualified', 'terminated') THEN 0
+                    WHEN (c.variables IS NOT NULL AND jsonb_typeof(c.variables) = 'object' AND (SELECT count(*) FROM jsonb_each_text(c.variables)) > 3) THEN 1.0
+                    ELSE 0.5
+                  END
+                ), 0) as active_workload,
+                COUNT(c.id) as active_leads
             FROM staff_members s
+            LEFT JOIN candidates c ON c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')
             WHERE s.is_active_for_auto_dist = TRUE 
               AND s.current_status = 'online'
               AND s.last_ping_at > NOW() - INTERVAL '2 minutes'
-              AND (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) < COALESCE(s.max_capacity, 15)
+              AND (
+                s.shift_start IS NULL OR s.shift_end IS NULL OR
+                (CURRENT_TIME AT TIME ZONE COALESCE(s.timezone, 'Asia/Kolkata')) BETWEEN s.shift_start AND s.shift_end
+              )
+              AND (
+                s.working_days IS NULL OR
+                EXTRACT(ISODOW FROM (NOW() AT TIME ZONE COALESCE(s.timezone, 'Asia/Kolkata')))::INTEGER = ANY(s.working_days)
+              )
+            GROUP BY s.id, s.last_assigned_at, s.max_capacity, s.shift_start, s.shift_end, s.timezone, s.working_days
+            HAVING COALESCE(SUM(
+              CASE 
+                WHEN c.lead_status = 'review_pending' THEN 1.5
+                WHEN c.lead_status IN ('booked', 'lost', 'unqualified', 'terminated') THEN 0
+                WHEN (c.variables IS NOT NULL AND jsonb_typeof(c.variables) = 'object' AND (SELECT count(*) FROM jsonb_each_text(c.variables)) > 3) THEN 1.0
+                ELSE 0.5
+              END
+            ), 0) < COALESCE(s.max_capacity, 15)
             ORDER BY 
-              (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) ASC,
+              active_workload ASC,
               s.last_assigned_at ASC NULLS FIRST
             LIMIT 1
         `);
@@ -7227,17 +7338,44 @@ async function startLeadAutoDistributor() {
                     const unassignedLeads = await client.query("SELECT id FROM candidates WHERE assigned_to IS NULL AND lead_status = 'new' LIMIT 10");
                     if (unassignedLeads.rows.length === 0) return;
 
-                    // 4. Smart Load-Balancing & Skill-Based Router: only active staff with < 15 active leads
+                    // 4. Smart Load-Balancing & Shift-Aware Router with Dynamic Capacity
                     const activeStaffRes = await client.query(`
                         SELECT 
                             s.id, 
                             s.last_assigned_at,
-                            (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) as active_leads
+                            COALESCE(s.max_capacity, 15) as max_cap,
+                            COALESCE(SUM(
+                              CASE 
+                                WHEN c.lead_status = 'review_pending' THEN 1.5
+                                WHEN c.lead_status IN ('booked', 'lost', 'unqualified', 'terminated') THEN 0
+                                WHEN (c.variables IS NOT NULL AND jsonb_typeof(c.variables) = 'object' AND (SELECT count(*) FROM jsonb_each_text(c.variables)) > 3) THEN 1.0
+                                ELSE 0.5
+                              END
+                            ), 0) as active_workload,
+                            COUNT(c.id) as active_leads
                         FROM staff_members s
+                        LEFT JOIN candidates c ON c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')
                         WHERE s.is_active_for_auto_dist = TRUE 
                           AND s.current_status = 'online'
                           AND s.last_ping_at > NOW() - INTERVAL '2 minutes'
-                          AND (SELECT COUNT(*) FROM candidates c WHERE c.assigned_to = s.id AND c.lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')) < 15
+                          AND (
+                            s.shift_start IS NULL OR s.shift_end IS NULL OR
+                            (CURRENT_TIME AT TIME ZONE COALESCE(s.timezone, 'Asia/Kolkata')) BETWEEN s.shift_start AND s.shift_end
+                          )
+                          AND (
+                            s.working_days IS NULL OR
+                            EXTRACT(ISODOW FROM (NOW() AT TIME ZONE COALESCE(s.timezone, 'Asia/Kolkata')))::INTEGER = ANY(s.working_days)
+                          )
+                        GROUP BY s.id, s.last_assigned_at, s.max_capacity, s.shift_start, s.shift_end, s.timezone, s.working_days
+                        HAVING COALESCE(SUM(
+                          CASE 
+                            WHEN c.lead_status = 'review_pending' THEN 1.5
+                            WHEN c.lead_status IN ('booked', 'lost', 'unqualified', 'terminated') THEN 0
+                            WHEN (c.variables IS NOT NULL AND jsonb_typeof(c.variables) = 'object' AND (SELECT count(*) FROM jsonb_each_text(c.variables)) > 3) THEN 1.0
+                            ELSE 0.5
+                          END
+                        ), 0) < COALESCE(s.max_capacity, 15)
+                        ORDER BY active_workload ASC, s.last_assigned_at ASC NULLS FIRST
                     `);
                     
                     if (activeStaffRes.rows.length === 0) {
@@ -7248,27 +7386,30 @@ async function startLeadAutoDistributor() {
                     let staffList = activeStaffRes.rows.map(row => ({
                         id: row.id,
                         active_leads: parseInt(row.active_leads, 10),
+                        active_workload: parseFloat(row.active_workload || '0'),
+                        max_cap: parseInt(row.max_cap, 10),
                         last_assigned_at: row.last_assigned_at ? new Date(row.last_assigned_at).getTime() : 0
                     }));
 
                     for (const lead of unassignedLeads.rows) {
                         // Re-sort to always pick the absolute best candidate for the next lead
                         staffList.sort((a, b) => {
-                            if (a.active_leads !== b.active_leads) return a.active_leads - b.active_leads;
+                            if (a.active_workload !== b.active_workload) return a.active_workload - b.active_workload;
                             return a.last_assigned_at - b.last_assigned_at;
                         });
 
                         const bestStaff = staffList[0];
-                        if (!bestStaff || bestStaff.active_leads >= 15) break;
+                        if (!bestStaff || bestStaff.active_workload >= bestStaff.max_cap) break;
 
                         await client.query("UPDATE candidates SET assigned_to = $1, lead_status = 'assigned', last_action_at = NOW() WHERE id = $2", [bestStaff.id, lead.id]);
                         await client.query("UPDATE staff_members SET last_assigned_at = NOW() WHERE id = $1", [bestStaff.id]);
-                        await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead routed via smart load-balancer')", [lead.id, bestStaff.id]);
+                        await client.query("INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, 'auto_assigned', 'Lead routed via shift-aware smart load-balancer')", [lead.id, bestStaff.id]);
                         
-                        console.log(`Smart-routed lead ${lead.id} to staff ${bestStaff.id} (Active Workload: ${bestStaff.active_leads})`);
+                        console.log(`Smart-routed lead ${lead.id} to staff ${bestStaff.id} (Active Workload: ${bestStaff.active_workload}/${bestStaff.max_cap})`);
                         notifyUpdates(lead.id);
                         
                         // Update in-memory stats
+                        bestStaff.active_workload += 0.5;
                         bestStaff.active_leads += 1;
                         bestStaff.last_assigned_at = Date.now();
                     }

@@ -32,6 +32,11 @@ CREATE TABLE staff_members (
     manager_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
     is_active_for_auto_dist BOOLEAN DEFAULT FALSE,
     last_assigned_at TIMESTAMP WITH TIME ZONE,
+    shift_start TIME DEFAULT '09:00:00',
+    shift_end TIME DEFAULT '19:00:00',
+    working_days INTEGER[] DEFAULT ARRAY[1,2,3,4,5,6]::INTEGER[],
+    timezone VARCHAR(50) DEFAULT 'Asia/Kolkata',
+    auto_away_timeout_minutes INTEGER DEFAULT 5,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -147,6 +152,21 @@ CREATE TABLE canned_responses (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- 12. Phone Calls & Telephony CTI
+CREATE TABLE IF NOT EXISTS lead_calls (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    candidate_id UUID REFERENCES candidates(id) ON DELETE CASCADE,
+    staff_id UUID REFERENCES staff_members(id) ON DELETE SET NULL,
+    phone_number VARCHAR(50) NOT NULL,
+    direction VARCHAR(20) DEFAULT 'outbound',
+    duration_seconds INTEGER DEFAULT 0,
+    status VARCHAR(50) DEFAULT 'completed',
+    recording_url TEXT,
+    disposition VARCHAR(100),
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 -- Performance Indexes
 CREATE INDEX IF NOT EXISTS idx_candidates_assigned_to ON candidates(assigned_to);
 CREATE INDEX IF NOT EXISTS idx_candidates_unassigned_pool ON candidates(last_message_at DESC NULLS LAST, created_at DESC) WHERE assigned_to IS NULL;
@@ -158,5 +178,7 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_messages_pending_scheduled_time ON sche
 CREATE INDEX IF NOT EXISTS idx_scheduled_messages_candidate_pending_time ON scheduled_messages(candidate_id, scheduled_time ASC) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_lead_reminders_staff_status ON lead_reminders(staff_id, status);
 CREATE INDEX IF NOT EXISTS idx_lead_reminders_scheduled_at ON lead_reminders(scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_lead_calls_candidate ON lead_calls(candidate_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_lead_calls_staff ON lead_calls(staff_id, created_at DESC);
 
 COMMIT;

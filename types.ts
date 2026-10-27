@@ -344,3 +344,26 @@ export interface ActiveLeadViewer {
   role: string;
   lastPing: number;
 }
+
+export interface LeadCall {
+  id: string;
+  candidate_id: string;
+  staff_id: string | null;
+  staff_name?: string;
+  phone_number: string;
+  direction?: 'inbound' | 'outbound';
+  duration_seconds: number;
+  status?: string;
+  recording_url?: string;
+  disposition?: string;
+  notes?: string;
+  created_at: string;
+}
+
+export interface QAScorecard {
+  greeting_compliance: number;
+  document_verification_accuracy: number;
+  payout_explanation_clarity: number;
+  fraud_check_passed: boolean;
+  total_qa_score?: number;
+}
