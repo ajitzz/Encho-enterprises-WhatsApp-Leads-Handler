@@ -8,6 +8,7 @@
     "start": "node --import tsx server.ts",
     "dev": "tsx server.ts",
     "lint": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.js",
     "build": "vite build",
     "preview": "vite preview",
     "db:migrate": "node --import tsx scripts/migrate.ts",

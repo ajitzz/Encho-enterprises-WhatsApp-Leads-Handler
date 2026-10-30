@@ -23,6 +23,7 @@ import {
     summarizePayloadForStorage,
     validateOutboundPayload,
 } from './backend/shared/infra/whatsappPayload.js';
+import { findMatchingKeywordNode } from './backend/shared/infra/botTriggerMatcher.js';
 import { isRedisAvailable, enqueueInboundPayload, popInboundBatch, getQueueLength } from './backend/shared/infra/inboundQueue.js';
 import { buildLeadIngestionFacade } from './backend/modules/lead-ingestion/api.js';
 import { buildRemindersRouter } from './backend/modules/reminders-escalations/api.js';
@@ -3021,8 +3022,34 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             currentNodeId = null;
         }
 
+        // 1.5. GLOBAL KEYWORD & INTENT ROUTER (Directly jumps to target flow upon matching keywords e.g. "send the property Number2")
+        // Check if incoming payload is an explicit interactive button/list click on the CURRENT node; if so, let current node handle it
+        const isInteractiveClickOnCurrentNode = incomingPayloadId && currentNodeId && (() => {
+            const cur = nodeMap.get(currentNodeId);
+            if (!cur?.data) return false;
+            if (cur.data.buttons?.some((b: any) => b.id === incomingPayloadId)) return true;
+            if (cur.data.presets?.some((p: any) => p.id === incomingPayloadId)) return true;
+            if (cur.data.sections?.some((s: any) => s.rows?.some((r: any) => r.id === incomingPayloadId))) return true;
+            return false;
+        })();
+
+        let keywordMatchedNode: any = null;
+        if (cleanInput && !isExplicitReset && !isInteractiveClickOnCurrentNode) {
+            keywordMatchedNode = findMatchingKeywordNode(nodes, cleanInput);
+        }
+
         // 2. Determine Current State
-        if (!currentNodeId) {
+        if (keywordMatchedNode) {
+            console.log(`[Bot Engine] 🎯 Global keyword matched for "${cleanInput}" -> Jumping to Node: ${keywordMatchedNode.id} (${keywordMatchedNode.data?.label || keywordMatchedNode.data?.type})`);
+            nextNodeId = keywordMatchedNode.id;
+            currentNodeId = keywordMatchedNode.id;
+            // Record keyword trigger in activity log for audit & timeline visibility
+            await client.query(
+                `INSERT INTO lead_activity_log (candidate_id, action, notes)
+                 VALUES ($1, 'bot_keyword_triggered', $2)`,
+                [candidate.id, `Triggered by keyword: "${cleanInput}" -> Node: ${keywordMatchedNode.data?.label || keywordMatchedNode.id}`]
+            ).catch(() => null);
+        } else if (!currentNodeId) {
             nextNodeId = startNode ? startNode.id : nodes[0]?.id;
         } else {
             const currentNode = nodeMap.get(currentNodeId);
@@ -3705,6 +3732,57 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                     const url = await refreshMediaUrl(data.mediaUrl);
                     payload = { type: 'image', image: { link: url, caption: validBody || '' } };
                 } 
+                else if (data.type === 'video' && data.mediaUrl) {
+                    const url = await refreshMediaUrl(data.mediaUrl);
+                    payload = { type: 'video', video: { link: url, caption: validBody || '' } };
+                }
+                else if (data.type === 'document' && data.mediaUrl) {
+                    const url = await refreshMediaUrl(data.mediaUrl);
+                    payload = {
+                        type: 'document',
+                        document: {
+                            link: url,
+                            caption: validBody || '',
+                            filename: data.documentFilename || 'Property_Brochure.pdf'
+                        }
+                    };
+                }
+                else if (data.type === 'template' && data.templateName) {
+                    let components: any[] = [];
+                    if (data.templateVariables && Array.isArray(data.templateVariables) && data.templateVariables.length > 0) {
+                        const bodyParams = data.templateVariables.map((v: string) => {
+                            const raw = typeof v === 'string' && v.startsWith('{{') && v.endsWith('}}')
+                                ? candidate.variables[v.slice(2, -2).trim()] || ''
+                                : processText(v, candidate);
+                            return { type: "text", text: String(raw || '') };
+                        });
+                        components.push({
+                            type: "body",
+                            parameters: bodyParams
+                        });
+                    }
+                    if (data.mediaUrl) {
+                        const resolvedUrl = await refreshMediaUrl(data.mediaUrl);
+                        components.push({
+                            type: "header",
+                            parameters: [
+                                {
+                                    type: data.headerType === 'document' ? 'document' : 'image',
+                                    [data.headerType === 'document' ? 'document' : 'image']: { link: resolvedUrl }
+                                }
+                            ]
+                        });
+                    }
+                    payload = {
+                        type: "template",
+                        template: {
+                            name: data.templateName.trim(),
+                            language: { code: data.templateLanguage || "en" },
+                            components: components.length > 0 ? components : undefined
+                        }
+                    };
+                    autoAdvance = true;
+                } 
                 else if ((data.type === 'interactive_button' || data.type === 'rich_card') && data.buttons?.length > 0) {
                     if (!validBody) {
                         autoAdvance = true;
@@ -3760,6 +3838,54 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
                             }
                         };
                         autoAdvance = false;
+                    }
+                }
+
+                // Dispatches multi-asset gallery items if configured (e.g. Property Photos + Floor Plans + Brochure PDF)
+                if (Array.isArray(data.mediaGallery) && data.mediaGallery.length > 0) {
+                    for (const item of data.mediaGallery) {
+                        if (!item?.url) continue;
+                        try {
+                            const itemUrl = await refreshMediaUrl(item.url);
+                            let itemPayload: any = null;
+                            const itemCaption = item.caption ? processText(item.caption, candidate) : '';
+                            if (item.type === 'document') {
+                                itemPayload = {
+                                    type: 'document',
+                                    document: {
+                                        link: itemUrl,
+                                        caption: itemCaption || undefined,
+                                        filename: item.filename || 'Property_Brochure.pdf'
+                                    }
+                                };
+                            } else if (item.type === 'video') {
+                                itemPayload = {
+                                    type: 'video',
+                                    video: {
+                                        link: itemUrl,
+                                        caption: itemCaption || undefined
+                                    }
+                                };
+                            } else {
+                                itemPayload = {
+                                    type: 'image',
+                                    image: {
+                                        link: itemUrl,
+                                        caption: itemCaption || undefined
+                                    }
+                                };
+                            }
+                            const gallerySendRes = await sendToMeta(candidate.phone_number, itemPayload, { sendType: 'bot', enableRetry: true });
+                            queueBotMessageSideEffects({
+                                candidateId: candidate.id,
+                                payload: itemPayload,
+                                nodeType: item.type || 'image',
+                                sendResult: gallerySendRes
+                            });
+                            await new Promise(r => setTimeout(r, 350)); // Sequential pacing for WhatsApp delivery
+                        } catch (galleryErr) {
+                            console.error('[Bot Engine] Error dispatching media gallery item:', galleryErr);
+                        }
                     }
                 }
 

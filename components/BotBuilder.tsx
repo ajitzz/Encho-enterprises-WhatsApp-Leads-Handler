@@ -131,6 +131,7 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
         case 'datetime_picker': config = { color: 'bg-cyan-600', icon: <CalendarClock size={14} />, label: 'Smart Scheduler', subtitle: 'Date → Period → Time' }; break;
         case 'handoff': config = { color: 'bg-red-500', icon: <User size={14} />, label: 'Agent Handoff', subtitle: 'Stop Bot' }; break;
         case 'status_update': config = { color: 'bg-green-600', icon: <Check size={14} />, label: 'Set Status', subtitle: 'CRM Update' }; break;
+        case 'template': config = { color: 'bg-emerald-600', icon: <LayoutTemplate size={14} />, label: 'WhatsApp Template', subtitle: 'Meta Approved' }; break;
     }
 
     return (
@@ -141,6 +142,37 @@ const UniversalNode = ({ data, selected }: { data: FlowNodeData, selected: boole
                 {/* Input Handle */}
                 {data.type !== 'start' && (
                     <Handle type="target" position={Position.Left} className="!w-3.5 !h-3.5 !bg-slate-500 !border-4 !border-white !-left-[19px] !shadow-sm" />
+                )}
+
+                {/* Global Keyword Trigger Badge */}
+                {data.keywords && data.keywords.length > 0 && (
+                    <div className="mb-2.5 flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-50 border border-amber-200 text-amber-800 text-[10px] font-bold">
+                        <Sparkles size={11} className="text-amber-600 animate-pulse shrink-0" />
+                        <span className="truncate">🔑 {data.keywords.slice(0, 2).join(', ')}{data.keywords.length > 2 ? ` +${data.keywords.length - 2}` : ''}</span>
+                    </div>
+                )}
+
+                {/* Multi-Asset Media Gallery Badge */}
+                {data.mediaGallery && data.mediaGallery.length > 0 && (
+                    <div className="mb-2 flex items-center gap-1.5 px-2 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700 text-[9px] font-semibold">
+                        <ImageIcon size={10} />
+                        <span>+{data.mediaGallery.length} Media Pack Assets</span>
+                    </div>
+                )}
+
+                {/* WhatsApp Template Preview */}
+                {data.type === 'template' && (
+                    <div className="mb-3 p-2 bg-emerald-50 rounded-lg border border-emerald-100 text-[10px] space-y-1">
+                        <div className="font-bold text-emerald-800 flex items-center justify-between">
+                            <span className="truncate">Template: {data.templateName || 'Unnamed'}</span>
+                            <span className="uppercase text-[9px] bg-emerald-200 text-emerald-900 px-1 rounded font-mono font-bold">{data.templateLanguage || 'en'}</span>
+                        </div>
+                        {data.templateVariables && data.templateVariables.length > 0 && (
+                            <div className="text-emerald-700 font-mono text-[9px] truncate">
+                                Params: {data.templateVariables.join(', ')}
+                            </div>
+                        )}
+                    </div>
                 )}
 
                 {/* --- CONTENT PREVIEWS --- */}
@@ -443,7 +475,74 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                 
                 {activeTab === 'content' && (
                 <>
-                    {/* Header Media (For Rich Cards) */}
+                    {/* Official Meta WhatsApp Template Configuration */}
+                    {local.type === 'template' && (
+                        <div className="bg-emerald-50/70 p-4 rounded-xl border border-emerald-200 shadow-sm space-y-4">
+                            <div className="flex items-center gap-2">
+                                <LayoutTemplate size={16} className="text-emerald-700" />
+                                <label className="text-xs font-bold text-emerald-900 uppercase">Meta WhatsApp Template</label>
+                            </div>
+                            <p className="text-[11px] text-emerald-800 leading-relaxed">
+                                Dispatches an official pre-approved template registered in your Meta WhatsApp Cloud API Manager.
+                            </p>
+                            <div>
+                                <label className="block text-[10px] font-bold text-gray-700 uppercase mb-1">Template Name (Meta Identifier)</label>
+                                <input
+                                    className="w-full border border-gray-200 p-2.5 rounded-lg text-sm font-mono bg-white focus:ring-2 focus:ring-emerald-500 outline-none"
+                                    value={local.templateName || ''}
+                                    onChange={e => update('templateName', e.target.value.trim().toLowerCase())}
+                                    placeholder="e.g. property_showcase_v1"
+                                />
+                                <p className="text-[10px] text-gray-500 mt-1">Must match the approved template name exactly in Meta Business Manager.</p>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                    <label className="block text-[10px] font-bold text-gray-700 uppercase mb-1">Language Code</label>
+                                    <input
+                                        className="w-full border border-gray-200 p-2 rounded-lg text-xs font-mono bg-white"
+                                        value={local.templateLanguage || 'en'}
+                                        onChange={e => update('templateLanguage', e.target.value.trim())}
+                                        placeholder="en"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-[10px] font-bold text-gray-700 uppercase mb-1">Header Media Type</label>
+                                    <select
+                                        className="w-full border border-gray-200 p-2 rounded-lg text-xs bg-white font-medium"
+                                        value={local.headerType || 'none'}
+                                        onChange={e => update('headerType', e.target.value)}
+                                    >
+                                        <option value="none">No Header Media</option>
+                                        <option value="image">Image</option>
+                                        <option value="document">PDF / Document</option>
+                                    </select>
+                                </div>
+                            </div>
+                            {local.headerType && local.headerType !== 'none' && (
+                                <div>
+                                    <label className="block text-[10px] font-bold text-gray-700 uppercase mb-1">Header Media URL</label>
+                                    <input
+                                        className="w-full border border-gray-200 p-2 rounded-lg text-xs font-mono bg-white"
+                                        value={local.mediaUrl || ''}
+                                        onChange={e => update('mediaUrl', e.target.value)}
+                                        placeholder="https://your-bucket.s3.../hero.jpg"
+                                    />
+                                </div>
+                            )}
+                            <div>
+                                <label className="block text-[10px] font-bold text-gray-700 uppercase mb-1">Template Variables (Comma-separated)</label>
+                                <input
+                                    className="w-full border border-gray-200 p-2.5 rounded-lg text-xs font-mono bg-white"
+                                    value={(local.templateVariables || []).join(', ')}
+                                    onChange={e => update('templateVariables', e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
+                                    placeholder="name, property_title, price"
+                                />
+                                <p className="text-[10px] text-gray-500 mt-1">Maps dynamically to Meta placeholders: {"{{1}}"}, {"{{2}}"}, etc.</p>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Header Media (For Rich Cards & Media) */}
                     {['rich_card', 'image', 'video'].includes(local.type) && (
                         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm space-y-3">
                              <div className="flex justify-between items-center">
@@ -865,6 +964,99 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                             </div>
                         </div>
                     )}
+
+                    {/* Multi-Asset Property Media Pack (Dispatches Photos, Floor Plans & Brochures) */}
+                    {['image', 'rich_card', 'interactive_button', 'interactive_list', 'text', 'document', 'template'].includes(local.type) && (
+                        <div className="bg-blue-50/70 p-4 rounded-xl border border-blue-200 shadow-sm space-y-3">
+                            <div className="flex justify-between items-center">
+                                <label className="text-xs font-bold text-blue-900 uppercase flex items-center gap-1.5">
+                                    <ImageIcon size={14} className="text-blue-600" />
+                                    Multi-Asset Media Pack
+                                </label>
+                                <span className="text-[10px] font-bold text-blue-600 bg-blue-100 px-2 py-0.5 rounded-full">
+                                    {(local.mediaGallery || []).length} extra assets
+                                </span>
+                            </div>
+                            <p className="text-[10px] text-blue-700 leading-relaxed">
+                                Automatically dispatch sequential property photos, floor plans, or PDF brochures alongside this message.
+                            </p>
+                            
+                            {(local.mediaGallery || []).map((asset: any, idx: number) => (
+                                <div key={idx} className="bg-white p-3 rounded-lg border border-blue-100 space-y-2">
+                                    <div className="flex items-center justify-between">
+                                        <select
+                                            className="text-[11px] font-bold border border-gray-200 rounded px-2 py-1 bg-gray-50"
+                                            value={asset.type || 'image'}
+                                            onChange={e => {
+                                                const next = [...(local.mediaGallery || [])];
+                                                next[idx] = { ...next[idx], type: e.target.value };
+                                                update('mediaGallery', next);
+                                            }}
+                                        >
+                                            <option value="image">Image / Photo</option>
+                                            <option value="document">PDF / Brochure</option>
+                                            <option value="video">Video Walkthrough</option>
+                                        </select>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                const next = (local.mediaGallery || []).filter((_: any, i: number) => i !== idx);
+                                                update('mediaGallery', next);
+                                            }}
+                                            className="text-[10px] font-bold text-red-500 hover:text-red-700"
+                                        >
+                                            Remove
+                                        </button>
+                                    </div>
+                                    <input
+                                        className="w-full border border-gray-200 p-2 rounded text-xs font-mono"
+                                        value={asset.url || ''}
+                                        onChange={e => {
+                                            const next = [...(local.mediaGallery || [])];
+                                            next[idx] = { ...next[idx], url: e.target.value };
+                                            update('mediaGallery', next);
+                                        }}
+                                        placeholder="https://.../asset.jpg or .pdf"
+                                    />
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <input
+                                            className="border border-gray-200 p-1.5 rounded text-[11px]"
+                                            value={asset.caption || ''}
+                                            onChange={e => {
+                                                const next = [...(local.mediaGallery || [])];
+                                                next[idx] = { ...next[idx], caption: e.target.value };
+                                                update('mediaGallery', next);
+                                            }}
+                                            placeholder="Caption (e.g. Master Bedroom)"
+                                        />
+                                        {asset.type === 'document' && (
+                                            <input
+                                                className="border border-gray-200 p-1.5 rounded text-[11px]"
+                                                value={asset.filename || ''}
+                                                onChange={e => {
+                                                    const next = [...(local.mediaGallery || [])];
+                                                    next[idx] = { ...next[idx], filename: e.target.value };
+                                                    update('mediaGallery', next);
+                                                }}
+                                                placeholder="Brochure.pdf"
+                                            />
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    const next = [...(local.mediaGallery || []), { type: 'image', url: '', caption: '' }];
+                                    update('mediaGallery', next);
+                                }}
+                                className="w-full py-2 border border-dashed border-blue-300 rounded-lg text-xs font-bold text-blue-700 bg-white hover:bg-blue-50 transition-colors flex items-center justify-center gap-1"
+                            >
+                                <Plus size={14} /> Add Property Image / Brochure
+                            </button>
+                        </div>
+                    )}
                 </>
                 )}
 
@@ -878,6 +1070,55 @@ const PropertiesPanel = ({ node, onChange, onClose }: { node: Node<FlowNodeData>
                             onChange={e => update('label', e.target.value)} 
                         />
                         <p className="text-[10px] text-gray-400 mt-1">Used for identifying this node in the canvas.</p>
+                    </div>
+
+                    {/* Global Keyword & Intent Triggers */}
+                    <div className="bg-amber-50/80 p-4 rounded-xl border border-amber-200 shadow-sm space-y-3">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-1.5">
+                                <Sparkles size={16} className="text-amber-600" />
+                                <label className="text-xs font-bold text-amber-900 uppercase">Global Keyword Triggers</label>
+                            </div>
+                            <span className="text-[10px] font-bold text-amber-800 bg-amber-200/80 px-2 py-0.5 rounded-full">
+                                {(local.keywords || []).length} keywords
+                            </span>
+                        </div>
+                        <p className="text-[10px] text-amber-800 leading-relaxed">
+                            When a customer messages any of these phrases (e.g. <em>"send the property Number2"</em> or <em>"Property 2"</em>), the bot instantly jumps to this step and dispatches this response, regardless of current flow position.
+                        </p>
+                        <div>
+                            <label className="block text-[10px] font-bold text-gray-700 uppercase mb-1">Keywords / Phrases (Comma-separated)</label>
+                            <textarea
+                                className="w-full border border-amber-200 p-2 rounded-lg text-xs font-mono bg-white focus:ring-2 focus:ring-amber-500 outline-none resize-none h-16"
+                                value={(local.keywords || []).join(', ')}
+                                onChange={e => update('keywords', e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
+                                placeholder="property 2, property number 2, villa 2, send property 2, p2"
+                            />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                            <div>
+                                <label className="block text-[10px] font-bold text-gray-700 uppercase mb-1">Matching Mode</label>
+                                <select
+                                    className="w-full border border-amber-200 p-1.5 rounded-lg text-xs bg-white font-medium"
+                                    value={local.keywordMatchMode || 'contains'}
+                                    onChange={e => update('keywordMatchMode', e.target.value)}
+                                >
+                                    <option value="contains">Contains Keyword (Recommended)</option>
+                                    <option value="exact">Exact Match Only</option>
+                                    <option value="regex">Regular Expression</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-[10px] font-bold text-gray-700 uppercase mb-1">Trigger Priority</label>
+                                <input
+                                    type="number"
+                                    className="w-full border border-amber-200 p-1.5 rounded-lg text-xs bg-white font-mono"
+                                    value={local.keywordPriority ?? 0}
+                                    onChange={e => update('keywordPriority', parseInt(e.target.value) || 0)}
+                                    placeholder="0"
+                                />
+                            </div>
+                        </div>
                     </div>
 
                     {local.type === 'summary' && (
@@ -1301,6 +1542,14 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
           newNode.data.variable = 'pickup_time';
           newNode.data.dateConfig = { daysToShow: 7, includeToday: true };
       }
+      if (type === 'template') {
+          newNode.data.label = "WhatsApp Template";
+          newNode.data.templateName = "property_showcase";
+          newNode.data.templateLanguage = "en";
+          newNode.data.templateVariables = ["name", "property_name"];
+          newNode.data.keywords = ["property 2", "property number 2", "p2"];
+          newNode.data.keywordMatchMode = "contains";
+      }
 
       addNode(newNode);
   };
@@ -1483,6 +1732,10 @@ export const BotBuilder = ({ isLiveMode }: { isLiveMode: boolean }) => {
                      <button onClick={() => handleAddNode('delay')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-gray-400 hover:shadow-sm transition-all text-gray-600 hover:text-gray-800">
                          <Clock size={20} className="mb-1" />
                          <span className="text-[10px] font-bold">Delay</span>
+                     </button>
+                     <button onClick={() => handleAddNode('template')} className="flex flex-col items-center justify-center p-3 rounded-xl border border-gray-200 bg-white hover:border-emerald-400 hover:shadow-sm transition-all text-gray-600 hover:text-emerald-600 col-span-2">
+                         <LayoutTemplate size={20} className="mb-1 text-emerald-600" />
+                         <span className="text-[10px] font-bold text-emerald-700">WhatsApp Template</span>
                      </button>
                  </div>
              </div>

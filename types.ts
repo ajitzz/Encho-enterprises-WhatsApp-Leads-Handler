@@ -148,6 +148,20 @@ export interface FlowNodeData {
   templateName?: string;
   templateLanguage?: string;
   templateVariables?: string[]; 
+  documentFilename?: string;
+
+  // Global Keyword & Intent Triggers
+  keywords?: string[];
+  keywordMatchMode?: 'contains' | 'exact' | 'regex';
+  keywordPriority?: number;
+
+  // Multi-Asset Property Media Dispatcher
+  mediaGallery?: Array<{
+    type: 'image' | 'video' | 'document';
+    url: string;
+    caption?: string;
+    filename?: string;
+  }>;
 
   // Summary Node Advanced Layout
   summaryDescription?: string;

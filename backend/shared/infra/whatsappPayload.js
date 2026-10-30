@@ -10,6 +10,7 @@ export const summarizePayloadForStorage = (payload) => {
   if (payload.type === 'video') return normalizeTextBody(payload.video?.caption || '[Video]');
   if (payload.type === 'document') return normalizeTextBody(payload.document?.caption || '[Document]');
   if (payload.type === 'audio') return '[Audio]';
+  if (payload.type === 'template') return `[Template: ${payload.template?.name || 'WhatsApp Template'}]`;
   return '[Media]';
 };
 
