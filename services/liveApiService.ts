@@ -178,7 +178,7 @@ export const liveApiService = {
   subscribeToUpdates: (callback: (drivers: Driver[]) => void, options: SubscribeToUpdatesOptions = {}) => {
       const {
           driverId,
-          pollIntervalMs = 10000,
+          pollIntervalMs = 1500,
           onMessages,
           onScheduledMessages,
           onConnectionStateChange,
@@ -237,13 +237,13 @@ export const liveApiService = {
       const scheduleReconnect = () => {
           if (isClosed) return;
           reconnectAttempts += 1;
-          const backoffMs = Math.min(30000, 1000 * (2 ** Math.min(reconnectAttempts, 5)));
+          const backoffMs = Math.min(3000, 500 * (1.5 ** Math.min(reconnectAttempts, 4)));
           setConnectionState('reconnecting');
           startPolling();
 
           reconnectTimer = setTimeout(() => {
               if (!isClosed) connectPush();
-          }, backoffMs + Math.floor(Math.random() * 400));
+          }, backoffMs + Math.floor(Math.random() * 200));
       };
 
       const connectPush = () => {

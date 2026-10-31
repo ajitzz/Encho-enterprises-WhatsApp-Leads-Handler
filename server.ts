@@ -4031,7 +4031,20 @@ if (REQUEST_CONTEXT_FLAG) {
 
 const apiRouter = express.Router();
 
-const handleHealthLegacy = async (req, res) => res.json({ status: 'ok', timestamp: Date.now() });
+const handleHealthLegacy = async (req: any, res: any) => {
+    let dbStatus = 'skipped';
+    if (req.query?.db === '1' || req.query?.warm === '1' || req.query?.warmup === '1') {
+        try {
+            await withDb(async (client) => {
+                await client.query('SELECT 1');
+            });
+            dbStatus = 'warm';
+        } catch (dbErr: any) {
+            dbStatus = `degraded: ${dbErr?.message || 'unknown'}`;
+        }
+    }
+    return res.json({ status: 'ok', db: dbStatus, timestamp: Date.now() });
+};
 
 const handleReadyLegacy = async (req, res) => {
     try {
@@ -5959,6 +5972,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
 
     let closed = false;
@@ -7558,6 +7572,17 @@ const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
     setInterval(() => {
         runNurtureTriggers().catch(err => console.error('[NURTURE JOB ERROR]', err));
     }, 1000 * 60 * 60); // Run every hour
+
+    // Keep Neon DB connection pool active, warm, and primed in RAM
+    setInterval(async () => {
+        try {
+            await withDb(async (client) => {
+                await client.query('SELECT 1');
+            });
+        } catch (e: any) {
+            console.error('[DB Warmup Heartbeat Error]', e?.message || e);
+        }
+    }, 1000 * 60 * 3); // Run every 3 minutes
 
     return app.listen(Number(port), '0.0.0.0', () => {
         console.log(`Server running on ${port}`);

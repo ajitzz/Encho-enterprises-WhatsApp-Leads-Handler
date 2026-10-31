@@ -123,15 +123,34 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     }
   }, [driver?.id]);
 
-  // Passive fallback reconciliation while chat drawer is open
+  // FAANG sub-second responsive active chat sync & instant tab-focus resync
   useEffect(() => {
     if (!driver?.id) return;
 
-    const livePollTimer = setInterval(() => {
+    const syncDriverChat = () => {
       loadMessages(driver.id);
-    }, 10000);
+      loadScheduledMessages(driver.id);
+    };
 
-    return () => clearInterval(livePollTimer);
+    // Sub-second adaptive polling fallback (1200ms) while chat drawer is active
+    const livePollTimer = setInterval(syncDriverChat, 1200);
+
+    // Instant resync the microsecond the user focuses or switches back to this tab
+    const handleFocus = () => syncDriverChat();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        syncDriverChat();
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      clearInterval(livePollTimer);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [driver?.id]);
 
   useEffect(() => {
@@ -139,7 +158,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
 
       const unsubscribe = liveApiService.subscribeToUpdates(() => {}, {
           driverId: driver.id,
-          pollIntervalMs: 3000,
+          pollIntervalMs: 1200,
           onMessages: (latestMsgs) => {
               if (!Array.isArray(latestMsgs) || latestMsgs.length === 0) return;
               setLocalMessages(prev => {

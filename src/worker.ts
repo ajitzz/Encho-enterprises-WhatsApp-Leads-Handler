@@ -6,6 +6,17 @@ interface Env {
   ALLOWED_ORIGINS?: string;
 }
 
+interface ScheduledEvent {
+  cron: string;
+  type: string;
+  scheduledTime: number;
+}
+
+interface ExecutionContext {
+  waitUntil(promise: Promise<unknown>): void;
+  passThroughOnException(): void;
+}
+
 const STATIC_FALLBACKS: Record<string, { body: string; contentType: string }> = {
   '/robots.txt': { body: 'User-agent: *\nDisallow:', contentType: 'text/plain; charset=utf-8' },
   '/favicon.ico': { body: '', contentType: 'image/x-icon' },
@@ -126,10 +137,13 @@ export default {
       }
 
       const upstreamPath = isWebhookProxyPath ? '/api/webhook' : url.pathname;
+      const isStreamPath = url.pathname === '/api/updates/stream';
       const configuredTimeoutMs = parseTimeoutMs(env.BACKEND_API_TIMEOUT_MS);
       const timeoutMs = isWebhookProxyPath
         ? Math.min(configuredTimeoutMs, WEBHOOK_UPSTREAM_TIMEOUT_CAP_MS)
-        : configuredTimeoutMs;
+        : isStreamPath
+          ? MAX_UPSTREAM_TIMEOUT_MS
+          : configuredTimeoutMs;
       const upstreamOrigins = [env.BACKEND_API_ORIGIN, env.BACKEND_API_FALLBACK_ORIGIN]
         .map((value) => value?.trim())
         .filter((value, index, arr): value is string => Boolean(value) && arr.indexOf(value) === index);
@@ -148,7 +162,12 @@ export default {
           selectedOrigin = origin;
 
           try {
-            upstreamResponse = await withTimeoutFetch(upstreamRequest, timeoutMs);
+            if (isStreamPath) {
+              // Direct fetch without premature abort controller for persistent SSE streams
+              upstreamResponse = await fetch(upstreamRequest);
+            } else {
+              upstreamResponse = await withTimeoutFetch(upstreamRequest, timeoutMs);
+            }
             break;
           } catch (error) {
             lastError = error;
@@ -177,8 +196,15 @@ export default {
         responseHeaders.set('Vary', 'Origin');
       }
 
+      if (isStreamPath) {
+        responseHeaders.set('Content-Type', 'text/event-stream; charset=utf-8');
+        responseHeaders.set('Cache-Control', 'no-cache, no-transform');
+        responseHeaders.set('Connection', 'keep-alive');
+        responseHeaders.set('X-Accel-Buffering', 'no');
+      }
+
       responseHeaders.set('x-proxied-by', 'cloudflare-worker-edge-proxy');
-      responseHeaders.set('x-proxy-path-type', isWebhookProxyPath ? 'webhook' : 'api');
+      responseHeaders.set('x-proxy-path-type', isWebhookProxyPath ? 'webhook' : isStreamPath ? 'stream' : 'api');
       if (selectedOrigin) {
         responseHeaders.set('x-proxy-upstream-origin', selectedOrigin);
       }
@@ -207,5 +233,35 @@ export default {
         'cache-control': 'no-store',
       },
     });
+  },
+
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    const backendOrigin = env.BACKEND_API_ORIGIN;
+    if (!backendOrigin) return;
+
+    const pingOrigins = [backendOrigin, env.BACKEND_API_FALLBACK_ORIGIN]
+      .map((value) => value?.trim())
+      .filter((value, index, arr): value is string => Boolean(value) && arr.indexOf(value) === index);
+
+    const warmupTask = Promise.all(
+      pingOrigins.map(async (origin) => {
+        try {
+          // Warm up both Express HTTP server and the Postgres DB pool
+          const readyUrl = joinUrl(origin, '/ready', '?warmup=1');
+          const res = await fetch(readyUrl, {
+            method: 'GET',
+            headers: {
+              'User-Agent': 'Cloudflare-Worker-KeepAlive/1.0',
+              'Accept': 'application/json',
+            },
+          });
+          console.log(`[KeepAlive] Edge warmup ping to ${origin}/ready: HTTP ${res.status}`);
+        } catch (err) {
+          console.error(`[KeepAlive] Edge warmup ping to ${origin} failed:`, err);
+        }
+      })
+    );
+
+    ctx.waitUntil(warmupTask);
   },
 };
