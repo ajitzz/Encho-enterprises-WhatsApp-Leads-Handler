@@ -1,0 +1,294 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 680" width="100%" height="100%" style="background:#090d16; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0f19"/>
+      <stop offset="100%" stop-color="#06080d"/>
+    </linearGradient>
+    
+    <!-- Component Gradients -->
+    <linearGradient id="metaGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#059669"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+    <linearGradient id="ingestGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="engineGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+    <linearGradient id="storageGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#d97706"/>
+      <stop offset="100%" stop-color="#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="portalGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+    
+    <!-- Glow Filters -->
+    <filter id="glowGreen" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#10b981" flood-opacity="0.25"/>
+    </filter>
+    <filter id="glowBlue" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#38bdf8" flood-opacity="0.25"/>
+    </filter>
+    <filter id="glowIndigo" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#6366f1" flood-opacity="0.25"/>
+    </filter>
+    <filter id="boxShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+    
+    <!-- Markers -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#10b981"/>
+    </marker>
+    <marker id="arrowIndigo" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#818cf8"/>
+    </marker>
+  </defs>
+
+  <!-- Canvas Background -->
+  <rect width="1200" height="680" fill="url(#bgGrad)"/>
+  
+  <!-- Subtle Grid Lines -->
+  <g opacity="0.07" stroke="#94a3b8" stroke-width="1">
+    <line x1="100" y1="0" x2="100" y2="680"/>
+    <line x1="300" y1="0" x2="300" y2="680"/>
+    <line x1="500" y1="0" x2="500" y2="680"/>
+    <line x1="700" y1="0" x2="700" y2="680"/>
+    <line x1="900" y1="0" x2="900" y2="680"/>
+    <line x1="1100" y1="0" x2="1100" y2="680"/>
+    <line x1="0" y1="120" x2="1200" y2="120"/>
+    <line x1="0" y1="280" x2="1200" y2="280"/>
+    <line x1="0" y1="440" x2="1200" y2="440"/>
+    <line x1="0" y1="600" x2="1200" y2="600"/>
+  </g>
+
+  <!-- Header Title -->
+  <g transform="translate(60, 48)">
+    <rect x="0" y="0" width="38" height="38" rx="8" fill="#10b981" fill-opacity="0.15" stroke="#10b981" stroke-width="1.5"/>
+    <path d="M 12 19 L 19 26 L 27 13" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="50" y="22" fill="#ffffff" font-size="20" font-weight="700" letter-spacing="-0.5">Encho Enterprise Leads Platform</text>
+    <text x="50" y="38" fill="#94a3b8" font-size="12" font-weight="500">FAANG-Grade High-Throughput WhatsApp Automation &amp; CRM Architecture</text>
+    
+    <!-- Top Status Badges -->
+    <rect x="760" y="4" width="130" height="26" rx="13" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+    <circle cx="774" cy="17" r="4" fill="#10b981"/>
+    <text x="786" y="21" fill="#cbd5e1" font-size="11" font-weight="600">Meta API v26.0</text>
+    
+    <rect x="900" y="4" width="130" height="26" rx="13" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+    <circle cx="914" cy="17" r="4" fill="#38bdf8"/>
+    <text x="926" y="21" fill="#cbd5e1" font-size="11" font-weight="600">P99 Latency &lt; 200ms</text>
+    
+    <rect x="1040" y="4" width="100" height="26" rx="13" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+    <circle cx="1054" cy="17" r="4" fill="#fbbf24"/>
+    <text x="1066" y="21" fill="#cbd5e1" font-size="11" font-weight="600">50/50 Tests</text>
+  </g>
+
+  <!-- ================= TIER 1: EXTERNAL ACTORS & META CLOUD ================= -->
+  <g transform="translate(60, 110)">
+    <rect width="200" height="490" rx="14" fill="#0f172a" stroke="#1e293b" stroke-width="1.5" filter="url(#boxShadow)"/>
+    <rect x="0" y="0" width="200" height="42" rx="14" fill="#1e293b" fill-opacity="0.6"/>
+    <text x="16" y="26" fill="#10b981" font-size="13" font-weight="700">1. INBOUND &amp; META CLOUD</text>
+    
+    <!-- Sub-box: End Customers -->
+    <g transform="translate(16, 60)">
+      <rect width="168" height="90" rx="10" fill="#131e33" stroke="#253550" stroke-width="1"/>
+      <circle cx="28" cy="28" r="14" fill="#10b981" fill-opacity="0.2"/>
+      <text x="28" y="32" fill="#10b981" font-size="12" font-weight="bold" text-anchor="middle">📱</text>
+      <text x="50" y="25" fill="#f8fafc" font-size="12" font-weight="600">WhatsApp Leads</text>
+      <text x="50" y="39" fill="#94a3b8" font-size="10">2B+ Global Devices</text>
+      <text x="14" y="66" fill="#64748b" font-size="9.5">Text, Media, Location,</text>
+      <text x="14" y="78" fill="#64748b" font-size="9.5">Interactive Button Clicks</text>
+    </g>
+
+    <!-- Sub-box: Meta Cloud API -->
+    <g transform="translate(16, 175)">
+      <rect width="168" height="120" rx="10" fill="#131e33" stroke="#10b981" stroke-width="1.2" filter="url(#glowGreen)"/>
+      <rect x="12" y="14" width="28" height="28" rx="6" fill="#10b981"/>
+      <text x="26" y="32" fill="#ffffff" font-size="14" font-weight="bold" text-anchor="middle">M</text>
+      <text x="48" y="26" fill="#ffffff" font-size="12" font-weight="700">Meta Cloud API</text>
+      <text x="48" y="40" fill="#34d399" font-size="10">WhatsApp Business Platform</text>
+      <line x1="12" y1="52" x2="156" y2="52" stroke="#1e293b" stroke-width="1"/>
+      <text x="12" y="70" fill="#cbd5e1" font-size="10">• Webhook Subscriptions</text>
+      <text x="12" y="85" fill="#cbd5e1" font-size="10">• Official Templates (HSM)</text>
+      <text x="12" y="100" fill="#cbd5e1" font-size="10">• 24-Hour Session Window</text>
+    </g>
+
+    <!-- Sub-box: Reverse Proxy / CDN -->
+    <g transform="translate(16, 320)">
+      <rect width="168" height="135" rx="10" fill="#131e33" stroke="#253550" stroke-width="1"/>
+      <rect x="12" y="14" width="28" height="28" rx="6" fill="#f97316" fill-opacity="0.2"/>
+      <text x="26" y="32" fill="#f97316" font-size="14" font-weight="bold" text-anchor="middle">⚡</text>
+      <text x="48" y="26" fill="#f8fafc" font-size="12" font-weight="600">Cloudflare Edge</text>
+      <text x="48" y="40" fill="#94a3b8" font-size="10">Global CDN / Workers</text>
+      <line x1="12" y1="52" x2="156" y2="52" stroke="#1e293b" stroke-width="1"/>
+      <text x="12" y="72" fill="#94a3b8" font-size="9.5">• DDoS Protection &amp; SSL</text>
+      <text x="12" y="87" fill="#94a3b8" font-size="9.5">• Static Asset Delivery</text>
+      <text x="12" y="102" fill="#94a3b8" font-size="9.5">• Strict Origin Shielding</text>
+      <text x="12" y="117" fill="#94a3b8" font-size="9.5">• Sub-10ms Edge Routing</text>
+    </g>
+  </g>
+
+  <!-- ================= TIER 2: HIGH-THROUGHPUT INGESTION ================= -->
+  <g transform="translate(290, 110)">
+    <rect width="240" height="490" rx="14" fill="#0f172a" stroke="#1e293b" stroke-width="1.5" filter="url(#boxShadow)"/>
+    <rect x="0" y="0" width="240" height="42" rx="14" fill="#1e293b" fill-opacity="0.6"/>
+    <text x="16" y="26" fill="#38bdf8" font-size="13" font-weight="700">2. INGESTION &amp; BUFFERING</text>
+    
+    <!-- Express Ingestion Gateway -->
+    <g transform="translate(16, 60)">
+      <rect width="208" height="110" rx="10" fill="#131e33" stroke="#0284c7" stroke-width="1.2" filter="url(#glowBlue)"/>
+      <text x="16" y="25" fill="#ffffff" font-size="12" font-weight="700">Express Webhook Router</text>
+      <text x="16" y="40" fill="#7dd3fc" font-size="10">server.ts / LeadIngestionFacade</text>
+      <line x1="16" y1="50" x2="192" y2="50" stroke="#1e293b" stroke-width="1"/>
+      <text x="16" y="68" fill="#cbd5e1" font-size="10">✓ HMAC SHA256 Signature Verify</text>
+      <text x="16" y="83" fill="#cbd5e1" font-size="10">✓ Deduplication Cache (Redis/RAM)</text>
+      <text x="16" y="98" fill="#cbd5e1" font-size="10">✓ Sub-50ms HTTP 200 Fast ACK</text>
+    </g>
+
+    <!-- Upstash Redis FIFO Queue -->
+    <g transform="translate(16, 190)">
+      <rect width="208" height="135" rx="10" fill="#131e33" stroke="#253550" stroke-width="1"/>
+      <rect x="12" y="14" width="28" height="28" rx="6" fill="#ef4444" fill-opacity="0.2"/>
+      <text x="26" y="32" fill="#ef4444" font-size="14" font-weight="bold" text-anchor="middle">Q</text>
+      <text x="48" y="26" fill="#f8fafc" font-size="12" font-weight="600">Upstash Inbound Queue</text>
+      <text x="48" y="40" fill="#94a3b8" font-size="10">Redis FIFO + QStash</text>
+      <line x1="12" y1="52" x2="196" y2="52" stroke="#1e293b" stroke-width="1"/>
+      <text x="12" y="72" fill="#94a3b8" font-size="9.5">• Inbound Traffic Shock Absorber</text>
+      <text x="12" y="88" fill="#94a3b8" font-size="9.5">• Prevents Meta Webhook Timeouts</text>
+      <text x="12" y="104" fill="#94a3b8" font-size="9.5">• Write-Behind Async Decoupling</text>
+      <text x="12" y="120" fill="#94a3b8" font-size="9.5">• Multi-Tenant Rate-Limit Throttling</text>
+    </g>
+
+    <!-- Outbound Payload Validator -->
+    <g transform="translate(16, 345)">
+      <rect width="208" height="115" rx="10" fill="#131e33" stroke="#253550" stroke-width="1"/>
+      <text x="16" y="25" fill="#f8fafc" font-size="12" font-weight="600">whatsappPayload.js</text>
+      <text x="16" y="40" fill="#94a3b8" font-size="10">Outbound Validation &amp; Sanitizer</text>
+      <line x1="16" y1="50" x2="192" y2="50" stroke="#1e293b" stroke-width="1"/>
+      <text x="16" y="68" fill="#94a3b8" font-size="9.5">• Enforces Max 4096 Text Chars</text>
+      <text x="16" y="83" fill="#94a3b8" font-size="9.5">• Validates Interactive Button IDs</text>
+      <text x="16" y="98" fill="#94a3b8" font-size="9.5">• Strips Unrendered Placeholders</text>
+    </g>
+  </g>
+
+  <!-- ================= TIER 3: INTELLIGENT BOT STUDIO & KEYWORD ENGINE ================= -->
+  <g transform="translate(560, 110)">
+    <rect width="290" height="490" rx="14" fill="#0f172a" stroke="#1e293b" stroke-width="1.5" filter="url(#boxShadow)"/>
+    <rect x="0" y="0" width="290" height="42" rx="14" fill="#1e293b" fill-opacity="0.6"/>
+    <text x="16" y="26" fill="#818cf8" font-size="13" font-weight="700">3. BOT STUDIO &amp; KEYWORD ROUTER</text>
+    
+    <!-- Global Keyword & Intent Matcher -->
+    <g transform="translate(16, 56)">
+      <rect width="258" height="126" rx="10" fill="#131e33" stroke="#6366f1" stroke-width="1.5" filter="url(#glowIndigo)"/>
+      <rect x="12" y="12" width="26" height="26" rx="6" fill="#6366f1"/>
+      <text x="25" y="29" fill="#ffffff" font-size="13" font-weight="bold" text-anchor="middle">🎯</text>
+      <text x="46" y="24" fill="#ffffff" font-size="12" font-weight="700">botTriggerMatcher.js</text>
+      <text x="46" y="38" fill="#a5b4fc" font-size="10">Global Intent &amp; Keyword Router</text>
+      <line x1="12" y1="48" x2="246" y2="48" stroke="#1e293b" stroke-width="1"/>
+      <text x="12" y="66" fill="#cbd5e1" font-size="10">✓ Filler Stripper ('send the property 2' → 'p2')</text>
+      <text x="12" y="81" fill="#cbd5e1" font-size="10">✓ Match Modes: contains, exact, regex</text>
+      <text x="12" y="96" fill="#cbd5e1" font-size="10">✓ Priority Arbitration (Higher wins)</text>
+      <text x="12" y="111" fill="#cbd5e1" font-size="10">✓ Active Button Priority Guard</text>
+    </g>
+
+    <!-- Multi-Asset Media Pack Dispatcher -->
+    <g transform="translate(16, 196)">
+      <rect width="258" height="120" rx="10" fill="#131e33" stroke="#253550" stroke-width="1"/>
+      <rect x="12" y="12" width="26" height="26" rx="6" fill="#059669" fill-opacity="0.2"/>
+      <text x="25" y="29" fill="#10b981" font-size="13" font-weight="bold" text-anchor="middle">📦</text>
+      <text x="46" y="24" fill="#f8fafc" font-size="12" font-weight="600">Multi-Asset Media Pack</text>
+      <text x="46" y="38" fill="#94a3b8" font-size="10">Sequential Paced Dispatcher</text>
+      <line x1="12" y1="48" x2="246" y2="48" stroke="#1e293b" stroke-width="1"/>
+      <text x="12" y="66" fill="#94a3b8" font-size="9.5">• 1. Hero Image / Video (Immediate)</text>
+      <text x="12" y="81" fill="#94a3b8" font-size="9.5">• 2. +350ms Floor Plan / Gallery Photo</text>
+      <text x="12" y="96" fill="#94a3b8" font-size="9.5">• 3. +350ms PDF Brochure (Preserves Name)</text>
+      <text x="12" y="111" fill="#94a3b8" font-size="9.5">• 4. +350ms Interactive Call-To-Action</text>
+    </g>
+
+    <!-- Meta Template Node -->
+    <g transform="translate(16, 330)">
+      <rect width="258" height="135" rx="10" fill="#131e33" stroke="#253550" stroke-width="1"/>
+      <text x="16" y="25" fill="#f8fafc" font-size="12" font-weight="600">Meta Template Engine (HSM)</text>
+      <text x="16" y="40" fill="#94a3b8" font-size="10">Pre-approved Outbound / Inbound</text>
+      <line x1="16" y1="50" x2="242" y2="50" stroke="#1e293b" stroke-width="1"/>
+      <text x="16" y="70" fill="#94a3b8" font-size="9.5">• Dynamic Parameter Mapping ({{1}}, {{2}})</text>
+      <text x="16" y="86" fill="#94a3b8" font-size="9.5">• Multi-Language Codes (en, ar, es, hi)</text>
+      <text x="16" y="102" fill="#94a3b8" font-size="9.5">• Dynamic Header Media Attachments</text>
+      <text x="16" y="118" fill="#94a3b8" font-size="9.5">• Cold Outreach &amp; Re-engagement</text>
+    </g>
+  </g>
+
+  <!-- ================= TIER 4: PERSISTENCE & CRM WORKSPACE ================= -->
+  <g transform="translate(880, 110)">
+    <rect width="260" height="490" rx="14" fill="#0f172a" stroke="#1e293b" stroke-width="1.5" filter="url(#boxShadow)"/>
+    <rect x="0" y="0" width="260" height="42" rx="14" fill="#1e293b" fill-opacity="0.6"/>
+    <text x="16" y="26" fill="#c084fc" font-size="13" font-weight="700">4. DATABASE &amp; STAFF PORTAL</text>
+    
+    <!-- Neon Postgres Database -->
+    <g transform="translate(16, 56)">
+      <rect width="228" height="120" rx="10" fill="#131e33" stroke="#d97706" stroke-width="1.2"/>
+      <rect x="12" y="12" width="26" height="26" rx="6" fill="#d97706"/>
+      <text x="25" y="29" fill="#ffffff" font-size="13" font-weight="bold" text-anchor="middle">🐘</text>
+      <text x="46" y="24" fill="#ffffff" font-size="12" font-weight="700">Neon Postgres (Serverless)</text>
+      <text x="46" y="38" fill="#fcd34d" font-size="10">System of Record</text>
+      <line x1="12" y1="48" x2="216" y2="48" stroke="#1e293b" stroke-width="1"/>
+      <text x="12" y="66" fill="#cbd5e1" font-size="10">• candidates / leads (State &amp; Step)</text>
+      <text x="12" y="81" fill="#cbd5e1" font-size="10">• messages (Inbound/Outbound Audit)</text>
+      <text x="12" y="96" fill="#cbd5e1" font-size="10">• lead_activity_log (FAANG Tracking)</text>
+      <text x="12" y="111" fill="#cbd5e1" font-size="10">• staff_members &amp; assignments</text>
+    </g>
+
+    <!-- Staff Portal & Live Chat -->
+    <g transform="translate(16, 192)">
+      <rect width="228" height="140" rx="10" fill="#131e33" stroke="#8b5cf6" stroke-width="1.2"/>
+      <rect x="12" y="12" width="26" height="26" rx="6" fill="#8b5cf6"/>
+      <text x="25" y="29" fill="#ffffff" font-size="13" font-weight="bold" text-anchor="middle">👥</text>
+      <text x="46" y="24" fill="#ffffff" font-size="12" font-weight="700">Staff Portal &amp; Live Chat</text>
+      <text x="46" y="38" fill="#d8b4fe" font-size="10">React 18 + Tailwind + Lucide</text>
+      <line x1="12" y1="48" x2="216" y2="48" stroke="#1e293b" stroke-width="1"/>
+      <text x="12" y="66" fill="#cbd5e1" font-size="10">• 24-Hour WhatsApp Session Timer</text>
+      <text x="12" y="81" fill="#cbd5e1" font-size="10">• Seamless Human Takeover Toggle</text>
+      <text x="12" y="96" fill="#cbd5e1" font-size="10">• Auto Lead Assignment (Round Robin)</text>
+      <text x="12" y="111" fill="#cbd5e1" font-size="10">• Quick Replies &amp; Document Review</text>
+      <text x="12" y="126" fill="#cbd5e1" font-size="10">• Real-time Sync via SSE / REST</text>
+    </g>
+
+    <!-- AWS S3 Media Storage -->
+    <g transform="translate(16, 348)">
+      <rect width="228" height="115" rx="10" fill="#131e33" stroke="#253550" stroke-width="1"/>
+      <text x="16" y="25" fill="#f8fafc" font-size="12" font-weight="600">AWS S3 Media Storage</text>
+      <text x="16" y="40" fill="#94a3b8" font-size="10">Presigned Uploads &amp; Retrieval</text>
+      <line x1="16" y1="50" x2="212" y2="50" stroke="#1e293b" stroke-width="1"/>
+      <text x="16" y="68" fill="#94a3b8" font-size="9.5">• Property Brochures (PDFs)</text>
+      <text x="16" y="83" fill="#94a3b8" font-size="9.5">• High-Res Villas, Real Estate &amp; Cars</text>
+      <text x="16" y="98" fill="#94a3b8" font-size="9.5">• Driver Licences &amp; ID Proofs</text>
+    </g>
+  </g>
+
+  <!-- ================= CONNECTING FLOW ARROWS ================= -->
+  <!-- Meta to Ingestion -->
+  <path d="M 260 235 L 290 235" fill="none" stroke="#10b981" stroke-width="2" marker-end="url(#arrowGreen)" stroke-dasharray="4,4"/>
+  
+  <!-- Ingestion to Bot Engine -->
+  <path d="M 530 235 L 560 235" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)"/>
+  
+  <!-- Bot Engine to Database -->
+  <path d="M 850 180 L 880 180" fill="none" stroke="#818cf8" stroke-width="2" marker-end="url(#arrowIndigo)"/>
+  
+  <!-- Bot Engine Outbound Back to Meta -->
+  <path d="M 560 410 C 440 460, 360 460, 260 300" fill="none" stroke="#10b981" stroke-width="2" marker-end="url(#arrowGreen)"/>
+  <text x="360" y="450" fill="#34d399" font-size="11" font-weight="600">Outbound Paced WhatsApp Dispatch</text>
+
+  <!-- Database to Staff Portal -->
+  <path d="M 990 176 L 990 192" fill="none" stroke="#d97706" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+</svg>
