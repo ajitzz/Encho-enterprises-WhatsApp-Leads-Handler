@@ -116,7 +116,7 @@ export default {
           headers: {
             'Access-Control-Allow-Origin': corsOrigin,
             'Access-Control-Allow-Methods': 'GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS',
-            'Access-Control-Allow-Headers': request.headers.get('access-control-request-headers') || 'authorization,content-type',
+            'Access-Control-Allow-Headers': request.headers.get('access-control-request-headers') || 'authorization,content-type,x-shadow-staff-id,x-requested-with,x-request-id',
             'Access-Control-Max-Age': '86400',
             Vary: 'Origin',
           },

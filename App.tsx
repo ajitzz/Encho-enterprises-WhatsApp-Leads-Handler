@@ -88,7 +88,42 @@ export default function App() {
   const [syncFailureMetrics, setSyncFailureMetrics] = useState({ polling: 0, push: 0, lastEndpoint: 'n/a' });
   const [dueAlertQueue, setDueAlertQueue] = useState<DueAlertItem[]>([]);
   const [activeDueAlert, setActiveDueAlert] = useState<DueAlertItem | null>(null);
-  const [shadowUser, setShadowUser] = useState<any>(null);
+  const [shadowUser, setShadowUser] = useState<any>(() => {
+    try {
+      const saved = sessionStorage.getItem('encho_shadow_user');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        const effectiveId = parsed?.staffId || parsed?.id;
+        if (effectiveId) {
+          liveApiService.setShadowStaffId(effectiveId);
+          return { ...parsed, id: effectiveId, staffId: effectiveId };
+        }
+      }
+    } catch {}
+    return null;
+  });
+
+  const handleStartShadow = (staff: any) => {
+    const effectiveStaffId = staff?.staffId || staff?.id;
+    const normalizedUser = {
+      ...staff,
+      id: effectiveStaffId,
+      staffId: effectiveStaffId,
+    };
+    liveApiService.setShadowStaffId(effectiveStaffId);
+    try {
+      sessionStorage.setItem('encho_shadow_user', JSON.stringify(normalizedUser));
+    } catch {}
+    setShadowUser(normalizedUser);
+  };
+
+  const handleExitShadow = () => {
+    liveApiService.setShadowStaffId(null);
+    try {
+      sessionStorage.removeItem('encho_shadow_user');
+    } catch {}
+    setShadowUser(null);
+  };
 
   const [dataSource, setDataSource] = useState<'mock' | 'live'>(() => {
       const saved = localStorage.getItem('uber_fleet_data_source');
@@ -231,11 +266,11 @@ export default function App() {
   };
 
   const handleLogout = () => {
+      handleExitShadow();
       googleLogout();
       clearAuthToken();
       setIsAuthenticated(false);
       setUserProfile(null);
-      setShadowUser(null);
       setSelectedDriver(null);
       setSelectedBulkIds([]);
       setActiveTab('dashboard');
@@ -334,8 +369,8 @@ export default function App() {
                       SHADOW MODE ACTIVE: You are viewing {shadowUser.name}'s workspace
                   </div>
                   <button
-                      onClick={() => setShadowUser(null)}
-                      className="bg-white text-purple-700 px-4 py-1 rounded-md font-bold hover:bg-purple-100 transition-colors text-sm"
+                      onClick={handleExitShadow}
+                      className="bg-white text-purple-700 px-4 py-1 rounded-md font-bold hover:bg-purple-100 transition-colors text-sm cursor-pointer shadow-sm"
                   >
                       Exit Shadow Mode
                   </button>
@@ -344,7 +379,7 @@ export default function App() {
                   <IsolatedFeatureBoundary featureName="Staff Portal (Shadow Mode)">
                       <StaffPortal
                           user={shadowUser}
-                          onLogout={() => setShadowUser(null)}
+                          onLogout={handleExitShadow}
                       />
                   </IsolatedFeatureBoundary>
               </div>
@@ -650,7 +685,7 @@ export default function App() {
         )}
         {activeTab === 'media-library' && <MediaLibrary />}
         {activeTab === 'bot-studio' && <BotBuilder isLiveMode={dataSource === 'live'} />}
-        {activeTab === 'staff' && <StaffManagement onShadowUser={setShadowUser} />}
+        {activeTab === 'staff' && <StaffManagement onShadowUser={handleStartShadow} />}
         {activeTab === 'staff-portal' && (
           <IsolatedFeatureBoundary featureName="Staff Portal">
             <StaffPortal user={userProfile} onLogout={handleLogout} />

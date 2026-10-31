@@ -9,6 +9,10 @@ declare global {
         role: string;
         name: string;
         email: string;
+        isShadowMode?: boolean;
+        originalAdminStaffId?: string;
+        originalAdminRole?: string;
+        originalAdminName?: string;
       };
       requestId?: string;
     }

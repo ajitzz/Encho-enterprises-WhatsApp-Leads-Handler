@@ -34,8 +34,24 @@ const resolveProxyUploadMaxBytes = () => {
 };
 
 let authToken: string | null = localStorage.getItem('encho_auth_token') || localStorage.getItem('uber_fleet_auth_token');
+let shadowStaffId: string | null = typeof sessionStorage !== 'undefined'
+    ? sessionStorage.getItem('encho_shadow_staff_id')
+    : null;
 let driversEtag: string | null = null;
 let driversSnapshotCache: Driver[] | null = null;
+
+export const setShadowStaffId = (id: string | null) => {
+    shadowStaffId = id;
+    if (typeof sessionStorage !== 'undefined') {
+        if (id) {
+            sessionStorage.setItem('encho_shadow_staff_id', id);
+        } else {
+            sessionStorage.removeItem('encho_shadow_staff_id');
+        }
+    }
+};
+
+export const getShadowStaffId = () => shadowStaffId;
 
 export type UpdateConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'polling' | 'disconnected';
 export interface DueAlertItem {
@@ -77,6 +93,9 @@ const getHeaders = () => {
     };
     if (authToken) {
         headers['Authorization'] = `Bearer ${authToken}`;
+    }
+    if (shadowStaffId) {
+        headers['x-shadow-staff-id'] = shadowStaffId;
     }
     return headers;
 };
@@ -638,8 +657,11 @@ export const liveApiService = {
     return apiRequest<Driver[]>('/api/leads/my');
   },
 
-  claimLead: async (id: string) => {
-    return apiRequest(`/api/leads/${id}/claim`, { method: 'POST' });
+  claimLead: async (id: string, staffId?: string) => {
+    return apiRequest(`/api/leads/${id}/claim`, { 
+      method: 'POST',
+      body: staffId ? JSON.stringify({ staff_id: staffId }) : undefined
+    });
   },
 
   logLeadAction: async (id: string, data: { action: string; notes: string; status?: string; media_url?: string; next_followup_at?: string }) => {
@@ -785,5 +807,8 @@ export const liveApiService = {
       method: 'POST',
       body: JSON.stringify({ status, active_seconds: activeSeconds, idle_seconds: idleSeconds })
     });
-  }
+  },
+
+  setShadowStaffId,
+  getShadowStaffId
 };

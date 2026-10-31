@@ -111,7 +111,16 @@ interface LeadActivity {
   };
 }
 
-export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ user, onLogout }) => {
+export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ user: initialUser, onLogout }) => {
+  const user = React.useMemo(() => {
+    const effectiveStaffId = initialUser?.staffId || initialUser?.id;
+    return {
+      ...initialUser,
+      id: effectiveStaffId,
+      staffId: effectiveStaffId,
+    };
+  }, [initialUser]);
+
   const [view, setView] = useState<'dashboard' | 'pool' | 'my-leads' | 'detail' | 'team' | 'action-center' | 'command-center' | 'pending-reviews' | 'manager-workspace'>('dashboard');
   const [managerTab, setManagerTab] = useState<'team-leads' | 'team-members' | 'assignments' | 'reports' | 'audit'>('team-leads');
   const [monitoredStaffId, setMonitoredStaffId] = useState<string | null>(null);
@@ -451,10 +460,10 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     }
   };
 
-  const myLeads = React.useMemo(() =>
-    allLeads.filter(l => (l as any).assigned_to === user.staffId),
-    [allLeads, user.staffId]
-  );
+  const myLeads = React.useMemo(() => {
+    const targetId = user.staffId || user.id;
+    return allLeads.filter(l => (l as any).assigned_to === targetId);
+  }, [allLeads, user.staffId, user.id]);
 
   const poolLeads = React.useMemo(() =>
     allLeads
@@ -715,7 +724,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
   const handleClaim = async (id: string) => {
     try {
       setLoading(true);
-      await liveApiService.claimLead(id);
+      const effectiveStaffId = user.staffId || user.id;
+      await liveApiService.claimLead(id, effectiveStaffId);
       await refreshOwnedLeadViews();
       setView('my-leads');
     } catch (err: any) {

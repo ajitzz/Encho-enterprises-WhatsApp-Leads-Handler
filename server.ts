@@ -3975,7 +3975,7 @@ app.use(cors({
         callback(new Error('CORS origin not allowed'));
     },
     methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Authorization', 'Content-Type', 'X-Requested-With', 'X-Request-Id'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'X-Requested-With', 'X-Request-Id', 'X-Shadow-Staff-Id'],
     exposedHeaders: ['X-Request-Id'],
     maxAge: 86400,
 }));
@@ -4181,45 +4181,79 @@ const authMiddleware = async (req: any, res: any, next: any) => {
 
         // Fast-path: Token Cache (5 min TTL)
         const cached = tokenCache.get(token);
+        let baseUser: any = null;
+
         if (cached && cached.expiresAt > Date.now()) {
-            req.user = cached.user;
-            return next();
-        }
-
-        const ticket = await googleClient.verifyIdToken({ idToken: token, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
-        const payload = ticket.getPayload();
-        if (!payload || !payload.email) {
-            return res.status(401).json({ error: 'Unauthorized: Invalid token payload' });
-        }
-        const email = payload.email;
-        const ADMIN_EMAILS = ['ajithsabzz@gmail.com', 'enchoenterprises@gmail.com'];
-        const isSuperAdmin = ADMIN_EMAILS.includes(email);
-
-        await withDb(async (client) => {
-            const staffRes = await client.query('SELECT id, role, name FROM staff_members WHERE email = $1', [email]);
-            if (staffRes.rows.length === 0) {
-                if (isSuperAdmin) {
-                    const insertRes = await client.query(
-                        'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id, role',
-                        [email, payload.name, 'admin']
-                    );
-                    req.user = { ...payload, staffId: insertRes.rows[0].id, role: 'admin', name: payload.name };
-                } else {
-                    throw new Error('Access denied. Not an authorized staff member.');
-                }
-            } else {
-                const userRole = isSuperAdmin ? 'admin' : (staffRes.rows[0].role || 'staff');
-                req.user = { 
-                    ...payload, 
-                    staffId: staffRes.rows[0].id, 
-                    role: userRole, 
-                    name: staffRes.rows[0].name || payload.name 
-                };
+            baseUser = { ...cached.user };
+        } else {
+            const ticket = await googleClient.verifyIdToken({ idToken: token, audience: SYSTEM_CONFIG.GOOGLE_CLIENT_ID });
+            const payload = ticket.getPayload();
+            if (!payload || !payload.email) {
+                return res.status(401).json({ error: 'Unauthorized: Invalid token payload' });
             }
-        });
+            const email = payload.email;
+            const ADMIN_EMAILS = ['ajithsabzz@gmail.com', 'enchoenterprises@gmail.com'];
+            const isSuperAdmin = ADMIN_EMAILS.includes(email);
 
-        // Cache valid user
-        tokenCache.set(token, { user: req.user, expiresAt: Date.now() + 5 * 60 * 1000 });
+            await withDb(async (client) => {
+                const staffRes = await client.query('SELECT id, role, name FROM staff_members WHERE email = $1', [email]);
+                if (staffRes.rows.length === 0) {
+                    if (isSuperAdmin) {
+                        const insertRes = await client.query(
+                            'INSERT INTO staff_members (email, name, role) VALUES ($1, $2, $3) RETURNING id, role',
+                            [email, payload.name, 'admin']
+                        );
+                        baseUser = { ...payload, staffId: insertRes.rows[0].id, role: 'admin', name: payload.name };
+                    } else {
+                        throw new Error('Access denied. Not an authorized staff member.');
+                    }
+                } else {
+                    const userRole = isSuperAdmin ? 'admin' : (staffRes.rows[0].role || 'staff');
+                    baseUser = { 
+                        ...payload, 
+                        staffId: staffRes.rows[0].id, 
+                        role: userRole, 
+                        name: staffRes.rows[0].name || payload.name 
+                    };
+                }
+            });
+
+            // Cache valid base user
+            tokenCache.set(token, { user: { ...baseUser }, expiresAt: Date.now() + 5 * 60 * 1000 });
+        }
+
+        req.user = { ...baseUser };
+
+        // --- SHADOW MODE IMPERSONATION RESOLUTION ---
+        const shadowStaffId = (req.headers['x-shadow-staff-id'] || req.query?.shadowStaffId) as string;
+        if (shadowStaffId && typeof shadowStaffId === 'string' && shadowStaffId.trim()) {
+            await withDb(async (client) => {
+                const shadowRes = await client.query(
+                    'SELECT id, name, role, email, manager_id FROM staff_members WHERE id = $1', 
+                    [shadowStaffId.trim()]
+                );
+                if (shadowRes.rows.length > 0) {
+                    const shadowed = shadowRes.rows[0];
+                    // Permission check: admin can shadow anyone; manager can only shadow subordinates or self
+                    const isSuperAdmin = req.user.role === 'admin' || req.user.originalAdminRole === 'admin';
+                    const isManagerOfTarget = req.user.role === 'manager' && (shadowed.manager_id === req.user.staffId || shadowed.id === req.user.staffId);
+                    
+                    if (!isSuperAdmin && !isManagerOfTarget) {
+                        return res.status(403).json({ error: 'Forbidden: You do not have permission to shadow this staff member' });
+                    }
+
+                    req.user.originalAdminStaffId = req.user.staffId;
+                    req.user.originalAdminRole = req.user.role;
+                    req.user.originalAdminName = req.user.name;
+                    req.user.isShadowMode = true;
+                    req.user.staffId = shadowed.id;
+                    req.user.role = shadowed.role;
+                    req.user.name = shadowed.name;
+                    req.user.email = shadowed.email;
+                }
+            });
+        }
+
         next();
     } catch (e: any) {
         res.status(401).json({ error: e.message || 'Unauthorized' });
@@ -4227,7 +4261,8 @@ const authMiddleware = async (req: any, res: any, next: any) => {
 };
 
 const requireRole = (...allowedRoles: string[]) => (req: any, res: any, next: any) => {
-    if (!req.user || !allowedRoles.includes(req.user.role)) {
+    const effectiveRole = req.user?.originalAdminRole || req.user?.role;
+    if (!req.user || (!allowedRoles.includes(req.user.role) && !allowedRoles.includes(effectiveRole))) {
         return res.status(403).json({ error: `Forbidden: Requires ${allowedRoles.join(' or ')} privilege` });
     }
     next();
@@ -4506,7 +4541,7 @@ apiRouter.get('/leads/my', authMiddleware, async (req, res) => {
             let query;
             let params;
             
-            if (req.user.role === 'admin') {
+            if (req.user.role === 'admin' && !req.user.isShadowMode) {
                 query = 'SELECT c.*, s.name as staff_name FROM candidates c LEFT JOIN staff_members s ON c.assigned_to = s.id WHERE c.assigned_to IS NOT NULL';
                 params = [];
             } else if (req.user.role === 'manager') {
@@ -4532,13 +4567,18 @@ apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
     try {
         await withTransaction(async (client) => {
             await withSchemaRetry(client, async () => {
-                // Hard Agent Capacity Limit: Max 15 active leads
+                const isSuperAdmin = req.user.role === 'admin' || req.user.originalAdminRole === 'admin';
+                const targetStaffId = (isSuperAdmin && req.body?.staff_id) 
+                    ? req.body.staff_id 
+                    : req.user.staffId;
+
+                // Hard Agent Capacity Limit: Max 15 active leads for target staff
                 const activeCountRes = await client.query(`
                     SELECT COUNT(*)::int as active_count
                     FROM candidates
                     WHERE assigned_to = $1 
                       AND lead_status NOT IN ('booked', 'lost', 'unqualified', 'terminated')
-                `, [req.user.staffId]);
+                `, [targetStaffId]);
                 
                 const activeCount = activeCountRes.rows[0]?.active_count || 0;
                 const MAX_ACTIVE_LEADS = 15;
@@ -4554,7 +4594,7 @@ apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
                      SET assigned_to = $1, lead_status = 'claimed', last_action_at = NOW(), claimed_at = NOW() 
                      WHERE id = $2 AND (assigned_to IS NULL OR assigned_to = $1)
                      RETURNING id, name, phone_number, assigned_to`,
-                    [req.user.staffId, req.params.id]
+                    [targetStaffId, req.params.id]
                 );
 
                 if (updateRes.rowCount === 0) {
@@ -4565,17 +4605,36 @@ apiRouter.post('/leads/:id/claim', authMiddleware, async (req, res) => {
                     return res.status(409).json({ error: 'Lead already claimed by another agent' });
                 }
 
-                await client.query('INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', [req.params.id, req.user.staffId, 'claimed', 'Lead claimed from pool']);
+                const notes = req.user.isShadowMode 
+                    ? `Lead claimed from pool by admin (Shadow Mode for ${req.user.name})`
+                    : 'Lead claimed from pool';
+
+                await client.query(
+                    'INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes) VALUES ($1, $2, $3, $4)', 
+                    [req.params.id, targetStaffId, 'claimed', notes]
+                );
                 
                 // Audit log
-                await client.query('INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, new_state) VALUES ($1, $2, $3, $4, $5)', 
-                    [req.user.staffId, 'lead_claim', 'candidate', req.params.id, JSON.stringify({ staff_id: req.user.staffId })]);
+                await client.query(
+                    'INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, new_state) VALUES ($1, $2, $3, $4, $5)', 
+                    [
+                        req.user.originalAdminStaffId || targetStaffId, 
+                        'lead_claim', 
+                        'candidate', 
+                        req.params.id, 
+                        JSON.stringify({ 
+                            staff_id: targetStaffId, 
+                            is_shadow_mode: Boolean(req.user.isShadowMode),
+                            shadowed_by: req.user.originalAdminStaffId || null 
+                        })
+                    ]
+                );
                 
                 notifyUpdates(req.params.id);
                 res.json({ success: true, lead: updateRes.rows[0] });
             });
         });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e: any) { res.status(500).json({ error: e?.message || 'Failed to claim lead' }); }
 });
 
 apiRouter.post('/leads/:id/assign', authMiddleware, async (req, res) => {
@@ -4585,7 +4644,8 @@ apiRouter.post('/leads/:id/assign', authMiddleware, async (req, res) => {
     try {
         await withTransaction(async (client) => {
             // Check permissions
-            if (req.user.role !== 'admin') {
+            const isSuperAdmin = req.user.role === 'admin' || req.user.originalAdminRole === 'admin';
+            if (!isSuperAdmin) {
                 if (req.user.role === 'manager') {
                     const staffCheck = await client.query('SELECT manager_id FROM staff_members WHERE id = $1', [staff_id]);
                     if (staffCheck.rows[0]?.manager_id !== req.user.staffId && staff_id !== req.user.staffId) {
@@ -4626,7 +4686,8 @@ apiRouter.post('/leads/:id/reassign', authMiddleware, async (req, res) => {
             const lead = leadCheck.rows[0];
             
             // Check permissions
-            if (req.user.role !== 'admin') {
+            const isSuperAdmin = req.user.role === 'admin' || req.user.originalAdminRole === 'admin';
+            if (!isSuperAdmin) {
                 if (req.user.role === 'manager') {
                     // Manager can reassign if they manage the CURRENTLY assigned staff OR the NEW staff
                     const newStaffCheck = await client.query('SELECT manager_id FROM staff_members WHERE id = $1', [staff_id]);
@@ -4675,14 +4736,15 @@ apiRouter.post('/leads/:id/unclaim', authMiddleware, async (req, res) => {
                 return res.status(400).json({ error: 'Lead is already in the pool' });
             }
 
-            if (req.user.role !== 'admin') {
+            const isSuperAdmin = req.user.role === 'admin' || req.user.originalAdminRole === 'admin';
+            if (!isSuperAdmin) {
                 if (req.user.role === 'manager') {
                     const isManagerOfCurrent = lead.manager_id === req.user.staffId || lead.assigned_to === req.user.staffId;
                     if (!isManagerOfCurrent) {
                         return res.status(403).json({ error: 'Can only unclaim leads from your team' });
                     }
-                } else {
-                    return res.status(403).json({ error: 'Only admins and managers can unclaim leads' });
+                } else if (lead.assigned_to !== req.user.staffId) {
+                    return res.status(403).json({ error: 'You can only unclaim your own assigned leads' });
                 }
             }
 
