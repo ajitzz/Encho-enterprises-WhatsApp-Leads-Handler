@@ -181,7 +181,7 @@ const SYSTEM_CONFIG: any = {
     CACHE_TTL: 60 * 1000, // 60 Seconds Cache for Bot Settings
     RUNTIME_CONFIG_CACHE_TTL: Number.parseInt(process.env.RUNTIME_CONFIG_CACHE_TTL_MS || '30000', 10),
     WEBHOOK_MESSAGE_ID_CACHE_TTL_MS: Number.parseInt(process.env.WEBHOOK_MESSAGE_ID_CACHE_TTL_MS || String(6 * 60 * 60 * 1000), 10),
-    PUBLIC_APP_URL: process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.vercel.app')
+    PUBLIC_APP_URL: (process.env.PUBLIC_APP_URL || process.env.APP_BASE_URL || process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://encho-whatsapp-lead-handler.enchoenterprises.workers.dev')).replace(/encho-whatsapp-lead-handler\.vercel\.app/g, 'encho-whatsapp-lead-handler.enchoenterprises.workers.dev')
 };
 
 const applyRuntimeGoogleSheetsConfig = (rawConfig: any = {}) => {
@@ -905,10 +905,47 @@ const inferMediaTypeFromKey = (key = '') => {
 const toBase64Url = (value = '') => Buffer.from(String(value)).toString('base64url');
 const fromBase64Url = (value = '') => Buffer.from(String(value), 'base64url').toString('utf8');
 const buildShowcaseToken = (payload = {}) => toBase64Url(JSON.stringify(payload));
-const getPublicShowcaseUrl = async (payload = {}) => {
+const CANONICAL_PUBLIC_APP_URL = 'https://encho-whatsapp-lead-handler.enchoenterprises.workers.dev';
+
+export const resolvePublicAppOrigin = (req?: any): string => {
+    if (req && req.headers) {
+        // Priority 1: Cloudflare Worker / reverse-proxy header (x-forwarded-host)
+        const rawForwardedHost = (req.headers['x-forwarded-host'] || req.headers.host || '').toString().split(',')[0].trim();
+        const rawForwardedProto = (req.headers['x-forwarded-proto'] || req.protocol || 'https').toString().split(',')[0].trim();
+        if (rawForwardedHost && !rawForwardedHost.includes('onrender.com') && !rawForwardedHost.includes('localhost') && !rawForwardedHost.includes('127.0.0.1')) {
+            const host = rawForwardedHost.replace(/encho-whatsapp-lead-handler\.vercel\.app/g, 'encho-whatsapp-lead-handler.enchoenterprises.workers.dev');
+            return `${rawForwardedProto}://${host}`;
+        }
+
+        // Priority 2: Origin header from the browser request
+        const originHeader = (req.headers.origin || '').toString().trim();
+        if (originHeader && !originHeader.includes('onrender.com') && !originHeader.includes('localhost') && !originHeader.includes('127.0.0.1')) {
+            return originHeader.replace(/encho-whatsapp-lead-handler\.vercel\.app/g, 'encho-whatsapp-lead-handler.enchoenterprises.workers.dev').replace(/\/+$/, '');
+        }
+
+        // Priority 3: Referer header
+        const refererHeader = (req.headers.referer || '').toString().trim();
+        if (refererHeader) {
+            try {
+                const parsed = new URL(refererHeader);
+                if (parsed.host && !parsed.host.includes('onrender.com') && !parsed.host.includes('localhost') && !parsed.host.includes('127.0.0.1')) {
+                    const host = parsed.host.replace(/encho-whatsapp-lead-handler\.vercel\.app/g, 'encho-whatsapp-lead-handler.enchoenterprises.workers.dev');
+                    return `${parsed.protocol}//${host}`;
+                }
+            } catch (_) {}
+        }
+    }
+
+    let configured = String(SYSTEM_CONFIG.PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
+    if (!configured || configured.includes('encho-whatsapp-lead-handler.vercel.app')) {
+        configured = CANONICAL_PUBLIC_APP_URL;
+    }
+    return configured;
+};
+
+const getPublicShowcaseUrl = async (payload = {}, req?: any) => {
     const token = encodeURIComponent(await getOrCreateShowcaseShortToken(payload));
-    const normalizedBase = String(SYSTEM_CONFIG.PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
-    const safeBase = normalizedBase || 'https://encho-whatsapp-lead-handler.vercel.app';
+    const safeBase = resolvePublicAppOrigin(req);
     return `${safeBase}/showcase/${token}`;
 };
 
@@ -5182,7 +5219,7 @@ apiRouter.get('/media', async (req, res) => {
                 name: folderPrefix,
                 parent_path: requestedPath,
                 is_public_showcase: Boolean(publicEntry),
-                public_showcase_url: publicEntry ? await getPublicShowcaseUrl({ type: 'folder', prefix: publicEntry.prefix }) : null
+                public_showcase_url: publicEntry ? await getPublicShowcaseUrl({ type: 'folder', prefix: publicEntry.prefix }, req) : null
             };
         }))).filter((folder) => folder.name);
 
@@ -5428,7 +5465,7 @@ apiRouter.post('/media/folders/:id/public', authMiddleware, requireRole('admin',
             prefix,
             hasObjects,
             usedFallback,
-            shareUrl: await getPublicShowcaseUrl({ type: 'folder', prefix }),
+            shareUrl: await getPublicShowcaseUrl({ type: 'folder', prefix }, req),
             activeCount: next.length
         });
     } catch (e) {
@@ -5515,7 +5552,7 @@ apiRouter.get('/showcase', async (req, res) => {
             .sort((a, b) => new Date(b.enabledAt || 0).getTime() - new Date(a.enabledAt || 0).getTime());
         const items = await Promise.all(sortedFolders.map(async (entry) => ({
                 id: entry.prefix,
-                url: await getPublicShowcaseUrl({ type: 'folder', prefix: entry.prefix }),
+                url: await getPublicShowcaseUrl({ type: 'folder', prefix: entry.prefix }, req),
                 type: 'document',
                 filename: entry.folderName || entry.prefix.replace(/\/$/, '').split('/').pop() || entry.prefix
             })));
@@ -5588,7 +5625,7 @@ apiRouter.get('/showcase/status', async (req, res) => {
             activeCount: folders.length,
             folderId: latest?.folderId || null,
             folderName: latest?.folderName || null,
-            shareUrl: latest ? await getPublicShowcaseUrl({ type: 'folder', prefix: latest.prefix }) : null
+            shareUrl: latest ? await getPublicShowcaseUrl({ type: 'folder', prefix: latest.prefix }, req) : null
         });
     } catch (e) {
         res.status(500).json({ error: e.message || 'Failed to load showcase status' });

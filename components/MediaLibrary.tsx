@@ -27,6 +27,27 @@ interface ShowcaseStatus {
     shareUrl?: string | null;
 }
 
+export const formatCanonicalShowcaseUrl = (rawUrl?: string | null, fallbackName?: string): string => {
+    const origin = typeof window !== 'undefined' && window.location ? window.location.origin : 'https://encho-whatsapp-lead-handler.enchoenterprises.workers.dev';
+    if (!rawUrl) {
+        return `${origin}/showcase/${encodeURIComponent(fallbackName || '')}`;
+    }
+    const trimmed = String(rawUrl).trim();
+    try {
+        const parsed = new URL(trimmed, origin);
+        // Replace legacy or foreign hosts (e.g. vercel.app, onrender.com) with active frontend origin
+        if (parsed.hostname.includes('vercel.app') || parsed.hostname.includes('onrender.com') || parsed.origin !== origin) {
+            return `${origin}${parsed.pathname}${parsed.search}`;
+        }
+        return parsed.toString();
+    } catch {
+        if (trimmed.startsWith('/showcase/')) {
+            return `${origin}${trimmed}`;
+        }
+        return `${origin}/showcase/${encodeURIComponent(fallbackName || trimmed)}`;
+    }
+};
+
 export const MediaLibrary = () => {
     const [files, setFiles] = useState<MediaFile[]>([]);
     const [folders, setFolders] = useState<MediaFolder[]>([]);
@@ -71,6 +92,9 @@ export const MediaLibrary = () => {
     const checkGlobalStatus = async () => {
         try {
             const status = await liveApiService.getShowcaseStatus();
+            if (status && status.shareUrl) {
+                status.shareUrl = formatCanonicalShowcaseUrl(status.shareUrl, status.folderName);
+            }
             setGlobalStatus(status);
             reportUiRecovery('polling', '/api/showcase/status');
         } catch(e) {
@@ -90,7 +114,11 @@ export const MediaLibrary = () => {
             const data = await liveApiService.getMediaLibrary(path);
             if (data) {
                 setFiles(data.files || []);
-                setFolders(data.folders || []);
+                const sanitizedFolders = (data.folders || []).map((f: MediaFolder) => ({
+                    ...f,
+                    public_showcase_url: f.public_showcase_url ? formatCanonicalShowcaseUrl(f.public_showcase_url, f.name) : f.public_showcase_url
+                }));
+                setFolders(sanitizedFolders);
                 if (typeof data.mediaRootFolderName === 'string' && data.mediaRootFolderName.trim()) {
                     setMediaRootFolderName(data.mediaRootFolderName.trim());
                 }
@@ -187,7 +215,7 @@ export const MediaLibrary = () => {
                 const result: any = await liveApiService.setPublicFolder(folder.id);
                 await loadMedia(currentPath);
                 checkGlobalStatus();
-                setShareUrl(result?.shareUrl || `${window.location.origin}/showcase/${encodeURIComponent(folder.name)}`); 
+                setShareUrl(formatCanonicalShowcaseUrl(result?.shareUrl, folder.name)); 
             } catch(e) { alert("Failed to start showcase"); }
         }
     };
@@ -207,7 +235,7 @@ export const MediaLibrary = () => {
     };
 
     const handleOpenShare = (folder: MediaFolder) => {
-        setShareUrl(folder.public_showcase_url || `${window.location.origin}/showcase/${encodeURIComponent(folder.name)}`);
+        setShareUrl(formatCanonicalShowcaseUrl(folder.public_showcase_url, folder.name));
     };
 
     // Shared handler for Create and Rename
