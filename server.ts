@@ -5862,8 +5862,8 @@ apiRouter.post('/webhook', async (req, res) => {
         tenantAllowList: MODULE_CANARY_TENANTS,
     });
 
-    // Redis Write-Behind Queue Buffer: Instantly absorbs peak traffic surges
-    if (isRedisAvailable() && process.env.FF_REDIS_WRITE_BEHIND !== 'false') {
+    // Redis Write-Behind Queue Buffer: Only active if explicitly enabled AND Redis is healthy
+    if (process.env.FF_REDIS_WRITE_BEHIND === 'true' && isRedisAvailable()) {
         const enqueued = await enqueueInboundPayload({
             body: req.body,
             requestId: (req as any).requestId,
@@ -7503,8 +7503,10 @@ app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
 
 // --- REDIS WRITE-BEHIND INBOUND WORKER ---
 let isInboundWorkerRunning = false;
+let inboundWorkerInterval: NodeJS.Timeout | null = null;
+
 async function processQueuedInboundBatch() {
-    if (isInboundWorkerRunning || !isRedisAvailable()) return;
+    if (isInboundWorkerRunning || !isRedisAvailable() || process.env.FF_REDIS_WRITE_BEHIND !== 'true') return;
     isInboundWorkerRunning = true;
     try {
         const batch = await popInboundBatch(10);
@@ -7543,13 +7545,17 @@ async function processQueuedInboundBatch() {
 }
 
 function startInboundQueueWorker() {
-    if (!isRedisAvailable()) {
-        console.log('[Inbound Queue Worker] Redis not configured; using direct fast-ack processing.');
+    if (process.env.FF_REDIS_WRITE_BEHIND !== 'true') {
+        console.log('[Inbound Queue Worker] Redis write-behind disabled (FF_REDIS_WRITE_BEHIND is not "true"). Webhooks process directly in-memory with sub-15ms fast-ack.');
         return;
     }
-    const pollIntervalMs = parseInt(process.env.REDIS_QUEUE_POLL_INTERVAL_MS || '100', 10);
+    if (!isRedisAvailable()) {
+        console.log('[Inbound Queue Worker] Redis not configured or unavailable; using direct fast-ack processing.');
+        return;
+    }
+    const pollIntervalMs = Math.max(500, parseInt(process.env.REDIS_QUEUE_POLL_INTERVAL_MS || '1000', 10));
     console.log(`[Inbound Queue Worker] Started Redis write-behind consumer (${pollIntervalMs}ms loop)...`);
-    setInterval(processQueuedInboundBatch, pollIntervalMs);
+    inboundWorkerInterval = setInterval(processQueuedInboundBatch, pollIntervalMs);
 }
 
 // --- LEAD AUTO-DISTRIBUTION & INSTANT EVENT ROUTER ---
