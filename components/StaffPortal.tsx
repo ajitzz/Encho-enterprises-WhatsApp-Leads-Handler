@@ -56,14 +56,31 @@ import { DueAlertItem } from '../services/liveApiService.ts';
 
 const getDueAlertInstanceId = (alert: DueAlertItem) => `${alert.event_id}:${new Date(alert.scheduled_at).toISOString()}`;
 
-const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTime }) => {
+const parseTimestamp = (val: any): number => {
+  if (!val) return 0;
+  if (typeof val === 'number') return isNaN(val) ? 0 : val;
+  if (val instanceof Date) return isNaN(val.getTime()) ? 0 : val.getTime();
+  const str = String(val).trim();
+  if (!str || str === '0' || str === 'undefined' || str === 'null') return 0;
+  const num = Number(str);
+  if (!isNaN(num) && num > 0) return num;
+  const parsed = Date.parse(str);
+  return isNaN(parsed) ? 0 : parsed;
+};
+
+const MetaWindowTimer: React.FC<{ lastMessageTime: any }> = ({ lastMessageTime }) => {
   const [timeLeft, setTimeLeft] = useState<number>(0);
   const WINDOW_DURATION = 24 * 60 * 60 * 1000; // 24 hours
 
   useEffect(() => {
     const calculateTime = () => {
+      const ts = parseTimestamp(lastMessageTime);
+      if (ts <= 0) {
+        setTimeLeft(0);
+        return;
+      }
       const now = Date.now();
-      const diff = (lastMessageTime + WINDOW_DURATION) - now;
+      const diff = (ts + WINDOW_DURATION) - now;
       setTimeLeft(Math.max(0, diff));
     };
 
@@ -72,7 +89,9 @@ const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTim
     return () => clearInterval(timer);
   }, [lastMessageTime]);
 
-  if (timeLeft === 0) {
+  const safeTime = parseTimestamp(lastMessageTime);
+
+  if (safeTime <= 0 || timeLeft <= 0 || isNaN(timeLeft)) {
     return (
       <div className="flex items-center gap-1.5 px-2 py-1 bg-red-50 text-red-600 rounded-lg text-[9px] font-bold uppercase tracking-wider border border-red-100">
         <ShieldAlert size={10} />
@@ -230,7 +249,8 @@ export const StaffPortal: React.FC<{ user: any; onLogout: () => void }> = ({ use
     ];
   };
 
-  const isWindowActive = selectedLead ? (Date.now() - selectedLead.lastMessageTime < 24 * 60 * 60 * 1000) : false;
+  const selectedLeadTime = selectedLead ? parseTimestamp(selectedLead.lastMessageTime || (selectedLead as any).last_message_at) : 0;
+  const isWindowActive = selectedLeadTime > 0 ? (Date.now() - selectedLeadTime < 24 * 60 * 60 * 1000) : false;
 
   const handleToggleHumanMode = async () => {
     if (!selectedLead || isHumanModeLoading) return;

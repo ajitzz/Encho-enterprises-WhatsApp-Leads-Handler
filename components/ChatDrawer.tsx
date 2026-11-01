@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Driver, Message, ScheduledMessage, DriverDocument } from '../types';
 import { 
   X, Send, Headset, MicOff, Clock, Paperclip, Edit2, Trash2, Zap, FileText, Download, Loader2, CalendarClock, Save, AlertTriangle, History, MessageCircle, ShieldAlert, User, Bot, Mic, Video, CheckCircle, Search, Activity, ChevronDown, Check, Copy, Reply, Forward, Maximize2, MoreVertical, Info
@@ -28,14 +28,31 @@ const QUICK_REPLIES: QuickReply[] = [
   { id: '5', title: 'Rejected', text: 'Unfortunately, your document was rejected. Please re-upload a clearer version.', category: 'Status' },
 ];
 
-const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTime }) => {
+const parseTimestamp = (val: any): number => {
+  if (!val) return 0;
+  if (typeof val === 'number') return isNaN(val) ? 0 : val;
+  if (val instanceof Date) return isNaN(val.getTime()) ? 0 : val.getTime();
+  const str = String(val).trim();
+  if (!str || str === '0' || str === 'undefined' || str === 'null') return 0;
+  const num = Number(str);
+  if (!isNaN(num) && num > 0) return num;
+  const parsed = Date.parse(str);
+  return isNaN(parsed) ? 0 : parsed;
+};
+
+const MetaWindowTimer: React.FC<{ lastMessageTime: any }> = ({ lastMessageTime }) => {
   const [timeLeft, setTimeLeft] = useState<number>(0);
   const WINDOW_DURATION = 24 * 60 * 60 * 1000; // 24 hours
 
   useEffect(() => {
     const calculateTime = () => {
+      const ts = parseTimestamp(lastMessageTime);
+      if (ts <= 0) {
+        setTimeLeft(0);
+        return;
+      }
       const now = Date.now();
-      const diff = (lastMessageTime + WINDOW_DURATION) - now;
+      const diff = (ts + WINDOW_DURATION) - now;
       setTimeLeft(Math.max(0, diff));
     };
 
@@ -44,7 +61,9 @@ const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTim
     return () => clearInterval(timer);
   }, [lastMessageTime]);
 
-  if (timeLeft === 0) {
+  const safeTime = parseTimestamp(lastMessageTime);
+
+  if (safeTime <= 0 || timeLeft <= 0 || isNaN(timeLeft)) {
     return (
       <div className="flex items-center gap-2 px-3 py-1.5 bg-red-50 text-red-600 rounded-full text-[10px] font-bold uppercase tracking-wider border border-red-100">
         <ShieldAlert size={12} />
@@ -60,7 +79,7 @@ const MetaWindowTimer: React.FC<{ lastMessageTime: number }> = ({ lastMessageTim
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 text-emerald-600 rounded-full text-[10px] font-bold uppercase tracking-wider border border-emerald-100">
       <Clock size={12} className="animate-pulse" />
-      {hours}h {minutes}m {seconds}s remaining
+      {isNaN(hours) ? 0 : hours}h {isNaN(minutes) ? 0 : minutes}m {isNaN(seconds) ? 0 : seconds}s remaining
     </div>
   );
 };
@@ -95,7 +114,28 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const isScheduledLoadingRef = useRef(false);
   const isDocsLoadingRef = useRef(false);
 
-  const isWindowActive = driver ? (Date.now() - driver.lastMessageTime < 24 * 60 * 60 * 1000) : false;
+  // Dynamically resolve freshest interaction timestamp:
+  // 1. From latest inbound customer message or last message in localMessages
+  // 2. From driver.lastMessageTime, driver.last_message_at, or driver.created_at
+  const latestInteractionTime = useMemo(() => {
+    if (localMessages && localMessages.length > 0) {
+      for (let i = localMessages.length - 1; i >= 0; i--) {
+        const msg = localMessages[i];
+        if (msg.sender === 'user' || (msg as any).direction === 'in') {
+          const t = parseTimestamp(msg.timestamp || (msg as any).created_at);
+          if (t > 0) return t;
+        }
+      }
+      const lastMsg = localMessages[localMessages.length - 1];
+      const t = parseTimestamp(lastMsg.timestamp || (lastMsg as any).created_at);
+      if (t > 0) return t;
+    }
+    return parseTimestamp(driver?.lastMessageTime || (driver as any)?.last_message_at || (driver as any)?.created_at);
+  }, [localMessages, driver?.lastMessageTime, (driver as any)?.last_message_at, (driver as any)?.created_at]);
+
+  const isWindowActive = latestInteractionTime > 0
+    ? (Date.now() - latestInteractionTime < 24 * 60 * 60 * 1000)
+    : false;
 
   const loadMessages = async (driverId: string) => {
       if (!driverId || driverId === 'undefined' || isMessagesLoadingRef.current) return;
@@ -460,7 +500,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             <div>
               <div className="flex items-center gap-3">
                 <h2 className="text-lg font-bold text-gray-900">{driver.name}</h2>
-                <MetaWindowTimer lastMessageTime={driver.lastMessageTime} />
+                <MetaWindowTimer lastMessageTime={latestInteractionTime} />
               </div>
               <div className="flex items-center gap-2 text-gray-500 text-xs">
                 <span className="font-mono">{driver.phoneNumber}</span>
@@ -880,7 +920,11 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                 <div className="grid grid-cols-2 gap-4">
                   <div className="p-3 bg-gray-50 rounded-2xl border border-gray-100">
                     <p className="text-[10px] text-gray-400 mb-1">Last Active</p>
-                    <p className="text-xs font-bold text-gray-900">{new Date(driver.lastMessageTime).toLocaleDateString()}</p>
+                    <p className="text-xs font-bold text-gray-900">
+                      {latestInteractionTime > 0 
+                        ? new Date(latestInteractionTime).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
+                        : 'No Activity'}
+                    </p>
                   </div>
                   <div className="p-3 bg-gray-50 rounded-2xl border border-gray-100">
                     <p className="text-[10px] text-gray-400 mb-1">Messages</p>

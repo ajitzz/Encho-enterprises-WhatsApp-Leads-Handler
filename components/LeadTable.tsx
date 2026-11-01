@@ -134,10 +134,14 @@ export const LeadTable: React.FC<LeadTableProps> = ({
                     {driver.lastMessage}
                   </div>
                   <div className="text-[11px] text-gray-400 mt-1 font-mono">
-                    {new Date(driver.lastMessageTime).toLocaleString([], { 
-                        year: 'numeric', month: 'short', day: 'numeric', 
-                        hour: '2-digit', minute: '2-digit' 
-                    })}
+                    {driver.lastMessageTime && !isNaN(Number(driver.lastMessageTime)) && Number(driver.lastMessageTime) > 0 ? (
+                      new Date(Number(driver.lastMessageTime)).toLocaleString([], { 
+                          year: 'numeric', month: 'short', day: 'numeric', 
+                          hour: '2-digit', minute: '2-digit' 
+                      })
+                    ) : (
+                      'No Activity'
+                    )}
                   </div>
                 </td>
                 <td className="p-4 text-right">

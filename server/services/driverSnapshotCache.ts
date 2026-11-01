@@ -32,6 +32,18 @@ let snapshotCache: { expiresAt: number; value: DriverSnapshot } | null = null;
 let snapshotInFlight: Promise<DriverSnapshot> | null = null;
 let totalNodesCache: { expiresAt: number; value: number } | null = null;
 
+export const parseTimestampSafe = (val: any): number => {
+    if (!val) return 0;
+    if (typeof val === 'number') return isNaN(val) ? 0 : val;
+    if (val instanceof Date) return isNaN(val.getTime()) ? 0 : val.getTime();
+    const str = String(val).trim();
+    if (!str || str === '0' || str === 'undefined' || str === 'null') return 0;
+    const num = Number(str);
+    if (!isNaN(num) && num > 0) return num;
+    const parsed = Date.parse(str);
+    return isNaN(parsed) ? 0 : parsed;
+};
+
 const parseNumeric = (input: number | string | null | undefined): number => {
     const parsed = Number.parseInt(String(input ?? 0), 10);
     return Number.isFinite(parsed) ? parsed : 0;
@@ -141,7 +153,7 @@ const buildDriverSnapshot = async (): Promise<DriverSnapshot> => {
             lead_status: row.lead_status,
             assigned_to: row.assigned_to,
             lastMessage: row.last_message,
-            lastMessageTime: parseInt(row.last_message_at || '0', 10),
+            lastMessageTime: parseTimestampSafe(row.last_message_at),
             source: row.source,
             isHumanMode: row.is_human_mode,
             isHidden: Boolean(row.is_hidden),

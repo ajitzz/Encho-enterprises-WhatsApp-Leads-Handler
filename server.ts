@@ -12,7 +12,7 @@ import { EventEmitter } from 'events';
 import dotenv from 'dotenv';
 import { withDb, withTransaction, query, getPool } from './server/db.js';
 import { broadcastUpdate, onUpdate, sendNotification } from './server/services/notificationService.js';
-import { getDriversSnapshotCached, invalidateDriversSnapshotCache } from './server/services/driverSnapshotCache.js';
+import { getDriversSnapshotCached, invalidateDriversSnapshotCache, parseTimestampSafe } from './server/services/driverSnapshotCache.js';
 
 dotenv.config();
 
@@ -6310,6 +6310,29 @@ apiRouter.get('/drivers', authMiddleware, async (req: any, res: any) => {
             return res.json(snapshot.drivers);
         }
 
+        const normalizeDriverRow = (row: any) => ({
+            id: row.id,
+            phoneNumber: row.phone_number,
+            phone_number: row.phone_number,
+            name: row.name,
+            status: row.stage,
+            stage: row.stage,
+            lead_status: row.lead_status || 'new',
+            assigned_to: row.assigned_to,
+            staff_name: row.staff_name || null,
+            lastMessage: row.last_message,
+            last_message: row.last_message,
+            lastMessageTime: parseTimestampSafe(row.last_message_at),
+            last_message_at: row.last_message_at,
+            source: row.source || 'Direct',
+            isHumanMode: Boolean(row.is_human_mode),
+            is_human_mode: Boolean(row.is_human_mode),
+            isHidden: Boolean(row.is_hidden),
+            isTerminated: Boolean(row.is_terminated),
+            created_at: row.created_at,
+            variables: row.variables || {},
+        });
+
         // Manager sees their team's drivers + unassigned leads
         if (callerRole === 'manager') {
             const drivers = await withDb(async (client) => {
@@ -6320,7 +6343,7 @@ apiRouter.get('/drivers', authMiddleware, async (req: any, res: any) => {
                     WHERE c.assigned_to = $1 OR s.manager_id = $1 OR c.assigned_to IS NULL
                     ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC
                 `, [callerStaffId]);
-                return r.rows;
+                return r.rows.map(normalizeDriverRow);
             });
             return res.json(drivers);
         }
@@ -6334,7 +6357,7 @@ apiRouter.get('/drivers', authMiddleware, async (req: any, res: any) => {
                 WHERE c.assigned_to = $1
                 ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC
             `, [callerStaffId]);
-            return r.rows.map(row => ({
+            return r.rows.map(row => normalizeDriverRow({
                 ...row,
                 phone_number: maskPhoneNumber(row.phone_number)
             }));
