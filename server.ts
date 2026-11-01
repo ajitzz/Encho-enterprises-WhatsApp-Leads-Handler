@@ -24,6 +24,7 @@ import {
     validateOutboundPayload,
 } from './backend/shared/infra/whatsappPayload.js';
 import { findMatchingKeywordNode } from './backend/shared/infra/botTriggerMatcher.js';
+import { isValidUuid, resolveCandidateIdSafe } from './backend/shared/infra/candidateResolver.js';
 import { isRedisAvailable, enqueueInboundPayload, popInboundBatch, getQueueLength } from './backend/shared/infra/inboundQueue.js';
 import { buildLeadIngestionFacade } from './backend/modules/lead-ingestion/api.js';
 import { buildRemindersRouter } from './backend/modules/reminders-escalations/api.js';
@@ -6106,58 +6107,61 @@ apiRouter.get('/updates/stream', async (req, res) => {
 
             const messagesByDriver: Record<string, any> = {};
             if (driverId) {
-                const [messagesRes, scheduledRes] = await Promise.all([
-                    client.query(`
-                        SELECT * FROM candidate_messages 
-                        WHERE candidate_id = $1 
-                          AND (type IS NULL OR type != 'variable_capture')
-                          AND (direction IS NULL OR direction != 'system')
-                        ORDER BY created_at DESC 
-                        LIMIT 50
-                    `, [driverId]),
-                    client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [driverId, 'pending', 'processing', 'failed'])
-                ]);
+                const resolvedCandidateId = await resolveCandidateIdSafe(client, driverId);
+                if (resolvedCandidateId) {
+                    const [messagesRes, scheduledRes] = await Promise.all([
+                        client.query(`
+                            SELECT * FROM candidate_messages 
+                            WHERE candidate_id = $1 
+                              AND (type IS NULL OR type != 'variable_capture')
+                              AND (direction IS NULL OR direction != 'system')
+                            ORDER BY created_at DESC 
+                            LIMIT 50
+                        `, [resolvedCandidateId]),
+                        client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [resolvedCandidateId, 'pending', 'processing', 'failed'])
+                    ]);
 
-                messagesByDriver[driverId] = await Promise.all(messagesRes.rows.map(async (row) => {
-                    let imageUrl, videoUrl, documentUrl, audioUrl;
-                    let text = row.text;
-                    if (row.type !== 'text' && row.type !== 'variable_capture') {
-                        try {
-                            const media = JSON.parse(row.text || '{}');
-                            text = media.caption || '';
-                            const resolvedMediaUrl = await refreshMediaUrl(media.url);
-                            if (row.type === 'video') videoUrl = resolvedMediaUrl;
-                            else if (row.type === 'document') documentUrl = resolvedMediaUrl;
-                            else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
-                            else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
-                        } catch(e){}
-                    }
-                    return {
-                        id: row.id,
-                        sender: row.direction === 'in' ? 'driver' : 'agent',
-                        senderType: row.sender_type || (row.direction === 'in' ? 'driver' : 'bot'),
-                        text,
-                        imageUrl,
-                        videoUrl,
-                        documentUrl,
-                        audioUrl,
-                        isInternal: Boolean(row.is_internal),
-                        timestamp: new Date(row.created_at).getTime(),
-                        type: row.type || 'text',
-                        status: row.status,
+                    messagesByDriver[driverId] = await Promise.all(messagesRes.rows.map(async (row) => {
+                        let imageUrl, videoUrl, documentUrl, audioUrl;
+                        let text = row.text;
+                        if (row.type !== 'text' && row.type !== 'variable_capture') {
+                            try {
+                                const media = JSON.parse(row.text || '{}');
+                                text = media.caption || '';
+                                const resolvedMediaUrl = await refreshMediaUrl(media.url);
+                                if (row.type === 'video') videoUrl = resolvedMediaUrl;
+                                else if (row.type === 'document') documentUrl = resolvedMediaUrl;
+                                else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
+                                else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
+                            } catch(e){}
+                        }
+                        return {
+                            id: row.id,
+                            sender: row.direction === 'in' ? 'driver' : 'agent',
+                            senderType: row.sender_type || (row.direction === 'in' ? 'driver' : 'bot'),
+                            text,
+                            imageUrl,
+                            videoUrl,
+                            documentUrl,
+                            audioUrl,
+                            isInternal: Boolean(row.is_internal),
+                            timestamp: new Date(row.created_at).getTime(),
+                            type: row.type || 'text',
+                            status: row.status,
+                        };
+                    }));
+                    messagesByDriver[driverId].sort((a: any, b: any) => a.timestamp - b.timestamp);
+
+                    payload.messagesByDriver = messagesByDriver;
+                    payload.scheduledByDriver = {
+                        [driverId]: scheduledRes.rows.map((row) => ({
+                            id: row.id,
+                            scheduledTime: Number(row.scheduled_time) || (row.scheduled_time ? new Date(row.scheduled_time).getTime() : Date.now()),
+                            payload: row.payload,
+                            status: row.status,
+                        }))
                     };
-                }));
-                messagesByDriver[driverId].sort((a: any, b: any) => a.timestamp - b.timestamp);
-
-                payload.messagesByDriver = messagesByDriver;
-                payload.scheduledByDriver = {
-                    [driverId]: scheduledRes.rows.map((row) => ({
-                        id: row.id,
-                        scheduledTime: new Date(row.scheduled_time).getTime(),
-                        payload: row.payload,
-                        status: row.status,
-                    }))
-                };
+                }
             }
 
             return payload;
@@ -6326,9 +6330,12 @@ apiRouter.patch('/drivers/:id', authMiddleware, async (req: any, res: any) => {
         const callerStaffId = req.user?.staffId;
 
         await withDb(async (client) => {
+            const candidateId = await resolveCandidateIdSafe(client, req.params.id);
+            if (!candidateId) return res.status(404).json({ error: 'Lead not found' });
+
             // Permission check: staff can only update their own assigned lead
             if (callerRole === 'staff') {
-                const leadCheck = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [req.params.id]);
+                const leadCheck = await client.query('SELECT assigned_to FROM candidates WHERE id = $1', [candidateId]);
                 if (leadCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
                 if (leadCheck.rows[0].assigned_to !== callerStaffId) {
                     return res.status(403).json({ error: 'Forbidden: You can only update leads assigned to you' });
@@ -6339,7 +6346,7 @@ apiRouter.patch('/drivers/:id', authMiddleware, async (req: any, res: any) => {
                     FROM candidates c
                     LEFT JOIN staff_members s ON c.assigned_to = s.id
                     WHERE c.id = $1
-                `, [req.params.id]);
+                `, [candidateId]);
                 if (leadCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
                 const lead = leadCheck.rows[0];
                 const isTeamLead = lead.assigned_to === callerStaffId || lead.manager_id === callerStaffId || lead.assigned_to === null;
@@ -6348,18 +6355,18 @@ apiRouter.patch('/drivers/:id', authMiddleware, async (req: any, res: any) => {
                 }
             }
 
-            if (status) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [status, req.params.id]);
-            if (isHumanMode !== undefined) await client.query("UPDATE candidates SET is_human_mode = $1 WHERE id = $2", [isHumanMode, req.params.id]);
-            if (name) await client.query("UPDATE candidates SET name = $1 WHERE id = $2", [name, req.params.id]);
+            if (status) await client.query("UPDATE candidates SET stage = $1 WHERE id = $2", [status, candidateId]);
+            if (isHumanMode !== undefined) await client.query("UPDATE candidates SET is_human_mode = $1 WHERE id = $2", [isHumanMode, candidateId]);
+            if (name) await client.query("UPDATE candidates SET name = $1 WHERE id = $2", [name, candidateId]);
             if (isTerminated === true) {
                 await client.query(
                     "UPDATE candidates SET is_terminated = TRUE, is_hidden = TRUE, lead_status = 'terminated' WHERE id = $1",
-                    [req.params.id]
+                    [candidateId]
                 );
             } else if (isTerminated === false) {
                 await client.query(
                     "UPDATE candidates SET is_terminated = FALSE, is_hidden = FALSE WHERE id = $1",
-                    [req.params.id]
+                    [candidateId]
                 );
             }
         });
@@ -6399,7 +6406,9 @@ apiRouter.patch('/drivers/:id/visibility', authMiddleware, requireRole('admin', 
             return res.status(400).json({ error: 'isHidden (boolean) is required' });
         }
         await withDb(async (client) => {
-            await client.query('UPDATE candidates SET is_hidden = $1 WHERE id = $2', [isHidden, req.params.id]);
+            const candidateId = await resolveCandidateIdSafe(client, req.params.id);
+            if (!candidateId) return res.status(404).json({ error: 'Lead not found' });
+            await client.query('UPDATE candidates SET is_hidden = $1 WHERE id = $2', [isHidden, candidateId]);
         });
         res.json({ success: true, isHidden });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
@@ -6407,7 +6416,17 @@ apiRouter.patch('/drivers/:id/visibility', authMiddleware, requireRole('admin', 
 
 apiRouter.get('/drivers/:id/messages', authMiddleware, async (req: any, res: any) => {
     try {
+        const candidateParam = req.params?.id;
+        if (!candidateParam || candidateParam === 'undefined' || candidateParam === 'null') {
+            return res.json([]);
+        }
+
         await withDb(async (client) => {
+            const candidateId = await resolveCandidateIdSafe(client, candidateParam);
+            if (!candidateId) {
+                return res.json([]);
+            }
+
             const r = await client.query(`
                 SELECT * FROM candidate_messages 
                 WHERE candidate_id = $1 
@@ -6415,7 +6434,7 @@ apiRouter.get('/drivers/:id/messages', authMiddleware, async (req: any, res: any
                   AND (direction IS NULL OR direction != 'system')
                 ORDER BY created_at DESC 
                 LIMIT 50
-            `, [req.params.id]);
+            `, [candidateId]);
             const msgs = await Promise.all(r.rows.map(async row => {
                 let text = row.text;
                 let imageUrl = null;
@@ -6465,8 +6484,8 @@ apiRouter.post('/drivers/:id/messages', authMiddleware, async (req: any, res: an
             if (!cleanNote) return res.status(400).json({ error: 'Internal note text cannot be empty' });
             
             await withDb(async (client) => {
-                const c = await client.query('SELECT id FROM candidates WHERE id = $1', [req.params.id]);
-                if (c.rows.length === 0) throw new Error("Candidate not found");
+                const candidateId = await resolveCandidateIdSafe(client, req.params.id);
+                if (!candidateId) throw new Error("Candidate not found");
                 const senderRole = req.user?.role || 'staff';
                 const staffId = req.user?.staffId || null;
                 const staffName = req.user?.name || req.user?.username || 'Team Member';
@@ -6474,16 +6493,16 @@ apiRouter.post('/drivers/:id/messages', authMiddleware, async (req: any, res: an
                 await client.query(
                     `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, sender_type, is_internal, created_at)
                      VALUES ($1, $2, 'out', $3, 'internal_note', 'sent', $4, TRUE, NOW())`,
-                    [crypto.randomUUID(), req.params.id, cleanNote, senderRole]
+                    [crypto.randomUUID(), candidateId, cleanNote, senderRole]
                 );
 
                 await client.query(
                     `INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes)
                      VALUES ($1, $2, 'internal_note', $3)`,
-                    [req.params.id, staffId, `[${senderRole.toUpperCase()}] ${staffName}: ${cleanNote.slice(0, 100)}`]
+                    [candidateId, staffId, `[${senderRole.toUpperCase()}] ${staffName}: ${cleanNote.slice(0, 100)}`]
                 );
 
-                notifyUpdates(req.params.id);
+                notifyUpdates(candidateId);
             });
             return res.json({ success: true, isInternal: true });
         }
@@ -6498,7 +6517,9 @@ apiRouter.post('/drivers/:id/messages', authMiddleware, async (req: any, res: an
 
         let sendResult = null;
         await withDb(async (client) => {
-            const c = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [req.params.id]);
+            const candidateId = await resolveCandidateIdSafe(client, req.params.id);
+            if (!candidateId) throw new Error("Candidate not found");
+            const c = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [candidateId]);
             if (c.rows.length === 0) throw new Error("Candidate not found");
             const sanitizedText = normalizedText.trim();
             let payload: any = { type: 'text', text: { body: sanitizedText } };
@@ -6522,19 +6543,19 @@ apiRouter.post('/drivers/:id/messages', authMiddleware, async (req: any, res: an
             await client.query(
                 `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, sender_type, created_at)
                  VALUES ($1, $2, 'out', $3, $4, $5, $6, 'staff', NOW())`,
-                [crypto.randomUUID(), req.params.id, dbText, mediaUrl ? (mediaType || 'image') : 'text', sendStatus, sendResult?.providerMessageId || null]
+                [crypto.randomUUID(), candidateId, dbText, mediaUrl ? (mediaType || 'image') : 'text', sendStatus, sendResult?.providerMessageId || null]
             );
 
             // Immutable Audit Log: Track exact staff sender
             await client.query(
                 `INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes)
                  VALUES ($1, $2, 'outbound_message', $3)`,
-                [req.params.id, req.user?.staffId || null, `Sent message: ${sanitizedText ? sanitizedText.slice(0, 80) : (mediaType || 'media')}`]
+                [candidateId, req.user?.staffId || null, `Sent message: ${sanitizedText ? sanitizedText.slice(0, 80) : (mediaType || 'media')}`]
             );
 
-            notifyUpdates(req.params.id);
+            notifyUpdates(candidateId);
             scheduleDriverExcelSync();
-            scheduleDriverExcelIncrementalSync({ candidateId: req.params.id, action: 'upsert' });
+            scheduleDriverExcelIncrementalSync({ candidateId, action: 'upsert' });
         });
 
         if (sendResult?.timeout) {
@@ -6552,12 +6573,43 @@ apiRouter.post('/drivers/:id/messages', authMiddleware, async (req: any, res: an
 
 apiRouter.get('/drivers/:id/documents', authMiddleware, async (req: any, res: any) => {
     try {
+        const candidateParam = req.params?.id;
+        if (!candidateParam || candidateParam === 'undefined' || candidateParam === 'null') {
+            return res.json([]);
+        }
+
         await withDb(async (client) => {
-            const r = await client.query('SELECT * FROM driver_documents WHERE candidate_id = $1 ORDER BY created_at DESC', [req.params.id]);
-            const docs = await Promise.all(r.rows.map(async d => ({ id: d.id, docType: d.type, url: await refreshMediaUrl(d.url), verificationStatus: d.status, timestamp: new Date(d.created_at).getTime() })));
+            const candidateId = await resolveCandidateIdSafe(client, candidateParam);
+            if (!candidateId) {
+                return res.json([]);
+            }
+
+            const r = await client.query('SELECT * FROM driver_documents WHERE candidate_id = $1 ORDER BY created_at DESC', [candidateId]);
+            const docs = await Promise.all(r.rows.map(async d => {
+                try {
+                    return {
+                        id: d.id,
+                        docType: d.type,
+                        url: await refreshMediaUrl(d.url),
+                        verificationStatus: d.status,
+                        timestamp: new Date(d.created_at).getTime()
+                    };
+                } catch {
+                    return {
+                        id: d.id,
+                        docType: d.type,
+                        url: d.url,
+                        verificationStatus: d.status,
+                        timestamp: new Date(d.created_at).getTime()
+                    };
+                }
+            }));
             res.json(docs);
         });
-    } catch (e: any) { res.status(500).json({ error: e.message }); }
+    } catch (e: any) {
+        console.warn('[Documents] Handled error in getDriverDocuments:', e?.message || e);
+        res.json([]);
+    }
 });
 
 apiRouter.patch('/drivers/:id/document-status', authMiddleware, async (req: any, res: any) => {
@@ -6568,7 +6620,10 @@ apiRouter.patch('/drivers/:id/document-status', authMiddleware, async (req: any,
         if (!allowed.has(status)) return res.status(400).json({ error: 'Invalid document status' });
 
         await withDb(async (client) => {
-            const candidateRes = await client.query('SELECT id FROM candidates WHERE id = $1 LIMIT 1', [req.params.id]);
+            const candidateId = await resolveCandidateIdSafe(client, req.params.id);
+            if (!candidateId) return res.status(404).json({ error: 'Candidate not found' });
+
+            const candidateRes = await client.query('SELECT id FROM candidates WHERE id = $1 LIMIT 1', [candidateId]);
             if (candidateRes.rows.length === 0) return res.status(404).json({ error: 'Candidate not found' });
 
             if (['approved', 'rejected', 'under_review', 'expired', 'missing', 'uploaded'].includes(status)) {
@@ -6581,7 +6636,7 @@ apiRouter.patch('/drivers/:id/document-status', authMiddleware, async (req: any,
                         ORDER BY created_at DESC
                         LIMIT 1
                      )`,
-                    [status, req.params.id]
+                    [status, candidateId]
                 );
             }
 
@@ -6928,16 +6983,47 @@ apiRouter.patch('/scheduled-messages/:id', authMiddleware, async (req, res) => r
 
 const handleDriverScheduledMessagesLegacy = async (req, res) => {
     try {
+        const candidateParam = req.params?.id;
+        if (!candidateParam || candidateParam === 'undefined' || candidateParam === 'null') {
+            return res.json([]);
+        }
+
         await withDb(async (client) => {
-            const r = await client.query(`SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status = 'pending' ORDER BY scheduled_time ASC`, [req.params.id]);
+            const candidateId = await resolveCandidateIdSafe(client, candidateParam);
+            if (!candidateId) {
+                return res.json([]);
+            }
+
+            const r = await client.query(
+                `SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status = 'pending' ORDER BY scheduled_time ASC`,
+                [candidateId]
+            );
             const mapped = await Promise.all(r.rows.map(async row => {
-                const p = row.payload || {};
-                if(p.mediaUrl) p.mediaUrl = await refreshMediaUrl(p.mediaUrl);
-                return { id: row.id, scheduledTime: parseInt(row.scheduled_time), payload: p, status: row.status };
+                try {
+                    let p = row.payload;
+                    if (typeof p === 'string') {
+                        try { p = JSON.parse(p); } catch { p = { text: p }; }
+                    }
+                    p = p || {};
+                    if (p.mediaUrl) {
+                        try {
+                            p.mediaUrl = await refreshMediaUrl(p.mediaUrl);
+                        } catch {
+                            // Retain original mediaUrl
+                        }
+                    }
+                    const scheduledTime = Number(row.scheduled_time) || parseInt(row.scheduled_time, 10) || (row.scheduled_time ? new Date(row.scheduled_time).getTime() : Date.now());
+                    return { id: row.id, scheduledTime, payload: p, status: row.status };
+                } catch {
+                    return null;
+                }
             }));
-            res.json(mapped);
+            return res.json(mapped.filter(Boolean));
         });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e: any) {
+        console.warn('[ScheduledMessages] Handled error in listDriverScheduled:', e?.message || e);
+        return res.json([]);
+    }
 };
 
 const handleDeleteScheduledMessageLegacy = async (req, res) => {

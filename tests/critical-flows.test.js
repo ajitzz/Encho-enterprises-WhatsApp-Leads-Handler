@@ -803,3 +803,69 @@ test('auth-config facade delegates auth and bot/system settings handlers', async
     'patchSystemSettings',
   ]);
 });
+
+test('candidateResolver: isValidUuid correctly validates UUID format', async () => {
+  const { isValidUuid } = await import('../backend/shared/infra/candidateResolver.js');
+  assert.equal(isValidUuid('d3b07384-d113-40e1-bbd4-28b3cf17d235'), true);
+  assert.equal(isValidUuid('D3B07384-D113-40E1-BBD4-28B3CF17D235'), true);
+  assert.equal(isValidUuid('919995864396'), false);
+  assert.equal(isValidUuid('+919995864396'), false);
+  assert.equal(isValidUuid('undefined'), false);
+  assert.equal(isValidUuid('null'), false);
+  assert.equal(isValidUuid(''), false);
+  assert.equal(isValidUuid(null), false);
+  assert.equal(isValidUuid(undefined), false);
+});
+
+test('candidateResolver: resolveCandidateIdSafe returns UUID without db lookup when input is valid UUID', async () => {
+  const { resolveCandidateIdSafe } = await import('../backend/shared/infra/candidateResolver.js');
+  let dbQueried = false;
+  const mockClient = {
+    query: async () => { dbQueried = true; return { rows: [] }; }
+  };
+  const validUuid = '123e4567-e89b-12d3-a456-426614174000';
+  const resolved = await resolveCandidateIdSafe(mockClient, validUuid);
+  assert.equal(resolved, validUuid);
+  assert.equal(dbQueried, false);
+});
+
+test('candidateResolver: resolveCandidateIdSafe resolves phone number to candidate UUID via query', async () => {
+  const { resolveCandidateIdSafe } = await import('../backend/shared/infra/candidateResolver.js');
+  const expectedUuid = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+  const mockClient = {
+    query: async (sql, params) => {
+      assert.equal(params[1], '919995864396');
+      return { rows: [{ id: expectedUuid }] };
+    }
+  };
+  const resolved = await resolveCandidateIdSafe(mockClient, '919995864396');
+  assert.equal(resolved, expectedUuid);
+});
+
+test('candidateResolver: resolveCandidateIdSafe safely returns null on unresolvable input or db error without throwing', async () => {
+  const { resolveCandidateIdSafe } = await import('../backend/shared/infra/candidateResolver.js');
+  const throwingClient = {
+    query: async () => { throw new Error('DB connection lost'); }
+  };
+  assert.equal(await resolveCandidateIdSafe(throwingClient, 'invalid-phone'), null);
+  assert.equal(await resolveCandidateIdSafe(throwingClient, null), null);
+  assert.equal(await resolveCandidateIdSafe(throwingClient, 'undefined'), null);
+});
+
+test('ReminderServiceFacade: listDriverScheduled degrades gracefully to empty array if legacy handler throws', async () => {
+  const facade = new ReminderServiceFacade({
+    legacyListDriverScheduledHandler: async () => {
+      throw new Error('Database relation error');
+    }
+  });
+
+  let sentPayload = null;
+  const mockRes = {
+    headersSent: false,
+    json: (payload) => { sentPayload = payload; return payload; }
+  };
+
+  const result = await facade.listDriverScheduled({ requestId: 'r-deg' }, mockRes);
+  assert.deepEqual(sentPayload, []);
+  assert.deepEqual(result, []);
+});

@@ -56,9 +56,17 @@ export class ReminderServiceFacade {
       warnThresholdMs: REMINDER_SCHEDULE_WARN_MS,
     });
 
-    const result = await this.legacyListDriverScheduledHandler(req, res);
-    latency.end({ path: 'module-facade' });
-    return result;
+    try {
+      const result = await this.legacyListDriverScheduledHandler(req, res);
+      latency.end({ path: 'module-facade' });
+      return result;
+    } catch (err) {
+      latency.end({ path: 'module-facade', error: true });
+      if (res && !res.headersSent && typeof res.json === 'function') {
+        return res.json([]);
+      }
+      return [];
+    }
   }
 
   async deleteScheduled(req, res) {

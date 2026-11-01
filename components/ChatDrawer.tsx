@@ -184,39 +184,37 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   }, [localMessages.length, scheduledMessages.length]);
 
   const loadDocuments = async (driverId: string) => {
+      if (!driverId || driverId === 'undefined') return;
       try { 
           const docs = await liveApiService.getDriverDocuments(driverId); 
-          setDocuments(docs || []); 
+          setDocuments(Array.isArray(docs) ? docs : []); 
           reportUiRecovery('polling', `/api/drivers/${driverId}/documents`);
       } catch(e) {
-          const streak = reportUiFailure({
+          reportUiFailure({
             channel: 'polling',
             endpoint: `/api/drivers/${driverId}/documents`,
             error: e,
             notifyAdmin: (message) => console.warn('[admin.notify]', message)
           });
-          if (streak === 1) {
-            alert('Documents are temporarily unavailable.');
-          }
+          console.warn('[ChatDrawer] Driver documents polling error:', e);
           setDocuments([]);
       }
   };
 
   const loadScheduledMessages = async (driverId: string) => {
+      if (!driverId || driverId === 'undefined') return;
       try {
           const items = await liveApiService.getScheduledMessages(driverId);
-          setScheduledMessages(items);
+          setScheduledMessages(Array.isArray(items) ? items : []);
           reportUiRecovery('polling', `/api/drivers/${driverId}/scheduled-messages`);
       } catch(e) {
-          const streak = reportUiFailure({
+          reportUiFailure({
             channel: 'polling',
             endpoint: `/api/drivers/${driverId}/scheduled-messages`,
             error: e,
             notifyAdmin: (message) => console.warn('[admin.notify]', message)
           });
-          if (streak === 1) {
-            alert('Scheduled message sync is degraded.');
-          }
+          console.warn('[ChatDrawer] Scheduled messages polling error:', e);
       }
   };
 

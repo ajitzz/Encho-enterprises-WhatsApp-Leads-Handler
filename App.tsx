@@ -228,7 +228,11 @@ export default function App() {
                    channel,
                    endpoint,
                    error,
-                   notifyUser: (message) => addNotification({ type: 'warning', title: 'Live Sync Degraded', message }),
+                   notifyUser: (message) => {
+                     if (streak >= 3) {
+                       addNotification({ type: 'warning', title: 'Live Sync Degraded', message });
+                     }
+                   },
                    notifyAdmin: (message) => console.warn('[admin.notify]', message)
                  });
                  setSyncFailureMetrics(prev => ({ ...prev, [channel]: failureStreak, lastEndpoint: endpoint }));
