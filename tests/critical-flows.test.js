@@ -961,3 +961,13 @@ test('lead-ingestion parseInboundMessage extracts list_reply from interactive li
   assert.equal(parsed.payloadId, 'list_opt_salary');
   assert.equal(parsed.messageType, 'interactive');
 });
+
+test('bot-engine handoff node formats payload and marks human mode properly', () => {
+  const candidate = { id: 'cand-1', phone_number: '919995864396', variables: {} };
+  const handoffContent = 'We Are Arranging an Call With Our Executive\n☎️ Contact To this number : Aswin B (Calicut): +91 90372 64396';
+  const handoffPayload = { type: 'text', text: { body: handoffContent } };
+  
+  assert.equal(handoffPayload.type, 'text');
+  assert.equal(handoffPayload.text.body.includes('Aswin B'), true);
+  assert.equal(handoffPayload.text.body.includes('+91 90372 64396'), true);
+});

@@ -164,12 +164,12 @@ const logLeadIngestionRuntimePosture = () => {
 // --- CONFIGURATION ---
 const SYSTEM_CONFIG: any = {
     META_TIMEOUT: 15000,
-    META_TIMEOUT_MANUAL_MS: Math.max(1000, Number(process.env.META_TIMEOUT_MANUAL_MS || 6000)),
-    META_TIMEOUT_BOT_MS: Math.max(1000, Number(process.env.META_TIMEOUT_BOT_MS || 12000)),
-    META_TIMEOUT_SCHEDULED_MS: Math.max(1000, Number(process.env.META_TIMEOUT_SCHEDULED_MS || 20000)),
-    META_RETRY_MAX_ATTEMPTS: Math.max(1, Number(process.env.META_RETRY_MAX_ATTEMPTS || 3)),
-    META_RETRY_BASE_DELAY_MS: Math.max(100, Number(process.env.META_RETRY_BASE_DELAY_MS || 300)),
-    META_RETRY_MAX_DELAY_MS: Math.max(250, Number(process.env.META_RETRY_MAX_DELAY_MS || 2500)),
+    META_TIMEOUT_MANUAL_MS: Math.max(1000, Number(process.env.META_TIMEOUT_MANUAL_MS || 5000)),
+    META_TIMEOUT_BOT_MS: Math.max(1000, Number(process.env.META_TIMEOUT_BOT_MS || 4000)),
+    META_TIMEOUT_SCHEDULED_MS: Math.max(1000, Number(process.env.META_TIMEOUT_SCHEDULED_MS || 10000)),
+    META_RETRY_MAX_ATTEMPTS: Math.max(1, Number(process.env.META_RETRY_MAX_ATTEMPTS || 2)),
+    META_RETRY_BASE_DELAY_MS: Math.max(50, Number(process.env.META_RETRY_BASE_DELAY_MS || 150)),
+    META_RETRY_MAX_DELAY_MS: Math.max(150, Number(process.env.META_RETRY_MAX_DELAY_MS || 1000)),
     DB_CONNECTION_TIMEOUT: 20000,
     AWS_REGION: process.env.AWS_REGION || 'us-east-1',
     AWS_BUCKET: process.env.AWS_BUCKET_NAME || 'uber-fleet-assets',
@@ -3548,7 +3548,17 @@ const runBotEngine = async (client, candidate, incomingText, incomingPayloadId =
             else if (data.type === 'handoff') {
                 await client.query("UPDATE candidates SET is_human_mode = TRUE WHERE id = $1", [candidate.id]);
                 const msg = processText(data.content, candidate);
-                if (isValidContent(msg)) await sendToMeta(candidate.phone_number, { type: 'text', text: { body: msg } }, { sendType: 'bot', enableRetry: true });
+                if (isValidContent(msg)) {
+                    const handoffPayload = { type: 'text', text: { body: msg } };
+                    const sendResult = await sendToMeta(candidate.phone_number, handoffPayload, { sendType: 'bot', enableRetry: true });
+                    queueBotMessageSideEffects({
+                        candidateId: candidate.id,
+                        payload: handoffPayload,
+                        nodeType: 'handoff',
+                        sendResult,
+                    });
+                }
+                notifyUpdates(candidate.id);
                 break; 
             }
 
@@ -6110,7 +6120,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
                               AND (type IS NULL OR type != 'variable_capture')
                               AND (direction IS NULL OR direction != 'system')
                             ORDER BY created_at DESC 
-                            LIMIT 50
+                            LIMIT 250
                         `, [resolvedCandidateId]),
                         client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [resolvedCandidateId, 'pending', 'processing', 'failed'])
                     ]);
@@ -6201,7 +6211,7 @@ apiRouter.get('/updates/stream', async (req, res) => {
                                   AND (type IS NULL OR type != 'variable_capture')
                                   AND (direction IS NULL OR direction != 'system')
                                 ORDER BY created_at DESC 
-                                LIMIT 50
+                                LIMIT 250
                             `, [resolvedDriverId]);
                             messageRows = mRes.rows;
                         }
@@ -6442,7 +6452,7 @@ apiRouter.get('/drivers/:id/messages', authMiddleware, async (req: any, res: any
                   AND (type IS NULL OR type != 'variable_capture')
                   AND (direction IS NULL OR direction != 'system')
                 ORDER BY created_at DESC 
-                LIMIT 50
+                LIMIT 250
             `, [candidateId]);
             rawRows = r.rows;
         });

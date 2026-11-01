@@ -108,7 +108,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                   if (prev.length !== msgs.length) return msgs;
                   const prevLast = prev[prev.length - 1];
                   const newLast = msgs[msgs.length - 1];
-                  if (prevLast?.id !== newLast?.id || prevLast?.status !== newLast?.status) {
+                  if (prevLast?.id !== newLast?.id || prevLast?.status !== newLast?.status || prevLast?.text !== newLast?.text) {
                       return msgs;
                   }
                   return prev;
@@ -130,7 +130,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     }
   }, [driver?.id]);
 
-  // Resilient live chat sync: 0ms SSE push events when connected; graceful 3500ms fallback when disconnected
+  // Resilient live chat sync: instant SSE push events backed by guaranteed 2s in-flight guarded reconciliation
   useEffect(() => {
     if (!driver?.id) return;
 
@@ -139,10 +139,9 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       loadScheduledMessages(driver.id);
     };
 
-    let livePollTimer: ReturnType<typeof setInterval> | null = null;
-    if (updateConnectionState !== 'connected') {
-      livePollTimer = setInterval(syncDriverChat, 3500);
-    }
+    // Active drawer guaranteed reconciliation poll (2000ms).
+    // In-flight loading guards strictly prevent any overlapping HTTP requests.
+    const livePollTimer = setInterval(syncDriverChat, 2000);
 
     // Instant resync when user focuses or returns to tab
     const handleFocus = () => syncDriverChat();
@@ -156,11 +155,11 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
-      if (livePollTimer) clearInterval(livePollTimer);
+      clearInterval(livePollTimer);
       window.removeEventListener('focus', handleFocus);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [driver?.id, updateConnectionState]);
+  }, [driver?.id]);
 
   useEffect(() => {
       if (!driver) return;
@@ -174,7 +173,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
                   if (prev.length !== latestMsgs.length) return latestMsgs;
                   const prevLast = prev[prev.length - 1];
                   const newLast = latestMsgs[latestMsgs.length - 1];
-                  if (prevLast?.id !== newLast?.id || prevLast?.status !== newLast?.status) {
+                  if (prevLast?.id !== newLast?.id || prevLast?.status !== newLast?.status || prevLast?.text !== newLast?.text) {
                       return latestMsgs;
                   }
                   return prev;

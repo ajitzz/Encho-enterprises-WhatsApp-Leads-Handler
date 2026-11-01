@@ -221,7 +221,7 @@ export const liveApiService = {
           try {
               const [drivers, messages, scheduled] = await Promise.all([
                   liveApiService.getDrivers(),
-                  driverId ? liveApiService.getDriverMessages(driverId, 50) : Promise.resolve(null),
+                  driverId ? liveApiService.getDriverMessages(driverId, 250) : Promise.resolve(null),
                   driverId ? liveApiService.getScheduledMessages(driverId) : Promise.resolve(null)
               ]);
 
@@ -352,7 +352,7 @@ export const liveApiService = {
       });
   },
 
-  getDriverMessages: async (id: string, limit: number = 50, beforeTimestamp?: number): Promise<Message[]> => {
+  getDriverMessages: async (id: string, limit: number = 250, beforeTimestamp?: number): Promise<Message[]> => {
       let url = `/api/drivers/${id}/messages?limit=${limit}`;
       if (beforeTimestamp) url += `&before=${beforeTimestamp}`;
       return apiRequest<Message[]>(url);
