@@ -4323,32 +4323,51 @@ apiRouter.get('/auth/me', authMiddleware, (req, res) => {
     });
 });
 
-apiRouter.post('/staff/heartbeat', authMiddleware, async (req, res) => {
+apiRouter.post('/staff/heartbeat', authMiddleware, async (req: any, res: any) => {
     try {
-        const { status } = req.body; // 'online' or 'idle'
+        const { status, active_seconds, idle_seconds } = req.body || {};
         const currentStatus = status === 'idle' ? 'idle' : 'online';
+        const staffId = req.user?.staffId;
+        const email = req.user?.email;
+
         await withDb(async (client) => {
             await client.query(
                 `UPDATE staff_members 
-                 SET last_seen_at = NOW(), current_status = $1 
-                 WHERE id = $2`,
-                [currentStatus, req.user.staffId]
+                 SET last_seen_at = NOW(),
+                     last_ping_at = NOW(),
+                     current_status = $1,
+                     active_seconds_today = active_seconds_today + $2,
+                     idle_seconds_today = idle_seconds_today + $3
+                 WHERE (id = $4 AND $4 IS NOT NULL) OR (email = $5 AND $5 IS NOT NULL)`,
+                [currentStatus, Number(active_seconds) || 0, Number(idle_seconds) || 0, staffId || null, email || null]
             );
-            
-            // Update daily performance metrics (online minutes)
-            // We'll increment total_online_minutes if status is online.
-            // This is a simple approximation: 1 heartbeat = 1 minute if called every 60s.
-            if (currentStatus === 'online') {
+
+            if (staffId) {
+                if (currentStatus === 'online') {
+                    await client.query(`
+                        INSERT INTO daily_performance_metrics (staff_id, record_date, total_online_minutes)
+                        VALUES ($1, CURRENT_DATE, 1)
+                        ON CONFLICT (staff_id, record_date) 
+                        DO UPDATE SET total_online_minutes = daily_performance_metrics.total_online_minutes + 1
+                    `, [staffId]).catch(() => null);
+                }
+
                 await client.query(`
-                    INSERT INTO daily_performance_metrics (staff_id, record_date, total_online_minutes)
-                    VALUES ($1, CURRENT_DATE, 1)
-                    ON CONFLICT (staff_id, record_date) 
-                    DO UPDATE SET total_online_minutes = daily_performance_metrics.total_online_minutes + 1
-                `, [req.user.staffId]);
+                    INSERT INTO staff_sessions (staff_id, session_date, active_seconds, idle_seconds)
+                    VALUES ($1, CURRENT_DATE, $2, $3)
+                    ON CONFLICT (staff_id, session_date) 
+                    DO UPDATE SET 
+                        active_seconds = staff_sessions.active_seconds + EXCLUDED.active_seconds,
+                        idle_seconds = staff_sessions.idle_seconds + EXCLUDED.idle_seconds,
+                        updated_at = NOW()
+                `, [staffId, Number(active_seconds) || 0, Number(idle_seconds) || 0]).catch(() => null);
             }
         });
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+        return res.json({ success: true });
+    } catch (e: any) {
+        console.warn('[Staff Heartbeat] Handled heartbeat error:', e?.message || e);
+        return res.json({ success: false, error: e?.message });
+    }
 });
 
 apiRouter.get('/staff/presence', authMiddleware, async (req, res) => {
@@ -4439,38 +4458,6 @@ apiRouter.post('/staff/:id/force-logout', authMiddleware, async (req, res) => {
                     is_active_for_auto_dist = FALSE 
                 WHERE id = $1
             `, [req.params.id]);
-            res.json({ success: true });
-        });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-apiRouter.post('/staff/heartbeat', authMiddleware, async (req, res) => {
-    const { status, active_seconds, idle_seconds } = req.body;
-    try {
-        await withDb(async (client) => {
-            await client.query(`
-                UPDATE staff_members 
-                SET current_status = $1, 
-                    last_ping_at = NOW(),
-                    active_seconds_today = active_seconds_today + $2,
-                    idle_seconds_today = idle_seconds_today + $3
-                WHERE email = $4
-            `, [status || 'online', active_seconds || 0, idle_seconds || 0, req.user.email]);
-            
-            const staffRes = await client.query('SELECT id FROM staff_members WHERE email = $1', [req.user.email]);
-            if (staffRes.rows.length > 0) {
-                const staffId = staffRes.rows[0].id;
-                await client.query(`
-                    INSERT INTO staff_sessions (staff_id, session_date, active_seconds, idle_seconds)
-                    VALUES ($1, CURRENT_DATE, $2, $3)
-                    ON CONFLICT (staff_id, session_date) 
-                    DO UPDATE SET 
-                        active_seconds = staff_sessions.active_seconds + EXCLUDED.active_seconds,
-                        idle_seconds = staff_sessions.idle_seconds + EXCLUDED.idle_seconds,
-                        updated_at = NOW()
-                `, [staffId, active_seconds || 0, idle_seconds || 0]);
-            }
-            
             res.json({ success: true });
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -5727,6 +5714,11 @@ const processWebhookLegacy = async ({ body, req, res }) => {
                         payloadId = msg.interactive.list_reply.id;
                     }
                 } 
+                else if (msg.type === 'button') {
+                    text = msg.button?.text || '';
+                    payloadId = msg.button?.payload || null;
+                    messageType = 'button';
+                }
                 else if (msg.type === 'location') {
                     // Extract structured location data
                     text = JSON.stringify(msg.location);
@@ -6101,12 +6093,14 @@ apiRouter.get('/updates/stream', async (req, res) => {
     };
 
     const fetchSnapshot = async () => {
-        return withDb(async (client) => {
-            const snapshot = await getDriversSnapshotCached();
-            const payload: any = { drivers: snapshot.drivers };
+        const snapshot = await getDriversSnapshotCached();
+        const payload: any = { drivers: snapshot.drivers };
 
-            const messagesByDriver: Record<string, any> = {};
-            if (driverId) {
+        if (driverId) {
+            let messagesRows: any[] = [];
+            let scheduledRows: any[] = [];
+
+            await withDb(async (client) => {
                 const resolvedCandidateId = await resolveCandidateIdSafe(client, driverId);
                 if (resolvedCandidateId) {
                     const [messagesRes, scheduledRes] = await Promise.all([
@@ -6120,52 +6114,56 @@ apiRouter.get('/updates/stream', async (req, res) => {
                         `, [resolvedCandidateId]),
                         client.query('SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status IN ($2, $3, $4) ORDER BY scheduled_time ASC LIMIT 100', [resolvedCandidateId, 'pending', 'processing', 'failed'])
                     ]);
-
-                    messagesByDriver[driverId] = await Promise.all(messagesRes.rows.map(async (row) => {
-                        let imageUrl, videoUrl, documentUrl, audioUrl;
-                        let text = row.text;
-                        if (row.type !== 'text' && row.type !== 'variable_capture') {
-                            try {
-                                const media = JSON.parse(row.text || '{}');
-                                text = media.caption || '';
-                                const resolvedMediaUrl = await refreshMediaUrl(media.url);
-                                if (row.type === 'video') videoUrl = resolvedMediaUrl;
-                                else if (row.type === 'document') documentUrl = resolvedMediaUrl;
-                                else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
-                                else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
-                            } catch(e){}
-                        }
-                        return {
-                            id: row.id,
-                            sender: row.direction === 'in' ? 'driver' : 'agent',
-                            senderType: row.sender_type || (row.direction === 'in' ? 'driver' : 'bot'),
-                            text,
-                            imageUrl,
-                            videoUrl,
-                            documentUrl,
-                            audioUrl,
-                            isInternal: Boolean(row.is_internal),
-                            timestamp: new Date(row.created_at).getTime(),
-                            type: row.type || 'text',
-                            status: row.status,
-                        };
-                    }));
-                    messagesByDriver[driverId].sort((a: any, b: any) => a.timestamp - b.timestamp);
-
-                    payload.messagesByDriver = messagesByDriver;
-                    payload.scheduledByDriver = {
-                        [driverId]: scheduledRes.rows.map((row) => ({
-                            id: row.id,
-                            scheduledTime: Number(row.scheduled_time) || (row.scheduled_time ? new Date(row.scheduled_time).getTime() : Date.now()),
-                            payload: row.payload,
-                            status: row.status,
-                        }))
-                    };
+                    messagesRows = messagesRes.rows;
+                    scheduledRows = scheduledRes.rows;
                 }
-            }
+            });
 
-            return payload;
-        });
+            if (messagesRows.length > 0 || scheduledRows.length > 0) {
+                const messages = await Promise.all(messagesRows.map(async (row) => {
+                    let imageUrl, videoUrl, documentUrl, audioUrl;
+                    let text = row.text;
+                    if (row.type !== 'text' && row.type !== 'variable_capture') {
+                        try {
+                            const media = JSON.parse(row.text || '{}');
+                            text = media.caption || '';
+                            const resolvedMediaUrl = await refreshMediaUrl(media.url);
+                            if (row.type === 'video') videoUrl = resolvedMediaUrl;
+                            else if (row.type === 'document') documentUrl = resolvedMediaUrl;
+                            else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
+                            else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
+                        } catch(e){}
+                    }
+                    return {
+                        id: row.id,
+                        sender: row.direction === 'in' ? 'driver' : 'agent',
+                        senderType: row.sender_type || (row.direction === 'in' ? 'driver' : 'bot'),
+                        text,
+                        imageUrl,
+                        videoUrl,
+                        documentUrl,
+                        audioUrl,
+                        isInternal: Boolean(row.is_internal),
+                        timestamp: new Date(row.created_at).getTime(),
+                        type: row.type || 'text',
+                        status: row.status,
+                    };
+                }));
+                messages.sort((a: any, b: any) => a.timestamp - b.timestamp);
+
+                payload.messagesByDriver = { [driverId]: messages };
+                payload.scheduledByDriver = {
+                    [driverId]: scheduledRows.map((row) => ({
+                        id: row.id,
+                        scheduledTime: Number(row.scheduled_time) || (row.scheduled_time ? new Date(row.scheduled_time).getTime() : Date.now()),
+                        payload: row.payload,
+                        status: row.status,
+                    }))
+                };
+            }
+        }
+
+        return payload;
     };
 
     const streamSnapshot = async () => {
@@ -6182,22 +6180,38 @@ apiRouter.get('/updates/stream', async (req, res) => {
         if (closed) return;
         if (data?.candidateId) {
             try {
-                const deltaPayload = await withDb(async (client) => {
-                    const row = await client.query('SELECT * FROM candidates WHERE id = $1', [data.candidateId]);
-                    if (row.rows.length === 0) return null;
+                let candidateRow: any = null;
+                let messageRows: any[] = [];
+                let resolvedTargetId: string | null = null;
 
+                await withDb(async (client) => {
+                    resolvedTargetId = await resolveCandidateIdSafe(client, data.candidateId);
+                    if (!resolvedTargetId) return;
+
+                    const row = await client.query('SELECT * FROM candidates WHERE id = $1', [resolvedTargetId]);
+                    if (row.rows.length === 0) return;
+                    candidateRow = row.rows[0];
+
+                    if (driverId) {
+                        const resolvedDriverId = await resolveCandidateIdSafe(client, driverId);
+                        if (resolvedDriverId && resolvedDriverId === resolvedTargetId) {
+                            const mRes = await client.query(`
+                                SELECT * FROM candidate_messages 
+                                WHERE candidate_id = $1 
+                                  AND (type IS NULL OR type != 'variable_capture')
+                                  AND (direction IS NULL OR direction != 'system')
+                                ORDER BY created_at DESC 
+                                LIMIT 50
+                            `, [resolvedDriverId]);
+                            messageRows = mRes.rows;
+                        }
+                    }
+                });
+
+                if (candidateRow) {
                     let messages = null;
-                    if (driverId && driverId === data.candidateId) {
-                        const mRes = await client.query(`
-                            SELECT * FROM candidate_messages 
-                            WHERE candidate_id = $1 
-                              AND (type IS NULL OR type != 'variable_capture')
-                              AND (direction IS NULL OR direction != 'system')
-                            ORDER BY created_at DESC 
-                            LIMIT 50
-                        `, [driverId]);
-
-                        messages = await Promise.all(mRes.rows.map(async (r) => {
+                    if (messageRows.length > 0) {
+                        messages = await Promise.all(messageRows.map(async (r) => {
                             let text = r.text;
                             let imageUrl, videoUrl, documentUrl, audioUrl;
                             if (r.type !== 'text' && r.type !== 'variable_capture') {
@@ -6229,17 +6243,13 @@ apiRouter.get('/updates/stream', async (req, res) => {
                         messages.sort((a: any, b: any) => a.timestamp - b.timestamp);
                     }
 
-                    return { candidate: row.rows[0], messages };
-                });
-
-                if (deltaPayload?.candidate) {
                     const eventPayload: any = {
                         type: 'LEAD_DELTA',
-                        candidate: deltaPayload.candidate,
+                        candidate: candidateRow,
                         candidateId: data.candidateId,
                     };
-                    if (deltaPayload.messages && driverId === data.candidateId) {
-                        eventPayload.messagesByDriver = { [driverId]: deltaPayload.messages };
+                    if (messages && driverId) {
+                        eventPayload.messagesByDriver = { [driverId]: messages };
                     }
                     sendEvent(eventPayload);
                     return;
@@ -6421,11 +6431,10 @@ apiRouter.get('/drivers/:id/messages', authMiddleware, async (req: any, res: any
             return res.json([]);
         }
 
+        let rawRows: any[] = [];
         await withDb(async (client) => {
             const candidateId = await resolveCandidateIdSafe(client, candidateParam);
-            if (!candidateId) {
-                return res.json([]);
-            }
+            if (!candidateId) return;
 
             const r = await client.query(`
                 SELECT * FROM candidate_messages 
@@ -6435,42 +6444,49 @@ apiRouter.get('/drivers/:id/messages', authMiddleware, async (req: any, res: any
                 ORDER BY created_at DESC 
                 LIMIT 50
             `, [candidateId]);
-            const msgs = await Promise.all(r.rows.map(async row => {
-                let text = row.text;
-                let imageUrl = null;
-                let videoUrl = null;
-                let documentUrl = null;
-                let audioUrl = null;
-
-                if (['image','video','document','audio','voice','sticker'].includes(row.type) && row.text?.startsWith('{')) {
-                    try {
-                        const p = JSON.parse(row.text);
-                        text = p.caption || '';
-                        const rawMediaUrl = p.mediaUrl || p.url || (p.mediaKey ? getPublicS3Url(p.mediaKey) : null);
-                        const resolvedMediaUrl = rawMediaUrl ? await refreshMediaUrl(rawMediaUrl) : null;
-
-                        if (row.type === 'video') videoUrl = resolvedMediaUrl;
-                        else if (row.type === 'document') documentUrl = resolvedMediaUrl;
-                        else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
-                        else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
-                    } catch(e){}
-                }
-                return { 
-                    id: row.id,
-                    sender: row.direction === 'in' ? 'driver' : 'agent',
-                    senderType: row.sender_type || (row.direction === 'in' ? 'driver' : 'bot'),
-                    text,
-                    imageUrl,
-                    videoUrl,
-                    documentUrl,
-                    audioUrl,
-                    isInternal: Boolean(row.is_internal),
-                    timestamp: new Date(row.created_at).getTime(), type: row.type || 'text', status: row.status 
-                };
-            }));
-            res.json(msgs.reverse());
+            rawRows = r.rows;
         });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+
+        const msgs = await Promise.all(rawRows.map(async row => {
+            let text = row.text;
+            let imageUrl = null;
+            let videoUrl = null;
+            let documentUrl = null;
+            let audioUrl = null;
+
+            if (['image','video','document','audio','voice','sticker'].includes(row.type) && row.text?.startsWith('{')) {
+                try {
+                    const p = JSON.parse(row.text);
+                    text = p.caption || '';
+                    const rawMediaUrl = p.mediaUrl || p.url || (p.mediaKey ? getPublicS3Url(p.mediaKey) : null);
+                    const resolvedMediaUrl = rawMediaUrl ? await refreshMediaUrl(rawMediaUrl) : null;
+
+                    if (row.type === 'video') videoUrl = resolvedMediaUrl;
+                    else if (row.type === 'document') documentUrl = resolvedMediaUrl;
+                    else if (row.type === 'audio' || row.type === 'voice') audioUrl = resolvedMediaUrl;
+                    else if (row.type === 'image' || row.type === 'sticker') imageUrl = resolvedMediaUrl;
+                } catch(e){}
+            }
+            return { 
+                id: row.id,
+                sender: row.direction === 'in' ? 'driver' : 'agent',
+                senderType: row.sender_type || (row.direction === 'in' ? 'driver' : 'bot'),
+                text,
+                imageUrl,
+                videoUrl,
+                documentUrl,
+                audioUrl,
+                isInternal: Boolean(row.is_internal),
+                timestamp: new Date(row.created_at).getTime(),
+                type: row.type || 'text',
+                status: row.status 
+            };
+        }));
+        return res.json(msgs.reverse());
+    } catch (e: any) {
+        console.warn('[Messages] Handled error in getDriverMessages:', e?.message || e);
+        return res.json([]);
+    }
 });
 
 apiRouter.post('/drivers/:id/messages', authMiddleware, async (req: any, res: any) => {
@@ -6515,47 +6531,55 @@ apiRouter.post('/drivers/:id/messages', authMiddleware, async (req: any, res: an
             if (trimmed.length > MAX_TEXT_MESSAGE_LENGTH) return res.status(400).json({ error: `Text exceeds max length (${MAX_TEXT_MESSAGE_LENGTH})` });
         }
 
-        let sendResult = null;
+        let candidateInfo: { id: string; phoneNumber: string } | null = null;
         await withDb(async (client) => {
             const candidateId = await resolveCandidateIdSafe(client, req.params.id);
             if (!candidateId) throw new Error("Candidate not found");
             const c = await client.query('SELECT phone_number FROM candidates WHERE id = $1', [candidateId]);
             if (c.rows.length === 0) throw new Error("Candidate not found");
-            const sanitizedText = normalizedText.trim();
-            let payload: any = { type: 'text', text: { body: sanitizedText } };
-            let dbText = sanitizedText;
-            if (mediaUrl) {
-                const freshUrl = await refreshMediaUrl(mediaUrl);
-                const type = mediaType || 'image';
-                payload = { type, [type]: { link: freshUrl } };
-                if (type !== 'audio' && type !== 'sticker' && sanitizedText) {
-                    payload[type].caption = sanitizedText;
-                }
-                if (type === 'document') {
-                    payload[type].filename = decodeURIComponent(new URL(freshUrl).pathname.split('/').pop() || 'file.pdf');
-                }
-                dbText = JSON.stringify({ url: mediaUrl, caption: sanitizedText });
+            candidateInfo = { id: candidateId, phoneNumber: c.rows[0].phone_number };
+        });
+
+        if (!candidateInfo) throw new Error("Candidate not found");
+
+        const sanitizedText = normalizedText.trim();
+        let payload: any = { type: 'text', text: { body: sanitizedText } };
+        let dbText = sanitizedText;
+        if (mediaUrl) {
+            const freshUrl = await refreshMediaUrl(mediaUrl);
+            const type = mediaType || 'image';
+            payload = { type, [type]: { link: freshUrl } };
+            if (type !== 'audio' && type !== 'sticker' && sanitizedText) {
+                payload[type].caption = sanitizedText;
             }
-            sendResult = await sendToMeta(c.rows[0].phone_number, payload, { sendType: 'manual', enableRetry: true, returnFastOnTimeout: true, requestId: req.requestId });
-            const sendStatus = sendResult?.delivered
-                ? 'sent'
-                : (sendResult?.timeout ? 'timeout_fast_fail' : 'blocked_validation');
+            if (type === 'document') {
+                payload[type].filename = decodeURIComponent(new URL(freshUrl).pathname.split('/').pop() || 'file.pdf');
+            }
+            dbText = JSON.stringify({ url: mediaUrl, caption: sanitizedText });
+        }
+
+        const sendResult = await sendToMeta((candidateInfo as any).phoneNumber, payload, { sendType: 'manual', enableRetry: true, returnFastOnTimeout: true, requestId: req.requestId });
+        const sendStatus = sendResult?.delivered
+            ? 'sent'
+            : (sendResult?.timeout ? 'timeout_fast_fail' : 'blocked_validation');
+
+        await withDb(async (client) => {
             await client.query(
                 `INSERT INTO candidate_messages (id, candidate_id, direction, text, type, status, whatsapp_message_id, sender_type, created_at)
                  VALUES ($1, $2, 'out', $3, $4, $5, $6, 'staff', NOW())`,
-                [crypto.randomUUID(), candidateId, dbText, mediaUrl ? (mediaType || 'image') : 'text', sendStatus, sendResult?.providerMessageId || null]
+                [crypto.randomUUID(), (candidateInfo as any).id, dbText, mediaUrl ? (mediaType || 'image') : 'text', sendStatus, sendResult?.providerMessageId || null]
             );
 
             // Immutable Audit Log: Track exact staff sender
             await client.query(
                 `INSERT INTO lead_activity_log (candidate_id, staff_id, action, notes)
                  VALUES ($1, $2, 'outbound_message', $3)`,
-                [candidateId, req.user?.staffId || null, `Sent message: ${sanitizedText ? sanitizedText.slice(0, 80) : (mediaType || 'media')}`]
+                [(candidateInfo as any).id, req.user?.staffId || null, `Sent message: ${sanitizedText ? sanitizedText.slice(0, 80) : (mediaType || 'media')}`]
             );
 
-            notifyUpdates(candidateId);
+            notifyUpdates((candidateInfo as any).id);
             scheduleDriverExcelSync();
-            scheduleDriverExcelIncrementalSync({ candidateId, action: 'upsert' });
+            scheduleDriverExcelIncrementalSync({ candidateId: (candidateInfo as any).id, action: 'upsert' });
         });
 
         if (sendResult?.timeout) {
@@ -6578,37 +6602,38 @@ apiRouter.get('/drivers/:id/documents', authMiddleware, async (req: any, res: an
             return res.json([]);
         }
 
+        let rawRows: any[] = [];
         await withDb(async (client) => {
             const candidateId = await resolveCandidateIdSafe(client, candidateParam);
-            if (!candidateId) {
-                return res.json([]);
-            }
+            if (!candidateId) return;
 
             const r = await client.query('SELECT * FROM driver_documents WHERE candidate_id = $1 ORDER BY created_at DESC', [candidateId]);
-            const docs = await Promise.all(r.rows.map(async d => {
-                try {
-                    return {
-                        id: d.id,
-                        docType: d.type,
-                        url: await refreshMediaUrl(d.url),
-                        verificationStatus: d.status,
-                        timestamp: new Date(d.created_at).getTime()
-                    };
-                } catch {
-                    return {
-                        id: d.id,
-                        docType: d.type,
-                        url: d.url,
-                        verificationStatus: d.status,
-                        timestamp: new Date(d.created_at).getTime()
-                    };
-                }
-            }));
-            res.json(docs);
+            rawRows = r.rows;
         });
+
+        const docs = await Promise.all(rawRows.map(async d => {
+            try {
+                return {
+                    id: d.id,
+                    docType: d.type,
+                    url: await refreshMediaUrl(d.url),
+                    verificationStatus: d.status,
+                    timestamp: new Date(d.created_at).getTime()
+                };
+            } catch {
+                return {
+                    id: d.id,
+                    docType: d.type,
+                    url: d.url,
+                    verificationStatus: d.status,
+                    timestamp: new Date(d.created_at).getTime()
+                };
+            }
+        }));
+        return res.json(docs);
     } catch (e: any) {
         console.warn('[Documents] Handled error in getDriverDocuments:', e?.message || e);
-        res.json([]);
+        return res.json([]);
     }
 });
 
@@ -6988,38 +7013,37 @@ const handleDriverScheduledMessagesLegacy = async (req, res) => {
             return res.json([]);
         }
 
+        let rawRows: any[] = [];
         await withDb(async (client) => {
             const candidateId = await resolveCandidateIdSafe(client, candidateParam);
-            if (!candidateId) {
-                return res.json([]);
-            }
+            if (!candidateId) return;
 
             const r = await client.query(
                 `SELECT * FROM scheduled_messages WHERE candidate_id = $1 AND status = 'pending' ORDER BY scheduled_time ASC`,
                 [candidateId]
             );
-            const mapped = await Promise.all(r.rows.map(async row => {
-                try {
-                    let p = row.payload;
-                    if (typeof p === 'string') {
-                        try { p = JSON.parse(p); } catch { p = { text: p }; }
-                    }
-                    p = p || {};
-                    if (p.mediaUrl) {
-                        try {
-                            p.mediaUrl = await refreshMediaUrl(p.mediaUrl);
-                        } catch {
-                            // Retain original mediaUrl
-                        }
-                    }
-                    const scheduledTime = Number(row.scheduled_time) || parseInt(row.scheduled_time, 10) || (row.scheduled_time ? new Date(row.scheduled_time).getTime() : Date.now());
-                    return { id: row.id, scheduledTime, payload: p, status: row.status };
-                } catch {
-                    return null;
-                }
-            }));
-            return res.json(mapped.filter(Boolean));
+            rawRows = r.rows;
         });
+
+        const mapped = await Promise.all(rawRows.map(async row => {
+            try {
+                let p = row.payload;
+                if (typeof p === 'string') {
+                    try { p = JSON.parse(p); } catch { p = { text: p }; }
+                }
+                p = p || {};
+                if (p.mediaUrl) {
+                    try {
+                        p.mediaUrl = await refreshMediaUrl(p.mediaUrl);
+                    } catch {}
+                }
+                const scheduledTime = Number(row.scheduled_time) || parseInt(row.scheduled_time, 10) || (row.scheduled_time ? new Date(row.scheduled_time).getTime() : Date.now());
+                return { id: row.id, scheduledTime, payload: p, status: row.status };
+            } catch {
+                return null;
+            }
+        }));
+        return res.json(mapped.filter(Boolean));
     } catch (e: any) {
         console.warn('[ScheduledMessages] Handled error in listDriverScheduled:', e?.message || e);
         return res.json([]);
@@ -7127,14 +7151,12 @@ const handleCronProcessQueueLegacy = async (req, res) => {
                     }
                 };
 
-                // PARALLEL EXECUTION (Batch of 5 concurrently)
-                const BATCH_SIZE = 5;
+                // Sequential execution to prevent connection stream corruption / pool lockup
                 perf.markStart('jobs_dispatch');
-                for (let i = 0; i < jobs.rows.length; i += BATCH_SIZE) {
-                    const chunk = jobs.rows.slice(i, i + BATCH_SIZE);
-                    await Promise.all(chunk.map(job => processJob(job)));
+                for (const job of jobs.rows) {
+                    await processJob(job);
                 }
-                perf.markEnd('jobs_dispatch', { processed, errors, batchSize: BATCH_SIZE });
+                perf.markEnd('jobs_dispatch', { processed, errors, total: jobs.rows.length });
             });
         });
         res.json({ status: 'ok', processed, errors, queueSize: processed + errors });

@@ -592,6 +592,10 @@ export class LeadIngestionService {
         text = msg.interactive.list_reply?.title || '';
         payloadId = msg.interactive.list_reply?.id || null;
       }
+    } else if (msg.type === 'button') {
+      text = msg.button?.text || '';
+      payloadId = msg.button?.payload || null;
+      messageType = 'button';
     } else if (msg.type === 'location') {
       text = JSON.stringify(msg.location || {});
     } else if (['image', 'document', 'video', 'audio'].includes(msg.type)) {

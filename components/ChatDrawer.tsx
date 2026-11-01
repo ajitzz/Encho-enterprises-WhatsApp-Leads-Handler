@@ -91,10 +91,15 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   const [editText, setEditText] = useState('');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const isMessagesLoadingRef = useRef(false);
+  const isScheduledLoadingRef = useRef(false);
+  const isDocsLoadingRef = useRef(false);
 
   const isWindowActive = driver ? (Date.now() - driver.lastMessageTime < 24 * 60 * 60 * 1000) : false;
 
   const loadMessages = async (driverId: string) => {
+      if (!driverId || driverId === 'undefined' || isMessagesLoadingRef.current) return;
+      isMessagesLoadingRef.current = true;
       try {
           const msgs = await liveApiService.getDriverMessages(driverId);
           if (Array.isArray(msgs)) {
@@ -111,6 +116,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
           }
       } catch (e: any) {
           console.warn('[ChatDrawer] Failed to load messages:', e?.message || e);
+      } finally {
+          isMessagesLoadingRef.current = false;
       }
   };
 
@@ -123,7 +130,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     }
   }, [driver?.id]);
 
-  // FAANG sub-second responsive active chat sync & instant tab-focus resync
+  // Resilient live chat sync: 0ms SSE push events when connected; graceful 3500ms fallback when disconnected
   useEffect(() => {
     if (!driver?.id) return;
 
@@ -132,10 +139,12 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
       loadScheduledMessages(driver.id);
     };
 
-    // Sub-second adaptive polling fallback (1200ms) while chat drawer is active
-    const livePollTimer = setInterval(syncDriverChat, 1200);
+    let livePollTimer: ReturnType<typeof setInterval> | null = null;
+    if (updateConnectionState !== 'connected') {
+      livePollTimer = setInterval(syncDriverChat, 3500);
+    }
 
-    // Instant resync the microsecond the user focuses or switches back to this tab
+    // Instant resync when user focuses or returns to tab
     const handleFocus = () => syncDriverChat();
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
@@ -147,18 +156,18 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
-      clearInterval(livePollTimer);
+      if (livePollTimer) clearInterval(livePollTimer);
       window.removeEventListener('focus', handleFocus);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [driver?.id]);
+  }, [driver?.id, updateConnectionState]);
 
   useEffect(() => {
       if (!driver) return;
 
       const unsubscribe = liveApiService.subscribeToUpdates(() => {}, {
           driverId: driver.id,
-          pollIntervalMs: 1200,
+          pollIntervalMs: 3500,
           onMessages: (latestMsgs) => {
               if (!Array.isArray(latestMsgs) || latestMsgs.length === 0) return;
               setLocalMessages(prev => {
@@ -172,7 +181,7 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
               });
           },
           onScheduledMessages: (latestSched) => {
-              setScheduledMessages(latestSched);
+              setScheduledMessages(Array.isArray(latestSched) ? latestSched : []);
           }
       });
 
@@ -184,7 +193,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
   }, [localMessages.length, scheduledMessages.length]);
 
   const loadDocuments = async (driverId: string) => {
-      if (!driverId || driverId === 'undefined') return;
+      if (!driverId || driverId === 'undefined' || isDocsLoadingRef.current) return;
+      isDocsLoadingRef.current = true;
       try { 
           const docs = await liveApiService.getDriverDocuments(driverId); 
           setDocuments(Array.isArray(docs) ? docs : []); 
@@ -198,11 +208,14 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
           });
           console.warn('[ChatDrawer] Driver documents polling error:', e);
           setDocuments([]);
+      } finally {
+          isDocsLoadingRef.current = false;
       }
   };
 
   const loadScheduledMessages = async (driverId: string) => {
-      if (!driverId || driverId === 'undefined') return;
+      if (!driverId || driverId === 'undefined' || isScheduledLoadingRef.current) return;
+      isScheduledLoadingRef.current = true;
       try {
           const items = await liveApiService.getScheduledMessages(driverId);
           setScheduledMessages(Array.isArray(items) ? items : []);
@@ -215,6 +228,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ driver, onClose, onSendM
             notifyAdmin: (message) => console.warn('[admin.notify]', message)
           });
           console.warn('[ChatDrawer] Scheduled messages polling error:', e);
+      } finally {
+          isScheduledLoadingRef.current = false;
       }
   };
 

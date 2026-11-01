@@ -869,3 +869,95 @@ test('ReminderServiceFacade: listDriverScheduled degrades gracefully to empty ar
   assert.deepEqual(sentPayload, []);
   assert.deepEqual(result, []);
 });
+
+test('lead-ingestion parseInboundMessage extracts button reply from template quick replies (type: button)', () => {
+  const service = new LeadIngestionService();
+  const body = {
+    entry: [{
+      changes: [{
+        value: {
+          contacts: [{ profile: { name: 'Ajitee' } }]
+        }
+      }]
+    }]
+  };
+  const msg = {
+    from: '919995864396',
+    id: 'wamid.HBgLM',
+    type: 'button',
+    button: {
+      text: 'വരുമാനം (Screenshot)',
+      payload: 'BTN_EARNINGS_SCREENSHOT'
+    }
+  };
+
+  const parsed = service.parseInboundMessage({ body, msg });
+  assert.equal(parsed.from, '919995864396');
+  assert.equal(parsed.name, 'Ajitee');
+  assert.equal(parsed.text, 'വരുമാനം (Screenshot)');
+  assert.equal(parsed.payloadId, 'BTN_EARNINGS_SCREENSHOT');
+  assert.equal(parsed.messageType, 'button');
+});
+
+test('lead-ingestion parseInboundMessage extracts button_reply from interactive button click', () => {
+  const service = new LeadIngestionService();
+  const body = {
+    entry: [{
+      changes: [{
+        value: {
+          contacts: [{ profile: { name: 'Ajitee' } }]
+        }
+      }]
+    }]
+  };
+  const msg = {
+    from: '919995864396',
+    id: 'wamid.HBgLM2',
+    type: 'interactive',
+    interactive: {
+      type: 'button_reply',
+      button_reply: {
+        id: 'btn_earnings_1',
+        title: 'വരുമാനം (Screenshot)'
+      }
+    }
+  };
+
+  const parsed = service.parseInboundMessage({ body, msg });
+  assert.equal(parsed.from, '919995864396');
+  assert.equal(parsed.name, 'Ajitee');
+  assert.equal(parsed.text, 'വരുമാനം (Screenshot)');
+  assert.equal(parsed.payloadId, 'btn_earnings_1');
+  assert.equal(parsed.messageType, 'interactive');
+});
+
+test('lead-ingestion parseInboundMessage extracts list_reply from interactive list click', () => {
+  const service = new LeadIngestionService();
+  const body = {
+    entry: [{
+      changes: [{
+        value: {
+          contacts: [{ profile: { name: 'Ajitee' } }]
+        }
+      }]
+    }]
+  };
+  const msg = {
+    from: '919995864396',
+    id: 'wamid.HBgLM3',
+    type: 'interactive',
+    interactive: {
+      type: 'list_reply',
+      list_reply: {
+        id: 'list_opt_salary',
+        title: 'Daily Payout'
+      }
+    }
+  };
+
+  const parsed = service.parseInboundMessage({ body, msg });
+  assert.equal(parsed.from, '919995864396');
+  assert.equal(parsed.text, 'Daily Payout');
+  assert.equal(parsed.payloadId, 'list_opt_salary');
+  assert.equal(parsed.messageType, 'interactive');
+});

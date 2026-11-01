@@ -229,7 +229,7 @@ export default function App() {
                    endpoint,
                    error,
                    notifyUser: (message) => {
-                     if (streak >= 3) {
+                     if (streak >= 5 && channel !== 'push') {
                        addNotification({ type: 'warning', title: 'Live Sync Degraded', message });
                      }
                    },

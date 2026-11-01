@@ -214,16 +214,23 @@ export const liveApiService = {
 
       const setConnectionState = (state: UpdateConnectionState) => onConnectionStateChange?.(state);
 
+      let isSnapshotFetching = false;
       const fetchFallbackSnapshot = async () => {
-          const [drivers, messages, scheduled] = await Promise.all([
-              liveApiService.getDrivers(),
-              driverId ? liveApiService.getDriverMessages(driverId, 50) : Promise.resolve(null),
-              driverId ? liveApiService.getScheduledMessages(driverId) : Promise.resolve(null)
-          ]);
+          if (isSnapshotFetching) return;
+          isSnapshotFetching = true;
+          try {
+              const [drivers, messages, scheduled] = await Promise.all([
+                  liveApiService.getDrivers(),
+                  driverId ? liveApiService.getDriverMessages(driverId, 50) : Promise.resolve(null),
+                  driverId ? liveApiService.getScheduledMessages(driverId) : Promise.resolve(null)
+              ]);
 
-          callback(drivers);
-          if (messages && onMessages) onMessages(messages);
-          if (scheduled && onScheduledMessages) onScheduledMessages(scheduled);
+              callback(drivers);
+              if (messages && onMessages) onMessages(messages);
+              if (scheduled && onScheduledMessages) onScheduledMessages(scheduled);
+          } finally {
+              isSnapshotFetching = false;
+          }
       };
 
       const stopPolling = () => {
