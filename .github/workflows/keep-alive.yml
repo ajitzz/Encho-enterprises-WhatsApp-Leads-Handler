@@ -1,0 +1,20 @@
+name: Zero-Cost Keep-Alive
+
+on:
+  schedule:
+    # Run every 10 minutes (prevents Render free tier from sleeping)
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    name: Ping Render Backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping Health Endpoint
+        run: |
+          BACKEND_URL="https://encho-enterprises-whatsapp-leads-handler-q7ac.onrender.com"
+          echo "Pinging ${BACKEND_URL}/api/ping..."
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 25 "${BACKEND_URL}/api/ping" || echo "000")
+          echo "Render response status: ${HTTP_STATUS}"

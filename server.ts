@@ -7807,6 +7807,23 @@ const startServer = ({ port = process.env.PORT || 3001 } = {}) => {
         }
     }, 1000 * 60 * 3); // Run every 3 minutes
 
+    // Zero-Cost Render Keep-Alive: Ping public HTTP endpoint through edge router every 8 minutes
+    const keepAliveUrl = process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_BACKEND_URL;
+    if (keepAliveUrl) {
+        console.log(`[KeepAlive] Zero-cost keep-alive active: self-pinging ${keepAliveUrl} every 8 minutes.`);
+        setInterval(async () => {
+            try {
+                const pingUrl = `${keepAliveUrl.replace(/\/$/, '')}/api/ping?source=keepalive`;
+                await fetch(pingUrl, {
+                    headers: { 'User-Agent': 'Encho-KeepAlive-Internal/1.0' },
+                    signal: AbortSignal.timeout(8000),
+                });
+            } catch {
+                // Non-fatal transient error
+            }
+        }, 1000 * 60 * 8); // 8 minutes (Render inactivity timer is 15 minutes)
+    }
+
     return app.listen(Number(port), '0.0.0.0', () => {
         console.log(`Server running on ${port}`);
         logLeadIngestionRuntimePosture();
